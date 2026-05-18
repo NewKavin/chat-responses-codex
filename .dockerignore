@@ -1,0 +1,9 @@
+.git
+.agents
+.codex
+.cargo
+*.log
+target/*
+!target/release/
+target/release/*
+!target/release/chat2responses-gateway
