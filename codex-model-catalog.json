@@ -1,0 +1,124 @@
+{
+  "models": [
+    {
+      "slug": "glm-5",
+      "display_name": "GLM-5",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 0,
+      "base_instructions": "You are Codex, a coding agent.",
+      "supports_reasoning_summaries": false,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ],
+      "supports_search_tool": true
+    },
+    {
+      "slug": "minimax-m2.7",
+      "display_name": "MiniMax-M2.7",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1,
+      "base_instructions": "You are Codex, a coding agent.",
+      "supports_reasoning_summaries": false,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ],
+      "supports_search_tool": true
+    },
+    {
+      "slug": "deepseek-r1",
+      "display_name": "DeepSeek-R1",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balances speed and reasoning depth for everyday tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning depth for complex problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 2,
+      "base_instructions": "You are Codex, a coding agent.",
+      "supports_reasoning_summaries": false,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ],
+      "supports_search_tool": true
+    }
+  ]
+}

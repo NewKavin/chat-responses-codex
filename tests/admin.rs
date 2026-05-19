@@ -117,6 +117,86 @@ async fn admin_can_persist_the_plaintext_downstream_secret() {
 }
 
 #[tokio::test]
+async fn admin_can_create_permanent_downstream_without_expiry_time() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state.clone());
+
+    let form = serde_urlencoded::to_string(json!({
+        "name": "Team Permanent",
+        "models": "gpt-4.1-mini",
+        "per_minute_limit": 60,
+        "expires_at": "",
+        "never_expires": "on",
+        "active": "on"
+    }))
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/downstreams")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.downstreams.len(), 1);
+    let downstream = &snapshot.downstreams[0];
+    assert_eq!(downstream.name, "Team Permanent");
+    assert_eq!(downstream.expires_at, None);
+    assert!(downstream.plaintext_key.is_some());
+}
+
+#[tokio::test]
+async fn admin_downstreams_form_includes_copy_fallback_and_expiry_toggle() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/downstreams/new")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("copyTextToClipboard"));
+    assert!(html.contains("fallbackCopyTextToClipboard"));
+    assert!(html.contains("syncExpiryField"));
+    assert!(html.contains(
+        r#"id="never-expires-checkbox" type="checkbox" name="never_expires" value="on" checked"#
+    ));
+    assert!(html.contains(
+        r#"id="expires-at-input" name="expires_at" type="number" placeholder="unix 秒，可选" value="" disabled"#
+    ));
+    assert!(html.contains("勾选后无需填写生效时间。"));
+}
+
+#[tokio::test]
 async fn admin_can_edit_downstream_metadata_without_changing_the_secret() {
     let tempdir = tempdir().unwrap();
     let generated = generate_downstream_key("gw");
@@ -568,6 +648,7 @@ async fn admin_can_disable_upstream_key_and_remove_its_models() {
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,
                 supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
                 active: true,
                 failure_count: 0,
             }],
@@ -659,6 +740,7 @@ async fn admin_can_edit_an_upstream_key() {
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,
                 supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
                 active: true,
                 failure_count: 7,
             }],
@@ -739,6 +821,7 @@ async fn admin_can_delete_an_upstream_key() {
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,
                 supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
                 active: true,
                 failure_count: 0,
             }],

@@ -43,6 +43,107 @@ fn responses_request_converts_to_chat_payload() {
 }
 
 #[test]
+fn responses_request_converts_flat_tools_to_chat_payload() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": "Hello",
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get the weather",
+                "parameters": {
+                    "type": "object"
+                }
+            }
+        ]
+    });
+
+    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+
+    assert_eq!(converted["tools"][0]["type"], "function");
+    assert_eq!(converted["tools"][0]["function"]["name"], "get_weather");
+    assert_eq!(
+        converted["tools"][0]["function"]["description"],
+        "Get the weather"
+    );
+    assert_eq!(converted["tools"][0]["function"]["parameters"]["type"], "object");
+}
+
+#[test]
+fn responses_request_ignores_unsupported_tools_for_chat_payload() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": "Hello",
+        "tools": [
+            {
+                "type": "web_search"
+            },
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get the weather",
+                "parameters": {
+                    "type": "object"
+                }
+            }
+        ],
+        "tool_choice": {
+            "type": "web_search"
+        }
+    });
+
+    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+
+    assert_eq!(converted["tools"][0]["type"], "function");
+    assert_eq!(converted["tools"][0]["function"]["name"], "get_weather");
+    assert!(converted.get("tool_choice").is_none());
+}
+
+#[test]
+fn responses_request_drops_tool_choice_when_no_supported_tools_remain() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": "Hello",
+        "tools": [
+            {
+                "type": "web_search"
+            }
+        ],
+        "tool_choice": "required"
+    });
+
+    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+
+    assert!(converted.get("tools").is_none());
+    assert!(converted.get("tool_choice").is_none());
+}
+
+#[test]
+fn responses_request_converts_developer_message_to_system_role() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": [
+            {
+                "role": "developer",
+                "content": "Use JSON."
+            },
+            {
+                "role": "user",
+                "content": "Hello"
+            }
+        ]
+    });
+
+    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+
+    assert_eq!(converted["messages"][0]["role"], "system");
+    assert_eq!(converted["messages"][0]["content"], "Use JSON.");
+    assert_eq!(converted["messages"][1]["role"], "user");
+    assert_eq!(converted["messages"][1]["content"], "Hello");
+}
+
+#[test]
 fn chat_request_converts_common_tool_call_fields_to_responses_payload() {
     let chat = json!({
         "model": "gpt-4.1-mini",
@@ -111,6 +212,32 @@ fn chat_request_converts_common_tool_call_fields_to_responses_payload() {
     assert_eq!(converted["input"][2]["type"], "function_call_output");
     assert_eq!(converted["input"][2]["call_id"], "call_1");
     assert_eq!(converted["input"][2]["output"], "Sunny");
+}
+
+#[test]
+fn chat_request_converts_flat_tool_call_fields_to_responses_payload() {
+    let chat = json!({
+        "model": "gpt-4.1-mini",
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "get_weather",
+                        "arguments": "{\"city\":\"Paris\"}"
+                    }
+                ]
+            }
+        ]
+    });
+
+    let converted = chat_request_to_responses_payload(&chat).expect("conversion should work");
+
+    assert_eq!(converted["input"][0]["type"], "function_call");
+    assert_eq!(converted["input"][0]["call_id"], "call_1");
+    assert_eq!(converted["input"][0]["name"], "get_weather");
+    assert_eq!(converted["input"][0]["arguments"], "{\"city\":\"Paris\"}");
 }
 
 #[test]

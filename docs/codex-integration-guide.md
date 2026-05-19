@@ -1,0 +1,476 @@
+# Codex 集成使用指南
+
+这份指南说明如何把 Codex 接到本项目的网关上，并让 GLM、MiniMax、DeepSeek 这类上游模型通过网关正常工作。
+
+核心思路只有一句话：
+
+- Codex 只连网关。
+- 网关再连各家上游模型。
+- 模型名必须在 Codex、网关、上游三处保持完全一致。
+
+## 先看整体结构
+
+推荐的链路是：
+
+`Codex -> chat2responses-gateway -> 上游模型`
+
+你不要把 Codex 直接指向上游厂商地址。这样做会绕过网关的协议转换、模型路由、Key 管理和限流。
+
+## 你需要改哪些地方
+
+一共有三类配置，分别在不同地方改：
+
+1. Codex 本地配置：`~/.codex/config.toml`
+2. Codex 模型目录：`codex-model-catalog.json`
+3. 网关状态：`STATE_PATH` 指向的 JSON 文件，通常通过网关管理页维护
+
+项目里已经准备了三个模板：
+
+- [codex-config.toml.example](../codex-config.toml.example)
+- [codex-model-catalog.json](../codex-model-catalog.json)
+- [gateway-state.example.json](../gateway-state.example.json)
+
+## 一把点亮版
+
+如果你已经有网关地址、上游 key 和管理员账号，最快的做法是按这个顺序来。
+
+### 1. 先把 Codex 模板放到本机
+
+```bash
+mkdir -p ~/.codex
+cp codex-config.toml.example ~/.codex/config.toml
+cp codex-model-catalog.json ~/.codex/model-catalog.json
+```
+
+### 2. 把 `~/.codex/config.toml` 改成这样
+
+```toml
+model_provider = "gateway"
+model = "glm-5"
+review_model = "glm-5"
+model_reasoning_effort = "high"
+disable_response_storage = true
+model_catalog_json = "/home/<你的用户名>/.codex/model-catalog.json"
+
+[features]
+skill_mcp_dependency_install = true
+tool_suggest = true
+
+[model_providers.gateway]
+name = "chat2responses-gateway"
+base_url = "http://127.0.0.1:3000/v1"
+wire_api = "responses"
+requires_openai_auth = true
+```
+
+如果你的网关不在本机，就把 `base_url` 改成远程网关地址，例如：
+
+- `http://<网关机器 IP>:3000/v1`
+- `https://codex-gateway.example.com/v1`
+
+### 3. 网关上配置上游
+
+在网关管理页打开：
+
+- `http://<网关地址>:3000/admin`
+
+进入 `Upstreams`，给每个上游填：
+
+- `base_url`
+- `api_key`
+- `protocol`
+- `supported_models`
+
+当前模板里按这三个模型先配：
+
+- `glm-5`
+- `minimax-m2.7`
+- `deepseek-r1`
+
+### 4. 网关上配置下游
+
+在同一个管理页里进入 `Downstreams`，新建一个下游 key。
+
+这个下游 key 是 Codex 实际要用的访问凭证。
+
+### 5. 再启动 Codex
+
+Codex 里选模型时，直接选你在目录里写的 slug，例如：
+
+- `glm-5`
+- `minimax-m2.7`
+- `deepseek-r1`
+
+## 这三个地方分别在哪改
+
+1. Codex 本地配置：`~/.codex/config.toml`
+2. Codex 模型目录：`~/.codex/model-catalog.json`
+3. 网关状态：`STATE_PATH` 对应的 JSON，或者直接通过管理页改
+
+## 第一步: 启动网关
+
+网关是实际接收 Codex 请求的服务。
+
+### 1.1 本地启动
+
+```bash
+cargo run
+```
+
+默认会使用这些环境变量：
+
+- `BIND_ADDR=0.0.0.0:3000`
+- `STATE_PATH=data/state.json`
+- `LOG_PATH=logs/runtime.log`
+- `ADMIN_USERNAME=admin`
+- `ADMIN_PASSWORD=admin`
+
+### 1.2 Docker 启动
+
+如果你用 Docker，建议直接看 [DEPLOYMENT.md](../DEPLOYMENT.md)。
+
+通常需要：
+
+- 把 `STATE_PATH` 挂载到持久化目录
+- 把 `LOG_PATH` 挂载到日志目录
+- 设置强一点的 `ADMIN_PASSWORD`
+
+### 1.3 网关地址怎么填
+
+如果网关在本机：
+
+- `http://127.0.0.1:3000/v1`
+
+如果网关在其他机器：
+
+- `http://<网关机器 IP>:3000/v1`
+- 或者你反向代理后的地址，例如 `https://codex-gateway.example.com/v1`
+
+Codex 里填的是网关地址，不是上游厂商地址。
+
+## 第二步: 配置网关里的上游模型
+
+这一步是在网关里做，不是在 Codex 里做。
+
+### 2.1 在哪配
+
+有两种方式：
+
+1. 网关管理页
+2. 直接编辑 `STATE_PATH` 对应的 JSON 文件
+
+推荐先用管理页，改完再导出或备份 JSON。
+
+### 2.2 管理页入口
+
+打开：
+
+- `http://<网关地址>:3000/admin`
+
+登录后去：
+
+- `Upstreams`
+- `Downstreams`
+
+### 2.3 上游怎么填
+
+每个上游需要填这些字段：
+
+- `name`：显示名
+- `base_url`：上游 OpenAI 风格 API 地址
+- `api_key`：上游密钥
+- `protocol`：`ChatCompletions` 或 `Responses`
+- `supported_models`：这个上游对外暴露给 Codex 的模型 slug 列表
+- `model_aliases`：可选，slug 到上游真实模型名的映射
+
+例子：
+
+```json
+{
+  "id": "glm-5",
+  "name": "GLM-5",
+  "base_url": "https://glm.example.com/v1",
+  "api_key": "sk-your-glm-key",
+  "protocol": "ChatCompletions",
+  "supported_models": ["glm-5"],
+  "model_aliases": [
+    {
+      "slug": "glm-5",
+      "upstream_model": "GLM-5"
+    }
+  ],
+  "active": true,
+  "failure_count": 0
+}
+```
+
+### 2.4 这里最重要的点
+
+`supported_models` 里可以放上游返回的原始模型 ID，哪怕是大写。
+
+例如：
+
+- Codex 里可以是 `glm-5`
+- 网关里 `supported_models` 里可以保留 `GLM-5`
+- `model_aliases` 写 `glm-5=GLM-5`
+- 不要直接把 `GLM-5` 当成 Codex 目录里的 slug，除非你也想让 Codex 直接选大写名字
+
+如果你的上游大小写敏感，就用 `model_aliases` 做映射。Codex 看到的是你想暴露的 slug，网关发给上游的是真实模型名。
+
+### 2.5 什么时候用 `ChatCompletions`
+
+如果上游只支持传统 Chat Completions，就把 `protocol` 设成 `ChatCompletions`。
+
+如果上游本身支持 Responses 且你要走 Responses 协议，就设成 `Responses`。
+
+你之前碰到的：
+
+- `streaming requests require an upstream that supports the requested protocol`
+
+通常就是网关路由到的上游协议类型不对，或者模型没有在任何活跃上游的 `supported_models` / `model_aliases` 里出现。
+
+补充一点：如果上游是 `ChatCompletions`，网关只会把 `function` 工具转成 Chat 兼容格式；`web_search`、`file_search`、`computer_use` 这类 Responses 内置工具不会报错，但会被忽略，因为它们无法直接映射到传统 Chat 上游。
+
+## 第三步: 配置网关里的下游 key
+
+Codex 不应该直接用上游厂商 key。它应该用网关发的下游 key。
+
+### 3.1 在哪配
+
+同样是在网关管理页：
+
+- `http://<网关地址>:3000/admin`
+- 进入 `Downstreams`
+
+### 3.2 下游 key 是什么
+
+下游 key 是网关发给 Codex 的访问凭证。
+
+Codex 请求网关时，实际发送的是：
+
+- `Authorization: Bearer <downstream-key>`
+
+### 3.3 下游允许哪些模型
+
+在下游里填 `model_allowlist`。
+
+如果你想让某个下游只能看到三个模型，就写：
+
+- `glm-5`
+- `minimax-m2.7`
+- `deepseek-r1`
+
+如果留空，一般表示不过滤模型，只要网关里可用就给。
+
+## 第四步: 配置 Codex
+
+这是你本机上的配置，位置是：
+
+- `~/.codex/config.toml`
+
+### 4.1 直接复制模板
+
+你可以先把项目里的模板复制过去，再改值：
+
+- [codex-config.toml.example](../codex-config.toml.example)
+
+### 4.2 关键字段
+
+最关键的是这些：
+
+```toml
+model_provider = "gateway"
+model = "glm-5"
+review_model = "glm-5"
+model_reasoning_effort = "high"
+disable_response_storage = true
+model_catalog_json = "/absolute/path/to/chat2Responses/codex-model-catalog.json"
+
+[model_providers.gateway]
+name = "chat2responses-gateway"
+base_url = "http://gateway-host:3000/v1"
+wire_api = "responses"
+requires_openai_auth = true
+```
+
+### 4.3 每个字段是什么意思
+
+- `model_provider`：使用哪个 provider
+- `model`：日常对话主模型
+- `review_model`：审查/评审模型
+- `model_reasoning_effort`：推理强度
+- `disable_response_storage`：关闭响应存储
+- `model_catalog_json`：Codex 模型目录文件路径
+- `base_url`：网关地址
+- `wire_api = "responses"`：让 Codex 按 Responses 协议跟网关通信
+- `requires_openai_auth = true`：使用 OpenAI 风格的 Bearer 鉴权头
+
+### 4.4 你现在最容易配错的地方
+
+1. `model_catalog_json` 路径写错
+2. `base_url` 写成了上游厂商地址，而不是网关地址
+3. `model` 和 `slug` 不一致
+4. 模型名大小写不一致
+
+## 第五步: 配置 Codex 模型目录
+
+这个文件也在你本机上，位置由 `~/.codex/config.toml` 里的 `model_catalog_json` 指定。
+
+项目里提供的是：
+
+- [codex-model-catalog.json](../codex-model-catalog.json)
+
+### 5.1 这个文件是干什么的
+
+它告诉 Codex：
+
+- 有哪些模型可选
+- 模型怎么显示
+- 默认推理等级是什么
+- 是否支持工具调用、搜索、流式等
+
+### 5.2 为什么必须和网关一致
+
+Codex 会根据这个目录决定模型是否存在。
+
+如果目录里写了 `glm-5`，但网关只认识 `GLM-5`，或者反过来，就会出问题。
+
+### 5.3 你要改什么
+
+如果你只想先跑通三个模型，就保留：
+
+- `glm-5`
+- `minimax-m2.7`
+- `deepseek-r1`
+
+然后按你真实上游支持情况，把 `display_name`、`priority` 和推理等级再微调。
+
+## 第六步: 如果你想直接用模板
+
+建议按这个顺序做：
+
+1. 在网关上启动服务
+2. 打开 `http://<网关地址>:3000/admin`
+3. 配好上游模型
+4. 配好下游 key
+5. 把 `codex-config.toml.example` 复制到 `~/.codex/config.toml`
+6. 把 `model_catalog_json` 指到你本机的 `codex-model-catalog.json`
+7. 确认 `base_url` 是网关地址
+8. 确认 `model` 和 `review_model` 都是目录里真实存在的 slug
+
+## 第七步: 怎么验证配置是否成功
+
+### 7.1 先测网关健康
+
+```bash
+curl -i http://<网关地址>:3000/healthz
+```
+
+### 7.2 再测管理页
+
+```bash
+curl -u admin:<ADMIN_PASSWORD> http://<网关地址>:3000/admin
+```
+
+### 7.3 再测下游模型列表
+
+拿到下游 key 以后：
+
+```bash
+curl -s \
+  -H "Authorization: Bearer <downstream-key>" \
+  http://<网关地址>:3000/v1/models
+```
+
+### 7.4 再测 chat 请求
+
+```bash
+curl -s \
+  -H "Authorization: Bearer <downstream-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5","messages":[{"role":"user","content":"hello"}]}' \
+  http://<网关地址>:3000/v1/chat/completions
+```
+
+### 7.5 再测 Codex
+
+Codex 启动后选你在目录里写的模型，比如：
+
+- `glm-5`
+- `minimax-m2.7`
+- `deepseek-r1`
+
+如果 Codex 能正常发起请求，说明配置链路通了。
+
+## 常见报错
+
+### 1. `streaming requests require an upstream that supports the requested protocol`
+
+含义：
+
+- Codex 发了流式请求
+- 但网关选中的上游协议不匹配，或者上游不支持当前 wire/protocol 组合
+
+怎么查：
+
+- 看网关 `Upstreams` 里这个模型挂在哪个 `protocol`
+- 看 Codex 是否走的是 `responses`
+- 看模型是否实际被路由到了支持该协议的上游
+
+### 2. `model metadata for xxx not found`
+
+含义：
+
+- `~/.codex/config.toml` 里的 `model_catalog_json` 路径不对
+- 或者 `slug` 不存在
+
+怎么查：
+
+- 检查 `model_catalog_json` 是否指向正确文件
+   - 检查 `model = "..."` 是否和 `codex-model-catalog.json` 里的 `slug` 完全一致
+
+### 3. `skill descriptions were shortened to fit the skills context budget`
+
+这个一般不是模型接入错误。
+
+它表示 Codex 的技能上下文太多，部分描述被压缩了。
+
+通常可以先忽略，除非你发现技能自动加载异常。
+
+### 4. 能用 Python `requests`，但 Codex 不行
+
+这通常说明：
+
+- 上游本身是通的
+- 但是 Codex 侧的协议、目录、模型名、鉴权或网关路由有一处不一致
+
+优先检查：
+
+1. `~/.codex/config.toml`
+2. `codex-model-catalog.json`
+3. 网关 `STATE_PATH`
+4. 网关上游 `protocol`
+5. 网关上游 `supported_models`
+
+## 推荐的实际落地方式
+
+如果你是第一次接，建议按这个组合来：
+
+- Codex 本机：只放 `~/.codex/config.toml`
+- 模型目录：放 `codex-model-catalog.json`
+- 网关机器：运行 `chat2responses-gateway`
+- 网关管理页：配置上游和下游
+
+这样职责最清楚：
+
+- Codex 只管发请求
+- 网关管协议转换和路由
+- 上游只提供模型能力
+
+## 相关文件
+
+- [README.md](../README.md)
+- [DEPLOYMENT.md](../DEPLOYMENT.md)
+- [codex-config.toml.example](../codex-config.toml.example)
+- [codex-model-catalog.json](../codex-model-catalog.json)
+- [gateway-state.example.json](../gateway-state.example.json)

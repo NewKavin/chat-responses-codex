@@ -45,8 +45,48 @@ pub struct UpstreamConfig {
     pub api_key: String,
     pub protocol: UpstreamProtocol,
     pub supported_models: Vec<String>,
+    #[serde(default)]
+    pub model_aliases: Vec<ModelAliasConfig>,
     pub active: bool,
     pub failure_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAliasConfig {
+    pub slug: String,
+    pub upstream_model: String,
+}
+
+impl UpstreamConfig {
+    pub(crate) fn route_models(&self) -> Vec<String> {
+        if !self.supported_models.is_empty() {
+            return self.supported_models.clone();
+        }
+
+        self.model_aliases
+            .iter()
+            .map(|alias| alias.slug.clone())
+            .collect()
+    }
+
+    pub(crate) fn supports_model(&self, model: &str) -> bool {
+        let route_models = self.route_models();
+        route_models.is_empty()
+            || route_models.iter().any(|candidate| candidate == model)
+            || self.model_aliases.iter().any(|alias| alias.slug == model)
+    }
+
+    pub(crate) fn resolved_model_name(&self, model: &str) -> Option<String> {
+        if !self.supports_model(model) {
+            return None;
+        }
+
+        self.model_aliases
+            .iter()
+            .find(|alias| alias.slug == model)
+            .map(|alias| alias.upstream_model.clone())
+            .or_else(|| Some(model.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,7 +306,7 @@ impl AppState {
                     upstream.name.clone(),
                     upstream.protocol,
                 )
-                .with_models(upstream.supported_models.clone())
+                .with_models(upstream.route_models())
                 .with_failure_count(upstream.failure_count)
             })
             .collect()
@@ -492,7 +532,7 @@ impl AppState {
 
         let mut models = HashSet::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            let upstream_models = if upstream.supported_models.is_empty() {
+            let upstream_models = if upstream.route_models().is_empty() {
                 match self
                     .fetch_models_from_endpoint(&upstream.base_url, &upstream.api_key)
                     .await
@@ -508,7 +548,7 @@ impl AppState {
                     }
                 }
             } else {
-                upstream.supported_models.clone()
+                upstream.route_models()
             };
 
             for model in upstream_models {

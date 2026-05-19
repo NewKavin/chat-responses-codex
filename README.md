@@ -5,6 +5,7 @@ Rust gateway for translating OpenAI-style chat and responses requests, managing 
 ## Features
 
 - Chat Completions and Responses endpoints
+- Cross-protocol streaming and tool-calling translation
 - Upstream key routing by model
 - Downstream key generation and enforcement
 - Upstream and downstream key disable/enable controls
@@ -79,3 +80,27 @@ docker compose up -d --build
 - The admin UI is protected with HTTP Basic Auth.
 - Upstream keys are configured in the admin UI.
 - Downstream keys are shown once when created.
+
+## Codex Integration
+
+This repo is intended to sit between Codex and multiple upstream model providers.
+
+- Codex should point at the gateway with a custom provider and `wire_api = "responses"`.
+- The gateway routes by the exposed model slug. Keep `model` and `review_model` aligned with `codex-model-catalog.json`, and use `model_aliases` when the upstream on-wire model name differs from the slug you want Codex to use.
+- If the upstream returns uppercase or otherwise different model IDs, that is fine as long as you map the Codex slug to the real upstream name in `model_aliases`.
+- Tool calling and streaming are supported by the gateway. Audio is not included in the templates.
+
+Files:
+
+- [codex-config.toml.example](codex-config.toml.example)
+- [codex-model-catalog.json](codex-model-catalog.json)
+- [gateway-state.example.json](gateway-state.example.json)
+
+Suggested flow:
+
+1. Copy `codex-config.toml.example` into `~/.codex/config.toml` and point `base_url` at the gateway's `/v1` endpoint.
+2. Copy `codex-model-catalog.json` to the path referenced by `model_catalog_json`.
+3. Copy `gateway-state.example.json` to your gateway `STATE_PATH` if you want a starter persisted state file.
+4. Create downstream keys in the admin UI, then allowlist the same model slugs there if you want to restrict access.
+
+For a step-by-step setup guide, see [docs/codex-integration-guide.md](docs/codex-integration-guide.md).

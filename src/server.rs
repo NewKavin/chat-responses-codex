@@ -2,6 +2,7 @@ use crate::keys::generate_downstream_key;
 use crate::protocol::{
     chat_request_to_responses_payload, chat_response_to_responses_payload,
     responses_request_to_chat_payload, responses_response_to_chat_payload, ProtocolError,
+    StreamTranslator,
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
@@ -15,9 +16,11 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use base64::Engine;
+use bytes::Bytes;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::time::Instant;
 use uuid::Uuid;
@@ -466,6 +469,7 @@ struct UpstreamForm {
     api_key: String,
     protocol: String,
     models: String,
+    model_aliases: Option<String>,
     active: Option<String>,
 }
 
@@ -477,7 +481,7 @@ struct DownstreamForm {
     daily_token_limit: Option<u64>,
     monthly_token_limit: Option<u64>,
     ip_allowlist: Option<String>,
-    expires_at: Option<u64>,
+    expires_at: Option<String>,
     never_expires: Option<String>,
     active: Option<String>,
 }
@@ -728,9 +732,19 @@ impl DownstreamFormView {
             expires_at: if form.never_expires.is_some() {
                 String::new()
             } else {
-                form.expires_at.map(|value| value.to_string()).unwrap_or_default()
+                form.expires_at
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string()
             },
-            never_expires: form.never_expires.is_some() || form.expires_at.is_none(),
+            never_expires: form.never_expires.is_some()
+                || form
+                    .expires_at
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty(),
             active: form_toggle_enabled(&form.active),
             plaintext_key: secret.clone(),
             legacy_secret: secret.is_none(),
@@ -748,6 +762,7 @@ struct UpstreamFormView {
     api_key: String,
     protocol: UpstreamProtocol,
     models: String,
+    model_aliases: String,
     active: bool,
 }
 
@@ -762,6 +777,7 @@ impl UpstreamFormView {
             api_key: String::new(),
             protocol: UpstreamProtocol::ChatCompletions,
             models: String::new(),
+            model_aliases: String::new(),
             active: true,
         }
     }
@@ -775,7 +791,8 @@ impl UpstreamFormView {
             base_url: upstream.base_url.clone(),
             api_key: upstream.api_key.clone(),
             protocol: upstream.protocol,
-            models: upstream.supported_models.join(","),
+            models: upstream.route_models().join(","),
+            model_aliases: format_model_aliases(&upstream.model_aliases),
             active: upstream.active,
         }
     }
@@ -799,6 +816,7 @@ impl UpstreamFormView {
             api_key: form.api_key.clone(),
             protocol: parse_upstream_protocol(&form.protocol),
             models: form.models.clone(),
+            model_aliases: form.model_aliases.clone().unwrap_or_default(),
             active: form_toggle_enabled(&form.active),
         }
     }
@@ -933,6 +951,18 @@ async fn handle_upstream_form_submit(
     }
 
     let upstream_id_value = upstream_id.clone().unwrap_or_else(|| new_id("up"));
+    let model_aliases = match parse_model_aliases(&form_view.model_aliases) {
+        Ok(model_aliases) => model_aliases,
+        Err(error) => {
+            let snapshot = state.snapshot().await;
+            return Html(render_upstreams_page(
+                &snapshot,
+                &form_view,
+                Some(&format!("模型别名格式错误: {error}")),
+            ))
+            .into_response();
+        }
+    };
     let upstream = UpstreamConfig {
         id: upstream_id_value,
         name: form_view.name.clone(),
@@ -940,6 +970,7 @@ async fn handle_upstream_form_submit(
         api_key: form_view.api_key.clone(),
         protocol: form_view.protocol,
         supported_models: parse_csv(&form_view.models),
+        model_aliases,
         active: form_view.active,
         failure_count: 0,
     };
@@ -1139,7 +1170,7 @@ async fn process_gateway_request(
     let request_id = Uuid::new_v4().to_string();
     let started = Instant::now();
     let candidate_protocols = if request_stream {
-        vec![endpoint.native_protocol()]
+        vec![endpoint.native_protocol(), endpoint.opposite()]
     } else {
         vec![endpoint.native_protocol(), endpoint.opposite()]
     };
@@ -1151,19 +1182,13 @@ async fn process_gateway_request(
             .iter()
             .filter(|upstream| upstream.active)
             .filter(|upstream| upstream.protocol == protocol)
-            .filter(|upstream| {
-                upstream.supported_models.is_empty()
-                    || upstream
-                        .supported_models
-                        .iter()
-                        .any(|supported| supported == model)
-            })
+            .filter(|upstream| upstream.supports_model(model))
             .cloned()
             .collect::<Vec<_>>();
         upstreams.sort_by_key(|upstream| upstream.failure_count);
 
         for upstream in upstreams {
-            match send_to_upstream(&state, &upstream, &body, endpoint, request_stream).await {
+            match send_to_upstream(&state, &upstream, &body, endpoint, request_stream, true).await {
                 Ok(mut result) => {
                     result.request_id = request_id.clone();
                     let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
@@ -1191,6 +1216,43 @@ async fn process_gateway_request(
                     }
                     return Ok(result);
                 }
+                Err(_first_error) if request_stream => {
+                    match send_to_upstream(&state, &upstream, &body, endpoint, request_stream, false)
+                        .await
+                    {
+                        Ok(mut result) => {
+                            result.request_id = request_id.clone();
+                            let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
+                            let log = UsageLog {
+                                id: request_id.clone(),
+                                downstream_key_id: downstream.id.clone(),
+                                upstream_key_id: upstream.id.clone(),
+                                endpoint: endpoint.path().to_string(),
+                                model: model.to_string(),
+                                request_id: request_id.clone(),
+                                status_code: result.status.as_u16(),
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens,
+                                latency_ms: started.elapsed().as_millis() as u64,
+                                created_at: unix_seconds(),
+                            };
+                            if let Err(error) = state.append_usage_log(log).await {
+                                tracing::error!(
+                                    upstream = %upstream.id,
+                                    request_id = %request_id,
+                                    error = %error,
+                                    "failed to save usage log"
+                                );
+                            }
+                            return Ok(result);
+                        }
+                        Err(second_error) => {
+                            state.mark_upstream_failure(&upstream.id).await.ok();
+                            last_error = Some(second_error);
+                        }
+                    }
+                }
                 Err(error) => {
                     state.mark_upstream_failure(&upstream.id).await.ok();
                     last_error = Some(error);
@@ -1199,15 +1261,11 @@ async fn process_gateway_request(
         }
     }
 
-    if request_stream {
-        return Err(GatewayError::BadRequest(
-            "streaming requests require an upstream that supports the requested protocol".into(),
-        ));
+    if let Some(error) = last_error {
+        return Err(error);
     }
 
-    Err(last_error.unwrap_or_else(|| {
-        GatewayError::Upstream("no upstream available for requested model".into())
-    }))
+    Err(no_routable_model_error(&snapshot, model))
 }
 
 async fn send_to_upstream(
@@ -1216,13 +1274,8 @@ async fn send_to_upstream(
     body: &Value,
     endpoint: EndpointKind,
     request_stream: bool,
+    try_upstream_stream: bool,
 ) -> Result<DispatchResult, GatewayError> {
-    if request_stream && upstream.protocol != endpoint.native_protocol() {
-        return Err(GatewayError::BadRequest(
-            "streaming requests require an upstream with the native protocol".into(),
-        ));
-    }
-
     let upstream_body = match (endpoint, upstream.protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => body.clone(),
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
@@ -1233,6 +1286,23 @@ async fn send_to_upstream(
             responses_request_to_chat_payload(body).map_err(protocol_error_to_gateway)?
         }
     };
+    let mut upstream_body = upstream_body;
+    if let Some(request_model) = body.get("model").and_then(Value::as_str) {
+        let resolved_model = upstream.resolved_model_name(request_model).ok_or_else(|| {
+            GatewayError::BadRequest(format!(
+                "model \"{request_model}\" is not configured for upstream \"{}\"",
+                upstream.name
+            ))
+        })?;
+        if let Some(object) = upstream_body.as_object_mut() {
+            object.insert("model".into(), Value::String(resolved_model));
+        }
+    }
+    if !try_upstream_stream {
+        if let Some(object) = upstream_body.as_object_mut() {
+            object.insert("stream".into(), Value::Bool(false));
+        }
+    }
 
     let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream.protocol));
     let response = state
@@ -1259,23 +1329,64 @@ async fn send_to_upstream(
             } else {
                 format!(": {error_text}")
             }
-        )));
+            )));
     }
 
     if request_stream {
-        let stream = stream::try_unfold(response, |mut response| async move {
-            match response.chunk().await {
-                Ok(Some(chunk)) => Ok(Some((chunk, response))),
-                Ok(None) => Ok(None),
-                Err(error) => Err(std::io::Error::other(error.to_string())),
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let mut usage_body = None;
+        let body = if content_type.contains("text/event-stream") {
+            if upstream.protocol == endpoint.native_protocol() {
+                let stream = stream::try_unfold(response, |mut response| async move {
+                    match response.chunk().await {
+                        Ok(Some(chunk)) => Ok(Some((chunk, response))),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(std::io::Error::other(error.to_string())),
+                    }
+                });
+                Body::from_stream(stream)
+            } else {
+                translated_stream_body(response, upstream.protocol, endpoint.native_protocol())?
             }
-        });
+        } else {
+            let bytes = response.bytes().await.map_err(|error| {
+                GatewayError::Upstream(format!("failed to read upstream response: {error}"))
+            })?;
+            let upstream_json: Value = serde_json::from_slice(&bytes).map_err(|error| {
+                GatewayError::Upstream(format!("upstream returned invalid json: {error}"))
+            })?;
+
+            let final_body = match (endpoint, upstream.protocol) {
+                (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
+                (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
+                    responses_response_to_chat_payload(&upstream_json)
+                        .map_err(protocol_error_to_gateway)?
+                }
+                (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
+                (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
+                    chat_response_to_responses_payload(&upstream_json)
+                        .map_err(protocol_error_to_gateway)?
+                }
+            };
+
+            usage_body = Some(final_body.clone());
+            synthesize_stream_body(endpoint, &final_body)?
+        };
 
         return Ok(DispatchResult {
             status,
-            body: DispatchBody::Stream(Body::from_stream(stream)),
+            body: DispatchBody::Stream(body),
             request_id: String::new(),
-            usage: (0, 0, 0),
+            usage: usage_body
+                .as_ref()
+                .map(usage_from_body)
+                .unwrap_or((0, 0, 0)),
         });
     }
 
@@ -1307,10 +1418,310 @@ async fn send_to_upstream(
     })
 }
 
+fn no_routable_model_error(snapshot: &crate::state::PersistedState, model: &str) -> GatewayError {
+    let mut visible_models = snapshot
+        .upstreams
+        .iter()
+        .filter(|upstream| upstream.active)
+        .flat_map(|upstream| upstream.route_models())
+        .collect::<Vec<_>>();
+    visible_models.sort();
+    visible_models.dedup();
+
+    if visible_models.is_empty() {
+        GatewayError::BadRequest(format!(
+            "model \"{model}\" is not configured on any active upstream; check supported_models or model_aliases"
+        ))
+    } else {
+        GatewayError::BadRequest(format!(
+            "model \"{model}\" is not configured on any active upstream; available models: {}; check supported_models or model_aliases",
+            visible_models.join(", ")
+        ))
+    }
+}
+
 fn endpoint_for_upstream(protocol: UpstreamProtocol) -> &'static str {
     match protocol {
         UpstreamProtocol::ChatCompletions => "/v1/chat/completions",
         UpstreamProtocol::Responses => "/v1/responses",
+    }
+}
+
+fn synthesize_stream_body(endpoint: EndpointKind, final_body: &Value) -> Result<Body, GatewayError> {
+    match endpoint {
+        EndpointKind::ChatCompletions => synthesize_chat_stream_body(final_body),
+        EndpointKind::Responses => synthesize_responses_stream_body(final_body),
+    }
+}
+
+fn synthesize_chat_stream_body(final_body: &Value) -> Result<Body, GatewayError> {
+    let choice = final_body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| GatewayError::Upstream("missing chat choices".into()))?;
+    let message = choice
+        .get("message")
+        .or_else(|| choice.get("delta"))
+        .ok_or_else(|| GatewayError::Upstream("missing chat message".into()))?;
+    let response_id = final_body
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("chatcmpl");
+    let created_at = final_body
+        .get("created")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(unix_seconds);
+    let model = final_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut delta = serde_json::Map::new();
+    delta.insert("role".into(), Value::String("assistant".into()));
+    if let Some(content) = message.get("content") {
+        delta.insert("content".into(), content.clone());
+    }
+    if let Some(tool_calls) = message.get("tool_calls") {
+        delta.insert("tool_calls".into(), tool_calls.clone());
+    }
+    if let Some(function_call) = message.get("function_call") {
+        delta.insert("function_call".into(), function_call.clone());
+    }
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            if delta.get("tool_calls").is_some() || delta.get("function_call").is_some() {
+                Some("tool_calls")
+            } else {
+                Some("stop")
+            }
+        });
+    let chunk = json!({
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "created": created_at,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": Value::Object(delta),
+            "finish_reason": finish_reason
+                .map(|value| Value::String(value.to_string()))
+                .unwrap_or(Value::Null)
+        }]
+    });
+    let chunks = vec![
+        Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {}\n\n", chunk))),
+        Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+    ];
+    Ok(Body::from_stream(stream::iter(chunks)))
+}
+
+fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayError> {
+    let response_id = final_body
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("resp");
+    let created_at = final_body
+        .get("created")
+        .and_then(Value::as_u64)
+        .or_else(|| final_body.get("created_at").and_then(Value::as_u64))
+        .unwrap_or_else(unix_seconds);
+    let model = final_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut events = vec![json!({
+        "type": "response.created",
+        "sequence_number": 1,
+        "response": {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "in_progress",
+            "model": model,
+            "output": []
+        }
+    })];
+    let mut sequence_number = 2u64;
+
+    if let Some(items) = final_body.get("output").and_then(Value::as_array) {
+        for item in items {
+            let Some(object) = item.as_object() else {
+                continue;
+            };
+            match object.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    let item_id = object.get("id").and_then(Value::as_str).unwrap_or("msg");
+                    events.push(json!({
+                        "type": "response.output_item.added",
+                        "sequence_number": sequence_number,
+                        "response_id": response_id,
+                        "output_index": 0,
+                        "item": {
+                            "id": item_id,
+                            "type": "message",
+                            "status": "in_progress",
+                            "role": "assistant",
+                            "content": []
+                        }
+                    }));
+                    sequence_number = sequence_number.saturating_add(1);
+
+                    let text = extract_plain_text_from_content(object.get("content"));
+                    if !text.is_empty() {
+                        events.push(json!({
+                            "type": "response.output_text.delta",
+                            "sequence_number": sequence_number,
+                            "response_id": response_id,
+                            "item_id": item_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": text
+                        }));
+                        sequence_number = sequence_number.saturating_add(1);
+                    }
+
+                    events.push(json!({
+                        "type": "response.output_text.done",
+                        "sequence_number": sequence_number,
+                        "response_id": response_id,
+                        "item_id": item_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "text": text
+                    }));
+                    sequence_number = sequence_number.saturating_add(1);
+
+                    events.push(json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": sequence_number,
+                        "response_id": response_id,
+                        "output_index": 0,
+                        "item": {
+                            "id": item_id,
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": text,
+                                "annotations": []
+                            }]
+                        }
+                    }));
+                    sequence_number = sequence_number.saturating_add(1);
+                }
+                Some("function_call") => {
+                    let item_id = object.get("id").and_then(Value::as_str).unwrap_or("call");
+                    let call_id = object
+                        .get("call_id")
+                        .or_else(|| object.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(item_id);
+                    let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+                    let arguments = object
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}");
+                    events.push(json!({
+                        "type": "response.output_item.added",
+                        "sequence_number": sequence_number,
+                        "response_id": response_id,
+                        "output_index": 0,
+                        "item": {
+                            "id": item_id,
+                            "type": "function_call",
+                            "status": "in_progress",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": ""
+                        }
+                    }));
+                    sequence_number = sequence_number.saturating_add(1);
+                    if !arguments.is_empty() {
+                        events.push(json!({
+                            "type": "response.function_call_arguments.delta",
+                            "sequence_number": sequence_number,
+                            "response_id": response_id,
+                            "item_id": item_id,
+                            "output_index": 0,
+                            "delta": arguments
+                        }));
+                        sequence_number = sequence_number.saturating_add(1);
+                    }
+                    events.push(json!({
+                        "type": "response.function_call_arguments.done",
+                        "sequence_number": sequence_number,
+                        "response_id": response_id,
+                        "item_id": item_id,
+                        "output_index": 0,
+                        "name": name,
+                        "arguments": arguments
+                    }));
+                    sequence_number = sequence_number.saturating_add(1);
+                    events.push(json!({
+                        "type": "response.output_item.done",
+                        "sequence_number": sequence_number,
+                        "response_id": response_id,
+                        "output_index": 0,
+                        "item": {
+                            "id": item_id,
+                            "type": "function_call",
+                            "status": "completed",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": arguments
+                        }
+                    }));
+                    sequence_number = sequence_number.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    events.push(json!({
+        "type": "response.completed",
+        "sequence_number": sequence_number,
+        "response": final_body
+    }));
+
+    let chunks = events
+        .into_iter()
+        .map(|event| Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {}\n\n", event))))
+        .chain(std::iter::once(Ok(Bytes::from_static(b"data: [DONE]\n\n"))))
+        .collect::<Vec<_>>();
+    Ok(Body::from_stream(stream::iter(chunks)))
+}
+
+fn extract_plain_text_from_content(content: Option<&Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+
+    match content {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => {
+            let mut text = String::new();
+            for part in parts {
+                if let Some(piece) = part.as_str() {
+                    text.push_str(piece);
+                    continue;
+                }
+                if let Some(piece) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(piece);
+                }
+            }
+            text
+        }
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
     }
 }
 
@@ -1362,6 +1773,168 @@ fn dispatch_success(result: DispatchResult) -> Response {
             );
             (result.status, headers, body).into_response()
         }
+    }
+}
+
+fn translated_stream_body(
+    response: reqwest::Response,
+    source_protocol: UpstreamProtocol,
+    target_protocol: UpstreamProtocol,
+) -> Result<Body, GatewayError> {
+    let translator = StreamTranslator::new(source_protocol, target_protocol).ok_or_else(|| {
+        GatewayError::BadRequest(
+            "stream translation is not available for the requested protocol pair".into(),
+        )
+    })?;
+
+    let state = TranslatedStreamState {
+        response,
+        translator,
+        buffer: Vec::new(),
+        pending: VecDeque::new(),
+        finished: false,
+    };
+    let stream = stream::try_unfold(state, |mut state| async move {
+        loop {
+            if let Some(bytes) = state.pending.pop_front() {
+                return Ok(Some((bytes, state)));
+            }
+
+            if state.finished {
+                return Ok(None);
+            }
+
+            match state.response.chunk().await {
+                Ok(Some(chunk)) => {
+                    state.buffer.extend_from_slice(&chunk);
+                    state.drain_buffer()?;
+                }
+                Ok(None) => {
+                    state.finish_stream()?;
+                    if let Some(bytes) = state.pending.pop_front() {
+                        return Ok(Some((bytes, state)));
+                    }
+                    return Ok(None);
+                }
+                Err(error) => {
+                    return Err(std::io::Error::other(error.to_string()));
+                }
+            }
+        }
+    });
+
+    Ok(Body::from_stream(stream))
+}
+
+#[derive(Debug)]
+struct TranslatedStreamState {
+    response: reqwest::Response,
+    translator: StreamTranslator,
+    buffer: Vec<u8>,
+    pending: VecDeque<Bytes>,
+    finished: bool,
+}
+
+impl TranslatedStreamState {
+    fn drain_buffer(&mut self) -> Result<(), std::io::Error> {
+        while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
+            let payload = match parse_sse_data_payload(&frame)? {
+                Some(payload) => payload,
+                None => {
+                    self.buffer.drain(..frame.len() + delimiter_len);
+                    continue;
+                }
+            };
+
+            self.buffer.drain(..frame.len() + delimiter_len);
+
+            if payload.trim() == "[DONE]" {
+                self.finish_stream()?;
+                break;
+            }
+
+            let event: Value = serde_json::from_str(&payload)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let translated = self
+                .translator
+                .translate_event(&event)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            for item in translated {
+                self.pending.push_back(serialize_sse_data(&item));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish_stream(&mut self) -> Result<(), std::io::Error> {
+        if self.finished {
+            return Ok(());
+        }
+
+        let translated = self
+            .translator
+            .finish()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        for item in translated {
+            self.pending.push_back(serialize_sse_data(&item));
+        }
+        self.pending.push_back(sse_done_frame());
+        self.finished = true;
+        self.buffer.clear();
+        Ok(())
+    }
+}
+
+fn serialize_sse_data(value: &Value) -> Bytes {
+    Bytes::from(format!("data: {}\n\n", value))
+}
+
+fn sse_done_frame() -> Bytes {
+    Bytes::from_static(b"data: [DONE]\n\n")
+}
+
+fn next_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|position| (position, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| (position, 4));
+
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
+        (Some(lf), None) => Some(lf),
+        (None, Some(crlf)) => Some(crlf),
+        (None, None) => None,
+    }
+    .map(|(position, delimiter_len)| (buffer[..position].to_vec(), delimiter_len))
+}
+
+fn parse_sse_data_payload(frame: &[u8]) -> Result<Option<String>, std::io::Error> {
+    let frame = std::str::from_utf8(frame)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut data = String::new();
+    let mut has_data = false;
+
+    for line in frame.lines() {
+        let line = line.trim_end_matches('\r');
+        let Some(value) = line.strip_prefix("data:") else {
+            continue;
+        };
+        if has_data {
+            data.push('\n');
+        }
+        data.push_str(value.trim_start());
+        has_data = true;
+    }
+
+    if has_data {
+        Ok(Some(data))
+    } else {
+        Ok(None)
     }
 }
 
@@ -1462,6 +2035,46 @@ async fn toggle_downstream(
 
 fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
     GatewayError::BadRequest(error.to_string())
+}
+
+fn parse_model_aliases(input: &str) -> Result<Vec<crate::state::ModelAliasConfig>, String> {
+    let mut aliases = Vec::new();
+
+    for raw_entry in input.split(',') {
+        let entry = raw_entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let Some((slug, upstream_model)) = entry.split_once('=') else {
+            return Err(format!("缺少 '=': {entry}"));
+        };
+
+        let slug = slug.trim();
+        let upstream_model = upstream_model.trim();
+        if slug.is_empty() || upstream_model.is_empty() {
+            return Err(format!("别名格式必须是 slug=上游模型: {entry}"));
+        }
+
+        aliases.push(crate::state::ModelAliasConfig {
+            slug: slug.to_string(),
+            upstream_model: upstream_model.to_string(),
+        });
+    }
+
+    Ok(aliases)
+}
+
+fn format_model_aliases(aliases: &[crate::state::ModelAliasConfig]) -> String {
+    if aliases.is_empty() {
+        return String::new();
+    }
+
+    aliases
+        .iter()
+        .map(|alias| format!("{}={}", alias.slug, alias.upstream_model))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn parse_csv(input: &str) -> Vec<String> {
@@ -1875,6 +2488,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       display: grid;
       gap: 12px;
     }}
+    .secret-stack .helper {{
+      margin-top: -2px;
+    }}
     .secret-state {{
       font-size: 13px;
       color: var(--muted);
@@ -1928,6 +2544,52 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       button.textContent = revealed ? '查看' : '隐藏';
     }}
 
+    function fallbackCopyTextToClipboard(text) {{
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '0';
+      textarea.style.left = '0';
+      textarea.style.width = '1px';
+      textarea.style.height = '1px';
+      textarea.style.padding = '0';
+      textarea.style.border = '0';
+      textarea.style.margin = '0';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+
+      let copied = false;
+      try {{
+        copied = document.execCommand('copy');
+      }} catch (error) {{
+        copied = false;
+      }}
+
+      if (textarea.parentNode) {{
+        textarea.parentNode.removeChild(textarea);
+      }}
+      return copied;
+    }}
+
+    async function copyTextToClipboard(text) {{
+      if (fallbackCopyTextToClipboard(text)) {{
+        return true;
+      }}
+
+      if (navigator.clipboard && window.isSecureContext) {{
+        try {{
+          await navigator.clipboard.writeText(text);
+          return true;
+        }} catch (error) {{}}
+      }}
+
+      return fallbackCopyTextToClipboard(text);
+    }}
+
     async function copySecret(button) {{
       const targetId = button.getAttribute('data-target');
       const target = document.getElementById(targetId);
@@ -1935,16 +2597,42 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       const secret = target.dataset.secret || '';
       if (!secret) return;
       try {{
-        await navigator.clipboard.writeText(secret);
+        const copied = await copyTextToClipboard(secret);
+        if (!copied) throw new Error('copy failed');
         const original = button.textContent;
         button.textContent = '已复制';
         setTimeout(() => {{ button.textContent = original; }}, 1200);
       }} catch (error) {{
+        window.prompt('复制失败，请手动复制以下秘钥', secret);
         const original = button.textContent;
-        button.textContent = '复制失败';
+        button.textContent = '请手动复制';
         setTimeout(() => {{ button.textContent = original; }}, 1200);
       }}
     }}
+
+    function syncExpiryField(checkbox) {{
+      const input = document.getElementById('expires-at-input');
+      if (!input) return;
+      if (checkbox.checked) {{
+        if (input.value) {{
+          input.dataset.previousValue = input.value;
+        }}
+        input.value = '';
+        input.disabled = true;
+      }} else {{
+        input.disabled = false;
+        if (!input.value && input.dataset.previousValue) {{
+          input.value = input.dataset.previousValue;
+        }}
+      }}
+    }}
+
+    document.addEventListener('DOMContentLoaded', () => {{
+      const checkbox = document.getElementById('never-expires-checkbox');
+      if (checkbox) {{
+        syncExpiryField(checkbox);
+      }}
+    }});
   </script>
 </head>
 <body>
@@ -2058,17 +2746,36 @@ fn render_upstreams_page(
             UpstreamProtocol::ChatCompletions => "chat.completions",
             UpstreamProtocol::Responses => "responses",
         };
-        let models = if upstream.supported_models.is_empty() {
+        let models = if upstream.route_models().is_empty() {
             "全部".to_string()
         } else {
-            escape_html(&upstream.supported_models.join(", "))
+            escape_html(&upstream.route_models().join(", "))
+        };
+        let alias_details = if upstream.model_aliases.is_empty() {
+            String::new()
+        } else {
+            let mappings = upstream
+                .model_aliases
+                .iter()
+                .map(|alias| {
+                    format!(
+                        "{} → {}",
+                        escape_html(&alias.slug),
+                        escape_html(&alias.upstream_model)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("<br>");
+            format!(
+                r#"<div class="muted" style="font-size:12px;margin-top:6px;">{mappings}</div>"#
+            )
         };
         let _ = write!(
             rows,
             r#"<tr>
   <td>{name}</td>
   <td><span class="pill">{protocol}</span></td>
-  <td>{models}</td>
+  <td>{models}{alias_details}</td>
   <td><span class="pill {status}">{active}</span></td>
   <td>{failure}</td>
   <td>{base}</td>
@@ -2093,6 +2800,7 @@ fn render_upstreams_page(
             base = escape_html(&upstream.base_url),
             id = escape_html(&upstream.id),
             toggle = if upstream.active { "停用" } else { "启用" },
+            alias_details = alias_details,
         );
     }
 
@@ -2161,6 +2869,11 @@ fn render_upstreams_page(
           <input name="models" placeholder="gpt-4.1-mini,gpt-4o-mini" value="{models}">
         </div>
         <div class="field">
+          <label>模型别名</label>
+          <input name="model_aliases" placeholder="glm-5=GLM-5,minimax-m2.7=MiniMax-M2.7" value="{model_aliases}">
+          <p class="muted">这里填“对外 slug=上游真实模型名”。没有别名就留空。</p>
+        </div>
+        <div class="field">
           <label>状态</label>
           <select name="active">
             <option value="on" {active_selected}>启用</option>
@@ -2190,6 +2903,7 @@ fn render_upstreams_page(
         chat_selected = protocol_chat_selected,
         responses_selected = protocol_responses_selected,
         models = escape_html(&form.models),
+        model_aliases = escape_html(&form.model_aliases),
         active_selected = active_selected,
         inactive_selected = inactive_selected,
         submit_label = escape_html(&form.submit_label),
@@ -2403,6 +3117,7 @@ fn render_downstreams_page(
     let active_selected = if drawer.active { "selected" } else { "" };
     let inactive_selected = if drawer.active { "" } else { "selected" };
     let never_expires_checked = if drawer.never_expires { "checked" } else { "" };
+    let expires_at_disabled = if drawer.never_expires { "disabled" } else { "" };
     let header = format!(
         r#"<header class="page-header">
   <div class="page-title">
@@ -2502,10 +3217,11 @@ fn render_downstreams_page(
           <label>过期时间</label>
           <div class="secret-stack">
             <label style="text-transform:none; letter-spacing:0; font-size:13px; color:var(--text); display:flex; align-items:center; gap:8px;">
-              <input type="checkbox" name="never_expires" value="on" {never_expires_checked} style="width:auto;">
+              <input id="never-expires-checkbox" type="checkbox" name="never_expires" value="on" {never_expires_checked} style="width:auto;" onchange="syncExpiryField(this)">
               永不过期
             </label>
-            <input name="expires_at" type="number" placeholder="unix 秒，可选" value="{expires_at}">
+            <input id="expires-at-input" name="expires_at" type="number" placeholder="unix 秒，可选" value="{expires_at}" {expires_at_disabled}>
+            <div class="helper">勾选后无需填写生效时间。</div>
           </div>
         </div>
         <div class="field">
@@ -2556,6 +3272,7 @@ fn render_downstreams_page(
         ip_allowlist = escape_html(&drawer.ip_allowlist),
         expires_at = escape_html(&drawer.expires_at),
         never_expires_checked = never_expires_checked,
+        expires_at_disabled = expires_at_disabled,
         active_selected = active_selected,
         inactive_selected = inactive_selected,
         submit_label = escape_html(&drawer.submit_label),
@@ -2761,9 +3478,9 @@ fn active_models(state: &crate::state::PersistedState) -> usize {
     let mut models = Vec::new();
     for upstream in &state.upstreams {
         if upstream.active {
-            for model in &upstream.supported_models {
-                if !models.contains(model) {
-                    models.push(model.clone());
+            for model in upstream.route_models() {
+                if !models.contains(&model) {
+                    models.push(model);
                 }
             }
         }

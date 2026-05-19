@@ -1,0 +1,60 @@
+{
+  "upstreams": [
+    {
+      "id": "glm-5",
+      "name": "GLM-5",
+      "base_url": "https://glm.example.com/v1",
+      "api_key": "sk-your-glm-key",
+      "protocol": "ChatCompletions",
+      "supported_models": [
+        "glm-5"
+      ],
+      "model_aliases": [
+        {
+          "slug": "glm-5",
+          "upstream_model": "GLM-5"
+        }
+      ],
+      "active": true,
+      "failure_count": 0
+    },
+    {
+      "id": "minimax-m2-7",
+      "name": "MiniMax-M2.7",
+      "base_url": "https://minimax.example.com/v1",
+      "api_key": "sk-your-minimax-key",
+      "protocol": "ChatCompletions",
+      "supported_models": [
+        "minimax-m2.7"
+      ],
+      "model_aliases": [
+        {
+          "slug": "minimax-m2.7",
+          "upstream_model": "MiniMax-M2.7"
+        }
+      ],
+      "active": true,
+      "failure_count": 0
+    },
+    {
+      "id": "deepseek-r1",
+      "name": "DeepSeek-R1",
+      "base_url": "https://deepseek.example.com/v1",
+      "api_key": "sk-your-deepseek-key",
+      "protocol": "ChatCompletions",
+      "supported_models": [
+        "deepseek-r1"
+      ],
+      "model_aliases": [
+        {
+          "slug": "deepseek-r1",
+          "upstream_model": "DeepSeek-R1"
+        }
+      ],
+      "active": true,
+      "failure_count": 0
+    }
+  ],
+  "downstreams": [],
+  "usage_logs": []
+}

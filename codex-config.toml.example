@@ -1,0 +1,22 @@
+# Point Codex at the gateway, not at the upstream vendors directly.
+# `model` and `review_model` must match the slugs in codex-model-catalog.json exactly.
+# Use `model_aliases` in the gateway state if the upstream model name is different.
+model_provider = "gateway"
+model = "glm-5"
+review_model = "glm-5"
+model_reasoning_effort = "high"
+disable_response_storage = true
+model_catalog_json = "/absolute/path/to/chat2Responses/codex-model-catalog.json"
+
+[features]
+skill_mcp_dependency_install = true
+tool_suggest = true
+
+[model_providers.gateway]
+name = "chat2responses-gateway"
+base_url = "http://gateway-host:3000/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+# If a skill still triggers an install prompt, the missing MCP server is declared
+# by that skill itself. Add it to your global Codex MCP config, then restart Codex.
