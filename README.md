@@ -22,6 +22,7 @@ Default environment:
 
 - `BIND_ADDR=0.0.0.0:3000`
 - `STATE_PATH=data/state.json`
+- `LOG_PATH=logs/runtime.log`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=admin`
 - `APP_NAME=chat2responses-gateway`
@@ -54,13 +55,14 @@ docker build -t chat2responses-gateway .
 docker run --rm -p 3000:3000 \
   -e ADMIN_PASSWORD=change-me \
   -v ./data:/data \
+  -v ./logs:/logs \
   chat2responses-gateway
 ```
 
 The image includes a Docker `HEALTHCHECK` that invokes the binary's built-in healthcheck mode.
 Use that health state for orchestration readiness checks.
 
-If you prefer Compose, use [docker-compose.yml](docker-compose.yml), create a local `./data` directory next to it, and run:
+If you prefer Compose, use [docker-compose.yml](docker-compose.yml), create local `./data` and `./logs` directories next to it, and run:
 
 ```bash
 cargo build --release

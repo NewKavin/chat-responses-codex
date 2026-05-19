@@ -6,6 +6,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,8 @@ pub struct DownstreamConfig {
     pub id: String,
     pub name: String,
     pub hash: String,
+    #[serde(default)]
+    pub plaintext_key: Option<String>,
     pub model_allowlist: Vec<String>,
     pub per_minute_limit: u32,
     pub daily_token_limit: Option<u64>,
@@ -175,6 +178,61 @@ impl AppState {
             .iter()
             .find(|downstream| downstream.active && verify_downstream_key(secret, &downstream.hash))
             .cloned()
+    }
+
+    pub async fn fetch_models_from_endpoint(
+        &self,
+        base_url: &str,
+        api_key: &str,
+    ) -> Result<Vec<String>, String> {
+        let url = join_upstream_url(base_url, "/v1/models");
+        let response = self
+            .client()
+            .get(url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", api_key.trim()),
+            )
+            .send()
+            .await
+            .map_err(|error| format!("请求上游模型失败: {error}"))?;
+
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| format!("读取上游模型响应失败: {error}"))?;
+
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes);
+            return Err(format!(
+                "上游返回状态 {}{}",
+                status,
+                if body.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {body}")
+                }
+            ));
+        }
+
+        let payload: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("解析上游模型响应失败: {error}"))?;
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+
+        if let Some(items) = payload.get("data").and_then(Value::as_array) {
+            for item in items {
+                if let Some(model) = item.get("id").and_then(Value::as_str) {
+                    let model = model.trim();
+                    if !model.is_empty() && seen.insert(model.to_string()) {
+                        models.push(model.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(models)
     }
 
     pub async fn choose_upstream(
@@ -304,10 +362,80 @@ impl AppState {
         self.persist_state(&state).await
     }
 
+    pub async fn update_upstream(
+        &self,
+        upstream_id: &str,
+        upstream: UpstreamConfig,
+    ) -> io::Result<bool> {
+        let mut state = self.inner.lock().await;
+        let Some(existing) = state
+            .upstreams
+            .iter_mut()
+            .find(|upstream| upstream.id == upstream_id)
+        else {
+            return Ok(false);
+        };
+
+        let mut upstream = upstream;
+        upstream.id = upstream_id.to_string();
+        let failure_count = existing.failure_count;
+        *existing = upstream;
+        existing.failure_count = failure_count;
+        self.persist_state(&state).await?;
+        Ok(true)
+    }
+
+    pub async fn remove_upstream(&self, upstream_id: &str) -> io::Result<bool> {
+        let mut state = self.inner.lock().await;
+        let original_len = state.upstreams.len();
+        state
+            .upstreams
+            .retain(|upstream| upstream.id != upstream_id);
+        if state.upstreams.len() == original_len {
+            return Ok(false);
+        }
+        self.persist_state(&state).await?;
+        Ok(true)
+    }
+
     pub async fn insert_downstream(&self, downstream: DownstreamConfig) -> io::Result<()> {
         let mut state = self.inner.lock().await;
         state.downstreams.push(downstream);
         self.persist_state(&state).await
+    }
+
+    pub async fn update_downstream(
+        &self,
+        downstream_id: &str,
+        downstream: DownstreamConfig,
+    ) -> io::Result<bool> {
+        let mut state = self.inner.lock().await;
+        let Some(existing) = state
+            .downstreams
+            .iter_mut()
+            .find(|downstream| downstream.id == downstream_id)
+        else {
+            return Ok(false);
+        };
+
+        let mut downstream = downstream;
+        downstream.id = downstream_id.to_string();
+        *existing = downstream;
+        self.persist_state(&state).await?;
+        Ok(true)
+    }
+
+    pub async fn remove_downstream(&self, downstream_id: &str) -> io::Result<bool> {
+        let mut state = self.inner.lock().await;
+        let original_len = state.downstreams.len();
+        state
+            .downstreams
+            .retain(|downstream| downstream.id != downstream_id);
+        if state.downstreams.len() == original_len {
+            return Ok(false);
+        }
+        self.persist_state(&state).await?;
+        Ok(true)
     }
 
     pub async fn set_downstream_active(
@@ -355,26 +483,44 @@ impl AppState {
     }
 
     pub async fn available_models_for_downstream(&self, secret: &str) -> Vec<String> {
-        let state = self.inner.lock().await;
-        let Some(downstream) = state.downstreams.iter().find(|downstream| {
+        let snapshot = self.snapshot().await;
+        let Some(downstream) = snapshot.downstreams.iter().find(|downstream| {
             downstream.active && verify_downstream_key(secret, &downstream.hash)
-        }) else {
+        }).cloned() else {
             return Vec::new();
         };
 
-        let mut models = Vec::new();
-        for upstream in &state.upstreams {
-            if upstream.active {
-                for model in &upstream.supported_models {
-                    if (downstream.model_allowlist.is_empty()
-                        || downstream.model_allowlist.contains(model))
-                        && !models.contains(model)
-                    {
-                        models.push(model.clone());
+        let mut models = HashSet::new();
+        for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
+            let upstream_models = if upstream.supported_models.is_empty() {
+                match self
+                    .fetch_models_from_endpoint(&upstream.base_url, &upstream.api_key)
+                    .await
+                {
+                    Ok(models) => models,
+                    Err(error) => {
+                        tracing::warn!(
+                            upstream = %upstream.id,
+                            error = %error,
+                            "failed to discover upstream models"
+                        );
+                        Vec::new()
                     }
+                }
+            } else {
+                upstream.supported_models.clone()
+            };
+
+            for model in upstream_models {
+                if downstream.model_allowlist.is_empty()
+                    || downstream.model_allowlist.contains(&model)
+                {
+                    models.insert(model);
                 }
             }
         }
+
+        let mut models = models.into_iter().collect::<Vec<_>>();
         models.sort();
         models
     }
@@ -536,4 +682,17 @@ pub fn new_id(prefix: &str) -> String {
 
 pub fn encode_secret_suffix(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub(crate) fn join_upstream_url(base_url: &str, endpoint_path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    let path = endpoint_path.trim_start_matches('/');
+
+    if let Some((version, remainder)) = path.split_once('/') {
+        if base.ends_with(&format!("/{version}")) {
+            return format!("{base}/{}", remainder);
+        }
+    }
+
+    format!("{base}/{}", path)
 }

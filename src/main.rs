@@ -2,8 +2,11 @@ use chat2responses_gateway::server::build_router;
 use chat2responses_gateway::state::{AppConfig, AppState};
 use std::env;
 use std::error::Error;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
@@ -13,10 +16,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return run_healthcheck().await;
     }
 
-    init_tracing();
-
     let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3000");
     let state_path = PathBuf::from(env_or("STATE_PATH", "data/state.json"));
+    let log_path = env_or("LOG_PATH", "logs/runtime.log");
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -25,11 +27,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         usage_log_archive_max_files: env_usize("USAGE_LOG_ARCHIVE_MAX_FILES", 10).max(1),
     };
 
+    init_tracing(&log_path);
     let state = AppState::load_from_path(&state_path, config).await?;
     let app = build_router(state);
     let listener = TcpListener::bind(&bind_addr).await?;
 
-    tracing::info!(%bind_addr, "gateway listening");
+    tracing::info!(%bind_addr, %log_path, "gateway listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -71,10 +74,70 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
+fn init_tracing(log_path: &str) {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=debug"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
         .with_target(false)
         .with_thread_ids(false)
         .with_thread_names(false)
-        .try_init();
+        .with_ansi(false);
+
+    let file_writer = match prepare_log_file(log_path) {
+        Ok(file) => Some(Arc::new(Mutex::new(file))),
+        Err(error) => {
+            eprintln!("failed to open log file {}: {}", log_path, error);
+            None
+        }
+    };
+
+    if let Some(file_writer) = file_writer {
+        let writer = move || TeeWriter {
+            file: file_writer.clone(),
+        };
+        let _ = builder.with_writer(writer).try_init();
+    } else {
+        let _ = builder.try_init();
+    }
+}
+
+fn prepare_log_file(log_path: &str) -> io::Result<fs::File> {
+    let path = PathBuf::from(log_path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
+struct TeeWriter {
+    file: Arc<Mutex<fs::File>>,
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(buf)?;
+        stdout.flush()?;
+
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("log file lock poisoned"))?;
+        file.write_all(buf)?;
+        file.flush()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::stdout().lock().flush()?;
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("log file lock poisoned"))?;
+        file.flush()
+    }
 }

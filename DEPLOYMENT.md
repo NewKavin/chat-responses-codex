@@ -17,6 +17,7 @@ These are the key settings for a production-like run:
 
 - `BIND_ADDR=0.0.0.0:3000`
 - `STATE_PATH=/data/state.json`
+- `LOG_PATH=/logs/runtime.log`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=<strong-secret>`
 - `APP_NAME=chat2responses-gateway`
@@ -46,12 +47,14 @@ docker run -d \
   -p 3000:3000 \
   -e BIND_ADDR=0.0.0.0:3000 \
   -e STATE_PATH=/data/state.json \
+  -e LOG_PATH=/logs/runtime.log \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD='replace-this-with-a-strong-password' \
   -e APP_NAME=chat2responses-gateway \
   -e USAGE_LOG_ROTATION_MAX_BYTES=1048576 \
   -e USAGE_LOG_ARCHIVE_MAX_FILES=10 \
   -v ./data:/data \
+  -v ./logs:/logs \
   chat2responses-gateway:latest
 ```
 
@@ -71,6 +74,7 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:3000
       STATE_PATH: /data/state.json
+      LOG_PATH: /logs/runtime.log
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
       APP_NAME: chat2responses-gateway
@@ -78,6 +82,7 @@ services:
       USAGE_LOG_ARCHIVE_MAX_FILES: "10"
     volumes:
       - ./data:/data
+      - ./logs:/logs
 ```
 
 If you use a `.env` file, set:
@@ -145,6 +150,7 @@ curl -s \
 
 - Usage logs rotate into archive files next to `STATE_PATH` once the current state file grows beyond `USAGE_LOG_ROTATION_MAX_BYTES`.
 - Archive files are capped at `USAGE_LOG_ARCHIVE_MAX_FILES`.
+- Runtime logs are appended to `LOG_PATH` and can be mounted to the host with `./logs:/logs`.
 - The Docker image exposes a `HEALTHCHECK` that runs the binary's built-in healthcheck mode.
 - Per-minute request limiting is enforced at the gateway entry point.
 - `daily_token_limit` and `monthly_token_limit` are persisted and shown in the admin UI, but they are not yet enforced by the request path.

@@ -5,21 +5,23 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    new_id, unix_seconds, AppConfig, AppState, DownstreamConfig, UpstreamConfig, UsageLog,
+    join_upstream_url, new_id, unix_seconds, AppConfig, AppState, DownstreamConfig,
+    UpstreamConfig, UsageLog,
 };
 use axum::body::Body;
-use axum::extract::{Form, Json, Path, State};
+use axum::extract::{Form, Json, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use base64::Engine;
 use futures_util::stream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::time::Instant;
 use uuid::Uuid;
+use tower_http::trace::TraceLayer;
 
 #[derive(Clone, Copy)]
 enum EndpointKind {
@@ -76,6 +78,20 @@ enum GatewayError {
     Upstream(String),
 }
 
+impl std::fmt::Display for GatewayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GatewayError::Unauthorized(message)
+            | GatewayError::Forbidden(message)
+            | GatewayError::BadRequest(message)
+            | GatewayError::Upstream(message) => f.write_str(message),
+            GatewayError::TooManyRequests { message, .. } => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for GatewayError {}
+
 impl GatewayError {
     fn into_response(self) -> Response {
         let (status, message, retry_after_seconds) = match self {
@@ -115,6 +131,7 @@ impl GatewayError {
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(root))
         .route("/healthz", get(healthz))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -123,20 +140,33 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin", get(admin_dashboard))
         .route(
             "/admin/upstreams",
-            get(admin_upstreams).post(create_upstream),
+            get(admin_upstreams).post(submit_upstream),
         )
+        .route("/admin/upstreams/{id}/edit", get(edit_upstream))
+        .route("/admin/upstreams/{id}", post(update_upstream))
+        .route("/admin/upstreams/{id}/delete", post(delete_upstream))
         .route("/admin/upstreams/{id}/toggle", post(toggle_upstream))
         .route(
             "/admin/downstreams",
             get(admin_downstreams).post(create_downstream),
         )
+        .route("/admin/downstreams/new", get(admin_downstreams_new))
+        .route("/admin/downstreams/{id}/edit", get(edit_downstream))
+        .route("/admin/downstreams/{id}", post(update_downstream))
+        .route("/admin/downstreams/{id}/rotate", post(rotate_downstream))
+        .route("/admin/downstreams/{id}/delete", post(delete_downstream))
         .route("/admin/downstreams/{id}/toggle", post(toggle_downstream))
         .route("/admin/logs", get(admin_logs))
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
 async fn healthz() -> impl IntoResponse {
     "ok"
+}
+
+async fn root() -> impl IntoResponse {
+    Redirect::to("/admin")
 }
 
 async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -222,16 +252,201 @@ async fn admin_upstreams(State(state): State<AppState>, headers: HeaderMap) -> i
     }
 
     let snapshot = state.snapshot().await;
-    Html(render_upstreams_page(&snapshot, None)).into_response()
+    Html(render_upstreams_page(
+        &snapshot,
+        &UpstreamFormView::blank(),
+        None,
+    ))
+    .into_response()
 }
 
-async fn admin_downstreams(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+async fn admin_downstreams(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(filters): Query<DownstreamListQuery>,
+) -> impl IntoResponse {
     if let Err(response) = ensure_admin(&headers, &state.config) {
         return response;
     }
 
     let snapshot = state.snapshot().await;
-    Html(render_downstreams_page(&snapshot, None)).into_response()
+    Html(render_downstreams_page(
+        &snapshot,
+        &DownstreamFormView::blank(),
+        None,
+        None,
+        &filters,
+    ))
+    .into_response()
+}
+
+async fn admin_downstreams_new(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(filters): Query<DownstreamListQuery>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
+    }
+
+    let snapshot = state.snapshot().await;
+    Html(render_downstreams_page(
+        &snapshot,
+        &DownstreamFormView::blank(),
+        None,
+        None,
+        &filters,
+    ))
+    .into_response()
+}
+
+async fn edit_downstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(filters): Query<DownstreamListQuery>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
+    }
+
+    let snapshot = state.snapshot().await;
+    let Some(downstream) = snapshot.downstreams.iter().find(|downstream| downstream.id == id) else {
+        return GatewayError::BadRequest("downstream not found".into()).into_response();
+    };
+
+    Html(render_downstreams_page(
+        &snapshot,
+        &DownstreamFormView::from_downstream(downstream),
+        None,
+        None,
+        &filters,
+    ))
+    .into_response()
+}
+
+async fn update_downstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(filters): Query<DownstreamListQuery>,
+    Form(form): Form<DownstreamForm>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
+    }
+
+    let snapshot = state.snapshot().await;
+    let Some(existing) = snapshot.downstreams.iter().find(|downstream| downstream.id == id).cloned() else {
+        return GatewayError::BadRequest("downstream not found".into()).into_response();
+    };
+
+    let action = format!("/admin/downstreams/{id}");
+    let form_view = DownstreamFormView::from_form(&form, action.clone(), Some(id.clone()), existing.plaintext_key.clone());
+    let downstream = downstream_from_form(&form_view, existing.hash.clone(), existing.plaintext_key.clone(), Some(&existing), id.clone());
+
+    match state.update_downstream(&id, downstream).await {
+        Ok(true) => {
+            let snapshot = state.snapshot().await;
+            let Some(updated) = snapshot.downstreams.iter().find(|downstream| downstream.id == id) else {
+                return GatewayError::Upstream("failed to reload downstream after save".into())
+                    .into_response();
+            };
+
+            Html(render_downstreams_page(
+                &snapshot,
+                &DownstreamFormView::from_downstream(updated),
+                None,
+                Some("已保存下游密钥"),
+                &filters,
+            ))
+            .into_response()
+        }
+        Ok(false) => GatewayError::BadRequest("downstream not found".into()).into_response(),
+        Err(error) => GatewayError::Upstream(format!("failed to save downstream: {error}"))
+            .into_response(),
+    }
+}
+
+async fn rotate_downstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(filters): Query<DownstreamListQuery>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
+    }
+
+    let snapshot = state.snapshot().await;
+    let Some(existing) = snapshot.downstreams.iter().find(|downstream| downstream.id == id).cloned() else {
+        return GatewayError::BadRequest("downstream not found".into()).into_response();
+    };
+
+    let generated = generate_downstream_key("gw");
+    let downstream = DownstreamConfig {
+        id: existing.id.clone(),
+        name: existing.name.clone(),
+        hash: generated.hash.clone(),
+        plaintext_key: Some(generated.plaintext.clone()),
+        model_allowlist: existing.model_allowlist.clone(),
+        per_minute_limit: existing.per_minute_limit,
+        daily_token_limit: existing.daily_token_limit,
+        monthly_token_limit: existing.monthly_token_limit,
+        ip_allowlist: existing.ip_allowlist.clone(),
+        expires_at: existing.expires_at,
+        active: existing.active,
+    };
+
+    match state.update_downstream(&id, downstream).await {
+        Ok(true) => {
+            let snapshot = state.snapshot().await;
+            let Some(updated) = snapshot.downstreams.iter().find(|downstream| downstream.id == id) else {
+                return GatewayError::Upstream("failed to reload downstream after rotation".into())
+                    .into_response();
+            };
+
+            Html(render_downstreams_page(
+                &snapshot,
+                &DownstreamFormView::from_downstream(updated),
+                Some(&generated.plaintext),
+                Some("已重新生成下游密钥"),
+                &filters,
+            ))
+            .into_response()
+        }
+        Ok(false) => GatewayError::BadRequest("downstream not found".into()).into_response(),
+        Err(error) => GatewayError::Upstream(format!("failed to rotate downstream: {error}"))
+            .into_response(),
+    }
+}
+
+async fn delete_downstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(filters): Query<DownstreamListQuery>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
+    }
+
+    match state.remove_downstream(&id).await {
+        Ok(true) => {
+            let snapshot = state.snapshot().await;
+            Html(render_downstreams_page(
+                &snapshot,
+                &DownstreamFormView::blank(),
+                None,
+                Some("已删除下游密钥"),
+                &filters,
+            ))
+            .into_response()
+        }
+        Ok(false) => GatewayError::BadRequest("downstream not found".into()).into_response(),
+        Err(error) => GatewayError::Upstream(format!("failed to delete downstream: {error}"))
+            .into_response(),
+    }
 }
 
 async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -245,6 +460,7 @@ async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> impl I
 
 #[derive(Debug, Deserialize)]
 struct UpstreamForm {
+    intent: Option<String>,
     name: String,
     base_url: String,
     api_key: String,
@@ -262,10 +478,339 @@ struct DownstreamForm {
     monthly_token_limit: Option<u64>,
     ip_allowlist: Option<String>,
     expires_at: Option<u64>,
+    never_expires: Option<String>,
     active: Option<String>,
 }
 
-async fn create_upstream(
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct DownstreamListQuery {
+    search: Option<String>,
+    status: Option<String>,
+    lifetime: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownstreamStatusFilter {
+    All,
+    Active,
+    Inactive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownstreamLifetimeFilter {
+    All,
+    Unlimited,
+    Expiring,
+}
+
+impl DownstreamListQuery {
+    fn search_value(&self) -> String {
+        self.search
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn status_filter(&self) -> DownstreamStatusFilter {
+        match self.status.as_deref().map(str::trim) {
+            Some("active") => DownstreamStatusFilter::Active,
+            Some("inactive") => DownstreamStatusFilter::Inactive,
+            _ => DownstreamStatusFilter::All,
+        }
+    }
+
+    fn lifetime_filter(&self) -> DownstreamLifetimeFilter {
+        match self.lifetime.as_deref().map(str::trim) {
+            Some("unlimited") => DownstreamLifetimeFilter::Unlimited,
+            Some("expiring") => DownstreamLifetimeFilter::Expiring,
+            _ => DownstreamLifetimeFilter::All,
+        }
+    }
+
+    fn matches(&self, downstream: &DownstreamConfig) -> bool {
+        let search = self.search_value();
+        if !search.is_empty() {
+            let search = search.to_lowercase();
+            let name_matches = downstream.name.to_lowercase().contains(&search);
+            let secret_matches = downstream
+                .plaintext_key
+                .as_deref()
+                .map(|secret| secret.to_lowercase().contains(&search))
+                .unwrap_or(false);
+            if !name_matches && !secret_matches {
+                return false;
+            }
+        }
+
+        match self.status_filter() {
+            DownstreamStatusFilter::All => {}
+            DownstreamStatusFilter::Active => {
+                if !downstream.active {
+                    return false;
+                }
+            }
+            DownstreamStatusFilter::Inactive => {
+                if downstream.active {
+                    return false;
+                }
+            }
+        }
+
+        match self.lifetime_filter() {
+            DownstreamLifetimeFilter::All => {}
+            DownstreamLifetimeFilter::Unlimited => {
+                if downstream.expires_at.is_some() {
+                    return false;
+                }
+            }
+            DownstreamLifetimeFilter::Expiring => {
+                if downstream.expires_at.is_none() {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn normalized(&self) -> Self {
+        Self {
+            search: {
+                let search = self.search_value();
+                if search.is_empty() {
+                    None
+                } else {
+                    Some(search)
+                }
+            },
+            status: match self.status_filter() {
+                DownstreamStatusFilter::Active => Some("active".to_string()),
+                DownstreamStatusFilter::Inactive => Some("inactive".to_string()),
+                DownstreamStatusFilter::All => None,
+            },
+            lifetime: match self.lifetime_filter() {
+                DownstreamLifetimeFilter::Unlimited => Some("unlimited".to_string()),
+                DownstreamLifetimeFilter::Expiring => Some("expiring".to_string()),
+                DownstreamLifetimeFilter::All => None,
+            },
+        }
+    }
+
+    fn query_suffix(&self) -> String {
+        let query = self.normalized();
+        let encoded = serde_urlencoded::to_string(&query).unwrap_or_default();
+        if encoded.is_empty() {
+            String::new()
+        } else {
+            format!("?{encoded}")
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DownstreamFormView {
+    action: String,
+    heading: String,
+    submit_label: String,
+    delete_action: Option<String>,
+    rotate_action: Option<String>,
+    id: Option<String>,
+    name: String,
+    models: String,
+    per_minute_limit: String,
+    daily_token_limit: String,
+    monthly_token_limit: String,
+    ip_allowlist: String,
+    expires_at: String,
+    never_expires: bool,
+    active: bool,
+    plaintext_key: Option<String>,
+    legacy_secret: bool,
+}
+
+impl DownstreamFormView {
+    fn blank() -> Self {
+        Self {
+            action: "/admin/downstreams".to_string(),
+            heading: "创建下游密钥".to_string(),
+            submit_label: "创建密钥".to_string(),
+            delete_action: None,
+            rotate_action: None,
+            id: None,
+            name: String::new(),
+            models: String::new(),
+            per_minute_limit: "60".to_string(),
+            daily_token_limit: String::new(),
+            monthly_token_limit: String::new(),
+            ip_allowlist: String::new(),
+            expires_at: String::new(),
+            never_expires: true,
+            active: true,
+            plaintext_key: None,
+            legacy_secret: false,
+        }
+    }
+
+    fn from_downstream(downstream: &DownstreamConfig) -> Self {
+        Self {
+            action: format!("/admin/downstreams/{}", downstream.id),
+            heading: "编辑下游密钥".to_string(),
+            submit_label: "保存修改".to_string(),
+            delete_action: Some(format!("/admin/downstreams/{}/delete", downstream.id)),
+            rotate_action: Some(format!("/admin/downstreams/{}/rotate", downstream.id)),
+            id: Some(downstream.id.clone()),
+            name: downstream.name.clone(),
+            models: downstream.model_allowlist.join(","),
+            per_minute_limit: downstream.per_minute_limit.to_string(),
+            daily_token_limit: downstream
+                .daily_token_limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            monthly_token_limit: downstream
+                .monthly_token_limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            ip_allowlist: downstream.ip_allowlist.join(","),
+            expires_at: downstream
+                .expires_at
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            never_expires: downstream.expires_at.is_none(),
+            active: downstream.active,
+            plaintext_key: downstream.plaintext_key.clone(),
+            legacy_secret: downstream.plaintext_key.is_none(),
+        }
+    }
+
+    fn from_form(
+        form: &DownstreamForm,
+        action: String,
+        downstream_id: Option<String>,
+        secret: Option<String>,
+    ) -> Self {
+        let is_editing = downstream_id.is_some();
+        Self {
+            action: action.clone(),
+            heading: if is_editing {
+                "编辑下游密钥".to_string()
+            } else {
+                "创建下游密钥".to_string()
+            },
+            submit_label: if is_editing {
+                "保存修改".to_string()
+            } else {
+                "创建密钥".to_string()
+            },
+            delete_action: downstream_id
+                .as_ref()
+                .map(|value| format!("/admin/downstreams/{value}/delete")),
+            rotate_action: downstream_id
+                .as_ref()
+                .map(|value| format!("/admin/downstreams/{value}/rotate")),
+            id: downstream_id,
+            name: form.name.clone(),
+            models: form.models.clone(),
+            per_minute_limit: form
+                .per_minute_limit
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "60".to_string()),
+            daily_token_limit: form
+                .daily_token_limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            monthly_token_limit: form
+                .monthly_token_limit
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            ip_allowlist: form.ip_allowlist.clone().unwrap_or_default(),
+            expires_at: if form.never_expires.is_some() {
+                String::new()
+            } else {
+                form.expires_at.map(|value| value.to_string()).unwrap_or_default()
+            },
+            never_expires: form.never_expires.is_some() || form.expires_at.is_none(),
+            active: form_toggle_enabled(&form.active),
+            plaintext_key: secret.clone(),
+            legacy_secret: secret.is_none(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UpstreamFormView {
+    action: String,
+    heading: String,
+    submit_label: String,
+    name: String,
+    base_url: String,
+    api_key: String,
+    protocol: UpstreamProtocol,
+    models: String,
+    active: bool,
+}
+
+impl UpstreamFormView {
+    fn blank() -> Self {
+        Self {
+            action: "/admin/upstreams".to_string(),
+            heading: "新增上游".to_string(),
+            submit_label: "保存上游".to_string(),
+            name: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            models: String::new(),
+            active: true,
+        }
+    }
+
+    fn from_upstream(upstream: &UpstreamConfig) -> Self {
+        Self {
+            action: format!("/admin/upstreams/{}", upstream.id),
+            heading: "编辑上游".to_string(),
+            submit_label: "保存修改".to_string(),
+            name: upstream.name.clone(),
+            base_url: upstream.base_url.clone(),
+            api_key: upstream.api_key.clone(),
+            protocol: upstream.protocol,
+            models: upstream.supported_models.join(","),
+            active: upstream.active,
+        }
+    }
+
+    fn from_form(form: &UpstreamForm, action: String) -> Self {
+        let is_editing = action != "/admin/upstreams";
+        Self {
+            action,
+            heading: if is_editing {
+                "编辑上游".to_string()
+            } else {
+                "新增上游".to_string()
+            },
+            submit_label: if is_editing {
+                "保存修改".to_string()
+            } else {
+                "保存上游".to_string()
+            },
+            name: form.name.clone(),
+            base_url: form.base_url.clone(),
+            api_key: form.api_key.clone(),
+            protocol: parse_upstream_protocol(&form.protocol),
+            models: form.models.clone(),
+            active: form_toggle_enabled(&form.active),
+        }
+    }
+
+    fn with_models(&self, models: String) -> Self {
+        let mut next = self.clone();
+        next.models = models;
+        next
+    }
+}
+
+async fn submit_upstream(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<UpstreamForm>,
@@ -274,25 +819,60 @@ async fn create_upstream(
         return response;
     }
 
-    let upstream = UpstreamConfig {
-        id: new_id("up"),
-        name: form.name,
-        base_url: form.base_url.trim_end_matches('/').to_string(),
-        api_key: form.api_key,
-        protocol: match form.protocol.as_str() {
-            "responses" => UpstreamProtocol::Responses,
-            _ => UpstreamProtocol::ChatCompletions,
-        },
-        supported_models: parse_csv(&form.models),
-        active: form.active.is_some(),
-        failure_count: 0,
-    };
+    handle_upstream_form_submit(state, form, None).await
+}
 
-    if let Err(error) = state.insert_upstream(upstream).await {
-        return GatewayError::Upstream(format!("failed to save upstream: {error}")).into_response();
+async fn edit_upstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
     }
 
-    Redirect::to("/admin/upstreams").into_response()
+    let snapshot = state.snapshot().await;
+    let Some(upstream) = snapshot.upstreams.iter().find(|upstream| upstream.id == id) else {
+        return GatewayError::BadRequest("upstream not found".into()).into_response();
+    };
+
+    Html(render_upstreams_page(
+        &snapshot,
+        &UpstreamFormView::from_upstream(upstream),
+        None,
+    ))
+    .into_response()
+}
+
+async fn update_upstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<UpstreamForm>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
+    }
+
+    handle_upstream_form_submit(state, form, Some(id)).await
+}
+
+async fn delete_upstream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state.config) {
+        return response;
+    }
+
+    match state.remove_upstream(&id).await {
+        Ok(true) => Redirect::to("/admin/upstreams").into_response(),
+        Ok(false) => GatewayError::BadRequest("upstream not found".into()).into_response(),
+        Err(error) => {
+            GatewayError::Upstream(format!("failed to delete upstream: {error}")).into_response()
+        }
+    }
 }
 
 async fn toggle_upstream(
@@ -317,9 +897,155 @@ async fn toggle_upstream(
     Redirect::to("/admin/upstreams").into_response()
 }
 
+async fn handle_upstream_form_submit(
+    state: AppState,
+    form: UpstreamForm,
+    upstream_id: Option<String>,
+) -> Response {
+    let action = upstream_id
+        .as_ref()
+        .map(|id| format!("/admin/upstreams/{id}"))
+        .unwrap_or_else(|| "/admin/upstreams".to_string());
+    let form_view = UpstreamFormView::from_form(&form, action);
+
+    if form.intent.as_deref() == Some("fetch") {
+        return match fetch_upstream_models(&state, &form).await {
+            Ok(models) => {
+                let snapshot = state.snapshot().await;
+                let fetched = form_view.with_models(models.join(","));
+                Html(render_upstreams_page(
+                    &snapshot,
+                    &fetched,
+                    Some("已获取当前模型"),
+                ))
+                .into_response()
+            }
+            Err(error) => {
+                let snapshot = state.snapshot().await;
+                Html(render_upstreams_page(
+                    &snapshot,
+                    &form_view,
+                    Some(&format!("获取当前模型失败: {error}")),
+                ))
+                .into_response()
+            }
+        };
+    }
+
+    let upstream_id_value = upstream_id.clone().unwrap_or_else(|| new_id("up"));
+    let upstream = UpstreamConfig {
+        id: upstream_id_value,
+        name: form_view.name.clone(),
+        base_url: form_view.base_url.trim_end_matches('/').to_string(),
+        api_key: form_view.api_key.clone(),
+        protocol: form_view.protocol,
+        supported_models: parse_csv(&form_view.models),
+        active: form_view.active,
+        failure_count: 0,
+    };
+
+    let result = if let Some(id) = upstream_id.as_deref() {
+        match state.update_upstream(id, upstream).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(GatewayError::BadRequest("upstream not found".into())),
+            Err(error) => Err(GatewayError::Upstream(format!(
+                "failed to save upstream: {error}"
+            ))),
+        }
+    } else {
+        state
+            .insert_upstream(upstream)
+            .await
+            .map_err(|error| GatewayError::Upstream(format!("failed to save upstream: {error}")))
+    };
+
+    match result {
+        Ok(()) => Redirect::to("/admin/upstreams").into_response(),
+        Err(error) => {
+            let snapshot = state.snapshot().await;
+            Html(render_upstreams_page(
+                &snapshot,
+                &form_view,
+                Some(&error.to_string()),
+            ))
+            .into_response()
+        }
+    }
+}
+
+async fn fetch_upstream_models(
+    state: &AppState,
+    form: &UpstreamForm,
+) -> Result<Vec<String>, String> {
+    state
+        .fetch_models_from_endpoint(&form.base_url, &form.api_key)
+        .await
+}
+
+fn parse_upstream_protocol(value: &str) -> UpstreamProtocol {
+    match value {
+        "responses" => UpstreamProtocol::Responses,
+        _ => UpstreamProtocol::ChatCompletions,
+    }
+}
+
+fn form_toggle_enabled(value: &Option<String>) -> bool {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+}
+
+fn downstream_from_form(
+    form_view: &DownstreamFormView,
+    hash: String,
+    plaintext_key: Option<String>,
+    existing: Option<&DownstreamConfig>,
+    fallback_id: String,
+) -> DownstreamConfig {
+    let per_minute_limit = form_view
+        .per_minute_limit
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .or_else(|| existing.map(|downstream| downstream.per_minute_limit))
+        .unwrap_or(60);
+    let daily_token_limit = parse_optional_u64(&form_view.daily_token_limit);
+    let monthly_token_limit = parse_optional_u64(&form_view.monthly_token_limit);
+
+    DownstreamConfig {
+        id: form_view.id.clone().unwrap_or(fallback_id),
+        name: form_view.name.clone(),
+        hash,
+        plaintext_key,
+        model_allowlist: parse_csv(&form_view.models),
+        per_minute_limit,
+        daily_token_limit,
+        monthly_token_limit,
+        ip_allowlist: parse_csv(&form_view.ip_allowlist),
+        expires_at: if form_view.never_expires {
+            None
+        } else {
+            parse_optional_u64(&form_view.expires_at)
+        },
+        active: form_view.active,
+    }
+}
+
+fn parse_optional_u64(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        trimmed.parse::<u64>().ok()
+    }
+}
+
 async fn create_downstream(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(filters): Query<DownstreamListQuery>,
     Form(form): Form<DownstreamForm>,
 ) -> impl IntoResponse {
     if let Err(response) = ensure_admin(&headers, &state.config) {
@@ -327,22 +1053,13 @@ async fn create_downstream(
     }
 
     let generated = generate_downstream_key("gw");
-    let downstream = DownstreamConfig {
-        id: new_id("down"),
-        name: form.name,
-        hash: generated.hash.clone(),
-        model_allowlist: parse_csv(&form.models),
-        per_minute_limit: form.per_minute_limit.unwrap_or(60),
-        daily_token_limit: form.daily_token_limit,
-        monthly_token_limit: form.monthly_token_limit,
-        ip_allowlist: form
-            .ip_allowlist
-            .as_deref()
-            .map(parse_csv)
-            .unwrap_or_default(),
-        expires_at: form.expires_at,
-        active: form.active.is_some(),
-    };
+    let downstream = downstream_from_form(
+        &DownstreamFormView::from_form(&form, "/admin/downstreams".to_string(), None, Some(generated.plaintext.clone())),
+        generated.hash.clone(),
+        Some(generated.plaintext.clone()),
+        None,
+        new_id("down"),
+    );
 
     if let Err(error) = state.insert_downstream(downstream).await {
         return GatewayError::Upstream(format!("failed to save downstream key: {error}"))
@@ -352,7 +1069,10 @@ async fn create_downstream(
     let snapshot = state.snapshot().await;
     Html(render_downstreams_page(
         &snapshot,
+        &DownstreamFormView::blank(),
         Some(&generated.plaintext),
+        Some("已生成的下游密钥"),
+        &filters,
     ))
     .into_response()
 }
@@ -432,10 +1152,11 @@ async fn process_gateway_request(
             .filter(|upstream| upstream.active)
             .filter(|upstream| upstream.protocol == protocol)
             .filter(|upstream| {
-                upstream
-                    .supported_models
-                    .iter()
-                    .any(|supported| supported == model)
+                upstream.supported_models.is_empty()
+                    || upstream
+                        .supported_models
+                        .iter()
+                        .any(|supported| supported == model)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -513,11 +1234,7 @@ async fn send_to_upstream(
         }
     };
 
-    let url = format!(
-        "{}{}",
-        upstream.base_url.trim_end_matches('/'),
-        endpoint_for_upstream(upstream.protocol)
-    );
+    let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream.protocol));
     let response = state
         .client()
         .post(url)
@@ -720,6 +1437,7 @@ async fn toggle_downstream(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(filters): Query<DownstreamListQuery>,
 ) -> impl IntoResponse {
     if let Err(response) = ensure_admin(&headers, &state.config) {
         return response;
@@ -739,7 +1457,7 @@ async fn toggle_downstream(
             .into_response();
     }
 
-    Redirect::to("/admin/downstreams").into_response()
+    Redirect::to(&format!("/admin/downstreams{}", filters.query_suffix())).into_response()
 }
 
 fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
@@ -755,7 +1473,16 @@ fn parse_csv(input: &str) -> Vec<String> {
         .collect()
 }
 
-fn render_shell(title: &str, body: &str) -> String {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShellSection {
+    Dashboard,
+    Upstreams,
+    Downstreams,
+    Logs,
+    Portal,
+}
+
+fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -765,71 +1492,140 @@ fn render_shell(title: &str, body: &str) -> String {
   <title>{title}</title>
   <style>
     :root {{
-      color-scheme: dark;
-      --bg: #07111f;
-      --panel: rgba(10, 18, 33, 0.92);
-      --panel-strong: #0f1b31;
-      --border: rgba(148, 163, 184, 0.18);
-      --text: #e5eefb;
-      --muted: #95a3bb;
-      --accent: #f59e0b;
+      color-scheme: light;
+      --bg: #eef5f7;
+      --panel: rgba(255, 255, 255, 0.88);
+      --panel-strong: #ffffff;
+      --border: rgba(15, 23, 42, 0.08);
+      --text: #102033;
+      --muted: #64748b;
+      --accent: #13b5a6;
       --accent-2: #38bdf8;
-      --danger: #f87171;
+      --danger: #ef4444;
+      --shadow: 0 22px 60px rgba(15, 23, 42, 0.08);
     }}
     * {{ box-sizing: border-box; }}
+    html, body {{ min-height: 100%; }}
     body {{
       margin: 0;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
-        radial-gradient(circle at top left, rgba(56, 189, 248, 0.14), transparent 28%),
-        radial-gradient(circle at top right, rgba(245, 158, 11, 0.12), transparent 26%),
-        linear-gradient(180deg, #050b17 0%, #07111f 100%);
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 28%),
+        radial-gradient(circle at top right, rgba(19, 181, 166, 0.16), transparent 30%),
+        linear-gradient(180deg, #f8fbfc 0%, #eef5f7 100%);
       color: var(--text);
       min-height: 100vh;
     }}
-    a {{ color: var(--accent-2); text-decoration: none; }}
-    .shell {{
-      width: min(1240px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 24px 0 56px;
+    a {{ color: inherit; text-decoration: none; }}
+    code, pre, .mono {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     }}
-    .topbar {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 20px;
+    .layout {{
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+    }}
+    .sidebar {{
+      position: sticky;
+      top: 0;
+      align-self: start;
+      min-height: 100vh;
+      padding: 22px 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border-right: 1px solid var(--border);
+      backdrop-filter: blur(18px);
+      box-shadow: 10px 0 32px rgba(15, 23, 42, 0.03);
     }}
     .brand {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px 22px;
+    }}
+    .brand-mark {{
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: linear-gradient(135deg, #0f172a, #13b5a6);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+    }}
+    .brand-text h1 {{
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.03em;
+    }}
+    .brand-text p {{
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .nav {{
+      display: grid;
+      gap: 8px;
+    }}
+    .nav a {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid transparent;
+      color: var(--text);
+      background: transparent;
+      transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+    }}
+    .nav a:hover {{
+      background: rgba(19, 181, 166, 0.08);
+      border-color: rgba(19, 181, 166, 0.12);
+      transform: translateX(1px);
+    }}
+    .nav a.active {{
+      background: linear-gradient(135deg, rgba(19, 181, 166, 0.14), rgba(56, 189, 248, 0.08));
+      border-color: rgba(19, 181, 166, 0.18);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+    }}
+    .nav small {{
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }}
+    .main {{
+      padding: 24px;
+    }}
+    .page-header {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }}
+    .page-title {{
       display: flex;
       flex-direction: column;
       gap: 6px;
     }}
-    .brand h1 {{
+    .page-title h2 {{
       margin: 0;
-      font-size: 28px;
-      letter-spacing: -0.04em;
+      font-size: 30px;
+      letter-spacing: -0.05em;
     }}
-    .brand p {{
+    .page-title p {{
       margin: 0;
       color: var(--muted);
       font-size: 14px;
     }}
-    .nav {{
+    .page-actions {{
       display: flex;
+      align-items: center;
+      justify-content: flex-end;
       gap: 10px;
       flex-wrap: wrap;
-    }}
-    .nav a {{
-      padding: 10px 14px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      color: var(--text);
-      background: rgba(255,255,255,0.02);
-    }}
-    .nav a:hover {{
-      border-color: rgba(245, 158, 11, 0.55);
-      background: rgba(245, 158, 11, 0.08);
     }}
     .grid {{
       display: grid;
@@ -839,14 +1635,15 @@ fn render_shell(title: &str, body: &str) -> String {
     .panel {{
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 20px;
+      border-radius: 22px;
       padding: 20px;
-      box-shadow: 0 24px 70px rgba(0,0,0,0.24);
-      backdrop-filter: blur(16px);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
     }}
     .panel h2 {{
       margin: 0 0 14px;
       font-size: 18px;
+      letter-spacing: -0.02em;
     }}
     .panel h3 {{
       margin: 0 0 10px;
@@ -857,12 +1654,13 @@ fn render_shell(title: &str, body: &str) -> String {
     }}
     .card {{
       grid-column: span 3;
-      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+      background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.74));
     }}
     .card strong {{
       display: block;
       font-size: 30px;
       margin-bottom: 6px;
+      letter-spacing: -0.04em;
     }}
     .card span {{
       color: var(--muted);
@@ -870,23 +1668,47 @@ fn render_shell(title: &str, body: &str) -> String {
     }}
     .wide {{ grid-column: span 12; }}
     .half {{ grid-column: span 6; }}
+    .drawer {{
+      grid-column: span 4;
+      position: sticky;
+      top: 24px;
+      align-self: start;
+    }}
+    .toolbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }}
+    .toolbar .actions {{
+      justify-content: flex-end;
+      margin-left: auto;
+    }}
     .table {{
       width: 100%;
-      border-collapse: collapse;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
     }}
     .table th, .table td {{
       text-align: left;
-      padding: 12px 10px;
-      border-bottom: 1px solid rgba(148,163,184,0.14);
+      padding: 14px 12px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.16);
       vertical-align: top;
       font-size: 14px;
+      background: transparent;
     }}
     .table th {{
       color: var(--muted);
-      font-weight: 600;
+      font-weight: 650;
       font-size: 12px;
       text-transform: uppercase;
       letter-spacing: 0.08em;
+    }}
+    .table tbody tr:hover td {{
+      background: rgba(56, 189, 248, 0.03);
     }}
     .pill {{
       display: inline-flex;
@@ -894,20 +1716,36 @@ fn render_shell(title: &str, body: &str) -> String {
       gap: 8px;
       border-radius: 999px;
       padding: 6px 10px;
-      border: 1px solid rgba(148,163,184,0.2);
+      border: 1px solid rgba(148, 163, 184, 0.18);
       color: var(--text);
-      background: rgba(255,255,255,0.03);
+      background: rgba(255, 255, 255, 0.8);
     }}
-    .pill.ok {{ color: #86efac; border-color: rgba(34,197,94,0.25); }}
-    .pill.warn {{ color: #fdba74; border-color: rgba(245,158,11,0.25); }}
-    .pill.bad {{ color: #fca5a5; border-color: rgba(248,113,113,0.25); }}
+    .pill.ok {{
+      color: #166534;
+      border-color: rgba(34, 197, 94, 0.24);
+      background: rgba(34, 197, 94, 0.08);
+    }}
+    .pill.warn {{
+      color: #9a3412;
+      border-color: rgba(245, 158, 11, 0.24);
+      background: rgba(245, 158, 11, 0.08);
+    }}
+    .pill.bad {{
+      color: #991b1b;
+      border-color: rgba(248, 113, 113, 0.24);
+      background: rgba(248, 113, 113, 0.08);
+    }}
     .muted {{ color: var(--muted); }}
     .notice {{
       margin-bottom: 16px;
       padding: 14px 16px;
-      border: 1px solid rgba(56, 189, 248, 0.24);
-      border-radius: 14px;
-      background: rgba(56, 189, 248, 0.08);
+      border: 1px solid rgba(19, 181, 166, 0.22);
+      border-radius: 16px;
+      background: rgba(19, 181, 166, 0.08);
+    }}
+    .notice h2 {{
+      margin: 0 0 8px;
+      font-size: 16px;
     }}
     form {{
       display: grid;
@@ -930,66 +1768,241 @@ fn render_shell(title: &str, body: &str) -> String {
     }}
     input, select, textarea {{
       width: 100%;
-      background: rgba(15, 27, 49, 0.9);
+      background: rgba(255, 255, 255, 0.88);
       color: var(--text);
-      border: 1px solid rgba(148, 163, 184, 0.22);
+      border: 1px solid rgba(148, 163, 184, 0.24);
       border-radius: 14px;
       padding: 12px 14px;
       font: inherit;
+      box-shadow: inset 0 1px 1px rgba(255,255,255,0.65);
+    }}
+    input:focus, select:focus, textarea:focus {{
+      outline: none;
+      border-color: rgba(19, 181, 166, 0.4);
+      box-shadow: 0 0 0 4px rgba(19, 181, 166, 0.12);
     }}
     textarea {{ min-height: 110px; resize: vertical; }}
     .actions {{
       display: flex;
       justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
     }}
     button {{
-      background: linear-gradient(135deg, var(--accent), #fb7185);
-      color: #111827;
+      background: linear-gradient(135deg, var(--accent), #34d399);
+      color: #fff;
       border: 0;
       border-radius: 999px;
-      padding: 12px 18px;
+      padding: 11px 16px;
       font-weight: 700;
       cursor: pointer;
+      box-shadow: 0 10px 22px rgba(19, 181, 166, 0.22);
+    }}
+    button.secondary {{
+      background: rgba(148, 163, 184, 0.16);
+      color: var(--text);
+      border: 1px solid var(--border);
+      box-shadow: none;
+    }}
+    button.danger {{
+      background: linear-gradient(135deg, #f87171, #ef4444);
+      color: #fff;
+      box-shadow: 0 10px 22px rgba(239, 68, 68, 0.18);
+    }}
+    .button-link {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.82);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    }}
+    .button-link:hover {{
+      border-color: rgba(19, 181, 166, 0.4);
+      background: rgba(19, 181, 166, 0.08);
+    }}
+    .row-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }}
+    .row-actions form {{
+      display: inline;
+    }}
+    .searchbar {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      width: 100%;
+    }}
+    .searchbar .field {{
+      flex: 1 1 220px;
+      min-width: 200px;
+    }}
+    .secret-chip {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }}
+    .secret-value {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 100%;
+      padding: 8px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(15, 23, 42, 0.04);
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-weight: 600;
+      font-size: 13px;
+    }}
+    .secret-value.revealed {{
+      background: rgba(19, 181, 166, 0.10);
+      border-color: rgba(19, 181, 166, 0.28);
+    }}
+    .secret-stack {{
+      display: grid;
+      gap: 12px;
+    }}
+    .secret-state {{
+      font-size: 13px;
+      color: var(--muted);
     }}
     .keybox {{
-      padding: 16px;
+      padding: 14px 16px;
       border-radius: 16px;
-      border: 1px solid rgba(245, 158, 11, 0.3);
-      background: rgba(245, 158, 11, 0.08);
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      border: 1px solid rgba(19, 181, 166, 0.22);
+      background: rgba(19, 181, 166, 0.08);
       word-break: break-all;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }}
+    .helper {{
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+    }}
+    .spacer {{
+      height: 12px;
+    }}
+    @media (max-width: 1100px) {{
+      .card {{ grid-column: span 6; }}
+      .drawer {{ grid-column: span 12; position: static; }}
     }}
     @media (max-width: 960px) {{
-      .card, .half {{ grid-column: span 12; }}
+      .layout {{ grid-template-columns: 1fr; }}
+      .sidebar {{
+        position: static;
+        min-height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }}
+      .main {{ padding: 18px; }}
+      .page-header {{ flex-direction: column; }}
+      .page-actions {{ justify-content: flex-start; }}
       .fields {{ grid-template-columns: 1fr; }}
-      .topbar {{ flex-direction: column; align-items: flex-start; }}
+      .card, .half {{ grid-column: span 12; }}
     }}
   </style>
+  <script>
+    function toggleSecret(button) {{
+      const targetId = button.getAttribute('data-target');
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      const secret = target.dataset.secret || '';
+      const masked = target.dataset.masked || secret;
+      const revealed = target.dataset.revealed === '1';
+      target.textContent = revealed ? masked : secret;
+      target.dataset.revealed = revealed ? '0' : '1';
+      target.classList.toggle('revealed', !revealed);
+      button.textContent = revealed ? '查看' : '隐藏';
+    }}
+
+    async function copySecret(button) {{
+      const targetId = button.getAttribute('data-target');
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      const secret = target.dataset.secret || '';
+      if (!secret) return;
+      try {{
+        await navigator.clipboard.writeText(secret);
+        const original = button.textContent;
+        button.textContent = '已复制';
+        setTimeout(() => {{ button.textContent = original; }}, 1200);
+      }} catch (error) {{
+        const original = button.textContent;
+        button.textContent = '复制失败';
+        setTimeout(() => {{ button.textContent = original; }}, 1200);
+      }}
+    }}
+  </script>
 </head>
 <body>
-  <div class="shell">
-    {body}
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">CR</div>
+        <div class="brand-text">
+          <h1>chat2responses</h1>
+          <p>协议转换网关控制台</p>
+        </div>
+      </div>
+      <nav class="nav">
+        {nav_dashboard}
+        {nav_upstreams}
+        {nav_downstreams}
+        {nav_logs}
+        {nav_portal}
+      </nav>
+    </aside>
+    <main class="main">
+      {body}
+    </main>
   </div>
 </body>
-</html>"#
+</html>"#,
+        nav_dashboard = render_nav_item(section, ShellSection::Dashboard, "/admin", "仪表盘", "全局概览"),
+        nav_upstreams = render_nav_item(section, ShellSection::Upstreams, "/admin/upstreams", "上游密钥", "模型路由"),
+        nav_downstreams = render_nav_item(section, ShellSection::Downstreams, "/admin/downstreams", "下游密钥", "客户密钥"),
+        nav_logs = render_nav_item(section, ShellSection::Logs, "/admin/logs", "运行日志", "审计与排障"),
+        nav_portal = render_nav_item(section, ShellSection::Portal, "/portal", "自助门户", "下游视图"),
+    )
+}
+
+fn render_nav_item(current: ShellSection, section: ShellSection, href: &str, title: &str, subtitle: &str) -> String {
+    let active_class = if current == section { "active" } else { "" };
+    format!(
+        r#"<a href="{href}" class="{class}">
+  <div>
+    <strong>{title}</strong>
+    <small>{subtitle}</small>
+  </div>
+</a>"#,
+        href = href,
+        class = active_class,
+        title = escape_html(title),
+        subtitle = escape_html(subtitle),
     )
 }
 
 fn render_topbar(title: &str, subtitle: &str) -> String {
     format!(
-        r#"<div class="topbar">
-  <div class="brand">
-    <h1>{}</h1>
+        r#"<header class="page-header">
+  <div class="page-title">
+    <h2>{}</h2>
     <p>{}</p>
   </div>
-  <nav class="nav">
-    <a href="/admin">Dashboard</a>
-    <a href="/admin/upstreams">Upstreams</a>
-    <a href="/admin/downstreams">Downstreams</a>
-    <a href="/admin/logs">Logs</a>
-    <a href="/portal">Portal</a>
-  </nav>
-</div>"#,
+</header>"#,
         escape_html(title),
         escape_html(subtitle)
     )
@@ -1001,31 +2014,28 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
 <div class="grid">
   <section class="panel card">
     <strong>{upstreams}</strong>
-    <span>Upstream keys</span>
+    <span>上游密钥</span>
   </section>
   <section class="panel card">
     <strong>{downstreams}</strong>
-    <span>Downstream keys</span>
+    <span>下游密钥</span>
   </section>
   <section class="panel card">
     <strong>{logs}</strong>
-    <span>Usage logs</span>
+    <span>运行日志</span>
   </section>
   <section class="panel card">
     <strong>{active_models}</strong>
-    <span>Models exposed</span>
+    <span>可见模型</span>
   </section>
   <section class="panel wide">
-    <h2>Overview</h2>
-    <p class="muted">Admin user: <strong>{admin}</strong></p>
-    <p class="muted">App: <strong>{app}</strong></p>
-    <p class="muted">This gateway converts chat and responses requests, forwards them to the best available upstream key, and records every request for auditing.</p>
+    <h2>概览</h2>
+    <p class="muted">管理员账号：<strong>{admin}</strong></p>
+    <p class="muted">应用名称：<strong>{app}</strong></p>
+    <p class="muted">这个网关会把 chat 和 responses 请求转换后转发给可用的上游密钥，并记录所有请求用于审计。</p>
   </section>
 </div>"#,
-        topbar = render_topbar(
-            "Gateway Dashboard",
-            "Protocol conversion gateway control plane"
-        ),
+        topbar = render_topbar("仪表盘", "协议转换网关控制台"),
         upstreams = state.upstreams.len(),
         downstreams = state.downstreams.len(),
         logs = state.usage_logs.len(),
@@ -1033,10 +2043,14 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
         admin = escape_html(&config.admin_username),
         app = escape_html(&config.app_name),
     );
-    render_shell("Dashboard", &body)
+    render_shell("仪表盘", ShellSection::Dashboard, &body)
 }
 
-fn render_upstreams_page(state: &crate::state::PersistedState, notice: Option<&str>) -> String {
+fn render_upstreams_page(
+    state: &crate::state::PersistedState,
+    form: &UpstreamFormView,
+    notice: Option<&str>,
+) -> String {
     let mut rows = String::new();
     for upstream in &state.upstreams {
         let status = if upstream.active { "ok" } else { "bad" };
@@ -1045,7 +2059,7 @@ fn render_upstreams_page(state: &crate::state::PersistedState, notice: Option<&s
             UpstreamProtocol::Responses => "responses",
         };
         let models = if upstream.supported_models.is_empty() {
-            "all".to_string()
+            "全部".to_string()
         } else {
             escape_html(&upstream.supported_models.join(", "))
         };
@@ -1059,24 +2073,26 @@ fn render_upstreams_page(state: &crate::state::PersistedState, notice: Option<&s
   <td>{failure}</td>
   <td>{base}</td>
   <td>
-    <form method="post" action="/admin/upstreams/{id}/toggle">
-      <button type="submit">{action}</button>
-    </form>
+    <div class="row-actions">
+      <a class="button-link" href="/admin/upstreams/{id}/edit">编辑</a>
+      <form method="post" action="/admin/upstreams/{id}/toggle">
+        <button class="secondary" type="submit">{toggle}</button>
+      </form>
+      <form method="post" action="/admin/upstreams/{id}/delete">
+        <button class="danger" type="submit">删除</button>
+      </form>
+    </div>
   </td>
 </tr>"#,
             name = escape_html(&upstream.name),
             protocol = protocol,
             models = models,
             status = status,
-            active = if upstream.active {
-                "active"
-            } else {
-                "disabled"
-            },
+            active = if upstream.active { "启用" } else { "停用" },
             failure = upstream.failure_count,
             base = escape_html(&upstream.base_url),
             id = escape_html(&upstream.id),
-            action = if upstream.active { "Disable" } else { "Enable" },
+            toggle = if upstream.active { "停用" } else { "启用" },
         );
     }
 
@@ -1084,123 +2100,245 @@ fn render_upstreams_page(state: &crate::state::PersistedState, notice: Option<&s
         .map(|message| format!(r#"<div class="notice">{}</div>"#, escape_html(message)))
         .unwrap_or_default();
 
+    let protocol_chat_selected = if form.protocol == UpstreamProtocol::ChatCompletions {
+        "selected"
+    } else {
+        ""
+    };
+    let protocol_responses_selected = if form.protocol == UpstreamProtocol::Responses {
+        "selected"
+    } else {
+        ""
+    };
+    let active_selected = if form.active { "selected" } else { "" };
+    let inactive_selected = if form.active { "" } else { "selected" };
+
     let body = format!(
         r#"{topbar}{notice}
 <div class="grid">
   <section class="panel wide">
-    <h2>Upstreams</h2>
+    <h2>上游密钥</h2>
     <table class="table">
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Protocol</th>
-          <th>Models</th>
-          <th>Status</th>
-          <th>Failures</th>
-          <th>Base URL</th>
-          <th>Action</th>
+          <th>名称</th>
+          <th>协议</th>
+          <th>模型</th>
+          <th>状态</th>
+          <th>失败次数</th>
+          <th>基础地址</th>
+          <th>操作</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
   </section>
   <section class="panel wide">
-    <h2>Add Upstream</h2>
-    <form method="post">
+    <h2>{heading}</h2>
+    <form method="post" action="{action}">
       <div class="fields">
         <div class="field">
-          <label>Name</label>
-          <input name="name" placeholder="Primary Chat Key">
+          <label>名称</label>
+          <input name="name" placeholder="主上游密钥" value="{name}">
         </div>
         <div class="field">
-          <label>Base URL</label>
-          <input name="base_url" placeholder="https://api.openai.com">
+          <label>基础地址</label>
+          <input name="base_url" placeholder="https://api.openai.com" value="{base_url}">
         </div>
         <div class="field">
-          <label>API Key</label>
-          <input name="api_key" placeholder="sk-...">
+          <label>API 密钥</label>
+          <input name="api_key" placeholder="sk-..." value="{api_key}">
         </div>
         <div class="field">
-          <label>Protocol</label>
+          <label>协议</label>
           <select name="protocol">
-            <option value="chat">chat.completions</option>
-            <option value="responses">responses</option>
+            <option value="chat" {chat_selected}>chat.completions</option>
+            <option value="responses" {responses_selected}>responses</option>
           </select>
         </div>
         <div class="field">
-          <label>Models</label>
-          <input name="models" placeholder="gpt-4.1-mini,gpt-4o-mini">
+          <label>模型</label>
+          <input name="models" placeholder="gpt-4.1-mini,gpt-4o-mini" value="{models}">
         </div>
         <div class="field">
-          <label>Active</label>
+          <label>状态</label>
           <select name="active">
-            <option value="on">Enabled</option>
-            <option value="">Disabled</option>
+            <option value="on" {active_selected}>启用</option>
+            <option value="" {inactive_selected}>停用</option>
           </select>
+        </div>
+        <div class="field">
+          <label>说明</label>
+          <p class="muted">点击“获取当前模型”会请求上游的 <code>/v1/models</code> 并自动填充到模型字段。</p>
         </div>
       </div>
       <div class="actions">
-        <button type="submit">Save upstream</button>
+        <button type="submit">{submit_label}</button>
+        <button class="secondary" type="submit" name="intent" value="fetch">获取当前模型</button>
       </div>
     </form>
   </section>
 </div>"#,
-        topbar = render_topbar("Upstreams", "Configure the upstream keys and model support"),
+        topbar = render_topbar("上游密钥", "配置上游密钥和模型支持"),
         notice = notice,
         rows = rows,
+        heading = escape_html(&form.heading),
+        action = escape_html(&form.action),
+        name = escape_html(&form.name),
+        base_url = escape_html(&form.base_url),
+        api_key = escape_html(&form.api_key),
+        chat_selected = protocol_chat_selected,
+        responses_selected = protocol_responses_selected,
+        models = escape_html(&form.models),
+        active_selected = active_selected,
+        inactive_selected = inactive_selected,
+        submit_label = escape_html(&form.submit_label),
     );
-    render_shell("Upstreams", &body)
+    render_shell("上游密钥", ShellSection::Upstreams, &body)
 }
 
 fn render_downstreams_page(
     state: &crate::state::PersistedState,
+    drawer: &DownstreamFormView,
     generated_key: Option<&str>,
+    notice: Option<&str>,
+    filters: &DownstreamListQuery,
 ) -> String {
+    let query_suffix = filters.query_suffix();
+    let create_href = escape_html(&format!("/admin/downstreams/new{query_suffix}"));
+    let search_value = escape_html(&filters.search_value());
+    let status_filter = filters.status_filter();
+    let lifetime_filter = filters.lifetime_filter();
+
+    let status_all_selected = if matches!(status_filter, DownstreamStatusFilter::All) {
+        "selected"
+    } else {
+        ""
+    };
+    let status_active_selected = if matches!(status_filter, DownstreamStatusFilter::Active) {
+        "selected"
+    } else {
+        ""
+    };
+    let status_inactive_selected = if matches!(status_filter, DownstreamStatusFilter::Inactive) {
+        "selected"
+    } else {
+        ""
+    };
+    let lifetime_all_selected = if matches!(lifetime_filter, DownstreamLifetimeFilter::All) {
+        "selected"
+    } else {
+        ""
+    };
+    let lifetime_unlimited_selected = if matches!(lifetime_filter, DownstreamLifetimeFilter::Unlimited) {
+        "selected"
+    } else {
+        ""
+    };
+    let lifetime_expiring_selected = if matches!(lifetime_filter, DownstreamLifetimeFilter::Expiring) {
+        "selected"
+    } else {
+        ""
+    };
+
+    let filtered_downstreams = state
+        .downstreams
+        .iter()
+        .filter(|downstream| filters.matches(downstream))
+        .collect::<Vec<_>>();
+    let filtered_count = filtered_downstreams.len();
+
     let mut rows = String::new();
-    for downstream in &state.downstreams {
-        let models = if downstream.model_allowlist.is_empty() {
-            "all".to_string()
-        } else {
-            escape_html(&downstream.model_allowlist.join(", "))
-        };
-        let key_hint = downstream.hash.split(':').next().unwrap_or("");
-        let _ = write!(
-            rows,
+    if filtered_downstreams.is_empty() {
+        rows.push_str(
             r#"<tr>
-  <td>{name}</td>
-  <td>{models}</td>
-  <td><span class="pill {status}">{active}</span></td>
-  <td>{key_hint}</td>
+  <td colspan="7" class="muted">没有匹配的下游记录</td>
+</tr>"#,
+        );
+    } else {
+        for downstream in &filtered_downstreams {
+            let models = render_model_pills(&downstream.model_allowlist);
+            let secret_cell = render_secret_cell(downstream);
+            let expiry_label = if let Some(expires_at) = downstream.expires_at {
+                format!(r#"<span class="pill warn">Unix {}</span>"#, expires_at)
+            } else {
+                "<span class=\"pill ok\">永不过期</span>".to_string()
+            };
+            let status_class = if downstream.active { "ok" } else { "bad" };
+            let status_label = if downstream.active { "启用" } else { "停用" };
+            let toggle_label = if downstream.active { "停用" } else { "启用" };
+            let limit_summary = format!(
+                r#"<div class="secret-stack">
+  <span class="pill">每分钟 {}</span>
+  <span class="pill">{}</span>
+  <span class="pill">{}</span>
+</div>"#,
+                downstream.per_minute_limit,
+                downstream
+                    .daily_token_limit
+                    .map(|value| format!("日令牌 {}", value))
+                    .unwrap_or_else(|| "日令牌 不限".to_string()),
+                downstream
+                    .monthly_token_limit
+                    .map(|value| format!("月令牌 {}", value))
+                    .unwrap_or_else(|| "月令牌 不限".to_string()),
+            );
+            let edit_href = escape_html(&format!("/admin/downstreams/{}/edit{query_suffix}", downstream.id));
+            let toggle_action = escape_html(&format!("/admin/downstreams/{}/toggle{query_suffix}", downstream.id));
+            let rotate_action = escape_html(&format!("/admin/downstreams/{}/rotate{query_suffix}", downstream.id));
+            let delete_action = escape_html(&format!("/admin/downstreams/{}/delete{query_suffix}", downstream.id));
+            let _ = write!(
+                rows,
+                r#"<tr>
   <td>
-    <form method="post" action="/admin/downstreams/{id}/toggle">
-      <button type="submit">{action}</button>
-    </form>
+    <div class="secret-stack">
+      <strong>{name}</strong>
+      <span class="muted mono">{id}</span>
+    </div>
+  </td>
+  <td>{secret_cell}</td>
+  <td>{models}</td>
+  <td>{limits}</td>
+  <td>{expiry}</td>
+  <td><span class="pill {status_class}">{status_label}</span></td>
+  <td>
+    <div class="row-actions">
+      <a class="button-link" href="{edit_href}">编辑</a>
+      <form method="post" action="{toggle_action}">
+        <button class="secondary" type="submit">{toggle_label}</button>
+      </form>
+      <form method="post" action="{rotate_action}" onsubmit="return confirm('重新生成后旧秘钥立即失效，继续吗？');">
+        <button class="secondary" type="submit">重生</button>
+      </form>
+      <form method="post" action="{delete_action}" onsubmit="return confirm('确定删除这条下游记录吗？');">
+        <button class="danger" type="submit">删除</button>
+      </form>
+    </div>
   </td>
 </tr>"#,
-            name = escape_html(&downstream.name),
-            models = models,
-            status = if downstream.active { "ok" } else { "bad" },
-            active = if downstream.active {
-                "active"
-            } else {
-                "disabled"
-            },
-            key_hint = escape_html(key_hint),
-            id = escape_html(&downstream.id),
-            action = if downstream.active {
-                "Disable"
-            } else {
-                "Enable"
-            },
-        );
+                name = escape_html(&downstream.name),
+                id = escape_html(&downstream.id),
+                secret_cell = secret_cell,
+                models = models,
+                limits = limit_summary,
+                expiry = expiry_label,
+                status_class = status_class,
+                status_label = status_label,
+                toggle_label = toggle_label,
+                edit_href = edit_href,
+                toggle_action = toggle_action,
+                rotate_action = rotate_action,
+                delete_action = delete_action,
+            );
+        }
     }
 
     let generated = generated_key
         .map(|secret| {
             format!(
                 r#"<div class="notice">
-  <h2>Generated downstream key</h2>
-  <p class="muted">Copy this value now. It is only shown once.</p>
+  <h2>已生成的下游密钥</h2>
+  <p class="helper">这个值默认只在这里显示，但现在会永久保存，后续还能在列表中查看和复制。</p>
   <div class="keybox">{}</div>
 </div>"#,
                 escape_html(secret)
@@ -1208,75 +2346,306 @@ fn render_downstreams_page(
         })
         .unwrap_or_default();
 
+    let drawer_secret_note = if drawer.plaintext_key.is_some() {
+        if drawer.legacy_secret {
+            "已补录明文秘钥，默认隐藏，仍可查看或复制。"
+        } else {
+            "明文秘钥默认隐藏，可以查看或复制。"
+        }
+    } else if drawer.id.is_some() {
+        "这个旧记录没有明文秘钥，建议先重生一次。"
+    } else {
+        "创建后会在这里显示明文秘钥。"
+    };
+
+    let drawer_secret = if let Some(secret) = drawer.plaintext_key.as_deref() {
+        let masked = mask_secret(secret);
+        format!(
+            r#"<div class="secret-chip">
+  <code id="drawer-secret" class="secret-value" data-secret="{secret}" data-masked="{masked}" data-revealed="0">{masked}</code>
+  <div class="secret-actions">
+    <button class="secondary" type="button" data-target="drawer-secret" onclick="toggleSecret(this)">查看</button>
+    <button class="secondary" type="button" data-target="drawer-secret" onclick="copySecret(this)">复制</button>
+  </div>
+</div>"#,
+            secret = escape_html(secret),
+            masked = escape_html(&masked),
+        )
+    } else {
+        r#"<div class="secret-chip">
+  <span class="secret-value mono">未保存明文</span>
+</div>"#
+            .to_string()
+    };
+
+    let delete_controls = if let Some(delete_action) = &drawer.delete_action {
+        let delete_action = escape_html(&format!("{}{}", delete_action, query_suffix));
+        format!(
+            r#"<form method="post" action="{delete_action}" onsubmit="return confirm('确定删除这条下游记录吗？');">
+  <button class="danger" type="submit">删除整条记录</button>
+</form>"#,
+        )
+    } else {
+        String::new()
+    };
+
+    let rotate_controls = if let Some(rotate_action) = &drawer.rotate_action {
+        let rotate_action = escape_html(&format!("{}{}", rotate_action, query_suffix));
+        format!(
+            r#"<form method="post" action="{rotate_action}" onsubmit="return confirm('重新生成后旧秘钥立即失效，继续吗？');">
+  <button class="secondary" type="submit">重新生成秘钥</button>
+</form>"#,
+        )
+    } else {
+        String::new()
+    };
+
+    let active_selected = if drawer.active { "selected" } else { "" };
+    let inactive_selected = if drawer.active { "" } else { "selected" };
+    let never_expires_checked = if drawer.never_expires { "checked" } else { "" };
+    let header = format!(
+        r#"<header class="page-header">
+  <div class="page-title">
+    <h2>下游密钥</h2>
+    <p>生成、编辑、重生和删除下游记录，保持秘钥默认隐藏但随时可查看。</p>
+  </div>
+  <div class="page-actions">
+    <a class="button-link" href="{create_href}">创建密钥</a>
+  </div>
+</header>"#
+    );
+
+    let action = escape_html(&format!("{}{}", drawer.action, query_suffix));
+
     let body = format!(
-        r#"{topbar}{generated}
+        r#"{header}{notice}{generated}
 <div class="grid">
   <section class="panel wide">
-    <h2>Downstream keys</h2>
+    <div class="toolbar">
+      <div>
+        <h2>下游记录</h2>
+        <p class="helper">秘钥默认折叠，支持查看、复制、重生和整条删除。</p>
+      </div>
+      <div class="muted">显示 {filtered_count}/{total_count} 条</div>
+    </div>
+    <form class="searchbar" method="get" action="/admin/downstreams">
+      <div class="field">
+        <label>搜索</label>
+        <input name="search" value="{search}" placeholder="按名称或秘钥片段搜索">
+      </div>
+      <div class="field">
+        <label>状态</label>
+        <select name="status">
+          <option value="" {status_all_selected}>全部</option>
+          <option value="active" {status_active_selected}>启用</option>
+          <option value="inactive" {status_inactive_selected}>停用</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>期限</label>
+        <select name="lifetime">
+          <option value="" {lifetime_all_selected}>全部</option>
+          <option value="unlimited" {lifetime_unlimited_selected}>永不过期</option>
+          <option value="expiring" {lifetime_expiring_selected}>会过期</option>
+        </select>
+      </div>
+      <div class="actions">
+        <button type="submit">筛选</button>
+        <a class="button-link" href="/admin/downstreams">重置</a>
+      </div>
+    </form>
     <table class="table">
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Models</th>
-          <th>Status</th>
-          <th>Key Hash Prefix</th>
-          <th>Action</th>
+          <th>名称</th>
+          <th>API 密钥</th>
+          <th>模型</th>
+          <th>限额</th>
+          <th>过期</th>
+          <th>状态</th>
+          <th>操作</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
   </section>
-  <section class="panel wide">
-    <h2>Create Downstream Key</h2>
-    <form method="post">
+  <section class="panel drawer">
+    <h2>{heading}</h2>
+    <p class="helper">{drawer_secret_note}</p>
+    <form method="post" action="{action}">
       <div class="fields">
         <div class="field">
-          <label>Name</label>
-          <input name="name" placeholder="Team Alpha">
+          <label>名称</label>
+          <input name="name" placeholder="研发团队 A" value="{name}">
         </div>
         <div class="field">
-          <label>Models</label>
-          <input name="models" placeholder="gpt-4.1-mini,gpt-4o-mini">
+          <label>模型</label>
+          <input name="models" placeholder="gpt-4.1-mini,gpt-4o-mini" value="{models}">
         </div>
         <div class="field">
-          <label>Per-minute limit</label>
-          <input name="per_minute_limit" type="number" value="60">
+          <label>每分钟限额</label>
+          <input name="per_minute_limit" type="number" value="{per_minute_limit}">
         </div>
         <div class="field">
-          <label>Daily token limit</label>
-          <input name="daily_token_limit" type="number" placeholder="optional">
+          <label>每日令牌限额</label>
+          <input name="daily_token_limit" type="number" placeholder="可选" value="{daily_token_limit}">
         </div>
         <div class="field">
-          <label>Monthly token limit</label>
-          <input name="monthly_token_limit" type="number" placeholder="optional">
+          <label>每月令牌限额</label>
+          <input name="monthly_token_limit" type="number" placeholder="可选" value="{monthly_token_limit}">
         </div>
         <div class="field">
-          <label>IP allowlist</label>
-          <input name="ip_allowlist" placeholder="10.0.0.1,10.0.0.2">
+          <label>IP 白名单</label>
+          <input name="ip_allowlist" placeholder="10.0.0.1,10.0.0.2" value="{ip_allowlist}">
         </div>
         <div class="field">
-          <label>Expires at (unix seconds)</label>
-          <input name="expires_at" type="number" placeholder="optional">
+          <label>过期时间</label>
+          <div class="secret-stack">
+            <label style="text-transform:none; letter-spacing:0; font-size:13px; color:var(--text); display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" name="never_expires" value="on" {never_expires_checked} style="width:auto;">
+              永不过期
+            </label>
+            <input name="expires_at" type="number" placeholder="unix 秒，可选" value="{expires_at}">
+          </div>
         </div>
         <div class="field">
-          <label>Active</label>
+          <label>状态</label>
           <select name="active">
-            <option value="on">Enabled</option>
-            <option value="">Disabled</option>
+            <option value="on" {active_selected}>启用</option>
+            <option value="" {inactive_selected}>停用</option>
           </select>
         </div>
       </div>
+      <div class="spacer"></div>
+      <div class="field">
+        <label>秘钥</label>
+        {drawer_secret}
+      </div>
       <div class="actions">
-        <button type="submit">Generate key</button>
+        <button type="submit">{submit_label}</button>
       </div>
     </form>
+    <div class="actions">
+      {rotate_controls}
+      {delete_controls}
+    </div>
   </section>
 </div>"#,
-        topbar = render_topbar("Downstreams", "Generate and distribute client keys"),
+        header = header,
+        notice = notice
+            .map(|message| format!(r#"<div class="notice">{}</div>"#, escape_html(message)))
+            .unwrap_or_default(),
         generated = generated,
         rows = rows,
+        filtered_count = filtered_count,
+        total_count = state.downstreams.len(),
+        search = search_value,
+        status_all_selected = status_all_selected,
+        status_active_selected = status_active_selected,
+        status_inactive_selected = status_inactive_selected,
+        lifetime_all_selected = lifetime_all_selected,
+        lifetime_unlimited_selected = lifetime_unlimited_selected,
+        lifetime_expiring_selected = lifetime_expiring_selected,
+        heading = escape_html(&drawer.heading),
+        action = action,
+        name = escape_html(&drawer.name),
+        models = escape_html(&drawer.models),
+        per_minute_limit = escape_html(&drawer.per_minute_limit),
+        daily_token_limit = escape_html(&drawer.daily_token_limit),
+        monthly_token_limit = escape_html(&drawer.monthly_token_limit),
+        ip_allowlist = escape_html(&drawer.ip_allowlist),
+        expires_at = escape_html(&drawer.expires_at),
+        never_expires_checked = never_expires_checked,
+        active_selected = active_selected,
+        inactive_selected = inactive_selected,
+        submit_label = escape_html(&drawer.submit_label),
+        drawer_secret = drawer_secret,
+        drawer_secret_note = drawer_secret_note,
+        rotate_controls = rotate_controls,
+        delete_controls = delete_controls,
     );
-    render_shell("Downstreams", &body)
+
+    render_shell("下游密钥", ShellSection::Downstreams, &body)
+}
+
+fn render_model_pills(models: &[String]) -> String {
+    if models.is_empty() {
+        return r#"<span class="pill">全部</span>"#.to_string();
+    }
+
+    let mut output = String::new();
+    for model in models {
+        let _ = write!(
+            output,
+            r#"<span class="pill">{}</span> "#,
+            escape_html(model)
+        );
+    }
+    output
+}
+
+fn render_secret_cell(downstream: &DownstreamConfig) -> String {
+    if let Some(secret) = downstream.plaintext_key.as_deref() {
+        let masked = mask_secret(secret);
+        format!(
+            r#"<div class="secret-chip">
+  <code id="secret-{}" class="secret-value" data-secret="{}" data-masked="{}" data-revealed="0">{}</code>
+  <div class="secret-actions">
+    <button class="secondary" type="button" data-target="secret-{}" onclick="toggleSecret(this)">查看</button>
+    <button class="secondary" type="button" data-target="secret-{}" onclick="copySecret(this)">复制</button>
+  </div>
+</div>"#,
+            escape_html(&downstream.id),
+            escape_html(secret),
+            escape_html(&masked),
+            escape_html(&masked),
+            escape_html(&downstream.id),
+            escape_html(&downstream.id),
+        )
+    } else {
+        let key_hint = downstream.hash.split(':').next().unwrap_or("");
+        format!(
+            r#"<div class="secret-chip">
+  <code class="secret-value mono">{}</code>
+  <span class="pill warn">Legacy</span>
+</div>"#,
+            escape_html(&legacy_secret_hint(key_hint))
+        )
+    }
+}
+
+fn mask_secret(secret: &str) -> String {
+    let chars = secret.chars().collect::<Vec<_>>();
+    if chars.len() <= 8 {
+        return secret.to_string();
+    }
+
+    let prefix = chars.iter().take(4).copied().collect::<String>();
+    let suffix = chars
+        .iter()
+        .rev()
+        .take(4)
+        .copied()
+        .collect::<Vec<_>>();
+    let suffix = suffix.into_iter().rev().collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
+fn legacy_secret_hint(secret: &str) -> String {
+    let chars = secret.chars().collect::<Vec<_>>();
+    if chars.len() <= 8 {
+        return secret.to_string();
+    }
+
+    let prefix = chars.iter().take(4).copied().collect::<String>();
+    let suffix = chars
+        .iter()
+        .rev()
+        .take(4)
+        .copied()
+        .collect::<Vec<_>>();
+    let suffix = suffix.into_iter().rev().collect::<String>();
+    format!("{prefix}…{suffix}")
 }
 
 fn render_logs_page(state: &crate::state::PersistedState) -> String {
@@ -1304,25 +2673,25 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
     let body = format!(
         r#"{topbar}
 <section class="panel wide">
-  <h2>Usage Logs</h2>
+  <h2>运行日志</h2>
   <table class="table">
     <thead>
       <tr>
-        <th>Endpoint</th>
-        <th>Model</th>
-        <th>Status</th>
-        <th>Tokens</th>
-        <th>Latency</th>
-        <th>Request ID</th>
+        <th>接口</th>
+        <th>模型</th>
+        <th>状态</th>
+        <th>令牌</th>
+        <th>延迟</th>
+        <th>请求 ID</th>
       </tr>
     </thead>
     <tbody>{rows}</tbody>
   </table>
 </section>"#,
-        topbar = render_topbar("Logs", "Recent gateway usage and errors"),
+        topbar = render_topbar("运行日志", "最近的网关使用和错误记录"),
         rows = rows,
     );
-    render_shell("Logs", &body)
+    render_shell("运行日志", ShellSection::Logs, &body)
 }
 
 fn render_portal_page(
@@ -1360,32 +2729,32 @@ fn render_portal_page(
         r#"{topbar}
 <div class="grid">
   <section class="panel wide">
-    <h2>Your key</h2>
-    <p class="muted">Key name: <strong>{name}</strong></p>
-    <p class="muted">Allowed models:</p>
+    <h2>你的密钥</h2>
+    <p class="muted">密钥名称：<strong>{name}</strong></p>
+    <p class="muted">允许的模型：</p>
     <div>{models}</div>
   </section>
   <section class="panel wide">
-    <h2>Recent usage</h2>
+    <h2>最近使用</h2>
     <table class="table">
       <thead>
         <tr>
-          <th>Endpoint</th>
-          <th>Model</th>
-          <th>Status</th>
-          <th>Tokens</th>
+          <th>接口</th>
+          <th>模型</th>
+          <th>状态</th>
+        <th>令牌</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
   </section>
 </div>"#,
-        topbar = render_topbar("Portal", "Self-service view for downstream clients"),
+        topbar = render_topbar("自助门户", "下游客户端的自助视图"),
         name = escape_html(&downstream.name),
         models = model_items,
         rows = rows,
     );
-    render_shell("Portal", &body)
+    render_shell("自助门户", ShellSection::Portal, &body)
 }
 
 fn active_models(state: &crate::state::PersistedState) -> usize {

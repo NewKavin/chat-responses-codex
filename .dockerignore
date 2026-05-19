@@ -3,6 +3,8 @@
 .codex
 .cargo
 *.log
+data/
+logs/
 target/*
 !target/release/
 target/release/*

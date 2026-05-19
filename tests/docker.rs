@@ -20,6 +20,10 @@ fn dockerfile_packages_a_prebuilt_release_binary() {
         !dockerfile.contains("apt-get update"),
         "Dockerfile should not install build toolchain dependencies at image build time"
     );
+    assert!(
+        dockerfile.contains("LOG_PATH=/logs/runtime.log"),
+        "Dockerfile should default runtime logs to /logs/runtime.log"
+    );
 }
 
 #[test]
@@ -46,5 +50,21 @@ fn docker_compose_uses_a_local_data_directory() {
         compose.contains("STATE_PATH=/data/state.json")
             || compose.contains("STATE_PATH: /data/state.json"),
         "docker-compose.yml should point STATE_PATH at the mounted data directory"
+    );
+}
+
+#[test]
+fn docker_compose_maps_runtime_logs_to_a_local_directory() {
+    let compose =
+        fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
+
+    assert!(
+        compose.contains("./logs:/logs"),
+        "docker-compose.yml should mount a local ./logs directory into /logs"
+    );
+    assert!(
+        compose.contains("LOG_PATH=/logs/runtime.log")
+            || compose.contains("LOG_PATH: /logs/runtime.log"),
+        "docker-compose.yml should point LOG_PATH at the mounted logs directory"
     );
 }
