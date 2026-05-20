@@ -21,14 +21,14 @@
 一共有三类配置，分别在不同地方改：
 
 1. Codex 本地配置：`~/.codex/config.toml`
-2. Codex 模型目录：`codex-model-catalog.json`
+2. Codex 模型目录：`templates/codex/model-catalog.json`
 3. 网关状态：`STATE_PATH` 指向的 JSON 文件，通常通过网关管理页维护
 
 项目里已经准备了三个模板：
 
-- [codex-config.toml.example](../codex-config.toml.example)
-- [codex-model-catalog.json](../codex-model-catalog.json)
-- [gateway-state.example.json](../gateway-state.example.json)
+- [codex-config.toml.example](../templates/codex/config.toml.example)
+- [codex-model-catalog.json](../templates/codex/model-catalog.json)
+- [gateway-state.example.json](../templates/state/gateway-state.example.json)
 
 ## 一把点亮版
 
@@ -38,8 +38,8 @@
 
 ```bash
 mkdir -p ~/.codex
-cp codex-config.toml.example ~/.codex/config.toml
-cp codex-model-catalog.json ~/.codex/model-catalog.json
+cp templates/codex/config.toml.example ~/.codex/config.toml
+cp templates/codex/model-catalog.json ~/.codex/model-catalog.json
 ```
 
 ### 2. 把 `~/.codex/config.toml` 改成这样
@@ -272,7 +272,7 @@ Codex 请求网关时，实际发送的是：
 
 你可以先把项目里的模板复制过去，再改值：
 
-- [codex-config.toml.example](../codex-config.toml.example)
+- [codex-config.toml.example](../templates/codex/config.toml.example)
 
 ### 4.2 关键字段
 
@@ -284,7 +284,7 @@ model = "glm-5"
 review_model = "glm-5"
 model_reasoning_effort = "high"
 disable_response_storage = true
-model_catalog_json = "/absolute/path/to/chat-responses-codex/codex-model-catalog.json"
+model_catalog_json = "/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"
 
 [model_providers.gateway]
 name = "chat-responses-codex"
@@ -318,7 +318,7 @@ requires_openai_auth = true
 
 项目里提供的是：
 
-- [codex-model-catalog.json](../codex-model-catalog.json)
+- [codex-model-catalog.json](../templates/codex/model-catalog.json)
 
 ### 5.1 这个文件是干什么的
 
@@ -353,8 +353,8 @@ Codex 会根据这个目录决定模型是否存在。
 2. 打开 `http://<网关地址>:3001/admin`
 3. 配好上游模型
 4. 配好下游 key
-5. 把 `codex-config.toml.example` 复制到 `~/.codex/config.toml`
-6. 把 `model_catalog_json` 指到你本机的 `codex-model-catalog.json`
+5. 把 `templates/codex/config.toml.example` 复制到 `~/.codex/config.toml`
+6. 把 `model_catalog_json` 指到你本机的 `templates/codex/model-catalog.json`
 7. 确认 `base_url` 是网关地址
 8. 确认 `model` 和 `review_model` 都是目录里真实存在的 slug
 
@@ -427,7 +427,7 @@ Codex 启动后选你在目录里写的模型，比如：
 怎么查：
 
 - 检查 `model_catalog_json` 是否指向正确文件
-   - 检查 `model = "..."` 是否和 `codex-model-catalog.json` 里的 `slug` 完全一致
+   - 检查 `model = "..."` 是否和 `templates/codex/model-catalog.json` 里的 `slug` 完全一致
 
 ### 3. `skill descriptions were shortened to fit the skills context budget`
 
@@ -447,7 +447,7 @@ Codex 启动后选你在目录里写的模型，比如：
 优先检查：
 
 1. `~/.codex/config.toml`
-2. `codex-model-catalog.json`
+2. `templates/codex/model-catalog.json`
 3. 网关 `STATE_PATH`
 4. 网关上游 `protocol`
 5. 网关上游 `supported_models`
@@ -457,7 +457,7 @@ Codex 启动后选你在目录里写的模型，比如：
 如果你是第一次接，建议按这个组合来：
 
 - Codex 本机：只放 `~/.codex/config.toml`
-- 模型目录：放 `codex-model-catalog.json`
+- 模型目录：放 `templates/codex/model-catalog.json`
 - 网关机器：运行 `chat-responses-codex`
 - 网关管理页：配置上游和下游
 
@@ -471,6 +471,6 @@ Codex 启动后选你在目录里写的模型，比如：
 
 - [README.md](../README.md)
 - [DEPLOYMENT.md](../DEPLOYMENT.md)
-- [codex-config.toml.example](../codex-config.toml.example)
-- [codex-model-catalog.json](../codex-model-catalog.json)
-- [gateway-state.example.json](../gateway-state.example.json)
+- [codex-config.toml.example](../templates/codex/config.toml.example)
+- [codex-model-catalog.json](../templates/codex/model-catalog.json)
+- [gateway-state.example.json](../templates/state/gateway-state.example.json)

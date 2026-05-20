@@ -95,9 +95,9 @@ The server module can improve presentation, but it must not change the meaning o
 
 These remain the canonical contract for Codex setup:
 
-- `codex-config.toml.example`
-- `codex-model-catalog.json`
-- `gateway-state.example.json`
+- `templates/codex/config.toml.example`
+- `templates/codex/model-catalog.json`
+- `templates/state/gateway-state.example.json`
 
 Any UI or docs change must keep these aligned with the active routing behavior.
 

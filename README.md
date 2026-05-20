@@ -83,9 +83,9 @@ The full Codex setup guide lives in [docs/codex-integration-guide.md](docs/codex
 
 The main templates are:
 
-- [codex-config.toml.example](codex-config.toml.example)
-- [codex-model-catalog.json](codex-model-catalog.json)
-- [gateway-state.example.json](gateway-state.example.json)
+- [templates/codex/config.toml.example](templates/codex/config.toml.example)
+- [templates/codex/model-catalog.json](templates/codex/model-catalog.json)
+- [templates/state/gateway-state.example.json](templates/state/gateway-state.example.json)
 
 ## Configuration
 
