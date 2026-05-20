@@ -12,7 +12,7 @@
 
 推荐的链路是：
 
-`Codex -> chat2responses-gateway -> 上游模型`
+`Codex -> chat-responses-codex -> 上游模型`
 
 你不要把 Codex 直接指向上游厂商地址。这样做会绕过网关的协议转换、模型路由、Key 管理和限流。
 
@@ -57,22 +57,22 @@ skill_mcp_dependency_install = true
 tool_suggest = true
 
 [model_providers.gateway]
-name = "chat2responses-gateway"
-base_url = "http://127.0.0.1:3000/v1"
+name = "chat-responses-codex"
+base_url = "http://127.0.0.1:3001/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
 
 如果你的网关不在本机，就把 `base_url` 改成远程网关地址，例如：
 
-- `http://<网关机器 IP>:3000/v1`
+- `http://<网关机器 IP>:3001/v1`
 - `https://codex-gateway.example.com/v1`
 
 ### 3. 网关上配置上游
 
 在网关管理页打开：
 
-- `http://<网关地址>:3000/admin`
+- `http://<网关地址>:3001/admin`
 
 进入 `Upstreams`，给每个上游填：
 
@@ -119,7 +119,7 @@ cargo run
 
 默认会使用这些环境变量：
 
-- `BIND_ADDR=0.0.0.0:3000`
+- `BIND_ADDR=0.0.0.0:3001`
 - `STATE_PATH=data/state.json`
 - `LOG_PATH=logs/runtime.log`
 - `ADMIN_USERNAME=admin`
@@ -139,11 +139,11 @@ cargo run
 
 如果网关在本机：
 
-- `http://127.0.0.1:3000/v1`
+- `http://127.0.0.1:3001/v1`
 
 如果网关在其他机器：
 
-- `http://<网关机器 IP>:3000/v1`
+- `http://<网关机器 IP>:3001/v1`
 - 或者你反向代理后的地址，例如 `https://codex-gateway.example.com/v1`
 
 Codex 里填的是网关地址，不是上游厂商地址。
@@ -165,7 +165,7 @@ Codex 里填的是网关地址，不是上游厂商地址。
 
 打开：
 
-- `http://<网关地址>:3000/admin`
+- `http://<网关地址>:3001/admin`
 
 登录后去：
 
@@ -239,7 +239,7 @@ Codex 不应该直接用上游厂商 key。它应该用网关发的下游 key。
 
 同样是在网关管理页：
 
-- `http://<网关地址>:3000/admin`
+- `http://<网关地址>:3001/admin`
 - 进入 `Downstreams`
 
 ### 3.2 下游 key 是什么
@@ -284,11 +284,11 @@ model = "glm-5"
 review_model = "glm-5"
 model_reasoning_effort = "high"
 disable_response_storage = true
-model_catalog_json = "/absolute/path/to/chat2Responses/codex-model-catalog.json"
+model_catalog_json = "/absolute/path/to/chat-responses-codex/codex-model-catalog.json"
 
 [model_providers.gateway]
-name = "chat2responses-gateway"
-base_url = "http://gateway-host:3000/v1"
+name = "chat-responses-codex"
+base_url = "http://gateway-host:3001/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
@@ -350,7 +350,7 @@ Codex 会根据这个目录决定模型是否存在。
 建议按这个顺序做：
 
 1. 在网关上启动服务
-2. 打开 `http://<网关地址>:3000/admin`
+2. 打开 `http://<网关地址>:3001/admin`
 3. 配好上游模型
 4. 配好下游 key
 5. 把 `codex-config.toml.example` 复制到 `~/.codex/config.toml`
@@ -363,13 +363,13 @@ Codex 会根据这个目录决定模型是否存在。
 ### 7.1 先测网关健康
 
 ```bash
-curl -i http://<网关地址>:3000/healthz
+curl -i http://<网关地址>:3001/healthz
 ```
 
 ### 7.2 再测管理页
 
 ```bash
-curl -u admin:<ADMIN_PASSWORD> http://<网关地址>:3000/admin
+curl -u admin:<ADMIN_PASSWORD> http://<网关地址>:3001/admin
 ```
 
 ### 7.3 再测下游模型列表
@@ -379,7 +379,7 @@ curl -u admin:<ADMIN_PASSWORD> http://<网关地址>:3000/admin
 ```bash
 curl -s \
   -H "Authorization: Bearer <downstream-key>" \
-  http://<网关地址>:3000/v1/models
+  http://<网关地址>:3001/v1/models
 ```
 
 ### 7.4 再测 chat 请求
@@ -389,7 +389,7 @@ curl -s \
   -H "Authorization: Bearer <downstream-key>" \
   -H "Content-Type: application/json" \
   -d '{"model":"glm-5","messages":[{"role":"user","content":"hello"}]}' \
-  http://<网关地址>:3000/v1/chat/completions
+  http://<网关地址>:3001/v1/chat/completions
 ```
 
 ### 7.5 再测 Codex
@@ -458,7 +458,7 @@ Codex 启动后选你在目录里写的模型，比如：
 
 - Codex 本机：只放 `~/.codex/config.toml`
 - 模型目录：放 `codex-model-catalog.json`
-- 网关机器：运行 `chat2responses-gateway`
+- 网关机器：运行 `chat-responses-codex`
 - 网关管理页：配置上游和下游
 
 这样职责最清楚：

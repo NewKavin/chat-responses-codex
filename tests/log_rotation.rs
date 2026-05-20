@@ -1,4 +1,4 @@
-use chat2responses_gateway::state::{AppConfig, AppState, PersistedState, UsageLog};
+use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UsageLog};
 use std::fs;
 use tempfile::tempdir;
 

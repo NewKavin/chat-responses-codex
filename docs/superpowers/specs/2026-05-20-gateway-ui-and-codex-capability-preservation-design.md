@@ -5,7 +5,7 @@ Status: Draft
 
 ## Context
 
-`chat2responses-gateway` is not just a conversion helper. It is the full gateway between Codex and multiple upstream model providers, with admin pages, downstream keys, routing, usage logging, and protocol translation.
+`chat-responses-codex` is not just a conversion helper. It is the full gateway between Codex and multiple upstream model providers, with admin pages, downstream keys, routing, usage logging, and protocol translation.
 
 The user goal is to improve the UI and keep Codex capability intact. That means this work must not accidentally weaken:
 
@@ -170,4 +170,3 @@ If a change touches tool calling or streaming, the relevant tests must be update
 - No new frontend build step.
 - UI changes land behind the existing server-rendered routes.
 - Preserve the current gateway contract while the shell is modernized.
-

@@ -3,11 +3,13 @@ use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use bytes::Bytes;
-use chat2responses_gateway::keys::generate_downstream_key;
-use chat2responses_gateway::routing::UpstreamProtocol;
-use chat2responses_gateway::server::build_router;
-use chat2responses_gateway::state::{
+use chat_responses_codex::keys::generate_downstream_key;
+use chat_responses_codex::routing::UpstreamProtocol;
+use chat_responses_codex::server::build_router;
+use chat_responses_codex::state::{
     AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig,
 };
 use futures_util::stream;
@@ -727,63 +729,64 @@ async fn downstream_models_are_discovered_from_upstream_when_configured_models_a
     let chat_capture_clone = chat_capture.clone();
     let models_hit_clone = models_hit.clone();
 
-    let upstream_app = Router::new()
-        .route(
-            "/v1/models",
-            get(move || {
-                let models_hit = models_hit_clone.clone();
-                async move {
-                    models_hit.fetch_add(1, Ordering::SeqCst);
-                    axum::Json(json!({
-                        "object": "list",
-                        "data": [
-                            {"id": "gpt-4.1-mini", "object": "model"},
-                            {"id": "gpt-4o-mini", "object": "model"}
-                        ]
-                    }))
-                }
-            }),
-        )
-        .route(
-            "/v1/chat/completions",
-            post(
-                move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                      request: Request<Body>| async move {
-                    let (parts, body) = request.into_parts();
-                    let body = to_bytes(body, usize::MAX).await.unwrap();
-                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    let mut lock = capture.lock().unwrap();
-                    lock.path = parts.uri.path().to_string();
-                    lock.authorization = parts
-                        .headers
-                        .get(header::AUTHORIZATION)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string);
-                    lock.request_body = Some(payload);
-
-                    (
-                        StatusCode::OK,
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/models",
+                get(move || {
+                    let models_hit = models_hit_clone.clone();
+                    async move {
+                        models_hit.fetch_add(1, Ordering::SeqCst);
                         axum::Json(json!({
-                            "id": "chatcmpl-test",
-                            "object": "chat.completion",
-                            "created": 1,
-                            "model": "gpt-4.1-mini",
-                            "choices": [{
-                                "index": 0,
-                                "message": {"role": "assistant", "content": "Hi"},
-                                "finish_reason": "stop"
-                            }],
-                            "usage": {
-                                "prompt_tokens": 1,
-                                "completion_tokens": 1,
-                                "total_tokens": 2
-                            }
-                        })),
-                    )
-                },
-            ),
-        )
-        .with_state(chat_capture_clone);
+                            "object": "list",
+                            "data": [
+                                {"id": "gpt-4.1-mini", "object": "model"},
+                                {"id": "gpt-4o-mini", "object": "model"}
+                            ]
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(chat_capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -840,7 +843,9 @@ async fn downstream_models_are_discovered_from_upstream_when_configured_models_a
         .unwrap();
 
     assert_eq!(list_response.status(), StatusCode::OK);
-    let body = to_bytes(list_response.into_body(), usize::MAX).await.unwrap();
+    let body = to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let ids = payload["data"]
         .as_array()
@@ -876,7 +881,9 @@ async fn downstream_models_are_discovered_from_upstream_when_configured_models_a
         .unwrap();
 
     assert_eq!(chat_response.status(), StatusCode::OK);
-    let body = to_bytes(chat_response.into_body(), usize::MAX).await.unwrap();
+    let body = to_bytes(chat_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
 
@@ -1269,46 +1276,48 @@ async fn downstream_chat_stream_is_synthesized_from_json_response() {
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/chat/completions",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "id": "chatcmpl-json",
-                        "object": "chat.completion",
-                        "created": 1,
-                        "model": "gpt-4.1-mini",
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "Hi"},
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {
-                            "prompt_tokens": 2,
-                            "completion_tokens": 3,
-                            "total_tokens": 5
-                        }
-                    })),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-json",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 2,
+                                    "completion_tokens": 3,
+                                    "total_tokens": 5
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -1559,75 +1568,77 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_tool_ca
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/chat/completions",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                let chunks = vec![
-                    Ok::<Bytes, std::io::Error>(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "id": "chatcmpl-tool",
-                            "object": "chat.completion.chunk",
-                            "created": 1,
-                            "model": "gpt-4.1-mini",
-                            "choices": [{
-                                "index": 0,
-                                "delta": {
-                                    "role": "assistant",
-                                    "tool_calls": [{
+                        let chunks = vec![
+                            Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": "chatcmpl-tool",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "gpt-4.1-mini",
+                                    "choices": [{
                                         "index": 0,
-                                        "id": "call_1",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "get_weather",
-                                            "arguments": "{\"location\":\"Paris\"}"
-                                        }
+                                        "delta": {
+                                            "role": "assistant",
+                                            "tool_calls": [{
+                                                "index": 0,
+                                                "id": "call_1",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "get_weather",
+                                                    "arguments": "{\"location\":\"Paris\"}"
+                                                }
+                                            }]
+                                        },
+                                        "finish_reason": null
                                     }]
-                                },
-                                "finish_reason": null
-                            }]
-                        })
-                    ))),
-                    Ok(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "id": "chatcmpl-tool",
-                            "object": "chat.completion.chunk",
-                            "created": 1,
-                            "model": "gpt-4.1-mini",
-                            "choices": [{
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": "tool_calls"
-                            }]
-                        })
-                    ))),
-                    Ok(Bytes::from_static(b"data: [DONE]\n\n")),
-                ];
+                                })
+                            ))),
+                            Ok(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": "chatcmpl-tool",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "gpt-4.1-mini",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "tool_calls"
+                                    }]
+                                })
+                            ))),
+                            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                        ];
 
-                (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    Body::from_stream(stream::iter(chunks)),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(stream::iter(chunks)),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -1724,7 +1735,10 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_tool_ca
         captured.authorization.as_deref(),
         Some("Bearer upstream-secret")
     );
-    assert_eq!(captured.request_body.unwrap()["messages"][0]["content"], "Need weather");
+    assert_eq!(
+        captured.request_body.unwrap()["messages"][0]["content"],
+        "Need weather"
+    );
 }
 
 #[tokio::test]
@@ -1736,72 +1750,74 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/chat/completions",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                let chunks = vec![
-                    Ok::<Bytes, std::io::Error>(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "id": "chatcmpl-tool",
-                            "object": "chat.completion.chunk",
-                            "created": 1,
-                            "model": "gpt-4.1-mini",
-                            "choices": [{
-                                "index": 0,
-                                "delta": {
-                                    "role": "assistant",
-                                    "tool_calls": [{
+                        let chunks = vec![
+                            Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": "chatcmpl-tool",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "gpt-4.1-mini",
+                                    "choices": [{
                                         "index": 0,
-                                        "id": "call_1",
-                                        "name": "get_weather",
-                                        "arguments": "{\"location\":\"Paris\"}"
+                                        "delta": {
+                                            "role": "assistant",
+                                            "tool_calls": [{
+                                                "index": 0,
+                                                "id": "call_1",
+                                                "name": "get_weather",
+                                                "arguments": "{\"location\":\"Paris\"}"
+                                            }]
+                                        },
+                                        "finish_reason": null
                                     }]
-                                },
-                                "finish_reason": null
-                            }]
-                        })
-                    ))),
-                    Ok(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "id": "chatcmpl-tool",
-                            "object": "chat.completion.chunk",
-                            "created": 1,
-                            "model": "gpt-4.1-mini",
-                            "choices": [{
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": "tool_calls"
-                            }]
-                        })
-                    ))),
-                    Ok(Bytes::from_static(b"data: [DONE]\n\n")),
-                ];
+                                })
+                            ))),
+                            Ok(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": "chatcmpl-tool",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1,
+                                    "model": "gpt-4.1-mini",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "tool_calls"
+                                    }]
+                                })
+                            ))),
+                            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                        ];
 
-                (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    Body::from_stream(stream::iter(chunks)),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(stream::iter(chunks)),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -1895,10 +1911,7 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
     assert_eq!(captured.path, "/v1/chat/completions");
     let request_body = captured.request_body.unwrap();
     assert_eq!(request_body["messages"][0]["content"], "Need weather");
-    assert_eq!(
-        request_body["tools"][0]["function"]["name"],
-        "get_weather"
-    );
+    assert_eq!(request_body["tools"][0]["function"]["name"], "get_weather");
 }
 
 #[tokio::test]
@@ -1910,46 +1923,48 @@ async fn downstream_responses_request_downgrades_developer_role_for_chat_upstrea
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/chat/completions",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "id": "chatcmpl-test",
-                        "object": "chat.completion",
-                        "created": 1,
-                        "model": "gpt-4.1-mini",
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "Hi"},
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {
-                            "prompt_tokens": 1,
-                            "completion_tokens": 1,
-                            "total_tokens": 2
-                        }
-                    })),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -2034,46 +2049,48 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/chat/completions",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "id": "chatcmpl-test",
-                        "object": "chat.completion",
-                        "created": 1,
-                        "model": "gpt-4.1-mini",
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "Hi"},
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {
-                            "prompt_tokens": 1,
-                            "completion_tokens": 1,
-                            "total_tokens": 2
-                        }
-                    })),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -2151,10 +2168,7 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
     assert_eq!(captured.path, "/v1/chat/completions");
     let request_body = captured.request_body.unwrap();
     assert_eq!(request_body["tools"][0]["type"], "function");
-    assert_eq!(
-        request_body["tools"][0]["function"]["name"],
-        "get_weather"
-    );
+    assert_eq!(request_body["tools"][0]["function"]["name"], "get_weather");
     assert_eq!(
         request_body["tools"][0]["function"]["description"],
         "Get the weather"
@@ -2166,7 +2180,7 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
 }
 
 #[tokio::test]
-async fn downstream_responses_request_ignores_unsupported_tools_for_chat_upstream() {
+async fn downstream_responses_request_with_non_function_tool_choice_requires_responses_upstream() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -2174,46 +2188,48 @@ async fn downstream_responses_request_ignores_unsupported_tools_for_chat_upstrea
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/chat/completions",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "id": "chatcmpl-test",
-                        "object": "chat.completion",
-                        "created": 1,
-                        "model": "gpt-4.1-mini",
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "Hi"},
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {
-                            "prompt_tokens": 1,
-                            "completion_tokens": 1,
-                            "total_tokens": 2
-                        }
-                    })),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -2267,7 +2283,12 @@ async fn downstream_responses_request_ignores_unsupported_tools_for_chat_upstrea
                 "input": "Need weather",
                 "tools": [
                     {
-                        "type": "web_search"
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get the weather",
+                        "parameters": {
+                            "type": "object"
+                        }
                     }
                 ],
                 "tool_choice": {
@@ -2280,16 +2301,165 @@ async fn downstream_responses_request_ignores_unsupported_tools_for_chat_upstrea
 
     let response = app.oneshot(request).await.unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["object"], "response");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Responses upstream"));
 
     let captured = capture.lock().unwrap().clone();
-    assert_eq!(captured.path, "/v1/chat/completions");
-    let request_body = captured.request_body.unwrap();
-    assert!(request_body.get("tools").is_none());
-    assert!(request_body.get("tool_choice").is_none());
+    assert!(captured.path.is_empty());
+    assert!(captured.request_body.is_none());
+}
+
+#[tokio::test]
+async fn admin_upstreams_page_mentions_protocol_capabilities() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let state = AppState::new(PersistedState::default(), state_path, AppConfig::default());
+    let app = build_router(state);
+    let auth = format!("Basic {}", STANDARD.encode("admin:admin"));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/upstreams")
+                .header("Authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("Responses 上游保留完整工具面"));
+    assert!(html.contains("ChatCompletions 只保留 function 风格工具"));
+}
+
+#[tokio::test]
+async fn downstream_responses_request_with_non_function_tools_requires_responses_upstream() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
+                active: true,
+                failure_count: 0,
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "input": "Need weather",
+                "tools": [
+                    {
+                        "type": "web_search"
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("Responses upstream"));
+    assert!(capture.lock().unwrap().path.is_empty());
 }
 
 #[tokio::test]
@@ -2301,102 +2471,104 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/responses",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/responses",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                let chunks = vec![
-                    Ok::<Bytes, std::io::Error>(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "type": "response.created",
-                            "response": {
-                                "id": "resp-1",
-                                "object": "response",
-                                "created_at": 1,
-                                "status": "in_progress",
-                                "model": "gpt-4.1-mini",
-                                "output": []
-                            }
-                        })
-                    ))),
-                    Ok(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "type": "response.output_text.delta",
-                            "response_id": "resp-1",
-                            "item_id": "msg-1",
-                            "output_index": 0,
-                            "content_index": 0,
-                            "delta": "Hi",
-                            "sequence_number": 2
-                        })
-                    ))),
-                    Ok(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "type": "response.output_text.done",
-                            "response_id": "resp-1",
-                            "item_id": "msg-1",
-                            "output_index": 0,
-                            "content_index": 0,
-                            "text": "Hi",
-                            "sequence_number": 3
-                        })
-                    ))),
-                    Ok(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({
-                            "type": "response.completed",
-                            "response": {
-                                "id": "resp-1",
-                                "object": "response",
-                                "created_at": 1,
-                                "status": "completed",
-                                "model": "gpt-4.1-mini",
-                                "output": [
-                                    {
-                                        "id": "msg-1",
-                                        "type": "message",
+                        let chunks = vec![
+                            Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "type": "response.created",
+                                    "response": {
+                                        "id": "resp-1",
+                                        "object": "response",
+                                        "created_at": 1,
+                                        "status": "in_progress",
+                                        "model": "gpt-4.1-mini",
+                                        "output": []
+                                    }
+                                })
+                            ))),
+                            Ok(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "type": "response.output_text.delta",
+                                    "response_id": "resp-1",
+                                    "item_id": "msg-1",
+                                    "output_index": 0,
+                                    "content_index": 0,
+                                    "delta": "Hi",
+                                    "sequence_number": 2
+                                })
+                            ))),
+                            Ok(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "type": "response.output_text.done",
+                                    "response_id": "resp-1",
+                                    "item_id": "msg-1",
+                                    "output_index": 0,
+                                    "content_index": 0,
+                                    "text": "Hi",
+                                    "sequence_number": 3
+                                })
+                            ))),
+                            Ok(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "type": "response.completed",
+                                    "response": {
+                                        "id": "resp-1",
+                                        "object": "response",
+                                        "created_at": 1,
                                         "status": "completed",
-                                        "role": "assistant",
-                                        "content": [
+                                        "model": "gpt-4.1-mini",
+                                        "output": [
                                             {
-                                                "type": "output_text",
-                                                "text": "Hi",
-                                                "annotations": []
+                                                "id": "msg-1",
+                                                "type": "message",
+                                                "status": "completed",
+                                                "role": "assistant",
+                                                "content": [
+                                                    {
+                                                        "type": "output_text",
+                                                        "text": "Hi",
+                                                        "annotations": []
+                                                    }
+                                                ]
                                             }
                                         ]
                                     }
-                                ]
-                            }
-                        })
-                    ))),
-                    Ok(Bytes::from_static(b"data: [DONE]\n\n")),
-                ];
+                                })
+                            ))),
+                            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                        ];
 
-                (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "text/event-stream")],
-                    Body::from_stream(stream::iter(chunks)),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(stream::iter(chunks)),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -2480,7 +2652,10 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
         captured.authorization.as_deref(),
         Some("Bearer upstream-secret")
     );
-    assert_eq!(captured.request_body.unwrap()["input"][0]["content"], "Hello");
+    assert_eq!(
+        captured.request_body.unwrap()["input"][0]["content"],
+        "Hello"
+    );
 }
 
 #[derive(Debug, Default, Clone)]

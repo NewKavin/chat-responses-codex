@@ -3,10 +3,10 @@ use axum::http::{header, Method, Request, StatusCode};
 use axum::routing::get;
 use axum::Router;
 use base64::Engine;
-use chat2responses_gateway::keys::generate_downstream_key;
-use chat2responses_gateway::routing::UpstreamProtocol;
-use chat2responses_gateway::server::build_router;
-use chat2responses_gateway::state::{
+use chat_responses_codex::keys::generate_downstream_key;
+use chat_responses_codex::routing::UpstreamProtocol;
+use chat_responses_codex::server::build_router;
+use chat_responses_codex::state::{
     AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig,
 };
 use serde_json::json;
@@ -14,6 +14,263 @@ use std::net::SocketAddr;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn admin_login_page_renders() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/login?next=/admin/downstreams")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("管理员登录"));
+    assert!(html.contains(r#"name="next" value="/admin/downstreams""#));
+}
+
+#[tokio::test]
+async fn admin_login_sets_session_cookie_and_redirects_to_target_page() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let login = serde_urlencoded::to_string(json!({
+        "username": "admin",
+        "password": "admin",
+        "next": "/admin/downstreams"
+    }))
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_redirection());
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/admin/downstreams")
+    );
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .expect("login should set a session cookie");
+    assert!(set_cookie.contains("chat_responses_codex_admin_session="));
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("Max-Age=43200"));
+
+    let cookie = set_cookie
+        .split(';')
+        .next()
+        .map(str::to_string)
+        .expect("session cookie should have a name/value pair");
+
+    let authed = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/downstreams")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(authed.status(), StatusCode::OK);
+    let body = to_bytes(authed.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("下游密钥"));
+}
+
+#[tokio::test]
+async fn admin_pages_redirect_to_login_without_basic_auth_challenge() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_redirection());
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/admin/login")
+    );
+    assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
+}
+
+#[tokio::test]
+async fn invalid_admin_login_renders_inline_error_without_basic_auth_challenge() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let login = serde_urlencoded::to_string(json!({
+        "username": "admin",
+        "password": "wrong-password",
+        "next": "/admin"
+    }))
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::WWW_AUTHENTICATE).is_none());
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("用户名或密码不正确"));
+    assert!(html.contains("管理员登录"));
+}
+
+#[tokio::test]
+async fn admin_logout_clears_session_cookie_and_requires_login_again() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let login = serde_urlencoded::to_string(json!({
+        "username": "admin",
+        "password": "admin"
+    }))
+    .unwrap();
+
+    let login_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let session_cookie = login_response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::to_string)
+        .expect("login should set a session cookie");
+
+    let logout_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/logout")
+                .header(header::COOKIE, session_cookie.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(logout_response.status().is_redirection());
+    assert_eq!(
+        logout_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/admin/login")
+    );
+    let clear_cookie = logout_response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .expect("logout should clear the session cookie");
+    assert!(clear_cookie.contains("chat_responses_codex_admin_session=;"));
+    assert!(clear_cookie.contains("Max-Age=0"));
+
+    let after_logout = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin")
+                .header(header::COOKIE, session_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(after_logout.status().is_redirection());
+    assert_eq!(
+        after_logout
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/admin/login")
+    );
+}
 
 #[tokio::test]
 async fn admin_can_create_downstream_key_and_view_dashboard() {
@@ -42,6 +299,8 @@ async fn admin_can_create_downstream_key_and_view_dashboard() {
     let dashboard_html = String::from_utf8(dashboard_body.to_vec()).unwrap();
     assert!(dashboard_html.contains("仪表盘"));
     assert!(dashboard_html.contains("上游密钥"));
+    assert!(dashboard_html.contains("管理上游"));
+    assert!(dashboard_html.contains("查看运行日志"));
 
     let form = serde_urlencoded::to_string(json!({
         "name": "Team Alpha",
@@ -72,6 +331,100 @@ async fn admin_can_create_downstream_key_and_view_dashboard() {
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.downstreams.len(), 1);
     assert_eq!(snapshot.downstreams[0].name, "Team Alpha");
+}
+
+#[tokio::test]
+async fn admin_upstreams_page_uses_a_drawer_layout_and_summary_cards() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "Primary".into(),
+                base_url: "https://api.example.com".into(),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
+                active: true,
+                failure_count: 0,
+            }],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/upstreams")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("上游概览"));
+    assert!(html.contains("新增上游"));
+    assert!(html.contains("drawer"));
+    assert!(html.contains("总上游"));
+    assert!(html.contains("Responses 上游"));
+}
+
+#[tokio::test]
+async fn admin_logs_page_uses_summary_cards_and_context_panel() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            usage_logs: vec![chat_responses_codex::state::UsageLog {
+                id: "log-1".into(),
+                downstream_key_id: "down-1".into(),
+                upstream_key_id: "up-1".into(),
+                endpoint: "/v1/chat/completions".into(),
+                model: "gpt-4.1-mini".into(),
+                request_id: "req-1".into(),
+                status_code: 200,
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                latency_ms: 42,
+                created_at: 1_700_000_000,
+            }],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/logs")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("运行概览"));
+    assert!(html.contains("最近 50 条"));
+    assert!(html.contains("Total tokens"));
+    assert!(html.contains("Tokens"));
+    assert!(html.contains("最新请求"));
+    assert!(html.contains("请求 ID"));
 }
 
 #[tokio::test]
@@ -113,7 +466,10 @@ async fn admin_can_persist_the_plaintext_downstream_secret() {
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.downstreams.len(), 1);
     assert_eq!(snapshot.downstreams[0].name, "Team Beta");
-    assert_eq!(snapshot.downstreams[0].plaintext_key.as_deref(), Some(secret.as_str()));
+    assert_eq!(
+        snapshot.downstreams[0].plaintext_key.as_deref(),
+        Some(secret.as_str())
+    );
 }
 
 #[tokio::test]
@@ -187,6 +543,8 @@ async fn admin_downstreams_form_includes_copy_fallback_and_expiry_toggle() {
     assert!(html.contains("copyTextToClipboard"));
     assert!(html.contains("fallbackCopyTextToClipboard"));
     assert!(html.contains("syncExpiryField"));
+    assert!(html.contains("Daily token limit"));
+    assert!(html.contains("Monthly token limit"));
     assert!(html.contains(
         r#"id="never-expires-checkbox" type="checkbox" name="never_expires" value="on" checked"#
     ));
@@ -282,7 +640,10 @@ async fn admin_can_edit_downstream_metadata_without_changing_the_secret() {
         vec!["1.2.3.4".to_string(), "5.6.7.8".to_string()]
     );
     assert_eq!(downstream.expires_at, Some(1_950_000_000));
-    assert_eq!(downstream.plaintext_key.as_deref(), Some(generated.plaintext.as_str()));
+    assert_eq!(
+        downstream.plaintext_key.as_deref(),
+        Some(generated.plaintext.as_str())
+    );
 }
 
 #[tokio::test]
@@ -330,9 +691,18 @@ async fn admin_can_rotate_a_downstream_secret() {
 
     let snapshot = state.snapshot().await;
     let downstream = &snapshot.downstreams[0];
-    assert_eq!(downstream.plaintext_key.as_deref(), Some(rotated_secret.as_str()));
-    assert_ne!(downstream.plaintext_key.as_deref(), Some(generated.plaintext.as_str()));
-    assert!(state.downstream_for_secret(&generated.plaintext).await.is_none());
+    assert_eq!(
+        downstream.plaintext_key.as_deref(),
+        Some(rotated_secret.as_str())
+    );
+    assert_ne!(
+        downstream.plaintext_key.as_deref(),
+        Some(generated.plaintext.as_str())
+    );
+    assert!(state
+        .downstream_for_secret(&generated.plaintext)
+        .await
+        .is_none());
     assert!(state.downstream_for_secret(&rotated_secret).await.is_some());
 }
 
@@ -892,6 +1262,57 @@ async fn admin_can_fetch_current_models_into_the_upstream_form() {
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("gpt-4.1-mini,gpt-4o-mini"));
     assert!(html.contains("获取当前模型"));
+
+    let snapshot = state.snapshot().await;
+    assert!(snapshot.upstreams.is_empty());
+}
+
+#[tokio::test]
+async fn admin_can_fetch_current_models_and_auto_generate_aliases_for_uppercase_models() {
+    let tempdir = tempdir().unwrap();
+    let upstream_server = spawn_upstream_model_server(vec![
+        "GLM-5".to_string(),
+        "gpt-4.1-mini".to_string(),
+        "MiniMax-M2.7".to_string(),
+    ])
+    .await;
+
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state.clone());
+
+    let form = serde_urlencoded::to_string(json!({
+        "intent": "fetch",
+        "name": "Primary",
+        "base_url": upstream_server,
+        "api_key": "upstream-secret",
+        "protocol": "chat",
+        "models": "",
+        "active": "on"
+    }))
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/upstreams")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains(r#"value="glm-5,gpt-4.1-mini,minimax-m2.7""#));
+    assert!(html.contains(r#"value="glm-5=GLM-5,minimax-m2.7=MiniMax-M2.7""#));
 
     let snapshot = state.snapshot().await;
     assert!(snapshot.upstreams.is_empty());

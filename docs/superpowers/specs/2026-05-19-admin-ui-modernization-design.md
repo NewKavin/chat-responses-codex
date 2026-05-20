@@ -5,7 +5,7 @@ Status: Draft
 
 ## Context
 
-`chat2responses-gateway` currently serves its admin UI directly from the Rust/axum app in `src/server.rs`. The existing interface is functional, but it is visually closer to a utility panel than a modern control plane.
+`chat-responses-codex` currently serves its admin UI directly from the Rust/axum app in `src/server.rs`. The existing interface is functional, but it is visually closer to a utility panel than a modern control plane.
 
 The target look and interaction model is a SaaS-style admin console similar to the screenshot the user provided:
 
@@ -312,4 +312,3 @@ Recommended request-level coverage:
 - Delete removes the whole downstream record.
 - Records can be configured to never expire.
 - The final shell and visual language can be reused across all admin pages.
-

@@ -1,5 +1,5 @@
-use chat2responses_gateway::server::build_router;
-use chat2responses_gateway::state::{AppConfig, AppState};
+use chat_responses_codex::server::build_router;
+use chat_responses_codex::state::{AppConfig, AppState};
 use std::env;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
@@ -16,24 +16,67 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return run_healthcheck().await;
     }
 
-    let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3000");
+    let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3001");
     let state_path = PathBuf::from(env_or("STATE_PATH", "data/state.json"));
     let log_path = env_or("LOG_PATH", "logs/runtime.log");
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
-        app_name: env_or("APP_NAME", "chat2responses-gateway"),
+        app_name: env_or("APP_NAME", "chat-responses-codex"),
         usage_log_rotation_max_bytes: env_usize("USAGE_LOG_ROTATION_MAX_BYTES", 1_048_576).max(1),
         usage_log_archive_max_files: env_usize("USAGE_LOG_ARCHIVE_MAX_FILES", 10).max(1),
     };
 
     init_tracing(&log_path);
-    let state = AppState::load_from_path(&state_path, config).await?;
-    let app = build_router(state);
-    let listener = TcpListener::bind(&bind_addr).await?;
+    tracing::info!(
+        bind_addr = %bind_addr,
+        state_path = %state_path.display(),
+        log_path = %log_path,
+        app_name = %config.app_name,
+        backend = if env::var("DATABASE_URL")
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "postgres"
+        } else {
+            "file"
+        },
+        "starting gateway"
+    );
 
-    tracing::info!(%bind_addr, %log_path, "gateway listening");
-    axum::serve(listener, app).await?;
+    let state = match AppState::load_from_path(&state_path, config).await {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(
+                bind_addr = %bind_addr,
+                state_path = %state_path.display(),
+                error = %error,
+                "failed to load gateway state"
+            );
+            return Err(error.into());
+        }
+    };
+    let app = build_router(state);
+    let listener = match TcpListener::bind(&bind_addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!(bind_addr = %bind_addr, error = %error, "failed to bind gateway listener");
+            return Err(error.into());
+        }
+    };
+
+    let local_addr = listener.local_addr()?;
+    tracing::info!(%bind_addr, %local_addr, %log_path, "gateway listening");
+    if let Err(error) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    {
+        tracing::error!(error = %error, "gateway server exited with error");
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -46,8 +89,10 @@ async fn run_healthcheck() -> Result<(), Box<dyn Error>> {
         .ok()
         .and_then(|value| value.parse::<SocketAddr>().ok())
         .map(|addr| addr.port())
-        .unwrap_or(3000);
+        .unwrap_or(3001);
     let url = format!("http://127.0.0.1:{port}/healthz");
+
+    tracing::info!(%url, "running gateway healthcheck");
 
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -57,9 +102,12 @@ async fn run_healthcheck() -> Result<(), Box<dyn Error>> {
         .await?;
 
     if response.status().is_success() {
+        tracing::info!(status = %response.status(), "gateway healthcheck succeeded");
         Ok(())
     } else {
-        Err(format!("healthcheck failed with status {}", response.status()).into())
+        let status = response.status();
+        tracing::warn!(status = %status, "gateway healthcheck failed");
+        Err(format!("healthcheck failed with status {}", status).into())
     }
 }
 

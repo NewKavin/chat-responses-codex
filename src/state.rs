@@ -4,17 +4,25 @@ use crate::routing::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+mod postgres;
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+use postgres::PostgresStateStore;
+
+pub const ADMIN_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -30,7 +38,7 @@ impl Default for AppConfig {
         Self {
             admin_username: "admin".into(),
             admin_password: "admin".into(),
-            app_name: "chat2responses-gateway".into(),
+            app_name: "chat-responses-codex".into(),
             usage_log_rotation_max_bytes: 1_048_576,
             usage_log_archive_max_files: 10,
         }
@@ -133,9 +141,11 @@ pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
     archived_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
+    admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
     pub store_path: PathBuf,
     pub config: AppConfig,
     client: Client,
+    postgres: Option<Arc<PostgresStateStore>>,
 }
 
 impl AppState {
@@ -153,14 +163,69 @@ impl AppState {
             inner: Arc::new(Mutex::new(state)),
             archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
             downstream_request_windows: Arc::new(Mutex::new(HashMap::new())),
+            admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: store_path.into(),
             config,
             client: Client::new(),
+            postgres: None,
+        }
+    }
+
+    async fn new_with_postgres(
+        state: PersistedState,
+        config: AppConfig,
+        postgres: PostgresStateStore,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(state)),
+            archived_usage_logs: Arc::new(Mutex::new(Vec::new())),
+            downstream_request_windows: Arc::new(Mutex::new(HashMap::new())),
+            admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
+            store_path: PathBuf::new(),
+            config,
+            client: Client::new(),
+            postgres: Some(Arc::new(postgres)),
         }
     }
 
     pub fn client(&self) -> Client {
         self.client.clone()
+    }
+
+    pub fn create_admin_session(&self) -> String {
+        let token = Uuid::new_v4().to_string();
+        let expires_at = unix_seconds() + ADMIN_SESSION_TTL_SECONDS;
+        let mut sessions = self
+            .admin_sessions
+            .lock()
+            .expect("admin session lock poisoned");
+        prune_expired_admin_sessions(&mut sessions);
+        sessions.insert(token.clone(), expires_at);
+        token
+    }
+
+    pub fn validate_admin_session(&self, token: &str) -> bool {
+        let now = unix_seconds();
+        let mut sessions = self
+            .admin_sessions
+            .lock()
+            .expect("admin session lock poisoned");
+        match sessions.get(token).copied() {
+            Some(expires_at) if expires_at > now => true,
+            Some(_) => {
+                sessions.remove(token);
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn revoke_admin_session(&self, token: &str) {
+        let mut sessions = self
+            .admin_sessions
+            .lock()
+            .expect("admin session lock poisoned");
+        sessions.remove(token);
     }
 
     pub async fn snapshot(&self) -> PersistedState {
@@ -192,7 +257,19 @@ impl AppState {
     }
 
     pub async fn load_from_path(path: impl AsRef<Path>, config: AppConfig) -> io::Result<Self> {
+        if let Ok(database_url) = env::var("DATABASE_URL") {
+            if !database_url.trim().is_empty() {
+                tracing::info!(backend = "postgres", "loading gateway state from postgres");
+                return Self::load_from_database_url(database_url, config).await;
+            }
+        }
+
         let store_path = path.as_ref().to_path_buf();
+        tracing::info!(
+            backend = "file",
+            state_path = %store_path.display(),
+            "loading gateway state from file"
+        );
         let state = if fs::try_exists(&store_path).await? {
             let bytes = fs::read(&store_path).await?;
             serde_json::from_slice(&bytes).unwrap_or_default()
@@ -201,9 +278,45 @@ impl AppState {
         };
 
         let archived_usage_logs = load_archived_usage_logs(&store_path).await?;
+        let upstream_count = state.upstreams.len();
+        let downstream_count = state.downstreams.len();
+        let usage_log_count = state.usage_logs.len();
+        let archived_usage_log_count = archived_usage_logs.len();
         let app = Self::new_with_archived(state, archived_usage_logs, store_path, config);
         app.enforce_usage_log_archive_limit().await?;
+        tracing::info!(
+            backend = "file",
+            state_path = %app.store_path.display(),
+            upstreams = upstream_count,
+            downstreams = downstream_count,
+            usage_logs = usage_log_count,
+            archived_usage_logs = archived_usage_log_count,
+            "loaded file-backed gateway state"
+        );
         Ok(app)
+    }
+
+    pub async fn load_from_database_url(
+        database_url: impl AsRef<str>,
+        config: AppConfig,
+    ) -> io::Result<Self> {
+        let postgres = PostgresStateStore::connect(database_url.as_ref())
+            .await
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to initialize postgres backend: {error}"),
+                )
+            })?;
+        let state = postgres.load_state().await?;
+        tracing::info!(
+            backend = "postgres",
+            upstreams = state.upstreams.len(),
+            downstreams = state.downstreams.len(),
+            usage_logs = state.usage_logs.len(),
+            "loaded postgres-backed gateway state"
+        );
+        Ok(Self::new_with_postgres(state, config, postgres).await)
     }
 
     pub async fn persist(&self) -> io::Result<()> {
@@ -342,6 +455,15 @@ impl AppState {
         }
         if log.created_at == 0 {
             log.created_at = unix_seconds();
+        }
+
+        if self.postgres.is_some() {
+            let mut state = self.inner.lock().await;
+            state.usage_logs.push(log);
+            let candidate_state = state.clone();
+            self.persist_state(&candidate_state).await?;
+            *state = candidate_state;
+            return Ok(());
         }
 
         let mut state = self.inner.lock().await;
@@ -524,9 +646,12 @@ impl AppState {
 
     pub async fn available_models_for_downstream(&self, secret: &str) -> Vec<String> {
         let snapshot = self.snapshot().await;
-        let Some(downstream) = snapshot.downstreams.iter().find(|downstream| {
-            downstream.active && verify_downstream_key(secret, &downstream.hash)
-        }).cloned() else {
+        let Some(downstream) = snapshot
+            .downstreams
+            .iter()
+            .find(|downstream| downstream.active && verify_downstream_key(secret, &downstream.hash))
+            .cloned()
+        else {
             return Vec::new();
         };
 
@@ -566,6 +691,10 @@ impl AppState {
     }
 
     async fn persist_state(&self, state: &PersistedState) -> io::Result<()> {
+        if let Some(postgres) = &self.postgres {
+            return postgres.replace_state(state).await;
+        }
+
         if let Some(parent) = self.store_path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -707,6 +836,11 @@ fn unix_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+fn prune_expired_admin_sessions(sessions: &mut HashMap<String, u64>) {
+    let now = unix_seconds();
+    sessions.retain(|_, expires_at| *expires_at > now);
 }
 
 pub fn unix_seconds() -> u64 {

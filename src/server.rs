@@ -6,12 +6,12 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, new_id, unix_seconds, AppConfig, AppState, DownstreamConfig,
-    UpstreamConfig, UsageLog,
+    join_upstream_url, new_id, unix_seconds, AppConfig, AppState, DownstreamConfig, UpstreamConfig,
+    UsageLog, ADMIN_SESSION_TTL_SECONDS,
 };
 use axum::body::Body;
-use axum::extract::{Form, Json, Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{ConnectInfo, Form, Json, Path, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -20,13 +20,18 @@ use bytes::Bytes;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
-use std::time::Instant;
-use uuid::Uuid;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
+use uuid::Uuid;
 
-#[derive(Clone, Copy)]
+const ADMIN_SESSION_COOKIE: &str = "chat_responses_codex_admin_session";
+const ADMIN_LOGIN_PATH: &str = "/admin/login";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum EndpointKind {
     ChatCompletions,
     Responses,
@@ -140,6 +145,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(responses))
         .route("/portal", get(portal))
+        .route(
+            "/admin/login",
+            get(admin_login_page).post(submit_admin_login),
+        )
+        .route("/admin/logout", post(admin_logout))
         .route("/admin", get(admin_dashboard))
         .route(
             "/admin/upstreams",
@@ -160,8 +170,69 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/downstreams/{id}/delete", post(delete_downstream))
         .route("/admin/downstreams/{id}/toggle", post(toggle_downstream))
         .route("/admin/logs", get(admin_logs))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri()
+                    )
+                })
+                .on_request(|request: &Request<Body>, _span: &tracing::Span| {
+                    tracing::info!(
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        client_addr = ?request_client_addr(request),
+                        forwarded_for = ?header_value(
+                            request.headers(),
+                            header::HeaderName::from_static("x-forwarded-for")
+                        ),
+                        x_real_ip = ?header_value(
+                            request.headers(),
+                            header::HeaderName::from_static("x-real-ip")
+                        ),
+                        user_agent = ?header_value(request.headers(), header::USER_AGENT),
+                        "request started"
+                    );
+                })
+                .on_response(
+                    |response: &Response, latency: Duration, _span: &tracing::Span| {
+                        tracing::info!(
+                            status = response.status().as_u16(),
+                            latency_ms = latency.as_millis() as u64,
+                            content_type = ?header_value(response.headers(), header::CONTENT_TYPE),
+                            "request completed"
+                        );
+                    },
+                )
+                .on_failure(
+                    |failure_class: ServerErrorsFailureClass,
+                     latency: Duration,
+                     _span: &tracing::Span| {
+                        tracing::warn!(
+                            classification = %failure_class,
+                            latency_ms = latency.as_millis() as u64,
+                            "request failed"
+                        );
+                    },
+                ),
+        )
         .with_state(state)
+}
+
+fn request_client_addr<B>(request: &Request<B>) -> Option<SocketAddr> {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0)
+}
+
+fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -241,7 +312,7 @@ async fn portal(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
 }
 
 async fn admin_dashboard(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -250,7 +321,7 @@ async fn admin_dashboard(State(state): State<AppState>, headers: HeaderMap) -> i
 }
 
 async fn admin_upstreams(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -268,7 +339,7 @@ async fn admin_downstreams(
     headers: HeaderMap,
     Query(filters): Query<DownstreamListQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -288,7 +359,7 @@ async fn admin_downstreams_new(
     headers: HeaderMap,
     Query(filters): Query<DownstreamListQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -309,12 +380,16 @@ async fn edit_downstream(
     Path(id): Path<String>,
     Query(filters): Query<DownstreamListQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
     let snapshot = state.snapshot().await;
-    let Some(downstream) = snapshot.downstreams.iter().find(|downstream| downstream.id == id) else {
+    let Some(downstream) = snapshot
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == id)
+    else {
         return GatewayError::BadRequest("downstream not found".into()).into_response();
     };
 
@@ -335,23 +410,43 @@ async fn update_downstream(
     Query(filters): Query<DownstreamListQuery>,
     Form(form): Form<DownstreamForm>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
     let snapshot = state.snapshot().await;
-    let Some(existing) = snapshot.downstreams.iter().find(|downstream| downstream.id == id).cloned() else {
+    let Some(existing) = snapshot
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == id)
+        .cloned()
+    else {
         return GatewayError::BadRequest("downstream not found".into()).into_response();
     };
 
     let action = format!("/admin/downstreams/{id}");
-    let form_view = DownstreamFormView::from_form(&form, action.clone(), Some(id.clone()), existing.plaintext_key.clone());
-    let downstream = downstream_from_form(&form_view, existing.hash.clone(), existing.plaintext_key.clone(), Some(&existing), id.clone());
+    let form_view = DownstreamFormView::from_form(
+        &form,
+        action.clone(),
+        Some(id.clone()),
+        existing.plaintext_key.clone(),
+    );
+    let downstream = downstream_from_form(
+        &form_view,
+        existing.hash.clone(),
+        existing.plaintext_key.clone(),
+        Some(&existing),
+        id.clone(),
+    );
 
     match state.update_downstream(&id, downstream).await {
         Ok(true) => {
             let snapshot = state.snapshot().await;
-            let Some(updated) = snapshot.downstreams.iter().find(|downstream| downstream.id == id) else {
+            let Some(updated) = snapshot
+                .downstreams
+                .iter()
+                .find(|downstream| downstream.id == id)
+            else {
                 return GatewayError::Upstream("failed to reload downstream after save".into())
                     .into_response();
             };
@@ -366,8 +461,9 @@ async fn update_downstream(
             .into_response()
         }
         Ok(false) => GatewayError::BadRequest("downstream not found".into()).into_response(),
-        Err(error) => GatewayError::Upstream(format!("failed to save downstream: {error}"))
-            .into_response(),
+        Err(error) => {
+            GatewayError::Upstream(format!("failed to save downstream: {error}")).into_response()
+        }
     }
 }
 
@@ -377,12 +473,17 @@ async fn rotate_downstream(
     Path(id): Path<String>,
     Query(filters): Query<DownstreamListQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
     let snapshot = state.snapshot().await;
-    let Some(existing) = snapshot.downstreams.iter().find(|downstream| downstream.id == id).cloned() else {
+    let Some(existing) = snapshot
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == id)
+        .cloned()
+    else {
         return GatewayError::BadRequest("downstream not found".into()).into_response();
     };
 
@@ -404,7 +505,11 @@ async fn rotate_downstream(
     match state.update_downstream(&id, downstream).await {
         Ok(true) => {
             let snapshot = state.snapshot().await;
-            let Some(updated) = snapshot.downstreams.iter().find(|downstream| downstream.id == id) else {
+            let Some(updated) = snapshot
+                .downstreams
+                .iter()
+                .find(|downstream| downstream.id == id)
+            else {
                 return GatewayError::Upstream("failed to reload downstream after rotation".into())
                     .into_response();
             };
@@ -419,8 +524,9 @@ async fn rotate_downstream(
             .into_response()
         }
         Ok(false) => GatewayError::BadRequest("downstream not found".into()).into_response(),
-        Err(error) => GatewayError::Upstream(format!("failed to rotate downstream: {error}"))
-            .into_response(),
+        Err(error) => {
+            GatewayError::Upstream(format!("failed to rotate downstream: {error}")).into_response()
+        }
     }
 }
 
@@ -430,7 +536,7 @@ async fn delete_downstream(
     Path(id): Path<String>,
     Query(filters): Query<DownstreamListQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -447,13 +553,14 @@ async fn delete_downstream(
             .into_response()
         }
         Ok(false) => GatewayError::BadRequest("downstream not found".into()).into_response(),
-        Err(error) => GatewayError::Upstream(format!("failed to delete downstream: {error}"))
-            .into_response(),
+        Err(error) => {
+            GatewayError::Upstream(format!("failed to delete downstream: {error}")).into_response()
+        }
     }
 }
 
 async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -821,9 +928,10 @@ impl UpstreamFormView {
         }
     }
 
-    fn with_models(&self, models: String) -> Self {
+    fn with_fetched_models(&self, models: String, model_aliases: String) -> Self {
         let mut next = self.clone();
         next.models = models;
+        next.model_aliases = merge_csv_values(&self.model_aliases, &model_aliases);
         next
     }
 }
@@ -833,7 +941,7 @@ async fn submit_upstream(
     headers: HeaderMap,
     Form(form): Form<UpstreamForm>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -845,7 +953,7 @@ async fn edit_upstream(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -868,7 +976,7 @@ async fn update_upstream(
     Path(id): Path<String>,
     Form(form): Form<UpstreamForm>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -880,7 +988,7 @@ async fn delete_upstream(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -898,7 +1006,7 @@ async fn toggle_upstream(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -930,7 +1038,8 @@ async fn handle_upstream_form_submit(
         return match fetch_upstream_models(&state, &form).await {
             Ok(models) => {
                 let snapshot = state.snapshot().await;
-                let fetched = form_view.with_models(models.join(","));
+                let (models, model_aliases) = normalize_fetched_models(models);
+                let fetched = form_view.with_fetched_models(models, model_aliases);
                 Html(render_upstreams_page(
                     &snapshot,
                     &fetched,
@@ -1079,13 +1188,18 @@ async fn create_downstream(
     Query(filters): Query<DownstreamListQuery>,
     Form(form): Form<DownstreamForm>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
     let generated = generate_downstream_key("gw");
     let downstream = downstream_from_form(
-        &DownstreamFormView::from_form(&form, "/admin/downstreams".to_string(), None, Some(generated.plaintext.clone())),
+        &DownstreamFormView::from_form(
+            &form,
+            "/admin/downstreams".to_string(),
+            None,
+            Some(generated.plaintext.clone()),
+        ),
         generated.hash.clone(),
         Some(generated.plaintext.clone()),
         None,
@@ -1125,8 +1239,22 @@ async fn process_gateway_request(
         .cloned()
         .ok_or_else(|| GatewayError::Unauthorized("invalid downstream key".into()))?;
 
+    let request_id = Uuid::new_v4().to_string();
+    tracing::info!(
+        request_id = %request_id,
+        downstream = %downstream.id,
+        endpoint = %endpoint.path(),
+        "received downstream request"
+    );
+
     if let Some(expires_at) = downstream.expires_at {
         if unix_seconds() > expires_at {
+            tracing::warn!(
+                request_id = %request_id,
+                downstream = %downstream.id,
+                expires_at,
+                "downstream key expired"
+            );
             return Err(GatewayError::Forbidden("downstream key expired".into()));
         }
     }
@@ -1138,6 +1266,12 @@ async fn process_gateway_request(
                 .iter()
                 .any(|allowed| allowed == &client_ip)
         {
+            tracing::warn!(
+                request_id = %request_id,
+                downstream = %downstream.id,
+                client_ip = %client_ip,
+                "client IP not allowed"
+            );
             return Err(GatewayError::Forbidden("ip not allowed".into()));
         }
     }
@@ -1152,6 +1286,12 @@ async fn process_gateway_request(
             .iter()
             .any(|allowed| allowed == model)
     {
+        tracing::warn!(
+            request_id = %request_id,
+            downstream = %downstream.id,
+            model = %model,
+            "model not allowed"
+        );
         return Err(GatewayError::Forbidden("model not allowed".into()));
     }
 
@@ -1159,6 +1299,12 @@ async fn process_gateway_request(
         .reserve_downstream_request(&downstream.id, downstream.per_minute_limit)
         .await
     {
+        tracing::warn!(
+            request_id = %request_id,
+            downstream = %downstream.id,
+            retry_after_seconds,
+            "downstream per-minute request limit exceeded"
+        );
         return Err(GatewayError::TooManyRequests {
             message: "downstream per-minute request limit exceeded".into(),
             retry_after_seconds: Some(retry_after_seconds),
@@ -1166,11 +1312,30 @@ async fn process_gateway_request(
     }
 
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let requires_responses_upstream =
+        endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
 
-    let request_id = Uuid::new_v4().to_string();
     let started = Instant::now();
-    let candidate_protocols = if request_stream {
-        vec![endpoint.native_protocol(), endpoint.opposite()]
+    if requires_responses_upstream
+        && !snapshot.upstreams.iter().any(|upstream| {
+            upstream.active
+                && upstream.protocol == UpstreamProtocol::Responses
+                && upstream.supports_model(model)
+        })
+    {
+        tracing::warn!(
+            request_id = %request_id,
+            model = %model,
+            endpoint = %endpoint.path(),
+            "responses request requires a Responses upstream"
+        );
+        return Err(GatewayError::BadRequest(format!(
+            "responses requests with non-function tools require a Responses upstream for model \"{model}\""
+        )));
+    }
+
+    let candidate_protocols = if requires_responses_upstream {
+        vec![UpstreamProtocol::Responses]
     } else {
         vec![endpoint.native_protocol(), endpoint.opposite()]
     };
@@ -1188,9 +1353,25 @@ async fn process_gateway_request(
         upstreams.sort_by_key(|upstream| upstream.failure_count);
 
         for upstream in upstreams {
+            tracing::info!(
+                request_id = %request_id,
+                upstream = %upstream.id,
+                upstream_name = %upstream.name,
+                protocol = ?upstream.protocol,
+                endpoint = %endpoint.path(),
+                stream = request_stream,
+                "sending request to upstream"
+            );
             match send_to_upstream(&state, &upstream, &body, endpoint, request_stream, true).await {
                 Ok(mut result) => {
                     result.request_id = request_id.clone();
+                    tracing::info!(
+                        request_id = %request_id,
+                        upstream = %upstream.id,
+                        status = result.status.as_u16(),
+                        latency_ms = started.elapsed().as_millis() as u64,
+                        "upstream request completed"
+                    );
                     let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
                     let log = UsageLog {
                         id: request_id.clone(),
@@ -1217,11 +1398,30 @@ async fn process_gateway_request(
                     return Ok(result);
                 }
                 Err(_first_error) if request_stream => {
-                    match send_to_upstream(&state, &upstream, &body, endpoint, request_stream, false)
-                        .await
+                    tracing::warn!(
+                        request_id = %request_id,
+                        upstream = %upstream.id,
+                        "streaming upstream attempt failed; retrying without stream"
+                    );
+                    match send_to_upstream(
+                        &state,
+                        &upstream,
+                        &body,
+                        endpoint,
+                        request_stream,
+                        false,
+                    )
+                    .await
                     {
                         Ok(mut result) => {
                             result.request_id = request_id.clone();
+                            tracing::info!(
+                                request_id = %request_id,
+                                upstream = %upstream.id,
+                                status = result.status.as_u16(),
+                                latency_ms = started.elapsed().as_millis() as u64,
+                                "upstream request completed after stream fallback"
+                            );
                             let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
                             let log = UsageLog {
                                 id: request_id.clone(),
@@ -1248,12 +1448,24 @@ async fn process_gateway_request(
                             return Ok(result);
                         }
                         Err(second_error) => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                upstream = %upstream.id,
+                                error = %second_error,
+                                "upstream request failed after stream fallback"
+                            );
                             state.mark_upstream_failure(&upstream.id).await.ok();
                             last_error = Some(second_error);
                         }
                     }
                 }
                 Err(error) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        upstream = %upstream.id,
+                        error = %error,
+                        "upstream request failed"
+                    );
                     state.mark_upstream_failure(&upstream.id).await.ok();
                     last_error = Some(error);
                 }
@@ -1262,10 +1474,60 @@ async fn process_gateway_request(
     }
 
     if let Some(error) = last_error {
+        tracing::error!(
+            request_id = %request_id,
+            model = %model,
+            endpoint = %endpoint.path(),
+            error = %error,
+            "request failed after exhausting upstream candidates"
+        );
         return Err(error);
     }
 
+    tracing::warn!(
+        request_id = %request_id,
+        model = %model,
+        endpoint = %endpoint.path(),
+        "no routable upstream found for request"
+    );
     Err(no_routable_model_error(&snapshot, model))
+}
+
+fn responses_request_requires_responses_upstream(body: &Value) -> bool {
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        if tools.iter().any(responses_tool_requires_responses_upstream) {
+            return true;
+        }
+    }
+
+    body.get("tool_choice")
+        .is_some_and(responses_tool_choice_requires_responses_upstream)
+}
+
+fn responses_tool_requires_responses_upstream(tool: &Value) -> bool {
+    let Some(object) = tool.as_object() else {
+        return false;
+    };
+
+    if object.get("function").and_then(Value::as_object).is_some() {
+        return false;
+    }
+
+    matches!(
+        object.get("type").and_then(Value::as_str),
+        Some(tool_type) if tool_type != "function"
+    )
+}
+
+fn responses_tool_choice_requires_responses_upstream(tool_choice: &Value) -> bool {
+    let Some(object) = tool_choice.as_object() else {
+        return false;
+    };
+
+    matches!(
+        object.get("type").and_then(Value::as_str),
+        Some(tool_type) if tool_type != "function"
+    )
 }
 
 async fn send_to_upstream(
@@ -1305,9 +1567,17 @@ async fn send_to_upstream(
     }
 
     let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream.protocol));
+    tracing::info!(
+        upstream = %upstream.id,
+        url = %url,
+        protocol = ?upstream.protocol,
+        request_stream,
+        try_upstream_stream,
+        "dispatching request to upstream service"
+    );
     let response = state
         .client()
-        .post(url)
+        .post(url.clone())
         .header(
             header::AUTHORIZATION,
             format!("Bearer {}", upstream.api_key),
@@ -1315,12 +1585,28 @@ async fn send_to_upstream(
         .json(&upstream_body)
         .send()
         .await
-        .map_err(|error| GatewayError::Upstream(format!("upstream request failed: {error}")))?;
+        .map_err(|error| {
+            tracing::warn!(
+                upstream = %upstream.id,
+                url = %url,
+                error = %error,
+                "upstream request failed"
+            );
+            GatewayError::Upstream(format!("upstream request failed: {error}"))
+        })?;
 
     let status = response.status();
 
     if !status.is_success() {
         let error_text = response.text().await.unwrap_or_default();
+        let error_excerpt = error_text.chars().take(512).collect::<String>();
+        tracing::warn!(
+            upstream = %upstream.id,
+            url = %url,
+            status = status.as_u16(),
+            error_excerpt = %error_excerpt,
+            "upstream responded with a non-success status"
+        );
         return Err(GatewayError::Upstream(format!(
             "upstream responded with status {}{}",
             status,
@@ -1329,7 +1615,7 @@ async fn send_to_upstream(
             } else {
                 format!(": {error_text}")
             }
-            )));
+        )));
     }
 
     if request_stream {
@@ -1447,7 +1733,10 @@ fn endpoint_for_upstream(protocol: UpstreamProtocol) -> &'static str {
     }
 }
 
-fn synthesize_stream_body(endpoint: EndpointKind, final_body: &Value) -> Result<Body, GatewayError> {
+fn synthesize_stream_body(
+    endpoint: EndpointKind,
+    final_body: &Value,
+) -> Result<Body, GatewayError> {
     match endpoint {
         EndpointKind::ChatCompletions => synthesize_chat_stream_body(final_body),
         EndpointKind::Responses => synthesize_responses_stream_body(final_body),
@@ -1914,8 +2203,8 @@ fn next_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
 }
 
 fn parse_sse_data_payload(frame: &[u8]) -> Result<Option<String>, std::io::Error> {
-    let frame = std::str::from_utf8(frame)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let frame =
+        std::str::from_utf8(frame).map_err(|error| std::io::Error::other(error.to_string()))?;
     let mut data = String::new();
     let mut has_data = false;
 
@@ -1965,45 +2254,164 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(|value| value.trim().to_string())
 }
 
-fn ensure_admin(headers: &HeaderMap, config: &AppConfig) -> Result<(), Response> {
-    let Some(value) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return Err(admin_unauthorized());
-    };
+#[derive(Debug, Default, Deserialize)]
+struct AdminLoginQuery {
+    next: Option<String>,
+}
 
-    let Some(encoded) = value.strip_prefix("Basic ") else {
-        return Err(admin_unauthorized());
-    };
+#[derive(Debug, Deserialize)]
+struct AdminLoginForm {
+    username: String,
+    password: String,
+    next: Option<String>,
+}
 
-    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-        return Err(admin_unauthorized());
-    };
-    let Ok(decoded) = String::from_utf8(decoded) else {
-        return Err(admin_unauthorized());
-    };
-    let Some((username, password)) = decoded.split_once(':') else {
-        return Err(admin_unauthorized());
-    };
+async fn admin_login_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AdminLoginQuery>,
+) -> impl IntoResponse {
+    let next = sanitize_admin_next(query.next.as_deref());
+    if admin_is_authenticated(&headers, &state) {
+        return redirect_with_no_store(&next, None);
+    }
 
-    if username == config.admin_username && password == config.admin_password {
+    html_no_store(render_login_page(
+        &state.config,
+        &next,
+        &state.config.admin_username,
+        None,
+    ))
+}
+
+async fn submit_admin_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<AdminLoginForm>,
+) -> impl IntoResponse {
+    let next = sanitize_admin_next(form.next.as_deref());
+    if admin_is_authenticated(&headers, &state) {
+        return redirect_with_no_store(&next, None);
+    }
+
+    if form.username == state.config.admin_username && form.password == state.config.admin_password
+    {
+        let session_token = state.create_admin_session();
+        return redirect_with_no_store(&next, Some(admin_session_cookie(&session_token)));
+    }
+
+    html_no_store(render_login_page(
+        &state.config,
+        &next,
+        &form.username,
+        Some("用户名或密码不正确"),
+    ))
+}
+
+async fn admin_logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Some(token) = admin_session_token_from_headers(&headers) {
+        state.revoke_admin_session(&token);
+    }
+
+    redirect_with_no_store(ADMIN_LOGIN_PATH, Some(cleared_admin_session_cookie()))
+}
+
+fn ensure_admin(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
+    if admin_is_authenticated(headers, state) {
         Ok(())
     } else {
-        Err(admin_unauthorized())
+        Err(redirect_with_no_store(ADMIN_LOGIN_PATH, None))
     }
 }
 
-fn admin_unauthorized() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(
-            header::WWW_AUTHENTICATE,
-            HeaderValue::from_static(r#"Basic realm=\"admin\""#),
-        )],
-        Html("<h1>Unauthorized</h1>".to_string()),
+fn admin_is_authenticated(headers: &HeaderMap, state: &AppState) -> bool {
+    if let Some(token) = admin_session_token_from_headers(headers) {
+        if state.validate_admin_session(&token) {
+            return true;
+        }
+    }
+
+    admin_basic_auth_credentials(headers).is_some_and(|(username, password)| {
+        username == state.config.admin_username && password == state.config.admin_password
+    })
+}
+
+fn admin_basic_auth_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())?;
+    let encoded = value.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (username, password) = decoded.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
+}
+
+fn admin_session_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::COOKIE)?.to_str().ok()?;
+    let prefix = format!("{ADMIN_SESSION_COOKIE}=");
+    value
+        .split(';')
+        .map(str::trim)
+        .find_map(|cookie| cookie.strip_prefix(&prefix).map(str::to_string))
+        .filter(|token| !token.is_empty())
+}
+
+fn sanitize_admin_next(next: Option<&str>) -> String {
+    let Some(next) = next.map(str::trim) else {
+        return "/admin".to_string();
+    };
+
+    if next.is_empty()
+        || !next.starts_with('/')
+        || next.starts_with("//")
+        || next.contains("://")
+        || next.contains('\\')
+    {
+        "/admin".to_string()
+    } else {
+        next.to_string()
+    }
+}
+
+fn admin_session_cookie(token: &str) -> String {
+    format!(
+        "{name}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}",
+        name = ADMIN_SESSION_COOKIE,
+        max_age = ADMIN_SESSION_TTL_SECONDS,
     )
-        .into_response()
+}
+
+fn cleared_admin_session_cookie() -> String {
+    format!(
+        "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        name = ADMIN_SESSION_COOKIE,
+    )
+}
+
+fn redirect_with_no_store(location: &str, cookie: Option<String>) -> Response {
+    let mut response = Redirect::to(location).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    if let Some(cookie) = cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
+    }
+    response
+}
+
+fn html_no_store(html: String) -> Response {
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response
 }
 
 async fn toggle_downstream(
@@ -2012,7 +2420,7 @@ async fn toggle_downstream(
     Path(id): Path<String>,
     Query(filters): Query<DownstreamListQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = ensure_admin(&headers, &state.config) {
+    if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
@@ -2084,6 +2492,49 @@ fn parse_csv(input: &str) -> Vec<String> {
         .filter(|item| !item.is_empty())
         .map(|item| item.to_string())
         .collect()
+}
+
+fn normalize_fetched_models(models: Vec<String>) -> (String, String) {
+    let mut seen = HashSet::new();
+    let mut normalized_models = Vec::new();
+    let mut aliases = Vec::new();
+
+    for model in models {
+        let original = model.trim();
+        if original.is_empty() {
+            continue;
+        }
+
+        let slug = original.to_lowercase();
+        if seen.insert(slug.clone()) {
+            normalized_models.push(slug.clone());
+            if slug != original {
+                aliases.push(format!("{slug}={original}"));
+            }
+        }
+    }
+
+    (normalized_models.join(","), aliases.join(","))
+}
+
+fn merge_csv_values(existing: &str, generated: &str) -> String {
+    let mut seen = HashSet::new();
+    let mut values = Vec::new();
+
+    for source in [existing, generated] {
+        for raw_item in source.split(',') {
+            let item = raw_item.trim();
+            if item.is_empty() {
+                continue;
+            }
+
+            if seen.insert(item.to_string()) {
+                values.push(item.to_string());
+            }
+        }
+    }
+
+    values.join(",")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2208,6 +2659,29 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       font-size: 12px;
       margin-top: 2px;
     }}
+    .sidebar-footer {{
+      margin-top: 18px;
+      padding: 0 4px;
+    }}
+    .sidebar-footer-card {{
+      display: grid;
+      gap: 12px;
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
+    }}
+    .sidebar-footer-card strong {{
+      display: block;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }}
+    .sidebar-footer-card p {{
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.5;
+    }}
     .main {{
       padding: 24px;
     }}
@@ -2239,6 +2713,141 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       justify-content: flex-end;
       gap: 10px;
       flex-wrap: wrap;
+    }}
+    .hero-band {{
+      display: flex;
+      align-items: stretch;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 16px;
+      padding: 22px 24px;
+      border-radius: 24px;
+      border: 1px solid rgba(19, 181, 166, 0.16);
+      background:
+        linear-gradient(135deg, rgba(19, 181, 166, 0.12), rgba(56, 189, 248, 0.08)),
+        rgba(255, 255, 255, 0.72);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }}
+    .hero-band h2 {{
+      margin: 0;
+      font-size: 32px;
+      letter-spacing: -0.05em;
+    }}
+    .hero-band p {{
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.7;
+      max-width: 72ch;
+    }}
+    .hero-band .hero-copy {{
+      display: grid;
+      gap: 6px;
+    }}
+    .hero-actions {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }}
+    .summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }}
+    .summary-card {{
+      grid-column: span 3;
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(255,255,255,0.76));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }}
+    .summary-card strong {{
+      display: block;
+      font-size: 30px;
+      letter-spacing: -0.05em;
+      margin-bottom: 6px;
+    }}
+    .summary-card span {{
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.4;
+    }}
+    .summary-card small {{
+      display: block;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }}
+    .section-head {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 16px;
+    }}
+    .section-head h2 {{
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }}
+    .section-head p {{
+      margin: 6px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }}
+    .table-shell {{
+      display: grid;
+      gap: 14px;
+    }}
+    .table-frame {{
+      border-radius: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.82);
+    }}
+    .table-frame .table th,
+    .table-frame .table td {{
+      background: transparent;
+    }}
+    .table-frame .table thead th {{
+      background: rgba(15, 23, 42, 0.02);
+    }}
+    .table-tools {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .context-list {{
+      display: grid;
+      gap: 12px;
+    }}
+    .context-item {{
+      display: grid;
+      gap: 6px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      background: rgba(255, 255, 255, 0.76);
+    }}
+    .context-item strong {{
+      display: block;
+      font-size: 14px;
+      letter-spacing: -0.02em;
+    }}
+    .context-item span {{
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
     }}
     .grid {{
       display: grid;
@@ -2512,7 +3121,7 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       height: 12px;
     }}
     @media (max-width: 1100px) {{
-      .card {{ grid-column: span 6; }}
+      .card, .summary-card {{ grid-column: span 6; }}
       .drawer {{ grid-column: span 12; position: static; }}
     }}
     @media (max-width: 960px) {{
@@ -2527,7 +3136,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       .page-header {{ flex-direction: column; }}
       .page-actions {{ justify-content: flex-start; }}
       .fields {{ grid-template-columns: 1fr; }}
-      .card, .half {{ grid-column: span 12; }}
+      .card, .half, .summary-card {{ grid-column: span 12; }}
+      .hero-band {{ flex-direction: column; }}
+      .hero-actions {{ justify-content: flex-start; }}
     }}
   </style>
   <script>
@@ -2639,9 +3250,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
   <div class="layout">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">CR</div>
+        <div class="brand-mark">CRC</div>
         <div class="brand-text">
-          <h1>chat2responses</h1>
+          <h1>chat-responses-codex</h1>
           <p>协议转换网关控制台</p>
         </div>
       </div>
@@ -2652,6 +3263,7 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
         {nav_logs}
         {nav_portal}
       </nav>
+      {logout_panel}
     </aside>
     <main class="main">
       {body}
@@ -2659,15 +3271,67 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
   </div>
 </body>
 </html>"#,
-        nav_dashboard = render_nav_item(section, ShellSection::Dashboard, "/admin", "仪表盘", "全局概览"),
-        nav_upstreams = render_nav_item(section, ShellSection::Upstreams, "/admin/upstreams", "上游密钥", "模型路由"),
-        nav_downstreams = render_nav_item(section, ShellSection::Downstreams, "/admin/downstreams", "下游密钥", "客户密钥"),
-        nav_logs = render_nav_item(section, ShellSection::Logs, "/admin/logs", "运行日志", "审计与排障"),
-        nav_portal = render_nav_item(section, ShellSection::Portal, "/portal", "自助门户", "下游视图"),
+        nav_dashboard = render_nav_item(
+            section,
+            ShellSection::Dashboard,
+            "/admin",
+            "仪表盘",
+            "全局概览"
+        ),
+        nav_upstreams = render_nav_item(
+            section,
+            ShellSection::Upstreams,
+            "/admin/upstreams",
+            "上游密钥",
+            "模型路由"
+        ),
+        nav_downstreams = render_nav_item(
+            section,
+            ShellSection::Downstreams,
+            "/admin/downstreams",
+            "下游密钥",
+            "客户密钥"
+        ),
+        nav_logs = render_nav_item(
+            section,
+            ShellSection::Logs,
+            "/admin/logs",
+            "运行日志",
+            "审计与排障"
+        ),
+        nav_portal = render_nav_item(
+            section,
+            ShellSection::Portal,
+            "/portal",
+            "自助门户",
+            "下游视图"
+        ),
+        logout_panel = if section == ShellSection::Portal {
+            String::new()
+        } else {
+            r#"<div class="sidebar-footer">
+        <div class="sidebar-footer-card">
+          <div>
+            <strong>管理员会话</strong>
+            <p>退出后需要重新登录，不会再触发浏览器基础认证弹框。</p>
+          </div>
+          <form method="post" action="/admin/logout">
+            <button class="secondary" type="submit">退出登录</button>
+          </form>
+        </div>
+      </div>"#
+                .to_string()
+        },
     )
 }
 
-fn render_nav_item(current: ShellSection, section: ShellSection, href: &str, title: &str, subtitle: &str) -> String {
+fn render_nav_item(
+    current: ShellSection,
+    section: ShellSection,
+    href: &str,
+    title: &str,
+    subtitle: &str,
+) -> String {
     let active_class = if current == section { "active" } else { "" };
     format!(
         r#"<a href="{href}" class="{class}">
@@ -2696,31 +3360,446 @@ fn render_topbar(title: &str, subtitle: &str) -> String {
     )
 }
 
+fn render_login_page(
+    config: &AppConfig,
+    next: &str,
+    username: &str,
+    error: Option<&str>,
+) -> String {
+    let error_block = error.map_or_else(String::new, |message| {
+        format!(
+            r#"<div class="alert" role="alert">{}</div>"#,
+            escape_html(message)
+        )
+    });
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{app_name} - 管理员登录</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #eef5f7;
+      --panel: rgba(255, 255, 255, 0.88);
+      --panel-strong: #ffffff;
+      --border: rgba(15, 23, 42, 0.08);
+      --text: #102033;
+      --muted: #64748b;
+      --accent: #13b5a6;
+      --accent-2: #38bdf8;
+      --danger: #ef4444;
+      --shadow: 0 22px 60px rgba(15, 23, 42, 0.08);
+    }}
+    * {{ box-sizing: border-box; }}
+    html, body {{ min-height: 100%; }}
+    body {{
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(56, 189, 248, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(19, 181, 166, 0.18), transparent 30%),
+        linear-gradient(180deg, #f8fbfc 0%, #eef5f7 100%);
+      color: var(--text);
+    }}
+    a {{ color: inherit; text-decoration: none; }}
+    .page {{
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }}
+    .frame {{
+      width: min(1180px, 100%);
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(340px, 0.9fr);
+      gap: 20px;
+      align-items: stretch;
+    }}
+    .hero, .panel {{
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }}
+    .hero {{
+      position: relative;
+      overflow: hidden;
+      min-height: 560px;
+      padding: 32px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 24px;
+    }}
+    .hero::before {{
+      content: "";
+      position: absolute;
+      inset: auto -80px -80px auto;
+      width: 240px;
+      height: 240px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.18), transparent 70%);
+      pointer-events: none;
+    }}
+    .brand {{
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: relative;
+      z-index: 1;
+    }}
+    .brand-mark {{
+      width: 52px;
+      height: 52px;
+      border-radius: 16px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: linear-gradient(135deg, #0f172a, #13b5a6);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+    }}
+    .brand-copy h1 {{
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.03em;
+    }}
+    .brand-copy p {{
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .hero h2 {{
+      margin: 0;
+      font-size: 42px;
+      line-height: 1;
+      letter-spacing: -0.06em;
+      max-width: 12ch;
+      position: relative;
+      z-index: 1;
+    }}
+    .hero p {{
+      margin: 0;
+      max-width: 58ch;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.7;
+      position: relative;
+      z-index: 1;
+    }}
+    .pill-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+      position: relative;
+      z-index: 1;
+    }}
+    .pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.82);
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .hero-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      position: relative;
+      z-index: 1;
+    }}
+    .feature {{
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.76);
+    }}
+    .feature strong {{
+      display: block;
+      font-size: 14px;
+      margin-bottom: 6px;
+      letter-spacing: -0.02em;
+    }}
+    .feature span {{
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }}
+    .panel {{
+      padding: 30px;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }}
+    .panel h3 {{
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }}
+    .panel p {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }}
+    .alert {{
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(239, 68, 68, 0.24);
+      background: rgba(239, 68, 68, 0.08);
+      color: #991b1b;
+    }}
+    form {{
+      display: grid;
+      gap: 14px;
+    }}
+    .field {{
+      display: grid;
+      gap: 6px;
+    }}
+    label {{
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+    input {{
+      width: 100%;
+      background: rgba(255, 255, 255, 0.88);
+      color: var(--text);
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 14px;
+      padding: 12px 14px;
+      font: inherit;
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.65);
+    }}
+    input:focus {{
+      outline: none;
+      border-color: rgba(19, 181, 166, 0.4);
+      box-shadow: 0 0 0 4px rgba(19, 181, 166, 0.12);
+    }}
+    .session-note {{
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(19, 181, 166, 0.18);
+      background: rgba(19, 181, 166, 0.08);
+    }}
+    .session-note strong {{
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }}
+    .helper {{
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.6;
+    }}
+    .actions {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+    button {{
+      background: linear-gradient(135deg, var(--accent), #34d399);
+      color: #fff;
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 16px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 10px 22px rgba(19, 181, 166, 0.22);
+    }}
+    @media (max-width: 960px) {{
+      .frame {{
+        grid-template-columns: 1fr;
+      }}
+      .hero {{
+        min-height: auto;
+      }}
+      .hero-grid {{
+        grid-template-columns: 1fr;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="frame">
+      <section class="hero">
+        <div>
+          <div class="brand">
+            <div class="brand-mark">CRC</div>
+            <div class="brand-copy">
+              <h1>chat-responses-codex</h1>
+              <p>{app_name}</p>
+            </div>
+          </div>
+          <div class="pill-row">
+            <span class="pill">Session 登录</span>
+            <span class="pill">无浏览器弹框</span>
+            <span class="pill">12 小时会话</span>
+          </div>
+          <h2>管理员登录</h2>
+          <p>使用部署配置中的管理员账号登录后台。登录后通过 session cookie 访问管理页，不再触发浏览器基础认证弹窗。</p>
+        </div>
+        <div class="hero-grid">
+          <div class="feature">
+            <strong>控制台范围</strong>
+            <span>仪表盘、上游密钥、下游密钥和运行日志都在同一套界面中操作。</span>
+          </div>
+          <div class="feature">
+            <strong>会话策略</strong>
+            <span>登录态保存在 HttpOnly cookie 中，退出后需要重新认证。</span>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <h3>登录控制台</h3>
+        <p>后台账号来自环境变量 `ADMIN_USERNAME` 与 `ADMIN_PASSWORD`。</p>
+        {error_block}
+        <form method="post" action="/admin/login">
+          <input type="hidden" name="next" value="{next}">
+          <div class="field">
+            <label for="username">用户名</label>
+            <input id="username" name="username" type="text" autocomplete="username" value="{username}" required autofocus>
+          </div>
+          <div class="field">
+            <label for="password">密码</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+          </div>
+          <div class="session-note">
+            <strong>会话时长</strong>
+            <p class="helper">成功登录后将设置 `HttpOnly` cookie，有效期 12 小时。</p>
+          </div>
+          <div class="actions">
+            <button type="submit">登录</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </main>
+</body>
+</html>"#,
+        app_name = escape_html(&config.app_name),
+        next = escape_html(next),
+        username = escape_html(username),
+        error_block = error_block,
+    )
+}
+
 fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedState) -> String {
+    let active_upstreams = state
+        .upstreams
+        .iter()
+        .filter(|upstream| upstream.active)
+        .count();
+    let active_downstreams = state
+        .downstreams
+        .iter()
+        .filter(|downstream| downstream.active)
+        .count();
+    let responses_upstreams = state
+        .upstreams
+        .iter()
+        .filter(|upstream| upstream.active && upstream.protocol == UpstreamProtocol::Responses)
+        .count();
+    let recent_logs = state.usage_logs.len();
+
     let body = format!(
         r#"{topbar}
-<div class="grid">
-  <section class="panel card">
+<section class="hero-band">
+  <div class="hero-copy">
+    <h2>控制台总览</h2>
+    <p>从这里查看上游、下游和请求日志的整体状态。管理页延续同一套控制台布局，方便快速切换到具体操作。</p>
+  </div>
+  <div class="hero-actions">
+    <a class="button-link" href="/admin/upstreams">管理上游</a>
+    <a class="button-link" href="/admin/downstreams">管理下游</a>
+    <a class="button-link" href="/admin/logs">查看运行日志</a>
+  </div>
+</section>
+<div class="summary-grid">
+  <section class="summary-card">
     <strong>{upstreams}</strong>
     <span>上游密钥</span>
+    <small>启用 {active_upstreams} / 共 {total_upstreams}</small>
   </section>
-  <section class="panel card">
+  <section class="summary-card">
     <strong>{downstreams}</strong>
     <span>下游密钥</span>
+    <small>启用 {active_downstreams} / 共 {total_downstreams}</small>
   </section>
-  <section class="panel card">
+  <section class="summary-card">
     <strong>{logs}</strong>
     <span>运行日志</span>
+    <small>最近记录 {recent_logs} 条</small>
   </section>
-  <section class="panel card">
+  <section class="summary-card">
     <strong>{active_models}</strong>
     <span>可见模型</span>
+    <small>{responses_upstreams} 个 Responses 上游在线</small>
   </section>
+</div>
+<div class="grid">
   <section class="panel wide">
-    <h2>概览</h2>
-    <p class="muted">管理员账号：<strong>{admin}</strong></p>
-    <p class="muted">应用名称：<strong>{app}</strong></p>
-    <p class="muted">这个网关会把 chat 和 responses 请求转换后转发给可用的上游密钥，并记录所有请求用于审计。</p>
+    <div class="section-head">
+      <div>
+        <h2>概览</h2>
+        <p>这个网关会把 chat 和 responses 请求转换后转发给可用的上游密钥，并记录所有请求用于审计。Responses 请求带非 function 工具时会直接要求 Responses 上游，避免静默降级。</p>
+      </div>
+      <div class="page-actions">
+        <a class="button-link" href="/admin/upstreams">新建上游</a>
+        <a class="button-link" href="/admin/downstreams/new">新建下游</a>
+      </div>
+    </div>
+    <div class="context-list">
+      <div class="context-item">
+        <strong>管理员账号</strong>
+        <span>{admin}</span>
+      </div>
+      <div class="context-item">
+        <strong>应用名称</strong>
+        <span>{app}</span>
+      </div>
+      <div class="context-item">
+        <strong>路由说明</strong>
+        <span>当模型需要完整工具面时，请优先选择 Responses 上游；常规 chat-completions 请求仍可复用同一套管理页进行配置。</span>
+      </div>
+    </div>
+  </section>
+  <section class="panel drawer">
+    <div class="section-head">
+      <div>
+        <h2>运维提示</h2>
+        <p>这里保留最常用的快捷入口和状态摘要，适合日常巡检。</p>
+      </div>
+    </div>
+    <div class="context-list">
+      <div class="context-item">
+        <strong>管理入口</strong>
+        <span>上游、下游和日志都在左侧导航中可直接切换。</span>
+      </div>
+      <div class="context-item">
+        <strong>模型容量</strong>
+        <span>当前可见模型数为 {active_models}，来自可用上游的合并路由结果。</span>
+      </div>
+      <div class="context-item">
+        <strong>请求节奏</strong>
+        <span>当前累计记录 {recent_logs} 条请求日志，用于排障和审计。</span>
+      </div>
+    </div>
   </section>
 </div>"#,
         topbar = render_topbar("仪表盘", "协议转换网关控制台"),
@@ -2730,6 +3809,12 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
         active_models = active_models(state),
         admin = escape_html(&config.admin_username),
         app = escape_html(&config.app_name),
+        total_upstreams = state.upstreams.len(),
+        total_downstreams = state.downstreams.len(),
+        active_upstreams = active_upstreams,
+        active_downstreams = active_downstreams,
+        responses_upstreams = responses_upstreams,
+        recent_logs = recent_logs,
     );
     render_shell("仪表盘", ShellSection::Dashboard, &body)
 }
@@ -2739,6 +3824,32 @@ fn render_upstreams_page(
     form: &UpstreamFormView,
     notice: Option<&str>,
 ) -> String {
+    let total_upstreams = state.upstreams.len();
+    let active_upstreams = state
+        .upstreams
+        .iter()
+        .filter(|upstream| upstream.active)
+        .count();
+    let responses_upstreams = state
+        .upstreams
+        .iter()
+        .filter(|upstream| upstream.active && upstream.protocol == UpstreamProtocol::Responses)
+        .count();
+    let alias_count = state
+        .upstreams
+        .iter()
+        .map(|upstream| upstream.model_aliases.len())
+        .sum::<usize>();
+    let routed_models = state
+        .upstreams
+        .iter()
+        .map(|upstream| upstream.route_models().len())
+        .sum::<usize>();
+    let active_rate = if total_upstreams == 0 {
+        0
+    } else {
+        active_upstreams * 100 / total_upstreams
+    };
     let mut rows = String::new();
     for upstream in &state.upstreams {
         let status = if upstream.active { "ok" } else { "bad" };
@@ -2766,9 +3877,7 @@ fn render_upstreams_page(
                 })
                 .collect::<Vec<_>>()
                 .join("<br>");
-            format!(
-                r#"<div class="muted" style="font-size:12px;margin-top:6px;">{mappings}</div>"#
-            )
+            format!(r#"<div class="muted" style="font-size:12px;margin-top:6px;">{mappings}</div>"#)
         };
         let _ = write!(
             rows,
@@ -2823,26 +3932,83 @@ fn render_upstreams_page(
 
     let body = format!(
         r#"{topbar}{notice}
+<section class="hero-band">
+  <div class="hero-copy">
+    <h2>上游概览</h2>
+    <p>集中管理模型上游、协议选择和别名映射。这个页面采用左侧列表、右侧 drawer 的布局，避免表格和表单互相打断视线。</p>
+  </div>
+  <div class="hero-actions">
+    <a class="button-link" href="/admin/upstreams">新增上游</a>
+    <a class="button-link" href="/admin/downstreams">查看下游</a>
+    <a class="button-link" href="/admin/logs">查看日志</a>
+  </div>
+</section>
+<div class="summary-grid">
+  <section class="summary-card">
+    <strong>{total_upstreams}</strong>
+    <span>总上游</span>
+    <small>启用 {active_upstreams} / 共 {total_upstreams}</small>
+  </section>
+  <section class="summary-card">
+    <strong>{responses_upstreams}</strong>
+    <span>Responses 上游</span>
+    <small>完整工具面优先走 Responses</small>
+  </section>
+  <section class="summary-card">
+    <strong>{alias_count}</strong>
+    <span>模型别名</span>
+    <small>{routed_models} 个路由模型</small>
+  </section>
+  <section class="summary-card">
+    <strong>{active_rate}%</strong>
+    <span>启用率</span>
+    <small>当前在线上游占比</small>
+  </section>
+</div>
 <div class="grid">
   <section class="panel wide">
-    <h2>上游密钥</h2>
-    <table class="table">
-      <thead>
-        <tr>
-          <th>名称</th>
-          <th>协议</th>
-          <th>模型</th>
-          <th>状态</th>
-          <th>失败次数</th>
-          <th>基础地址</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>{rows}</tbody>
-    </table>
+    <div class="section-head">
+      <div>
+        <h2>上游列表</h2>
+        <p>按协议、模型和别名一眼看清路由面，支持停用、删除和编辑。</p>
+      </div>
+      <div class="page-actions">
+        <a class="button-link" href="/admin/upstreams">新增上游</a>
+      </div>
+    </div>
+    <div class="table-shell">
+      <div class="table-tools">
+        <div>
+          <h2>路由表</h2>
+          <p class="helper">Responses 和 ChatCompletions 的协议属性都在这里可见。</p>
+        </div>
+        <span class="muted">显示 {total_upstreams} 条</span>
+      </div>
+      <div class="table-frame">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>协议</th>
+              <th>模型</th>
+              <th>状态</th>
+              <th>失败次数</th>
+              <th>基础地址</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </div>
   </section>
-  <section class="panel wide">
-    <h2>{heading}</h2>
+  <section class="panel drawer" id="upstream-drawer">
+    <div class="section-head">
+      <div>
+        <h2>{heading}</h2>
+        <p>保存后仍留在当前页，适合快速调整协议、模型和别名。</p>
+      </div>
+    </div>
     <form method="post" action="{action}">
       <div class="fields">
         <div class="field">
@@ -2882,7 +4048,8 @@ fn render_upstreams_page(
         </div>
         <div class="field">
           <label>说明</label>
-          <p class="muted">点击“获取当前模型”会请求上游的 <code>/v1/models</code> 并自动填充到模型字段。</p>
+          <p class="muted">点击“获取当前模型”会请求上游的 <code>/v1/models</code> 并自动填充到模型和别名字段。</p>
+          <p class="muted">Responses 上游保留完整工具面，ChatCompletions 只保留 function 风格工具。需要 web_search、file_search、computer_use 等非 function 能力时，请选 Responses。</p>
         </div>
       </div>
       <div class="actions">
@@ -2895,6 +4062,12 @@ fn render_upstreams_page(
         topbar = render_topbar("上游密钥", "配置上游密钥和模型支持"),
         notice = notice,
         rows = rows,
+        total_upstreams = total_upstreams,
+        active_upstreams = active_upstreams,
+        responses_upstreams = responses_upstreams,
+        alias_count = alias_count,
+        routed_models = routed_models,
+        active_rate = active_rate,
         heading = escape_html(&form.heading),
         action = escape_html(&form.action),
         name = escape_html(&form.name),
@@ -2944,16 +4117,18 @@ fn render_downstreams_page(
     } else {
         ""
     };
-    let lifetime_unlimited_selected = if matches!(lifetime_filter, DownstreamLifetimeFilter::Unlimited) {
-        "selected"
-    } else {
-        ""
-    };
-    let lifetime_expiring_selected = if matches!(lifetime_filter, DownstreamLifetimeFilter::Expiring) {
-        "selected"
-    } else {
-        ""
-    };
+    let lifetime_unlimited_selected =
+        if matches!(lifetime_filter, DownstreamLifetimeFilter::Unlimited) {
+            "selected"
+        } else {
+            ""
+        };
+    let lifetime_expiring_selected =
+        if matches!(lifetime_filter, DownstreamLifetimeFilter::Expiring) {
+            "selected"
+        } else {
+            ""
+        };
 
     let filtered_downstreams = state
         .downstreams
@@ -2979,8 +4154,16 @@ fn render_downstreams_page(
                 "<span class=\"pill ok\">永不过期</span>".to_string()
             };
             let status_class = if downstream.active { "ok" } else { "bad" };
-            let status_label = if downstream.active { "启用" } else { "停用" };
-            let toggle_label = if downstream.active { "停用" } else { "启用" };
+            let status_label = if downstream.active {
+                "启用"
+            } else {
+                "停用"
+            };
+            let toggle_label = if downstream.active {
+                "停用"
+            } else {
+                "启用"
+            };
             let limit_summary = format!(
                 r#"<div class="secret-stack">
   <span class="pill">每分钟 {}</span>
@@ -2990,17 +4173,29 @@ fn render_downstreams_page(
                 downstream.per_minute_limit,
                 downstream
                     .daily_token_limit
-                    .map(|value| format!("日令牌 {}", value))
-                    .unwrap_or_else(|| "日令牌 不限".to_string()),
+                    .map(|value| format!("Daily token limit {}", value))
+                    .unwrap_or_else(|| "Daily token limit unlimited".to_string()),
                 downstream
                     .monthly_token_limit
-                    .map(|value| format!("月令牌 {}", value))
-                    .unwrap_or_else(|| "月令牌 不限".to_string()),
+                    .map(|value| format!("Monthly token limit {}", value))
+                    .unwrap_or_else(|| "Monthly token limit unlimited".to_string()),
             );
-            let edit_href = escape_html(&format!("/admin/downstreams/{}/edit{query_suffix}", downstream.id));
-            let toggle_action = escape_html(&format!("/admin/downstreams/{}/toggle{query_suffix}", downstream.id));
-            let rotate_action = escape_html(&format!("/admin/downstreams/{}/rotate{query_suffix}", downstream.id));
-            let delete_action = escape_html(&format!("/admin/downstreams/{}/delete{query_suffix}", downstream.id));
+            let edit_href = escape_html(&format!(
+                "/admin/downstreams/{}/edit{query_suffix}",
+                downstream.id
+            ));
+            let toggle_action = escape_html(&format!(
+                "/admin/downstreams/{}/toggle{query_suffix}",
+                downstream.id
+            ));
+            let rotate_action = escape_html(&format!(
+                "/admin/downstreams/{}/rotate{query_suffix}",
+                downstream.id
+            ));
+            let delete_action = escape_html(&format!(
+                "/admin/downstreams/{}/delete{query_suffix}",
+                downstream.id
+            ));
             let _ = write!(
                 rows,
                 r#"<tr>
@@ -3202,12 +4397,12 @@ fn render_downstreams_page(
           <input name="per_minute_limit" type="number" value="{per_minute_limit}">
         </div>
         <div class="field">
-          <label>每日令牌限额</label>
-          <input name="daily_token_limit" type="number" placeholder="可选" value="{daily_token_limit}">
+          <label>Daily token limit</label>
+          <input name="daily_token_limit" type="number" placeholder="Optional" value="{daily_token_limit}">
         </div>
         <div class="field">
-          <label>每月令牌限额</label>
-          <input name="monthly_token_limit" type="number" placeholder="可选" value="{monthly_token_limit}">
+          <label>Monthly token limit</label>
+          <input name="monthly_token_limit" type="number" placeholder="Optional" value="{monthly_token_limit}">
         </div>
         <div class="field">
           <label>IP 白名单</label>
@@ -3338,12 +4533,7 @@ fn mask_secret(secret: &str) -> String {
     }
 
     let prefix = chars.iter().take(4).copied().collect::<String>();
-    let suffix = chars
-        .iter()
-        .rev()
-        .take(4)
-        .copied()
-        .collect::<Vec<_>>();
+    let suffix = chars.iter().rev().take(4).copied().collect::<Vec<_>>();
     let suffix = suffix.into_iter().rev().collect::<String>();
     format!("{prefix}…{suffix}")
 }
@@ -3355,17 +4545,43 @@ fn legacy_secret_hint(secret: &str) -> String {
     }
 
     let prefix = chars.iter().take(4).copied().collect::<String>();
-    let suffix = chars
-        .iter()
-        .rev()
-        .take(4)
-        .copied()
-        .collect::<Vec<_>>();
+    let suffix = chars.iter().rev().take(4).copied().collect::<Vec<_>>();
     let suffix = suffix.into_iter().rev().collect::<String>();
     format!("{prefix}…{suffix}")
 }
 
 fn render_logs_page(state: &crate::state::PersistedState) -> String {
+    let total_logs = state.usage_logs.len();
+    let total_tokens = state
+        .usage_logs
+        .iter()
+        .map(|log| log.total_tokens)
+        .sum::<u64>();
+    let error_logs = state
+        .usage_logs
+        .iter()
+        .filter(|log| log.status_code >= 400)
+        .count();
+    let latest_log = state.usage_logs.last();
+    let latest_request_id = latest_log
+        .map(|log| log.request_id.clone())
+        .unwrap_or_else(|| "暂无".to_string());
+    let latest_endpoint = latest_log
+        .map(|log| log.endpoint.clone())
+        .unwrap_or_else(|| "暂无".to_string());
+    let latest_model = latest_log
+        .map(|log| log.model.clone())
+        .unwrap_or_else(|| "暂无".to_string());
+    let latest_status = latest_log
+        .map(|log| log.status_code.to_string())
+        .unwrap_or_else(|| "暂无".to_string());
+    let latest_latency = latest_log
+        .map(|log| format!("{} ms", log.latency_ms))
+        .unwrap_or_else(|| "暂无".to_string());
+    let latest_tokens = latest_log
+        .map(|log| log.total_tokens.to_string())
+        .unwrap_or_else(|| "暂无".to_string());
+
     let mut rows = String::new();
     for log in state.usage_logs.iter().rev().take(50) {
         let _ = write!(
@@ -3389,24 +4605,103 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
 
     let body = format!(
         r#"{topbar}
-<section class="panel wide">
-  <h2>运行日志</h2>
-  <table class="table">
-    <thead>
-      <tr>
-        <th>接口</th>
-        <th>模型</th>
-        <th>状态</th>
-        <th>令牌</th>
-        <th>延迟</th>
-        <th>请求 ID</th>
-      </tr>
-    </thead>
-    <tbody>{rows}</tbody>
-  </table>
-</section>"#,
+<section class="hero-band">
+  <div class="hero-copy">
+    <h2>运行概览</h2>
+    <p>查看最近的网关使用记录、错误状态和请求延迟。这个页面保留了紧凑的日志表格和右侧最新请求摘要，方便排障时快速定位。</p>
+  </div>
+  <div class="hero-actions">
+    <a class="button-link" href="/admin/upstreams">查看上游</a>
+    <a class="button-link" href="/admin/downstreams">查看下游</a>
+  </div>
+</section>
+<div class="summary-grid">
+  <section class="summary-card">
+    <strong>{total_logs}</strong>
+    <span>日志总数</span>
+    <small>最近 50 条在表格中展示</small>
+  </section>
+  <section class="summary-card">
+    <strong>{total_tokens}</strong>
+    <span>Total tokens</span>
+    <small>Token usage across all records</small>
+  </section>
+  <section class="summary-card">
+    <strong>{error_logs}</strong>
+    <span>错误请求</span>
+    <small>状态码大于等于 400 的记录</small>
+  </section>
+  <section class="summary-card">
+    <strong>{latest_latency}</strong>
+    <span>最新延迟</span>
+    <small>最近一条请求的响应耗时</small>
+  </section>
+</div>
+<div class="grid">
+  <section class="panel wide">
+    <div class="section-head">
+      <div>
+        <h2>最近 50 条</h2>
+        <p>按最新时间倒序显示请求摘要、模型、状态和请求 ID。</p>
+      </div>
+      <div class="muted">共 {total_logs} 条</div>
+    </div>
+    <div class="table-shell">
+      <div class="table-frame">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>接口</th>
+              <th>模型</th>
+              <th>状态</th>
+              <th>Tokens</th>
+              <th>延迟</th>
+              <th>请求 ID</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+  <section class="panel drawer">
+    <div class="section-head">
+      <div>
+        <h2>最新请求</h2>
+        <p>这块保留最近一条日志的关键信息，方便直接核对路由和响应状态。</p>
+      </div>
+    </div>
+    <div class="context-list">
+      <div class="context-item">
+        <strong>请求 ID</strong>
+        <span>{latest_request_id}</span>
+      </div>
+      <div class="context-item">
+        <strong>接口</strong>
+        <span>{latest_endpoint}</span>
+      </div>
+      <div class="context-item">
+        <strong>模型</strong>
+        <span>{latest_model}</span>
+      </div>
+      <div class="context-item">
+        <strong>状态</strong>
+        <span>{latest_status} · {latest_latency} · {latest_tokens} tokens</span>
+      </div>
+    </div>
+  </section>
+</div>"#,
         topbar = render_topbar("运行日志", "最近的网关使用和错误记录"),
         rows = rows,
+        total_logs = total_logs,
+        total_tokens = total_tokens,
+        error_logs = error_logs,
+        latest_latency = latest_latency,
+        latest_request_id = escape_html(&latest_request_id),
+        latest_endpoint = escape_html(&latest_endpoint),
+        latest_model = escape_html(&latest_model),
+        latest_status = escape_html(&latest_status),
+        latest_tokens = escape_html(&latest_tokens),
     );
     render_shell("运行日志", ShellSection::Logs, &body)
 }
@@ -3459,7 +4754,7 @@ fn render_portal_page(
           <th>接口</th>
           <th>模型</th>
           <th>状态</th>
-        <th>令牌</th>
+          <th>Tokens</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>

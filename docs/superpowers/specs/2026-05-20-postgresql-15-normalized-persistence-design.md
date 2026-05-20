@@ -5,7 +5,7 @@ Status: Draft
 
 ## Context
 
-`chat2responses-gateway` currently persists gateway state in a JSON file at `STATE_PATH`, with usage logs also written to per-file archives next to that state file.
+`chat-responses-codex` currently persists gateway state in a JSON file at `STATE_PATH`, with usage logs also written to per-file archives next to that state file.
 
 That approach is good enough for a single-process demo, but it is not a durable long-term storage model:
 

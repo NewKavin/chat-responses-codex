@@ -1,5 +1,5 @@
 [package]
-name = "chat2responses-gateway"
+name = "chat-responses-codex"
 version = "0.1.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
@@ -26,9 +26,9 @@ tempfile = "=3.27.0"
 tower = "=0.5.3"
 
 [lib]
-name = "chat2responses_gateway"
+name = "chat_responses_codex"
 path = "src/lib.rs"
 
 [[bin]]
-name = "chat2responses-gateway"
+name = "chat-responses-codex"
 path = "src/main.rs"

@@ -6,15 +6,15 @@ model = "glm-5"
 review_model = "glm-5"
 model_reasoning_effort = "high"
 disable_response_storage = true
-model_catalog_json = "/absolute/path/to/chat2Responses/codex-model-catalog.json"
+model_catalog_json = "/absolute/path/to/chat-responses-codex/codex-model-catalog.json"
 
 [features]
 skill_mcp_dependency_install = true
 tool_suggest = true
 
 [model_providers.gateway]
-name = "chat2responses-gateway"
-base_url = "http://gateway-host:3000/v1"
+name = "chat-responses-codex"
+base_url = "http://gateway-host:3001/v1"
 wire_api = "responses"
 requires_openai_auth = true
 

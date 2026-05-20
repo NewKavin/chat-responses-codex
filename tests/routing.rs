@@ -1,4 +1,4 @@
-use chat2responses_gateway::routing::{
+use chat_responses_codex::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
 

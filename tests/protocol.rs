@@ -1,4 +1,4 @@
-use chat2responses_gateway::protocol::{
+use chat_responses_codex::protocol::{
     chat_request_to_responses_payload, chat_response_to_responses_payload,
     responses_request_to_chat_payload, responses_response_to_chat_payload,
 };
@@ -67,11 +67,14 @@ fn responses_request_converts_flat_tools_to_chat_payload() {
         converted["tools"][0]["function"]["description"],
         "Get the weather"
     );
-    assert_eq!(converted["tools"][0]["function"]["parameters"]["type"], "object");
+    assert_eq!(
+        converted["tools"][0]["function"]["parameters"]["type"],
+        "object"
+    );
 }
 
 #[test]
-fn responses_request_ignores_unsupported_tools_for_chat_payload() {
+fn responses_request_rejects_non_function_tools_for_chat_payload() {
     let responses = json!({
         "model": "gpt-4.1-mini",
         "input": "Hello",
@@ -93,30 +96,67 @@ fn responses_request_ignores_unsupported_tools_for_chat_payload() {
         }
     });
 
-    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
-
-    assert_eq!(converted["tools"][0]["type"], "function");
-    assert_eq!(converted["tools"][0]["function"]["name"], "get_weather");
-    assert!(converted.get("tool_choice").is_none());
+    let error = responses_request_to_chat_payload(&responses).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("unsupported responses tool type"));
 }
 
 #[test]
-fn responses_request_drops_tool_choice_when_no_supported_tools_remain() {
+fn responses_request_rejects_non_function_tool_choice_for_chat_payload() {
     let responses = json!({
         "model": "gpt-4.1-mini",
         "input": "Hello",
         "tools": [
             {
-                "type": "web_search"
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get the weather",
+                "parameters": {
+                    "type": "object"
+                }
             }
         ],
+        "tool_choice": {
+            "type": "web_search"
+        }
+    });
+
+    let error = responses_request_to_chat_payload(&responses).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("unsupported responses tool_choice type"));
+}
+
+#[test]
+fn responses_request_rejects_required_tool_choice_without_supported_tools() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": "Hello",
         "tool_choice": "required"
     });
 
-    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+    let error = responses_request_to_chat_payload(&responses).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("requires at least one supported function tool"));
+}
 
-    assert!(converted.get("tools").is_none());
-    assert!(converted.get("tool_choice").is_none());
+#[test]
+fn responses_request_rejects_unknown_input_items_for_chat_payload() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": [
+            {
+                "type": "reasoning"
+            }
+        ]
+    });
+
+    let error = responses_request_to_chat_payload(&responses).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("unsupported responses input item"));
 }
 
 #[test]
@@ -300,7 +340,10 @@ fn responses_request_converts_tool_calls_and_outputs_to_chat_payload() {
     assert_eq!(converted["messages"][1]["content"], "Hello");
     assert_eq!(converted["messages"][2]["role"], "assistant");
     assert_eq!(converted["messages"][2]["tool_calls"][0]["id"], "call_1");
-    assert_eq!(converted["messages"][2]["tool_calls"][0]["function"]["name"], "get_weather");
+    assert_eq!(
+        converted["messages"][2]["tool_calls"][0]["function"]["name"],
+        "get_weather"
+    );
     assert_eq!(
         converted["messages"][2]["tool_calls"][0]["function"]["arguments"],
         "{\"city\":\"Paris\"}"
@@ -353,17 +396,15 @@ fn chat_response_converts_tool_calls_to_responses_output() {
         }
     });
 
-    let converted = chat_response_to_responses_payload(&chat_response).expect("conversion should work");
+    let converted =
+        chat_response_to_responses_payload(&chat_response).expect("conversion should work");
 
     assert_eq!(converted["id"], "chatcmpl-1");
     assert_eq!(converted["object"], "response");
     assert_eq!(converted["output"][0]["type"], "function_call");
     assert_eq!(converted["output"][0]["call_id"], "call_1");
     assert_eq!(converted["output"][0]["name"], "get_weather");
-    assert_eq!(
-        converted["output"][0]["arguments"],
-        "{\"city\":\"Paris\"}"
-    );
+    assert_eq!(converted["output"][0]["arguments"], "{\"city\":\"Paris\"}");
     assert_eq!(converted["usage"]["prompt_tokens"], 1);
     assert_eq!(converted["usage"]["completion_tokens"], 0);
     assert_eq!(converted["usage"]["total_tokens"], 1);
@@ -398,7 +439,10 @@ fn responses_response_converts_tool_calls_to_chat_payload() {
     assert_eq!(converted["object"], "chat.completion");
     assert_eq!(converted["choices"][0]["message"]["role"], "assistant");
     assert_eq!(converted["choices"][0]["message"]["content"], json!(null));
-    assert_eq!(converted["choices"][0]["message"]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(
+        converted["choices"][0]["message"]["tool_calls"][0]["id"],
+        "call_1"
+    );
     assert_eq!(
         converted["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
         "get_weather"
@@ -407,4 +451,54 @@ fn responses_response_converts_tool_calls_to_chat_payload() {
     assert_eq!(converted["usage"]["prompt_tokens"], 1);
     assert_eq!(converted["usage"]["completion_tokens"], 0);
     assert_eq!(converted["usage"]["total_tokens"], 1);
+}
+
+#[test]
+fn responses_response_rejects_unknown_output_items() {
+    let responses = json!({
+        "id": "resp-1",
+        "object": "response",
+        "created": 1,
+        "model": "gpt-4.1-mini",
+        "output": [
+            {
+                "id": "reasoning_1",
+                "type": "reasoning"
+            }
+        ]
+    });
+
+    let error = responses_response_to_chat_payload(&responses).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("unsupported responses output item type"));
+}
+
+#[test]
+fn responses_response_rejects_non_assistant_output_roles() {
+    let responses = json!({
+        "id": "resp-1",
+        "object": "response",
+        "created": 1,
+        "model": "gpt-4.1-mini",
+        "output": [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Hi",
+                        "annotations": []
+                    }
+                ]
+            }
+        ]
+    });
+
+    let error = responses_response_to_chat_payload(&responses).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("unsupported responses output role"));
 }

@@ -1,4 +1,4 @@
-use chat2responses_gateway::keys::{generate_downstream_key, verify_downstream_key};
+use chat_responses_codex::keys::{generate_downstream_key, verify_downstream_key};
 
 #[test]
 fn generated_downstream_key_verifies_and_is_hashed_for_storage() {

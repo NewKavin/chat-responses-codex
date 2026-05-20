@@ -8,4 +8,4 @@ logs/
 target/*
 !target/release/
 target/release/*
-!target/release/chat2responses-gateway
+!target/release/chat-responses-codex
