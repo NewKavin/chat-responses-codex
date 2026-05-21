@@ -1,5 +1,5 @@
-pub mod keys;
-pub mod protocol;
-pub mod routing;
 pub mod server;
-pub mod state;
+pub use gateway_core::keys;
+pub use gateway_core::protocol;
+pub use gateway_core::routing;
+pub use gateway_core::state;

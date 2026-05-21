@@ -1119,7 +1119,7 @@ fn image_url_string(object: &Map<String, Value>) -> Option<String> {
 }
 
 #[derive(Debug)]
-pub(crate) struct StreamTranslator {
+pub struct StreamTranslator {
     state: StreamTranslatorState,
 }
 
@@ -1130,7 +1130,7 @@ enum StreamTranslatorState {
 }
 
 impl StreamTranslator {
-    pub(crate) fn new(source: UpstreamProtocol, target: UpstreamProtocol) -> Option<Self> {
+    pub fn new(source: UpstreamProtocol, target: UpstreamProtocol) -> Option<Self> {
         match (source, target) {
             (UpstreamProtocol::ChatCompletions, UpstreamProtocol::Responses) => Some(Self {
                 state: StreamTranslatorState::ChatToResponses(ChatToResponsesState::new()),
@@ -1142,14 +1142,14 @@ impl StreamTranslator {
         }
     }
 
-    pub(crate) fn translate_event(&mut self, event: &Value) -> Result<Vec<Value>, ProtocolError> {
+    pub fn translate_event(&mut self, event: &Value) -> Result<Vec<Value>, ProtocolError> {
         match &mut self.state {
             StreamTranslatorState::ChatToResponses(state) => state.translate_event(event),
             StreamTranslatorState::ResponsesToChat(state) => state.translate_event(event),
         }
     }
 
-    pub(crate) fn finish(&mut self) -> Result<Vec<Value>, ProtocolError> {
+    pub fn finish(&mut self) -> Result<Vec<Value>, ProtocolError> {
         match &mut self.state {
             StreamTranslatorState::ChatToResponses(state) => state.finish(),
             StreamTranslatorState::ResponsesToChat(state) => state.finish(),

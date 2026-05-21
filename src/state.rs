@@ -4,6 +4,7 @@ use crate::routing::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+#[path = "state/postgres.rs"]
 mod postgres;
 
 use reqwest::Client;
@@ -101,7 +102,7 @@ pub struct ModelRequestCostConfig {
 }
 
 impl UpstreamConfig {
-    pub(crate) fn route_models(&self) -> Vec<String> {
+    pub fn route_models(&self) -> Vec<String> {
         if !self.supported_models.is_empty() {
             return self.supported_models.clone();
         }
@@ -112,14 +113,14 @@ impl UpstreamConfig {
             .collect()
     }
 
-    pub(crate) fn supports_model(&self, model: &str) -> bool {
+    pub fn supports_model(&self, model: &str) -> bool {
         let route_models = self.route_models();
         route_models.is_empty()
             || route_models.iter().any(|candidate| candidate == model)
             || self.model_aliases.iter().any(|alias| alias.slug == model)
     }
 
-    pub(crate) fn resolved_model_name(&self, model: &str) -> Option<String> {
+    pub fn resolved_model_name(&self, model: &str) -> Option<String> {
         if !self.supports_model(model) {
             return None;
         }
@@ -131,7 +132,7 @@ impl UpstreamConfig {
             .or_else(|| Some(model.to_string()))
     }
 
-    pub(crate) fn request_cost_for_model(&self, model: &str) -> u32 {
+    pub fn request_cost_for_model(&self, model: &str) -> u32 {
         self.model_request_costs
             .iter()
             .find(|rule| rule.slug == model)
@@ -1090,15 +1091,15 @@ async fn load_usage_log_archive(path: &Path) -> io::Result<Vec<UsageLog>> {
     Ok(serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
-pub(crate) fn default_upstream_request_quota_5h() -> u32 {
+pub fn default_upstream_request_quota_5h() -> u32 {
     600
 }
 
-pub(crate) fn default_upstream_requests_per_minute() -> u32 {
+pub fn default_upstream_requests_per_minute() -> u32 {
     20
 }
 
-pub(crate) fn default_upstream_max_concurrency() -> u32 {
+pub fn default_upstream_max_concurrency() -> u32 {
     4
 }
 
@@ -1197,7 +1198,7 @@ pub fn encode_secret_suffix(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-pub(crate) fn join_upstream_url(base_url: &str, endpoint_path: &str) -> String {
+pub fn join_upstream_url(base_url: &str, endpoint_path: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let path = endpoint_path.trim_start_matches('/');
 

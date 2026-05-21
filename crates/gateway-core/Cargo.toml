@@ -1,16 +1,10 @@
 [package]
-name = "chat-responses-codex"
-version = "0.1.1"
+name = "gateway-core"
+version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
-[workspace]
-members = [".", "crates/gateway-core"]
-default-members = ["."]
-resolver = "2"
-
 [dependencies]
-gateway-core = { path = "crates/gateway-core" }
 axum = "=0.8.9"
 base64 = "=0.22.1"
 bytes = "=1.11.1"
@@ -32,9 +26,6 @@ tempfile = "=3.27.0"
 tower = "=0.5.3"
 
 [lib]
-name = "chat_responses_codex"
+name = "gateway_core"
 path = "src/lib.rs"
 
-[[bin]]
-name = "chat-responses-codex"
-path = "src/main.rs"

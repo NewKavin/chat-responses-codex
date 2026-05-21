@@ -129,6 +129,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-util",
+ "gateway-core",
  "rand",
  "reqwest",
  "serde",
@@ -241,6 +242,29 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "gateway-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "bytes",
+ "futures-util",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
