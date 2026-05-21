@@ -56,6 +56,11 @@ impl PostgresStateStore {
         conn.replace_state(state).await
     }
 
+    pub async fn append_usage_logs(&self, logs: &[UsageLog]) -> io::Result<()> {
+        let mut conn = self.conn.lock().await;
+        conn.append_usage_logs(logs).await
+    }
+
     async fn initialize_schema(&self) -> io::Result<()> {
         let mut conn = self.conn.lock().await;
         conn.batch_execute(
@@ -92,6 +97,23 @@ impl PostgresStateStore {
                 upstream_model TEXT NOT NULL,
                 PRIMARY KEY (upstream_id, slug)
             );
+
+            CREATE TABLE IF NOT EXISTS upstream_model_request_costs (
+                upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                slug TEXT NOT NULL,
+                cost INTEGER NOT NULL,
+                PRIMARY KEY (upstream_id, slug)
+            );
+
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS request_quota_5h INTEGER NOT NULL DEFAULT 600;
+
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS requests_per_minute INTEGER NOT NULL DEFAULT 20;
+
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 4;
 
             CREATE TABLE IF NOT EXISTS downstreams (
                 id TEXT PRIMARY KEY,
@@ -323,7 +345,8 @@ impl PgConnection {
         let mut upstreams = Vec::new();
         for row in self
             .query(
-                "SELECT id, name, base_url, api_key, protocol, active, failure_count \
+                "SELECT id, name, base_url, api_key, protocol, request_quota_5h, \
+                 requests_per_minute, max_concurrency, active, failure_count \
                  FROM upstreams ORDER BY id",
             )
             .await?
@@ -336,8 +359,18 @@ impl PgConnection {
                 protocol: decode_protocol(required_text(&row, 4, "upstreams.protocol")?)?,
                 supported_models: Vec::new(),
                 model_aliases: Vec::new(),
-                active: parse_bool(required_text(&row, 5, "upstreams.active")?)?,
-                failure_count: required_text(&row, 6, "upstreams.failure_count")?
+                model_request_costs: Vec::new(),
+                request_quota_5h: required_text(&row, 5, "upstreams.request_quota_5h")?
+                    .parse::<u32>()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                requests_per_minute: required_text(&row, 6, "upstreams.requests_per_minute")?
+                    .parse::<u32>()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                max_concurrency: required_text(&row, 7, "upstreams.max_concurrency")?
+                    .parse::<u32>()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                active: parse_bool(required_text(&row, 8, "upstreams.active")?)?,
+                failure_count: required_text(&row, 9, "upstreams.failure_count")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
             });
@@ -379,6 +412,26 @@ impl PgConnection {
                         "upstream_model_aliases.upstream_model",
                     )?,
                 });
+            }
+        }
+
+        for row in self
+            .query(
+                "SELECT upstream_id, slug, cost FROM upstream_model_request_costs \
+                 ORDER BY upstream_id, position, slug",
+            )
+            .await?
+        {
+            let upstream_id = required_text(&row, 0, "upstream_model_request_costs.upstream_id")?;
+            if let Some(&index) = upstream_index.get(&upstream_id) {
+                upstreams[index]
+                    .model_request_costs
+                    .push(super::ModelRequestCostConfig {
+                        slug: required_text(&row, 1, "upstream_model_request_costs.slug")?,
+                        cost: required_text(&row, 2, "upstream_model_request_costs.cost")?
+                            .parse::<u32>()
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                    });
             }
         }
 
@@ -502,19 +555,23 @@ impl PgConnection {
             self.batch_execute("DELETE FROM downstream_model_allowlist").await?;
             self.batch_execute("DELETE FROM downstreams").await?;
             self.batch_execute("DELETE FROM upstream_model_aliases").await?;
+            self.batch_execute("DELETE FROM upstream_model_request_costs").await?;
             self.batch_execute("DELETE FROM upstream_supported_models").await?;
             self.batch_execute("DELETE FROM upstreams").await?;
             self.batch_execute("DELETE FROM usage_logs").await?;
 
             for upstream in &state.upstreams {
                 self.batch_execute(&format!(
-                    "INSERT INTO upstreams (id, name, base_url, api_key, protocol, active, failure_count) \
-                     VALUES ({id}, {name}, {base_url}, {api_key}, {protocol}, {active}, {failure_count})",
+                    "INSERT INTO upstreams (id, name, base_url, api_key, protocol, request_quota_5h, requests_per_minute, max_concurrency, active, failure_count) \
+                     VALUES ({id}, {name}, {base_url}, {api_key}, {protocol}, {request_quota_5h}, {requests_per_minute}, {max_concurrency}, {active}, {failure_count})",
                     id = sql_string(&upstream.id),
                     name = sql_string(&upstream.name),
                     base_url = sql_string(&upstream.base_url),
                     api_key = sql_string(&upstream.api_key),
                     protocol = sql_string(&format!("{:?}", upstream.protocol)),
+                    request_quota_5h = upstream.request_quota_5h,
+                    requests_per_minute = upstream.requests_per_minute,
+                    max_concurrency = upstream.max_concurrency,
                     active = sql_bool(upstream.active),
                     failure_count = upstream.failure_count,
                 ))
@@ -539,6 +596,18 @@ impl PgConnection {
                         position = position as i64,
                         slug = sql_string(&alias.slug),
                         upstream_model = sql_string(&alias.upstream_model),
+                    ))
+                    .await?;
+                }
+
+                for (position, rule) in upstream.model_request_costs.iter().enumerate() {
+                    self.batch_execute(&format!(
+                        "INSERT INTO upstream_model_request_costs (upstream_id, position, slug, cost) \
+                         VALUES ({upstream_id}, {position}, {slug}, {cost})",
+                        upstream_id = sql_string(&upstream.id),
+                        position = position as i64,
+                        slug = sql_string(&rule.slug),
+                        cost = rule.cost as i64,
                     ))
                     .await?;
                 }
@@ -614,6 +683,14 @@ impl PgConnection {
                 Err(error)
             }
         }
+    }
+
+    async fn append_usage_logs(&mut self, logs: &[UsageLog]) -> io::Result<()> {
+        if logs.is_empty() {
+            return Ok(());
+        }
+
+        self.batch_execute(&usage_log_insert_sql(logs)).await
     }
 
     async fn batch_execute(&mut self, sql: &str) -> io::Result<()> {
@@ -998,6 +1075,35 @@ fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn usage_log_insert_sql(logs: &[UsageLog]) -> String {
+    const COLUMNS: &str = "id, downstream_key_id, upstream_key_id, endpoint, model, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at";
+    let values = logs
+        .iter()
+        .map(usage_log_values_sql)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!("INSERT INTO usage_logs ({COLUMNS}) VALUES {values} ON CONFLICT (id) DO NOTHING")
+}
+
+fn usage_log_values_sql(log: &UsageLog) -> String {
+    format!(
+        "({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        sql_string(&log.id),
+        sql_string(&log.downstream_key_id),
+        sql_string(&log.upstream_key_id),
+        sql_string(&log.endpoint),
+        sql_string(&log.model),
+        sql_string(&log.request_id),
+        log.status_code as i64,
+        log.prompt_tokens as i64,
+        log.completion_tokens as i64,
+        log.total_tokens as i64,
+        log.latency_ms as i64,
+        log.created_at as i64,
+    )
+}
+
 fn sql_optional_string(value: Option<&str>) -> String {
     value.map(sql_string).unwrap_or_else(|| "NULL".to_string())
 }
@@ -1137,6 +1243,49 @@ mod tests {
         assert_eq!(url.user, "chat_responses_codex");
         assert_eq!(url.host, "postgres");
         assert_eq!(url.database, "chat_responses_codex");
+    }
+
+    #[test]
+    fn usage_log_insert_sql_batches_multiple_rows() {
+        let sql = usage_log_insert_sql(&[
+            UsageLog {
+                id: "log-1".into(),
+                downstream_key_id: "down-1".into(),
+                upstream_key_id: "up-1".into(),
+                endpoint: "/v1/chat/completions".into(),
+                model: "gpt-4.1-mini".into(),
+                request_id: "req-1".into(),
+                status_code: 200,
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                total_tokens: 3,
+                latency_ms: 40,
+                created_at: 100,
+            },
+            UsageLog {
+                id: "log-2".into(),
+                downstream_key_id: "down-2".into(),
+                upstream_key_id: "up-2".into(),
+                endpoint: "/v1/responses".into(),
+                model: "glm-5".into(),
+                request_id: "req-2".into(),
+                status_code: 201,
+                prompt_tokens: 4,
+                completion_tokens: 5,
+                total_tokens: 9,
+                latency_ms: 55,
+                created_at: 101,
+            },
+        ]);
+
+        assert!(sql.starts_with(
+            "INSERT INTO usage_logs (id, downstream_key_id, upstream_key_id, endpoint, model, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at) VALUES "
+        ));
+        assert!(sql.contains("('log-1', 'down-1', 'up-1', '/v1/chat/completions', 'gpt-4.1-mini', 'req-1', 200, 1, 2, 3, 40, 100)"));
+        assert!(sql.contains(
+            "('log-2', 'down-2', 'up-2', '/v1/responses', 'glm-5', 'req-2', 201, 4, 5, 9, 55, 101)"
+        ));
+        assert!(sql.ends_with("ON CONFLICT (id) DO NOTHING"));
     }
 
     fn env_lock() -> &'static Mutex<()> {

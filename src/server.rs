@@ -6,8 +6,10 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, new_id, unix_seconds, AppConfig, AppState, DownstreamConfig, UpstreamConfig,
-    UsageLog, ADMIN_SESSION_TTL_SECONDS,
+    default_upstream_max_concurrency, default_upstream_request_quota_5h,
+    default_upstream_requests_per_minute, join_upstream_url, new_id, unix_seconds, AppConfig,
+    AppState, DownstreamConfig, ModelRequestCostConfig, UpstreamConfig, UsageLog,
+    ADMIN_SESSION_TTL_SECONDS,
 };
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Form, Json, Path, Query, State};
@@ -155,6 +157,7 @@ pub fn build_router(state: AppState) -> Router {
             "/admin/upstreams",
             get(admin_upstreams).post(submit_upstream),
         )
+        .route("/admin/upstreams/new", get(admin_upstreams_new))
         .route("/admin/upstreams/{id}/edit", get(edit_upstream))
         .route("/admin/upstreams/{id}", post(update_upstream))
         .route("/admin/upstreams/{id}/delete", post(delete_upstream))
@@ -330,6 +333,25 @@ async fn admin_upstreams(State(state): State<AppState>, headers: HeaderMap) -> i
         &snapshot,
         &UpstreamFormView::blank(),
         None,
+        false,
+    ))
+    .into_response()
+}
+
+async fn admin_upstreams_new(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(response) = ensure_admin(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.snapshot().await;
+    Html(render_upstreams_page(
+        &snapshot,
+        &UpstreamFormView::blank(),
+        None,
+        true,
     ))
     .into_response()
 }
@@ -350,6 +372,7 @@ async fn admin_downstreams(
         None,
         None,
         &filters,
+        false,
     ))
     .into_response()
 }
@@ -370,6 +393,7 @@ async fn admin_downstreams_new(
         None,
         None,
         &filters,
+        true,
     ))
     .into_response()
 }
@@ -399,6 +423,7 @@ async fn edit_downstream(
         None,
         None,
         &filters,
+        true,
     ))
     .into_response()
 }
@@ -457,6 +482,7 @@ async fn update_downstream(
                 None,
                 Some("已保存下游密钥"),
                 &filters,
+                true,
             ))
             .into_response()
         }
@@ -520,6 +546,7 @@ async fn rotate_downstream(
                 Some(&generated.plaintext),
                 Some("已重新生成下游密钥"),
                 &filters,
+                true,
             ))
             .into_response()
         }
@@ -549,6 +576,7 @@ async fn delete_downstream(
                 None,
                 Some("已删除下游密钥"),
                 &filters,
+                false,
             ))
             .into_response()
         }
@@ -577,6 +605,10 @@ struct UpstreamForm {
     protocol: String,
     models: String,
     model_aliases: Option<String>,
+    request_quota_5h: Option<u32>,
+    requests_per_minute: Option<u32>,
+    max_concurrency: Option<u32>,
+    model_request_costs: Option<String>,
     active: Option<String>,
 }
 
@@ -870,6 +902,10 @@ struct UpstreamFormView {
     protocol: UpstreamProtocol,
     models: String,
     model_aliases: String,
+    request_quota_5h: String,
+    requests_per_minute: String,
+    max_concurrency: String,
+    model_request_costs: String,
     active: bool,
 }
 
@@ -885,6 +921,10 @@ impl UpstreamFormView {
             protocol: UpstreamProtocol::ChatCompletions,
             models: String::new(),
             model_aliases: String::new(),
+            request_quota_5h: default_upstream_request_quota_5h().to_string(),
+            requests_per_minute: default_upstream_requests_per_minute().to_string(),
+            max_concurrency: default_upstream_max_concurrency().to_string(),
+            model_request_costs: String::new(),
             active: true,
         }
     }
@@ -900,12 +940,19 @@ impl UpstreamFormView {
             protocol: upstream.protocol,
             models: upstream.route_models().join(","),
             model_aliases: format_model_aliases(&upstream.model_aliases),
+            request_quota_5h: upstream.request_quota_5h.to_string(),
+            requests_per_minute: upstream.requests_per_minute.to_string(),
+            max_concurrency: upstream.max_concurrency.to_string(),
+            model_request_costs: format_model_request_costs(&upstream.model_request_costs),
             active: upstream.active,
         }
     }
 
-    fn from_form(form: &UpstreamForm, action: String) -> Self {
+    fn from_form(form: &UpstreamForm, action: String, existing: Option<&UpstreamConfig>) -> Self {
         let is_editing = action != "/admin/upstreams";
+        let existing_request_quota_5h = existing.map(|upstream| upstream.request_quota_5h);
+        let existing_requests_per_minute = existing.map(|upstream| upstream.requests_per_minute);
+        let existing_max_concurrency = existing.map(|upstream| upstream.max_concurrency);
         Self {
             action,
             heading: if is_editing {
@@ -924,6 +971,29 @@ impl UpstreamFormView {
             protocol: parse_upstream_protocol(&form.protocol),
             models: form.models.clone(),
             model_aliases: form.model_aliases.clone().unwrap_or_default(),
+            request_quota_5h: upstream_form_u32_string(
+                form.request_quota_5h,
+                existing_request_quota_5h,
+                default_upstream_request_quota_5h(),
+            ),
+            requests_per_minute: upstream_form_u32_string(
+                form.requests_per_minute,
+                existing_requests_per_minute,
+                default_upstream_requests_per_minute(),
+            ),
+            max_concurrency: upstream_form_u32_string(
+                form.max_concurrency,
+                existing_max_concurrency,
+                default_upstream_max_concurrency(),
+            ),
+            model_request_costs: form
+                .model_request_costs
+                .clone()
+                .or_else(|| {
+                    existing
+                        .map(|upstream| format_model_request_costs(&upstream.model_request_costs))
+                })
+                .unwrap_or_default(),
             active: form_toggle_enabled(&form.active),
         }
     }
@@ -966,6 +1036,7 @@ async fn edit_upstream(
         &snapshot,
         &UpstreamFormView::from_upstream(upstream),
         None,
+        true,
     ))
     .into_response()
 }
@@ -1032,30 +1103,35 @@ async fn handle_upstream_form_submit(
         .as_ref()
         .map(|id| format!("/admin/upstreams/{id}"))
         .unwrap_or_else(|| "/admin/upstreams".to_string());
-    let form_view = UpstreamFormView::from_form(&form, action);
+    let snapshot = state.snapshot().await;
+    let existing = upstream_id
+        .as_deref()
+        .and_then(|id| snapshot.upstreams.iter().find(|upstream| upstream.id == id));
+    let form_view = UpstreamFormView::from_form(&form, action, existing);
+    let render_error = |message: String| -> Response {
+        Html(render_upstreams_page(
+            &snapshot,
+            &form_view,
+            Some(&message),
+            true,
+        ))
+        .into_response()
+    };
 
     if form.intent.as_deref() == Some("fetch") {
         return match fetch_upstream_models(&state, &form).await {
             Ok(models) => {
-                let snapshot = state.snapshot().await;
                 let (models, model_aliases) = normalize_fetched_models(models);
                 let fetched = form_view.with_fetched_models(models, model_aliases);
                 Html(render_upstreams_page(
                     &snapshot,
                     &fetched,
                     Some("已获取当前模型"),
+                    true,
                 ))
                 .into_response()
             }
-            Err(error) => {
-                let snapshot = state.snapshot().await;
-                Html(render_upstreams_page(
-                    &snapshot,
-                    &form_view,
-                    Some(&format!("获取当前模型失败: {error}")),
-                ))
-                .into_response()
-            }
+            Err(error) => render_error(format!("获取当前模型失败: {error}")),
         };
     }
 
@@ -1063,14 +1139,38 @@ async fn handle_upstream_form_submit(
     let model_aliases = match parse_model_aliases(&form_view.model_aliases) {
         Ok(model_aliases) => model_aliases,
         Err(error) => {
-            let snapshot = state.snapshot().await;
-            return Html(render_upstreams_page(
-                &snapshot,
-                &form_view,
-                Some(&format!("模型别名格式错误: {error}")),
-            ))
-            .into_response();
+            return render_error(format!("模型别名格式错误: {error}"));
         }
+    };
+    let model_request_costs = match parse_model_request_costs(&form_view.model_request_costs) {
+        Ok(model_request_costs) => model_request_costs,
+        Err(error) => {
+            return render_error(format!("模型计费格式错误: {error}"));
+        }
+    };
+    let request_quota_5h = match parse_upstream_u32(
+        &form_view.request_quota_5h,
+        existing.map(|upstream| upstream.request_quota_5h),
+        default_upstream_request_quota_5h(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return render_error(format!("5小时请求上限格式错误: {error}")),
+    };
+    let requests_per_minute = match parse_upstream_u32(
+        &form_view.requests_per_minute,
+        existing.map(|upstream| upstream.requests_per_minute),
+        default_upstream_requests_per_minute(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return render_error(format!("每分钟请求上限格式错误: {error}")),
+    };
+    let max_concurrency = match parse_upstream_u32(
+        &form_view.max_concurrency,
+        existing.map(|upstream| upstream.max_concurrency),
+        default_upstream_max_concurrency(),
+    ) {
+        Ok(value) => value,
+        Err(error) => return render_error(format!("最大并发格式错误: {error}")),
     };
     let upstream = UpstreamConfig {
         id: upstream_id_value,
@@ -1080,6 +1180,10 @@ async fn handle_upstream_form_submit(
         protocol: form_view.protocol,
         supported_models: parse_csv(&form_view.models),
         model_aliases,
+        request_quota_5h,
+        requests_per_minute,
+        max_concurrency,
+        model_request_costs,
         active: form_view.active,
         failure_count: 0,
     };
@@ -1107,6 +1211,7 @@ async fn handle_upstream_form_submit(
                 &snapshot,
                 &form_view,
                 Some(&error.to_string()),
+                true,
             ))
             .into_response()
         }
@@ -1218,6 +1323,7 @@ async fn create_downstream(
         Some(&generated.plaintext),
         Some("已生成的下游密钥"),
         &filters,
+        false,
     ))
     .into_response()
 }
@@ -1229,8 +1335,8 @@ async fn process_gateway_request(
     endpoint: EndpointKind,
 ) -> Result<DispatchResult, GatewayError> {
     let secret = downstream_secret_from_headers(&headers)?;
-    let snapshot = state.snapshot().await;
-    let downstream = snapshot
+    let routing_snapshot = state.routing_snapshot().await;
+    let downstream = routing_snapshot
         .downstreams
         .iter()
         .find(|downstream| {
@@ -1312,37 +1418,31 @@ async fn process_gateway_request(
     }
 
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let requires_responses_upstream =
+    let requires_responses_tooling =
         endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
-
-    let started = Instant::now();
-    if requires_responses_upstream
-        && !snapshot.upstreams.iter().any(|upstream| {
+    let fallback_to_chat = requires_responses_tooling
+        && !routing_snapshot.upstreams.iter().any(|upstream| {
             upstream.active
                 && upstream.protocol == UpstreamProtocol::Responses
                 && upstream.supports_model(model)
-        })
-    {
-        tracing::warn!(
-            request_id = %request_id,
-            model = %model,
-            endpoint = %endpoint.path(),
-            "responses request requires a Responses upstream"
-        );
-        return Err(GatewayError::BadRequest(format!(
-            "responses requests with non-function tools require a Responses upstream for model \"{model}\""
-        )));
-    }
+        });
 
-    let candidate_protocols = if requires_responses_upstream {
-        vec![UpstreamProtocol::Responses]
+    let started = Instant::now();
+
+    let upstream_in_flight_counts = state.upstream_in_flight_counts().await;
+    let candidate_protocols = if requires_responses_tooling {
+        if fallback_to_chat {
+            vec![UpstreamProtocol::ChatCompletions]
+        } else {
+            vec![UpstreamProtocol::Responses]
+        }
     } else {
         vec![endpoint.native_protocol(), endpoint.opposite()]
     };
     let mut last_error = None;
 
     for protocol in candidate_protocols {
-        let mut upstreams = snapshot
+        let mut upstreams = routing_snapshot
             .upstreams
             .iter()
             .filter(|upstream| upstream.active)
@@ -1350,9 +1450,23 @@ async fn process_gateway_request(
             .filter(|upstream| upstream.supports_model(model))
             .cloned()
             .collect::<Vec<_>>();
-        upstreams.sort_by_key(|upstream| upstream.failure_count);
+        upstreams.sort_by_key(|upstream| {
+            (
+                upstream_in_flight_counts
+                    .get(&upstream.id)
+                    .copied()
+                    .unwrap_or(0),
+                upstream.failure_count,
+                upstream.id.clone(),
+            )
+        });
 
         for upstream in upstreams {
+            let in_flight = upstream_in_flight_counts
+                .get(&upstream.id)
+                .copied()
+                .unwrap_or(0);
+            let request_cost = upstream.request_cost_for_model(model);
             tracing::info!(
                 request_id = %request_id,
                 upstream = %upstream.id,
@@ -1360,114 +1474,115 @@ async fn process_gateway_request(
                 protocol = ?upstream.protocol,
                 endpoint = %endpoint.path(),
                 stream = request_stream,
-                "sending request to upstream"
+                in_flight,
+                request_cost,
+                failure_count = upstream.failure_count,
+                "considering upstream candidate"
             );
-            match send_to_upstream(&state, &upstream, &body, endpoint, request_stream, true).await {
-                Ok(mut result) => {
-                    result.request_id = request_id.clone();
-                    tracing::info!(
+
+            let mut attempt_stream = request_stream;
+            loop {
+                let admission = match state.try_reserve_upstream_request(&upstream, model).await {
+                    Ok(()) => None,
+                    Err(error) => Some(error),
+                };
+
+                if let Some(admission) = admission {
+                    tracing::warn!(
                         request_id = %request_id,
                         upstream = %upstream.id,
-                        status = result.status.as_u16(),
-                        latency_ms = started.elapsed().as_millis() as u64,
-                        "upstream request completed"
+                        error = %admission.message,
+                        retry_after_seconds = admission.retry_after_seconds,
+                        "upstream quota admission rejected"
                     );
-                    let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
-                    let log = UsageLog {
-                        id: request_id.clone(),
-                        downstream_key_id: downstream.id.clone(),
-                        upstream_key_id: upstream.id.clone(),
-                        endpoint: endpoint.path().to_string(),
-                        model: model.to_string(),
-                        request_id: request_id.clone(),
-                        status_code: result.status.as_u16(),
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens,
-                        latency_ms: started.elapsed().as_millis() as u64,
-                        created_at: unix_seconds(),
-                    };
-                    if let Err(error) = state.append_usage_log(log).await {
-                        tracing::error!(
-                            upstream = %upstream.id,
+                    last_error = Some(GatewayError::TooManyRequests {
+                        message: admission.message,
+                        retry_after_seconds: Some(admission.retry_after_seconds),
+                    });
+                    break;
+                }
+
+                tracing::info!(
+                    request_id = %request_id,
+                    upstream = %upstream.id,
+                    attempt_stream,
+                    request_cost,
+                    "reserved upstream capacity"
+                );
+
+                let result = send_to_upstream(
+                    &state,
+                    &upstream,
+                    &body,
+                    endpoint,
+                    request_stream,
+                    attempt_stream,
+                    &request_id,
+                    model,
+                    fallback_to_chat,
+                )
+                .await;
+                state.release_upstream_request(&upstream.id).await;
+
+                match result {
+                    Ok(mut result) => {
+                        result.request_id = request_id.clone();
+                        let completed_after_stream_fallback = request_stream && !attempt_stream;
+                        tracing::info!(
                             request_id = %request_id,
-                            error = %error,
-                            "failed to save usage log"
+                            upstream = %upstream.id,
+                            status = result.status.as_u16(),
+                            latency_ms = started.elapsed().as_millis() as u64,
+                            attempt_stream,
+                            completed_after_stream_fallback,
+                            "upstream request completed"
                         );
-                    }
-                    return Ok(result);
-                }
-                Err(_first_error) if request_stream => {
-                    tracing::warn!(
-                        request_id = %request_id,
-                        upstream = %upstream.id,
-                        "streaming upstream attempt failed; retrying without stream"
-                    );
-                    match send_to_upstream(
-                        &state,
-                        &upstream,
-                        &body,
-                        endpoint,
-                        request_stream,
-                        false,
-                    )
-                    .await
-                    {
-                        Ok(mut result) => {
-                            result.request_id = request_id.clone();
-                            tracing::info!(
-                                request_id = %request_id,
+                        let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
+                        let log = UsageLog {
+                            id: request_id.clone(),
+                            downstream_key_id: downstream.id.clone(),
+                            upstream_key_id: upstream.id.clone(),
+                            endpoint: endpoint.path().to_string(),
+                            model: model.to_string(),
+                            request_id: request_id.clone(),
+                            status_code: result.status.as_u16(),
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            latency_ms: started.elapsed().as_millis() as u64,
+                            created_at: unix_seconds(),
+                        };
+                        if let Err(error) = state.append_usage_log(log).await {
+                            tracing::error!(
                                 upstream = %upstream.id,
-                                status = result.status.as_u16(),
-                                latency_ms = started.elapsed().as_millis() as u64,
-                                "upstream request completed after stream fallback"
-                            );
-                            let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
-                            let log = UsageLog {
-                                id: request_id.clone(),
-                                downstream_key_id: downstream.id.clone(),
-                                upstream_key_id: upstream.id.clone(),
-                                endpoint: endpoint.path().to_string(),
-                                model: model.to_string(),
-                                request_id: request_id.clone(),
-                                status_code: result.status.as_u16(),
-                                prompt_tokens,
-                                completion_tokens,
-                                total_tokens,
-                                latency_ms: started.elapsed().as_millis() as u64,
-                                created_at: unix_seconds(),
-                            };
-                            if let Err(error) = state.append_usage_log(log).await {
-                                tracing::error!(
-                                    upstream = %upstream.id,
-                                    request_id = %request_id,
-                                    error = %error,
-                                    "failed to save usage log"
-                                );
-                            }
-                            return Ok(result);
-                        }
-                        Err(second_error) => {
-                            tracing::warn!(
                                 request_id = %request_id,
-                                upstream = %upstream.id,
-                                error = %second_error,
-                                "upstream request failed after stream fallback"
+                                error = %error,
+                                "failed to save usage log"
                             );
-                            state.mark_upstream_failure(&upstream.id).await.ok();
-                            last_error = Some(second_error);
                         }
+                        return Ok(result);
                     }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        request_id = %request_id,
-                        upstream = %upstream.id,
-                        error = %error,
-                        "upstream request failed"
-                    );
-                    state.mark_upstream_failure(&upstream.id).await.ok();
-                    last_error = Some(error);
+                    Err(error) if attempt_stream => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            upstream = %upstream.id,
+                            error = %error,
+                            "streaming upstream attempt failed; retrying without stream"
+                        );
+                        attempt_stream = false;
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            upstream = %upstream.id,
+                            error = %error,
+                            "upstream request failed"
+                        );
+                        state.mark_upstream_failure(&upstream.id).await.ok();
+                        last_error = Some(error);
+                        break;
+                    }
                 }
             }
         }
@@ -1490,7 +1605,7 @@ async fn process_gateway_request(
         endpoint = %endpoint.path(),
         "no routable upstream found for request"
     );
-    Err(no_routable_model_error(&snapshot, model))
+    Err(no_routable_model_error(&routing_snapshot, model))
 }
 
 fn responses_request_requires_responses_upstream(body: &Value) -> bool {
@@ -1520,14 +1635,190 @@ fn responses_tool_requires_responses_upstream(tool: &Value) -> bool {
 }
 
 fn responses_tool_choice_requires_responses_upstream(tool_choice: &Value) -> bool {
-    let Some(object) = tool_choice.as_object() else {
-        return false;
+    match tool_choice {
+        Value::String(choice) => !matches!(choice.as_str(), "none" | "auto" | "required"),
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) != Some("function") {
+                return true;
+            }
+
+            object
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name").and_then(Value::as_str))
+                .or_else(|| object.get("name").and_then(Value::as_str))
+                .is_none()
+        }
+        _ => true,
+    }
+}
+
+fn responses_request_to_chat_payload_with_fallback(body: &Value) -> Result<Value, ProtocolError> {
+    let mut sanitized = body.clone();
+
+    if let Some(object) = sanitized.as_object_mut() {
+        let (had_tools_array, has_supported_tools) = match object.get_mut("tools") {
+            Some(Value::Array(tools)) => {
+                tools.retain(|tool| !responses_tool_requires_responses_upstream(tool));
+                (true, !tools.is_empty())
+            }
+            _ => (false, false),
+        };
+
+        if had_tools_array && !has_supported_tools {
+            object.remove("tools");
+        }
+
+        if let Some(tool_choice) = object.get("tool_choice").cloned() {
+            if responses_tool_choice_requires_chat_fallback(&tool_choice, has_supported_tools) {
+                object.remove("tool_choice");
+            }
+        }
+    }
+
+    responses_request_to_chat_payload(&sanitized)
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResponsesChatFallbackReport {
+    retained_tools: Vec<String>,
+    stripped_tools: Vec<String>,
+    tool_choice: Option<String>,
+    tool_choice_dropped: bool,
+}
+
+#[derive(Debug, Clone)]
+struct StreamRetryReport {
+    attempted_stream: bool,
+    retry_without_stream: bool,
+    responses_chat_fallback: Option<ResponsesChatFallbackReport>,
+}
+
+fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallbackReport {
+    let mut report = ResponsesChatFallbackReport::default();
+
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            let summary = responses_tool_summary(tool);
+            if responses_tool_requires_responses_upstream(tool) {
+                report.stripped_tools.push(summary);
+            } else {
+                report.retained_tools.push(summary);
+            }
+        }
+    }
+
+    if let Some(tool_choice) = body.get("tool_choice") {
+        report.tool_choice = Some(responses_tool_choice_summary(tool_choice));
+        report.tool_choice_dropped = responses_tool_choice_requires_chat_fallback(
+            tool_choice,
+            !report.retained_tools.is_empty(),
+        );
+    }
+
+    report
+}
+
+fn stream_retry_report(
+    body: &Value,
+    endpoint: EndpointKind,
+    upstream_protocol: UpstreamProtocol,
+    attempted_stream: bool,
+    retry_without_stream: bool,
+) -> StreamRetryReport {
+    let responses_chat_fallback = if endpoint == EndpointKind::Responses
+        && upstream_protocol == UpstreamProtocol::ChatCompletions
+    {
+        Some(responses_request_chat_fallback_report(body))
+    } else {
+        None
     };
 
-    matches!(
-        object.get("type").and_then(Value::as_str),
-        Some(tool_type) if tool_type != "function"
-    )
+    StreamRetryReport {
+        attempted_stream,
+        retry_without_stream,
+        responses_chat_fallback,
+    }
+}
+
+fn responses_tool_summary(tool: &Value) -> String {
+    let Some(object) = tool.as_object() else {
+        return serde_json::to_string(tool).unwrap_or_else(|_| format!("{tool}"));
+    };
+
+    if let Some(function) = object.get("function").and_then(Value::as_object) {
+        if let Some(name) = function.get("name").and_then(Value::as_str) {
+            return format!("function:{name}");
+        }
+        return "function".to_string();
+    }
+
+    if let Some(tool_type) = object.get("type").and_then(Value::as_str) {
+        if let Some(name) = object.get("name").and_then(Value::as_str) {
+            return format!("{tool_type}:{name}");
+        }
+        return tool_type.to_string();
+    }
+
+    if let Some(name) = object.get("name").and_then(Value::as_str) {
+        return format!("function:{name}");
+    }
+
+    serde_json::to_string(tool).unwrap_or_else(|_| format!("{tool}"))
+}
+
+fn responses_tool_choice_summary(tool_choice: &Value) -> String {
+    match tool_choice {
+        Value::String(choice) => choice.clone(),
+        Value::Object(object) => {
+            if let Some(function) = object.get("function").and_then(Value::as_object) {
+                if let Some(name) = function.get("name").and_then(Value::as_str) {
+                    return format!("function:{name}");
+                }
+            }
+
+            if let Some(tool_type) = object.get("type").and_then(Value::as_str) {
+                if let Some(name) = object.get("name").and_then(Value::as_str) {
+                    return format!("{tool_type}:{name}");
+                }
+                return tool_type.to_string();
+            }
+
+            if let Some(name) = object.get("name").and_then(Value::as_str) {
+                return format!("function:{name}");
+            }
+
+            serde_json::to_string(tool_choice).unwrap_or_else(|_| format!("{tool_choice}"))
+        }
+        _ => serde_json::to_string(tool_choice).unwrap_or_else(|_| format!("{tool_choice}")),
+    }
+}
+
+fn responses_tool_choice_requires_chat_fallback(tool_choice: &Value, has_supported_tools: bool) -> bool {
+    match tool_choice {
+        Value::String(choice) => match choice.as_str() {
+            "none" => false,
+            "auto" | "required" => !has_supported_tools,
+            _ => true,
+        },
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) != Some("function") {
+                return true;
+            }
+
+            if !has_supported_tools {
+                return true;
+            }
+
+            object
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name").and_then(Value::as_str))
+                .or_else(|| object.get("name").and_then(Value::as_str))
+                .is_none()
+        }
+        _ => true,
+    }
 }
 
 async fn send_to_upstream(
@@ -1537,6 +1828,9 @@ async fn send_to_upstream(
     endpoint: EndpointKind,
     request_stream: bool,
     try_upstream_stream: bool,
+    request_id: &str,
+    model: &str,
+    chat_fallback_requested: bool,
 ) -> Result<DispatchResult, GatewayError> {
     let upstream_body = match (endpoint, upstream.protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => body.clone(),
@@ -1545,7 +1839,31 @@ async fn send_to_upstream(
         }
         (EndpointKind::Responses, UpstreamProtocol::Responses) => body.clone(),
         (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
-            responses_request_to_chat_payload(body).map_err(protocol_error_to_gateway)?
+            let fallback_report = responses_request_chat_fallback_report(body);
+            if chat_fallback_requested {
+                tracing::warn!(
+                    request_id = %request_id,
+                    model = %model,
+                    endpoint = %endpoint.path(),
+                    retained_tools = ?fallback_report.retained_tools,
+                    stripped_tools = ?fallback_report.stripped_tools,
+                    tool_choice = ?fallback_report.tool_choice,
+                    tool_choice_dropped = fallback_report.tool_choice_dropped,
+                    "responses request downgraded to ChatCompletions because no Responses upstream supports the model"
+                );
+            } else if !fallback_report.stripped_tools.is_empty() || fallback_report.tool_choice_dropped {
+                tracing::warn!(
+                    request_id = %request_id,
+                    model = %model,
+                    endpoint = %endpoint.path(),
+                    retained_tools = ?fallback_report.retained_tools,
+                    stripped_tools = ?fallback_report.stripped_tools,
+                    tool_choice = ?fallback_report.tool_choice,
+                    tool_choice_dropped = fallback_report.tool_choice_dropped,
+                    "responses request sanitized before ChatCompletions conversion"
+                );
+            }
+            responses_request_to_chat_payload_with_fallback(body).map_err(protocol_error_to_gateway)?
         }
     };
     let mut upstream_body = upstream_body;
@@ -2485,6 +2803,70 @@ fn format_model_aliases(aliases: &[crate::state::ModelAliasConfig]) -> String {
         .join(",")
 }
 
+fn format_model_request_costs(costs: &[ModelRequestCostConfig]) -> String {
+    if costs.is_empty() {
+        return String::new();
+    }
+
+    costs
+        .iter()
+        .map(|rule| format!("{}={}", rule.slug, rule.cost))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_model_request_costs(input: &str) -> Result<Vec<ModelRequestCostConfig>, String> {
+    let mut costs = Vec::new();
+
+    for raw_entry in input.lines().flat_map(|line| line.split(',')) {
+        let entry = raw_entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let Some((slug, cost)) = entry.split_once('=') else {
+            return Err(format!("缺少 '=': {entry}"));
+        };
+
+        let slug = slug.trim().to_lowercase();
+        let cost = cost.trim();
+        if slug.is_empty() || cost.is_empty() {
+            return Err(format!("模型计费格式必须是 slug=cost: {entry}"));
+        }
+
+        let cost = cost
+            .parse::<u32>()
+            .map_err(|_| format!("计费必须是数字: {entry}"))?;
+        if cost == 0 {
+            return Err(format!("计费必须大于 0: {entry}"));
+        }
+
+        costs.push(ModelRequestCostConfig { slug, cost });
+    }
+
+    Ok(costs)
+}
+
+fn upstream_form_u32_string(value: Option<u32>, existing: Option<u32>, default: u32) -> String {
+    value.or(existing).unwrap_or(default).to_string()
+}
+
+fn parse_upstream_u32(value: &str, existing: Option<u32>, default: u32) -> Result<u32, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(existing.unwrap_or(default));
+    }
+
+    let parsed = trimmed
+        .parse::<u32>()
+        .map_err(|_| "请输入正整数".to_string())?;
+    if parsed == 0 {
+        return Err("必须大于 0".to_string());
+    }
+
+    Ok(parsed)
+}
+
 fn parse_csv(input: &str) -> Vec<String> {
     input
         .split(',')
@@ -2554,19 +2936,19 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title}</title>
-  <style>
+    <style>
     :root {{
       color-scheme: light;
-      --bg: #eef5f7;
-      --panel: rgba(255, 255, 255, 0.88);
+      --bg: #edf2f5;
+      --panel: rgba(255, 255, 255, 0.9);
       --panel-strong: #ffffff;
-      --border: rgba(15, 23, 42, 0.08);
-      --text: #102033;
+      --border: rgba(15, 23, 42, 0.09);
+      --text: #0f1d2b;
       --muted: #64748b;
-      --accent: #13b5a6;
-      --accent-2: #38bdf8;
+      --accent: #129687;
+      --accent-2: #3799e6;
       --danger: #ef4444;
-      --shadow: 0 22px 60px rgba(15, 23, 42, 0.08);
+      --shadow: 0 26px 72px rgba(15, 23, 42, 0.09);
     }}
     * {{ box-sizing: border-box; }}
     html, body {{ min-height: 100%; }}
@@ -2574,9 +2956,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       margin: 0;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
-        radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 28%),
-        radial-gradient(circle at top right, rgba(19, 181, 166, 0.16), transparent 30%),
-        linear-gradient(180deg, #f8fbfc 0%, #eef5f7 100%);
+        radial-gradient(circle at top left, rgba(55, 153, 230, 0.14), transparent 30%),
+        radial-gradient(circle at top right, rgba(18, 150, 135, 0.14), transparent 32%),
+        linear-gradient(180deg, #f7fafc 0%, #edf2f5 100%);
       color: var(--text);
       min-height: 100vh;
     }}
@@ -2586,7 +2968,7 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     }}
     .layout {{
       display: grid;
-      grid-template-columns: 280px minmax(0, 1fr);
+      grid-template-columns: 304px minmax(0, 1fr);
       min-height: 100vh;
     }}
     .sidebar {{
@@ -2594,17 +2976,19 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       top: 0;
       align-self: start;
       min-height: 100vh;
-      padding: 22px 18px;
-      background: rgba(255, 255, 255, 0.72);
+      padding: 24px 20px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 251, 253, 0.72)),
+        rgba(255, 255, 255, 0.72);
       border-right: 1px solid var(--border);
-      backdrop-filter: blur(18px);
-      box-shadow: 10px 0 32px rgba(15, 23, 42, 0.03);
+      backdrop-filter: blur(20px);
+      box-shadow: 12px 0 34px rgba(15, 23, 42, 0.04);
     }}
     .brand {{
       display: flex;
       align-items: center;
       gap: 12px;
-      padding: 10px 12px 22px;
+      padding: 10px 12px 24px;
     }}
     .brand-mark {{
       width: 44px;
@@ -2613,10 +2997,10 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       display: grid;
       place-items: center;
       color: #fff;
-      background: linear-gradient(135deg, #0f172a, #13b5a6);
+      background: linear-gradient(135deg, #0f172a, #129687 55%, #3799e6);
       font-weight: 800;
       letter-spacing: -0.04em;
-      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.24);
     }}
     .brand-text h1 {{
       margin: 0;
@@ -2683,14 +3067,14 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       line-height: 1.5;
     }}
     .main {{
-      padding: 24px;
+      padding: 30px 32px 34px;
     }}
     .page-header {{
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 18px;
+      margin-bottom: 20px;
     }}
     .page-title {{
       display: flex;
@@ -2699,8 +3083,8 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     }}
     .page-title h2 {{
       margin: 0;
-      font-size: 30px;
-      letter-spacing: -0.05em;
+      font-size: 32px;
+      letter-spacing: -0.055em;
     }}
     .page-title p {{
       margin: 0;
@@ -2719,26 +3103,26 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       align-items: stretch;
       justify-content: space-between;
       gap: 18px;
-      margin-bottom: 16px;
-      padding: 22px 24px;
-      border-radius: 24px;
-      border: 1px solid rgba(19, 181, 166, 0.16);
+      margin-bottom: 18px;
+      padding: 28px 28px 26px;
+      border-radius: 28px;
+      border: 1px solid rgba(18, 150, 135, 0.18);
       background:
-        linear-gradient(135deg, rgba(19, 181, 166, 0.12), rgba(56, 189, 248, 0.08)),
-        rgba(255, 255, 255, 0.72);
+        linear-gradient(135deg, rgba(18, 150, 135, 0.12), rgba(55, 153, 230, 0.1)),
+        rgba(255, 255, 255, 0.8);
       box-shadow: var(--shadow);
       backdrop-filter: blur(18px);
     }}
     .hero-band h2 {{
       margin: 0;
-      font-size: 32px;
-      letter-spacing: -0.05em;
+      font-size: 36px;
+      letter-spacing: -0.06em;
     }}
     .hero-band p {{
       margin: 8px 0 0;
       color: var(--muted);
       line-height: 1.7;
-      max-width: 72ch;
+      max-width: 76ch;
     }}
     .hero-band .hero-copy {{
       display: grid;
@@ -2755,17 +3139,24 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     .summary-grid {{
       display: grid;
       grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 16px;
-      margin-bottom: 16px;
+      gap: 18px;
+      margin-bottom: 18px;
     }}
     .summary-card {{
       grid-column: span 3;
-      padding: 18px;
-      border-radius: 20px;
+      padding: 20px;
+      border-radius: 22px;
       border: 1px solid var(--border);
-      background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(255,255,255,0.76));
+      min-height: 160px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.78));
       box-shadow: var(--shadow);
       backdrop-filter: blur(18px);
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    }}
+    .summary-card:hover {{
+      transform: translateY(-2px);
+      border-color: rgba(19, 181, 166, 0.18);
+      box-shadow: 0 24px 64px rgba(15, 23, 42, 0.11);
     }}
     .summary-card strong {{
       display: block;
@@ -2791,11 +3182,11 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       align-items: flex-start;
       justify-content: space-between;
       gap: 14px;
-      margin-bottom: 16px;
+      margin-bottom: 18px;
     }}
     .section-head h2 {{
       margin: 0;
-      font-size: 18px;
+      font-size: 19px;
       letter-spacing: -0.02em;
     }}
     .section-head p {{
@@ -2805,12 +3196,13 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     }}
     .table-shell {{
       display: grid;
-      gap: 14px;
+      gap: 16px;
     }}
     .table-frame {{
-      border-radius: 18px;
+      border-radius: 20px;
       border: 1px solid rgba(148, 163, 184, 0.16);
-      overflow: hidden;
+      overflow-x: auto;
+      overflow-y: hidden;
       background: rgba(255, 255, 255, 0.82);
     }}
     .table-frame .table th,
@@ -2834,8 +3226,8 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     .context-item {{
       display: grid;
       gap: 6px;
-      padding: 14px 16px;
-      border-radius: 18px;
+      padding: 16px 18px;
+      border-radius: 20px;
       border: 1px solid rgba(148, 163, 184, 0.16);
       background: rgba(255, 255, 255, 0.76);
     }}
@@ -2852,15 +3244,21 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     .grid {{
       display: grid;
       grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 16px;
+      gap: 18px;
     }}
     .panel {{
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 22px;
-      padding: 20px;
+      border-radius: 24px;
+      padding: 22px;
       box-shadow: var(--shadow);
       backdrop-filter: blur(18px);
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    }}
+    .panel:hover {{
+      transform: translateY(-1px);
+      border-color: rgba(19, 181, 166, 0.14);
+      box-shadow: 0 24px 64px rgba(15, 23, 42, 0.10);
     }}
     .panel h2 {{
       margin: 0 0 14px;
@@ -2876,7 +3274,7 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     }}
     .card {{
       grid-column: span 3;
-      background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.74));
+      background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(255,255,255,0.76));
     }}
     .card strong {{
       display: block;
@@ -2896,6 +3294,68 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       top: 24px;
       align-self: start;
     }}
+    .capability-grid {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-bottom: 18px;
+    }}
+    .capability-card {{
+      min-height: 168px;
+      display: grid;
+      gap: 10px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.96), rgba(244, 250, 251, 0.9));
+      border: 1px solid rgba(18, 150, 135, 0.12);
+    }}
+    .capability-card h3 {{
+      margin: 0;
+      color: var(--accent);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }}
+    .capability-card strong {{
+      display: block;
+      font-size: 20px;
+      line-height: 1.35;
+      letter-spacing: -0.04em;
+    }}
+    .capability-card p {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+    }}
+    .drawer-layout {{
+      position: relative;
+      align-items: start;
+    }}
+    .drawer-layout[data-drawer-state="open"] .wide {{
+      grid-column: span 8;
+    }}
+    .drawer-layout[data-drawer-state="open"] .drawer {{
+      z-index: 2;
+      animation: drawer-rise 0.2s ease-out both;
+    }}
+    .drawer-layout[data-drawer-state="open"] .drawer-backdrop {{
+      display: block;
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      border-radius: 22px;
+      background: rgba(15, 23, 42, 0.18);
+      backdrop-filter: blur(2px);
+    }}
+    .drawer-layout[data-drawer-state="closed"] .drawer {{
+      display: none;
+    }}
+    .drawer-layout[data-drawer-state="closed"] .drawer-backdrop {{
+      display: none;
+    }}
+    .drawer-backdrop {{
+      display: none;
+    }}
     .toolbar {{
       display: flex;
       align-items: center;
@@ -2910,6 +3370,7 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     }}
     .table {{
       width: 100%;
+      min-width: 860px;
       border-collapse: separate;
       border-spacing: 0;
       overflow: hidden;
@@ -3038,16 +3499,34 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       padding: 8px 12px;
       border-radius: 999px;
       border: 1px solid var(--border);
-      background: rgba(255, 255, 255, 0.82);
+      background: rgba(255, 255, 255, 0.78);
       color: var(--text);
       font-size: 13px;
       font-weight: 700;
       line-height: 1;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+      transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
     }}
     .button-link:hover {{
       border-color: rgba(19, 181, 166, 0.4);
       background: rgba(19, 181, 166, 0.08);
+      transform: translateY(-1px);
+    }}
+    .button-link.primary {{
+      border-color: rgba(19, 181, 166, 0.22);
+      background: linear-gradient(135deg, rgba(19, 181, 166, 0.14), rgba(56, 189, 248, 0.08));
+      box-shadow: 0 10px 22px rgba(19, 181, 166, 0.14);
+    }}
+    .button-link.primary:hover {{
+      background: linear-gradient(135deg, rgba(19, 181, 166, 0.2), rgba(56, 189, 248, 0.12));
+      box-shadow: 0 14px 28px rgba(19, 181, 166, 0.16);
+    }}
+    .button-link.ghost {{
+      background: rgba(255, 255, 255, 0.62);
+      color: var(--muted);
+    }}
+    .button-link.ghost:hover {{
+      color: var(--text);
     }}
     .row-actions {{
       display: flex;
@@ -3073,6 +3552,12 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       gap: 8px;
       align-items: center;
       flex-wrap: wrap;
+    }}
+    .secret-actions {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
     }}
     .secret-value {{
       display: inline-flex;
@@ -3120,25 +3605,15 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     .spacer {{
       height: 12px;
     }}
-    @media (max-width: 1100px) {{
-      .card, .summary-card {{ grid-column: span 6; }}
-      .drawer {{ grid-column: span 12; position: static; }}
-    }}
-    @media (max-width: 960px) {{
-      .layout {{ grid-template-columns: 1fr; }}
-      .sidebar {{
-        position: static;
-        min-height: auto;
-        border-right: 0;
-        border-bottom: 1px solid var(--border);
+    @keyframes drawer-rise {{
+      from {{
+        opacity: 0;
+        transform: translateY(8px);
       }}
-      .main {{ padding: 18px; }}
-      .page-header {{ flex-direction: column; }}
-      .page-actions {{ justify-content: flex-start; }}
-      .fields {{ grid-template-columns: 1fr; }}
-      .card, .half, .summary-card {{ grid-column: span 12; }}
-      .hero-band {{ flex-direction: column; }}
-      .hero-actions {{ justify-content: flex-start; }}
+      to {{
+        opacity: 1;
+        transform: translateY(0);
+      }}
     }}
   </style>
   <script>
@@ -3251,9 +3726,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">CRC</div>
-        <div class="brand-text">
+      <div class="brand-text">
           <h1>chat-responses-codex</h1>
-          <p>协议转换网关控制台</p>
+          <p>协议转换与能力保留控制台</p>
         </div>
       </div>
       <nav class="nav">
@@ -3621,17 +4096,6 @@ fn render_login_page(
       cursor: pointer;
       box-shadow: 0 10px 22px rgba(19, 181, 166, 0.22);
     }}
-    @media (max-width: 960px) {{
-      .frame {{
-        grid-template-columns: 1fr;
-      }}
-      .hero {{
-        min-height: auto;
-      }}
-      .hero-grid {{
-        grid-template-columns: 1fr;
-      }}
-    }}
   </style>
 </head>
 <body>
@@ -3722,12 +4186,12 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
 <section class="hero-band">
   <div class="hero-copy">
     <h2>控制台总览</h2>
-    <p>从这里查看上游、下游和请求日志的整体状态。管理页延续同一套控制台布局，方便快速切换到具体操作。</p>
+    <p>从这里查看上游、下游和请求日志的整体状态。这个控制台强调协议转换如何保留工具面、模型语义和调用上下文，必要时才做可追踪的降级。</p>
   </div>
   <div class="hero-actions">
-    <a class="button-link" href="/admin/upstreams">管理上游</a>
-    <a class="button-link" href="/admin/downstreams">管理下游</a>
-    <a class="button-link" href="/admin/logs">查看运行日志</a>
+    <a class="button-link primary" href="/admin/upstreams">管理上游</a>
+    <a class="button-link ghost" href="/admin/downstreams">管理下游</a>
+    <a class="button-link ghost" href="/admin/logs">查看运行日志</a>
   </div>
 </section>
 <div class="summary-grid">
@@ -3752,12 +4216,29 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
     <small>{responses_upstreams} 个 Responses 上游在线</small>
   </section>
 </div>
+<div class="capability-grid">
+  <section class="panel capability-card">
+    <h3>能力保留</h3>
+    <strong>优先保留 Responses 工具面</strong>
+    <p>支持 web_search、file_search、computer_use 等能力时，不做无声裁剪。</p>
+  </section>
+  <section class="panel capability-card">
+    <h3>降级可追踪</h3>
+    <strong>不支持时再降级到 ChatCompletions</strong>
+    <p>无法原样透传的工具会被记录到日志，方便排查能力损耗。</p>
+  </section>
+  <section class="panel capability-card">
+    <h3>模型映射</h3>
+    <strong>自动归一大小写与别名</strong>
+    <p>减少手工输入模型名，让上游模型和下游暴露名称保持一致。</p>
+  </section>
+</div>
 <div class="grid">
   <section class="panel wide">
     <div class="section-head">
       <div>
         <h2>概览</h2>
-        <p>这个网关会把 chat 和 responses 请求转换后转发给可用的上游密钥，并记录所有请求用于审计。Responses 请求带非 function 工具时会直接要求 Responses 上游，避免静默降级。</p>
+        <p>这个网关会把 chat 和 responses 请求转换后转发给可用的上游密钥，并记录所有请求用于审计。Responses 优先保留完整工具面，必要时才做可追踪的降级。</p>
       </div>
       <div class="page-actions">
         <a class="button-link" href="/admin/upstreams">新建上游</a>
@@ -3774,8 +4255,12 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
         <span>{app}</span>
       </div>
       <div class="context-item">
+        <strong>能力保留</strong>
+        <span>Responses 上游优先保留完整工具面；无法原样透传时会降级并记录原因。</span>
+      </div>
+      <div class="context-item">
         <strong>路由说明</strong>
-        <span>当模型需要完整工具面时，请优先选择 Responses 上游；常规 chat-completions 请求仍可复用同一套管理页进行配置。</span>
+        <span>常规 chat-completions 请求仍可复用同一套管理页配置，模型映射和大小写归一会自动处理。</span>
       </div>
     </div>
   </section>
@@ -3783,7 +4268,7 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
     <div class="section-head">
       <div>
         <h2>运维提示</h2>
-        <p>这里保留最常用的快捷入口和状态摘要，适合日常巡检。</p>
+        <p>这里保留最常用的快捷入口和状态摘要，适合日常巡检和能力回溯。</p>
       </div>
     </div>
     <div class="context-list">
@@ -3792,17 +4277,21 @@ fn render_dashboard_page(config: &AppConfig, state: &crate::state::PersistedStat
         <span>上游、下游和日志都在左侧导航中可直接切换。</span>
       </div>
       <div class="context-item">
+        <strong>能力路线</strong>
+        <span>Responses 优先保留工具面，ChatCompletions 只承接 function 工具。</span>
+      </div>
+      <div class="context-item">
         <strong>模型容量</strong>
         <span>当前可见模型数为 {active_models}，来自可用上游的合并路由结果。</span>
       </div>
       <div class="context-item">
         <strong>请求节奏</strong>
-        <span>当前累计记录 {recent_logs} 条请求日志，用于排障和审计。</span>
+        <span>当前累计记录 {recent_logs} 条请求日志，用于排障、审计和降级追踪。</span>
       </div>
     </div>
   </section>
 </div>"#,
-        topbar = render_topbar("仪表盘", "协议转换网关控制台"),
+        topbar = render_topbar("仪表盘", "协议转换与能力保留控制台"),
         upstreams = state.upstreams.len(),
         downstreams = state.downstreams.len(),
         logs = state.usage_logs.len(),
@@ -3823,6 +4312,7 @@ fn render_upstreams_page(
     state: &crate::state::PersistedState,
     form: &UpstreamFormView,
     notice: Option<&str>,
+    drawer_open: bool,
 ) -> String {
     let total_upstreams = state.upstreams.len();
     let active_upstreams = state
@@ -3850,6 +4340,18 @@ fn render_upstreams_page(
     } else {
         active_upstreams * 100 / total_upstreams
     };
+    let drawer_state = if drawer_open { "open" } else { "closed" };
+    let drawer_toggle_href = if drawer_open {
+        "/admin/upstreams"
+    } else {
+        "/admin/upstreams/new"
+    };
+    let drawer_toggle_label = if drawer_open {
+        "返回列表"
+    } else {
+        "新增上游"
+    };
+    let drawer_toggle_class = if drawer_open { "ghost" } else { "primary" };
     let mut rows = String::new();
     for upstream in &state.upstreams {
         let status = if upstream.active { "ok" } else { "bad" };
@@ -3879,12 +4381,48 @@ fn render_upstreams_page(
                 .join("<br>");
             format!(r#"<div class="muted" style="font-size:12px;margin-top:6px;">{mappings}</div>"#)
         };
+        let quota_details = format!(
+            r#"<div class="secret-chip">
+  <span class="pill">5h {}</span>
+  <span class="pill">/min {}</span>
+  <span class="pill">并发 {}</span>
+</div>"#,
+            upstream.request_quota_5h,
+            upstream.requests_per_minute,
+            upstream.max_concurrency
+        );
+        let cost_details = if upstream.model_request_costs.is_empty() {
+            "<span class=\"muted\">默认 1</span>".to_string()
+        } else {
+            let visible_rules = upstream
+                .model_request_costs
+                .iter()
+                .take(3)
+                .map(|rule| {
+                    format!(
+                        r#"<span class="pill">{}</span>"#,
+                        escape_html(&format!("{}={}", rule.slug, rule.cost))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if upstream.model_request_costs.len() > 3 {
+                format!(
+                    r#"<div class="secret-stack"><div class="secret-chip">{visible_rules}</div><span class="helper">另有 {} 条规则</span></div>"#,
+                    upstream.model_request_costs.len() - 3
+                )
+            } else {
+                format!(r#"<div class="secret-chip">{visible_rules}</div>"#)
+            }
+        };
         let _ = write!(
             rows,
             r#"<tr>
   <td>{name}</td>
   <td><span class="pill">{protocol}</span></td>
   <td>{models}{alias_details}</td>
+  <td>{quota_details}</td>
+  <td>{cost_details}</td>
   <td><span class="pill {status}">{active}</span></td>
   <td>{failure}</td>
   <td>{base}</td>
@@ -3910,6 +4448,8 @@ fn render_upstreams_page(
             id = escape_html(&upstream.id),
             toggle = if upstream.active { "停用" } else { "启用" },
             alias_details = alias_details,
+            quota_details = quota_details,
+            cost_details = cost_details,
         );
     }
 
@@ -3935,12 +4475,12 @@ fn render_upstreams_page(
 <section class="hero-band">
   <div class="hero-copy">
     <h2>上游概览</h2>
-    <p>集中管理模型上游、协议选择和别名映射。这个页面采用左侧列表、右侧 drawer 的布局，避免表格和表单互相打断视线。</p>
+    <p>集中管理模型上游、协议选择、配额控制和模型计费。Responses 上游保留完整工具面，ChatCompletions 只承接 function 工具；模型别名会自动做大小写归一，减少手工录入。</p>
   </div>
   <div class="hero-actions">
-    <a class="button-link" href="/admin/upstreams">新增上游</a>
-    <a class="button-link" href="/admin/downstreams">查看下游</a>
-    <a class="button-link" href="/admin/logs">查看日志</a>
+    <a class="button-link {drawer_toggle_class}" href="{drawer_toggle_href}">{drawer_toggle_label}</a>
+    <a class="button-link ghost" href="/admin/downstreams">查看下游</a>
+    <a class="button-link ghost" href="/admin/logs">查看日志</a>
   </div>
 </section>
 <div class="summary-grid">
@@ -3965,22 +4505,39 @@ fn render_upstreams_page(
     <small>当前在线上游占比</small>
   </section>
 </div>
-<div class="grid">
+<div class="capability-grid">
+  <section class="panel capability-card">
+    <h3>路由策略</h3>
+    <strong>空闲优先，失败次之</strong>
+    <p>同模型多账号时，先看实时 in-flight，再按失败次数和稳定 id 兜底，避免单账号被打满。</p>
+  </section>
+  <section class="panel capability-card">
+    <h3>配额控制</h3>
+    <strong>5小时 / 每分钟 / 并发</strong>
+    <p>每个上游账号都能单独配置 5 小时请求上限、每分钟请求上限和最大并发，不写死在代码里。</p>
+  </section>
+  <section class="panel capability-card">
+    <h3>模型计费</h3>
+    <strong>slug=cost，多行维护</strong>
+    <p>例如 glm-5=2、glm-5.1=2；未配置的模型默认按 1 计费，兼容不同账号的规则差异。</p>
+  </section>
+</div>
+<div class="grid drawer-layout" data-drawer-state="{drawer_state}">
   <section class="panel wide">
     <div class="section-head">
       <div>
         <h2>上游列表</h2>
-        <p>按协议、模型和别名一眼看清路由面，支持停用、删除和编辑。</p>
+        <p>按协议、模型、配额和计费一眼看清路由面，支持停用、删除和编辑。</p>
       </div>
       <div class="page-actions">
-        <a class="button-link" href="/admin/upstreams">新增上游</a>
+        <a class="button-link ghost" href="{drawer_toggle_href}">{drawer_toggle_label}</a>
       </div>
     </div>
     <div class="table-shell">
       <div class="table-tools">
         <div>
           <h2>路由表</h2>
-          <p class="helper">Responses 和 ChatCompletions 的协议属性都在这里可见。</p>
+          <p class="helper">Responses 和 ChatCompletions 的协议属性都在这里可见，配额和计费也会直接展示出来。</p>
         </div>
         <span class="muted">显示 {total_upstreams} 条</span>
       </div>
@@ -3991,6 +4548,8 @@ fn render_upstreams_page(
               <th>名称</th>
               <th>协议</th>
               <th>模型</th>
+              <th>配额</th>
+              <th>计费</th>
               <th>状态</th>
               <th>失败次数</th>
               <th>基础地址</th>
@@ -4002,11 +4561,15 @@ fn render_upstreams_page(
       </div>
     </div>
   </section>
+  <a class="drawer-backdrop" href="/admin/upstreams" aria-label="关闭上游表单"></a>
   <section class="panel drawer" id="upstream-drawer">
     <div class="section-head">
       <div>
         <h2>{heading}</h2>
-        <p>保存后仍留在当前页，适合快速调整协议、模型和别名。</p>
+        <p>保存后仍留在当前页，适合快速调整协议、模型和别名。Responses 会保留完整工具面，模型别名支持大小写归一，减少手工维护。</p>
+      </div>
+      <div class="page-actions">
+        <a class="button-link" href="{drawer_toggle_href}">{drawer_toggle_label}</a>
       </div>
     </div>
     <form method="post" action="{action}">
@@ -4037,7 +4600,27 @@ fn render_upstreams_page(
         <div class="field">
           <label>模型别名</label>
           <input name="model_aliases" placeholder="glm-5=GLM-5,minimax-m2.7=MiniMax-M2.7" value="{model_aliases}">
-          <p class="muted">这里填“对外 slug=上游真实模型名”。没有别名就留空。</p>
+          <p class="muted">这里填“对外 slug=上游真实模型名”。系统会自动帮你做大小写映射和归一，没有别名就留空。</p>
+        </div>
+        <div class="field">
+          <label>5小时请求上限</label>
+          <input type="number" min="1" step="1" name="request_quota_5h" value="{request_quota_5h}">
+          <p class="muted">默认 600。模型计费会按每次请求叠加消耗额度。</p>
+        </div>
+        <div class="field">
+          <label>每分钟请求上限</label>
+          <input type="number" min="1" step="1" name="requests_per_minute" value="{requests_per_minute}">
+          <p class="muted">默认 20。适合在多账号之间做平滑分流。</p>
+        </div>
+        <div class="field">
+          <label>最大并发</label>
+          <input type="number" min="1" step="1" name="max_concurrency" value="{max_concurrency}">
+          <p class="muted">默认 4。并发会优先分配给更空闲的上游。</p>
+        </div>
+        <div class="field">
+          <label>模型计费</label>
+          <textarea name="model_request_costs" placeholder="glm-5=2&#10;glm-5.1=2">{model_request_costs}</textarea>
+          <p class="muted">每行一个 <code>slug=cost</code>。未配置的模型默认按 1 计费。</p>
         </div>
         <div class="field">
           <label>状态</label>
@@ -4049,7 +4632,7 @@ fn render_upstreams_page(
         <div class="field">
           <label>说明</label>
           <p class="muted">点击“获取当前模型”会请求上游的 <code>/v1/models</code> 并自动填充到模型和别名字段。</p>
-          <p class="muted">Responses 上游保留完整工具面，ChatCompletions 只保留 function 风格工具。需要 web_search、file_search、computer_use 等非 function 能力时，请选 Responses。</p>
+          <p class="muted">Responses 上游会尽量保留完整工具面，包括 web_search、file_search、computer_use 等能力。ChatCompletions 只承接 function 工具，无法原样透传时会记录降级过程。</p>
         </div>
       </div>
       <div class="actions">
@@ -4059,7 +4642,7 @@ fn render_upstreams_page(
     </form>
   </section>
 </div>"#,
-        topbar = render_topbar("上游密钥", "配置上游密钥和模型支持"),
+        topbar = render_topbar("上游密钥", "配置上游密钥、模型映射和工具策略"),
         notice = notice,
         rows = rows,
         total_upstreams = total_upstreams,
@@ -4077,9 +4660,16 @@ fn render_upstreams_page(
         responses_selected = protocol_responses_selected,
         models = escape_html(&form.models),
         model_aliases = escape_html(&form.model_aliases),
+        request_quota_5h = escape_html(&form.request_quota_5h),
+        requests_per_minute = escape_html(&form.requests_per_minute),
+        max_concurrency = escape_html(&form.max_concurrency),
+        model_request_costs = escape_html(&form.model_request_costs),
         active_selected = active_selected,
         inactive_selected = inactive_selected,
         submit_label = escape_html(&form.submit_label),
+        drawer_state = drawer_state,
+        drawer_toggle_href = drawer_toggle_href,
+        drawer_toggle_label = drawer_toggle_label,
     );
     render_shell("上游密钥", ShellSection::Upstreams, &body)
 }
@@ -4090,9 +4680,21 @@ fn render_downstreams_page(
     generated_key: Option<&str>,
     notice: Option<&str>,
     filters: &DownstreamListQuery,
+    drawer_open: bool,
 ) -> String {
     let query_suffix = filters.query_suffix();
-    let create_href = escape_html(&format!("/admin/downstreams/new{query_suffix}"));
+    let drawer_state = if drawer_open { "open" } else { "closed" };
+    let create_href = if drawer_open {
+        format!("/admin/downstreams{query_suffix}")
+    } else {
+        format!("/admin/downstreams/new{query_suffix}")
+    };
+    let create_label = if drawer_open {
+        "返回列表"
+    } else {
+        "创建密钥"
+    };
+    let create_button_class = if drawer_open { "ghost" } else { "primary" };
     let search_value = escape_html(&filters.search_value());
     let status_filter = filters.status_filter();
     let lifetime_filter = filters.lifetime_filter();
@@ -4317,10 +4919,10 @@ fn render_downstreams_page(
         r#"<header class="page-header">
   <div class="page-title">
     <h2>下游密钥</h2>
-    <p>生成、编辑、重生和删除下游记录，保持秘钥默认隐藏但随时可查看。</p>
+    <p>生成、编辑、重生和删除下游记录，保持秘钥默认隐藏但随时可查看；模型白名单决定下游客户端能看到哪些能力。</p>
   </div>
   <div class="page-actions">
-    <a class="button-link" href="{create_href}">创建密钥</a>
+    <a class="button-link {create_button_class}" href="{create_href}">{create_label}</a>
   </div>
 </header>"#
     );
@@ -4329,7 +4931,7 @@ fn render_downstreams_page(
 
     let body = format!(
         r#"{header}{notice}{generated}
-<div class="grid">
+<div class="grid drawer-layout" data-drawer-state="{drawer_state}">
   <section class="panel wide">
     <div class="toolbar">
       <div>
@@ -4379,9 +4981,17 @@ fn render_downstreams_page(
       <tbody>{rows}</tbody>
     </table>
   </section>
+  <a class="drawer-backdrop" href="/admin/downstreams{query_suffix}" aria-label="关闭下游表单"></a>
   <section class="panel drawer">
-    <h2>{heading}</h2>
-    <p class="helper">{drawer_secret_note}</p>
+    <div class="section-head">
+      <div>
+        <h2>{heading}</h2>
+        <p class="helper">{drawer_secret_note}</p>
+      </div>
+      <div class="page-actions">
+        <a class="button-link ghost" href="{create_href}">{create_label}</a>
+      </div>
+    </div>
     <form method="post" action="{action}">
       <div class="fields">
         <div class="field">
@@ -4475,6 +5085,9 @@ fn render_downstreams_page(
         drawer_secret_note = drawer_secret_note,
         rotate_controls = rotate_controls,
         delete_controls = delete_controls,
+        drawer_state = drawer_state,
+        create_href = create_href,
+        create_label = create_label,
     );
 
     render_shell("下游密钥", ShellSection::Downstreams, &body)
@@ -4608,11 +5221,11 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
 <section class="hero-band">
   <div class="hero-copy">
     <h2>运行概览</h2>
-    <p>查看最近的网关使用记录、错误状态和请求延迟。这个页面保留了紧凑的日志表格和右侧最新请求摘要，方便排障时快速定位。</p>
+    <p>查看最近的网关使用记录、错误状态、请求延迟和能力降级痕迹。这个页面保留了紧凑的日志表格和右侧最新请求摘要，方便快速定位协议转换是否丢失了能力。</p>
   </div>
   <div class="hero-actions">
-    <a class="button-link" href="/admin/upstreams">查看上游</a>
-    <a class="button-link" href="/admin/downstreams">查看下游</a>
+    <a class="button-link primary" href="/admin/upstreams">查看上游</a>
+    <a class="button-link ghost" href="/admin/downstreams">查看下游</a>
   </div>
 </section>
 <div class="summary-grid">
@@ -4691,7 +5304,7 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
     </div>
   </section>
 </div>"#,
-        topbar = render_topbar("运行日志", "最近的网关使用和错误记录"),
+        topbar = render_topbar("运行日志", "最近的网关使用、错误与降级记录"),
         rows = rows,
         total_logs = total_logs,
         total_tokens = total_tokens,
@@ -4796,4 +5409,98 @@ fn escape_html(input: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn responses_chat_fallback_report_distinguishes_kept_and_stripped_tools() {
+        let body = json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the weather"
+                    }
+                },
+                {
+                    "type": "web_search"
+                },
+                {
+                    "type": "computer_use"
+                }
+            ],
+            "tool_choice": {
+                "type": "web_search"
+            }
+        });
+
+        let report = responses_request_chat_fallback_report(&body);
+
+        assert_eq!(report.retained_tools, vec!["function:get_weather"]);
+        assert_eq!(report.stripped_tools, vec!["web_search", "computer_use"]);
+        assert_eq!(report.tool_choice.as_deref(), Some("web_search"));
+        assert!(report.tool_choice_dropped);
+    }
+
+    #[test]
+    fn responses_chat_fallback_report_drops_auto_tool_choice_without_supported_tools() {
+        let body = json!({
+            "tools": [
+                {
+                    "type": "web_search"
+                }
+            ],
+            "tool_choice": "auto"
+        });
+
+        let report = responses_request_chat_fallback_report(&body);
+
+        assert!(report.retained_tools.is_empty());
+        assert_eq!(report.stripped_tools, vec!["web_search"]);
+        assert_eq!(report.tool_choice.as_deref(), Some("auto"));
+        assert!(report.tool_choice_dropped);
+    }
+
+    #[test]
+    fn stream_retry_report_includes_conversion_report_for_responses_to_chat() {
+        let body = json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather"
+                    }
+                },
+                {
+                    "type": "web_search"
+                }
+            ],
+            "tool_choice": {
+                "type": "web_search"
+            }
+        });
+
+        let report = stream_retry_report(
+            &body,
+            EndpointKind::Responses,
+            UpstreamProtocol::ChatCompletions,
+            true,
+            true,
+        );
+
+        assert!(report.attempted_stream);
+        assert!(report.retry_without_stream);
+        let conversion = report
+            .responses_chat_fallback
+            .expect("conversion report should be present");
+        assert_eq!(conversion.retained_tools, vec!["function:get_weather"]);
+        assert_eq!(conversion.stripped_tools, vec!["web_search"]);
+        assert_eq!(conversion.tool_choice.as_deref(), Some("web_search"));
+        assert!(conversion.tool_choice_dropped);
+    }
 }

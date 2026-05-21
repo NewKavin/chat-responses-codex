@@ -348,6 +348,7 @@ async fn admin_upstreams_page_uses_a_drawer_layout_and_summary_cards() {
                 model_aliases: vec![],
                 active: true,
                 failure_count: 0,
+                ..Default::default()
             }],
             ..PersistedState::default()
         },
@@ -373,9 +374,119 @@ async fn admin_upstreams_page_uses_a_drawer_layout_and_summary_cards() {
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert!(html.contains("上游概览"));
     assert!(html.contains("新增上游"));
+    assert!(html.contains(r#"href="/admin/upstreams/new""#));
+    assert!(html.contains(r#"data-drawer-state="closed""#));
     assert!(html.contains("drawer"));
     assert!(html.contains("总上游"));
     assert!(html.contains("Responses 上游"));
+}
+
+#[tokio::test]
+async fn admin_upstreams_form_includes_upstream_quota_controls() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/upstreams/new")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("5小时请求上限"));
+    assert!(html.contains("每分钟请求上限"));
+    assert!(html.contains("最大并发"));
+    assert!(html.contains("模型计费"));
+    assert!(html.contains("glm-5=2"));
+}
+
+#[tokio::test]
+async fn admin_upstreams_page_highlights_routing_policy_and_quota_rules() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/upstreams")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("路由策略"));
+    assert!(html.contains("空闲优先"));
+    assert!(html.contains("配额控制"));
+    assert!(html.contains("模型计费"));
+}
+
+#[tokio::test]
+async fn admin_upstreams_new_page_opens_the_drawer_form() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "Primary".into(),
+                base_url: "https://api.example.com".into(),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/upstreams/new")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains(r#"data-drawer-state="open""#));
+    assert!(html.contains("新增上游"));
+    assert!(html.contains("保存上游"));
+    assert!(html.contains("API 密钥"));
 }
 
 #[tokio::test]
@@ -540,6 +651,7 @@ async fn admin_downstreams_form_includes_copy_fallback_and_expiry_toggle() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains(r#"data-drawer-state="open""#));
     assert!(html.contains("copyTextToClipboard"));
     assert!(html.contains("fallbackCopyTextToClipboard"));
     assert!(html.contains("syncExpiryField"));
@@ -552,6 +664,37 @@ async fn admin_downstreams_form_includes_copy_fallback_and_expiry_toggle() {
         r#"id="expires-at-input" name="expires_at" type="number" placeholder="unix 秒，可选" value="" disabled"#
     ));
     assert!(html.contains("勾选后无需填写生效时间。"));
+}
+
+#[tokio::test]
+async fn admin_downstreams_page_uses_a_collapsed_drawer_and_create_button() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/downstreams")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("下游密钥"));
+    assert!(html.contains("创建密钥"));
+    assert!(html.contains(r#"href="/admin/downstreams/new""#));
+    assert!(html.contains(r#"data-drawer-state="closed""#));
 }
 
 #[tokio::test]
@@ -1021,6 +1164,7 @@ async fn admin_can_disable_upstream_key_and_remove_its_models() {
                 model_aliases: vec![],
                 active: true,
                 failure_count: 0,
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -1113,6 +1257,7 @@ async fn admin_can_edit_an_upstream_key() {
                 model_aliases: vec![],
                 active: true,
                 failure_count: 7,
+                ..Default::default()
             }],
             ..PersistedState::default()
         },
@@ -1194,6 +1339,7 @@ async fn admin_can_delete_an_upstream_key() {
                 model_aliases: vec![],
                 active: true,
                 failure_count: 0,
+                ..Default::default()
             }],
             ..PersistedState::default()
         },

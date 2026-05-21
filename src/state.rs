@@ -13,9 +13,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -55,14 +56,48 @@ pub struct UpstreamConfig {
     pub supported_models: Vec<String>,
     #[serde(default)]
     pub model_aliases: Vec<ModelAliasConfig>,
+    #[serde(default = "default_upstream_request_quota_5h")]
+    pub request_quota_5h: u32,
+    #[serde(default = "default_upstream_requests_per_minute")]
+    pub requests_per_minute: u32,
+    #[serde(default = "default_upstream_max_concurrency")]
+    pub max_concurrency: u32,
+    #[serde(default)]
+    pub model_request_costs: Vec<ModelRequestCostConfig>,
     pub active: bool,
     pub failure_count: u32,
+}
+
+impl Default for UpstreamConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            supported_models: Vec::new(),
+            model_aliases: Vec::new(),
+            request_quota_5h: default_upstream_request_quota_5h(),
+            requests_per_minute: default_upstream_requests_per_minute(),
+            max_concurrency: default_upstream_max_concurrency(),
+            model_request_costs: Vec::new(),
+            active: false,
+            failure_count: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelAliasConfig {
     pub slug: String,
     pub upstream_model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRequestCostConfig {
+    pub slug: String,
+    pub cost: u32,
 }
 
 impl UpstreamConfig {
@@ -94,6 +129,14 @@ impl UpstreamConfig {
             .find(|alias| alias.slug == model)
             .map(|alias| alias.upstream_model.clone())
             .or_else(|| Some(model.to_string()))
+    }
+
+    pub(crate) fn request_cost_for_model(&self, model: &str) -> u32 {
+        self.model_request_costs
+            .iter()
+            .find(|rule| rule.slug == model)
+            .map(|rule| rule.cost.max(1))
+            .unwrap_or(1)
     }
 }
 
@@ -140,6 +183,9 @@ pub struct PersistedState {
 pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
     archived_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
+    pending_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
+    usage_log_flush_running: Arc<AtomicBool>,
+    upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
     pub store_path: PathBuf,
@@ -162,6 +208,9 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
+            pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
+            usage_log_flush_running: Arc::new(AtomicBool::new(false)),
+            upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             downstream_request_windows: Arc::new(Mutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: store_path.into(),
@@ -179,6 +228,9 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             archived_usage_logs: Arc::new(Mutex::new(Vec::new())),
+            pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
+            usage_log_flush_running: Arc::new(AtomicBool::new(false)),
+            upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             downstream_request_windows: Arc::new(Mutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: PathBuf::new(),
@@ -230,13 +282,15 @@ impl AppState {
 
     pub async fn snapshot(&self) -> PersistedState {
         let mut state = self.inner.lock().await.clone();
+        let pending_usage_logs = self.pending_usage_logs.lock().await.clone();
         let archived_usage_logs = self.archived_usage_logs.lock().await.clone();
-        if archived_usage_logs.is_empty() {
+        if archived_usage_logs.is_empty() && pending_usage_logs.is_empty() {
             return state;
         }
 
-        let mut usage_logs = archived_usage_logs
+        let mut usage_logs = pending_usage_logs
             .into_iter()
+            .chain(archived_usage_logs.into_iter())
             .chain(state.usage_logs.into_iter())
             .collect::<Vec<_>>();
         usage_logs.sort_by(|left, right| {
@@ -254,6 +308,15 @@ impl AppState {
         }
         state.usage_logs = deduped;
         state
+    }
+
+    pub async fn routing_snapshot(&self) -> PersistedState {
+        let state = self.inner.lock().await;
+        PersistedState {
+            upstreams: state.upstreams.clone(),
+            downstreams: state.downstreams.clone(),
+            usage_logs: Vec::new(),
+        }
     }
 
     pub async fn load_from_path(path: impl AsRef<Path>, config: AppConfig) -> io::Result<Self> {
@@ -425,6 +488,102 @@ impl AppState {
             .collect()
     }
 
+    pub async fn upstream_in_flight_counts(&self) -> HashMap<String, u32> {
+        let runtime_state = self.upstream_runtime_state.lock().await;
+        runtime_state
+            .iter()
+            .map(|(upstream_id, state)| (upstream_id.clone(), state.in_flight))
+            .collect()
+    }
+
+    pub async fn try_reserve_upstream_request(
+        &self,
+        upstream: &UpstreamConfig,
+        model: &str,
+    ) -> Result<(), UpstreamAdmissionError> {
+        let request_cost = upstream.request_cost_for_model(model);
+        if request_cost == 0 {
+            return Err(UpstreamAdmissionError::new(
+                "invalid upstream model request cost".into(),
+                1,
+            ));
+        }
+
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        let state = runtime_state
+            .entry(upstream.id.clone())
+            .or_insert_with(UpstreamRuntimeState::default);
+        let now = unix_seconds();
+        prune_quota_events(&mut state.minute_events, now, 60);
+        prune_quota_events(&mut state.five_hour_events, now, 5 * 60 * 60);
+
+        if state.in_flight >= upstream.max_concurrency.max(1) {
+            return Err(UpstreamAdmissionError::new(
+                format!(
+                    "upstream concurrency limit exceeded: {}/{}",
+                    state.in_flight, upstream.max_concurrency
+                ),
+                1,
+            ));
+        }
+
+        let minute_cost = quota_event_cost(&state.minute_events);
+        if minute_cost.saturating_add(request_cost) > upstream.requests_per_minute.max(1) {
+            return Err(UpstreamAdmissionError::new(
+                format!(
+                    "upstream per-minute quota exceeded: {}/{}",
+                    minute_cost.saturating_add(request_cost),
+                    upstream.requests_per_minute
+                ),
+                quota_retry_after_seconds(
+                    &state.minute_events,
+                    now,
+                    60,
+                    minute_cost
+                        .saturating_add(request_cost)
+                        .saturating_sub(upstream.requests_per_minute.max(1)),
+                ),
+            ));
+        }
+
+        let five_hour_cost = quota_event_cost(&state.five_hour_events);
+        if five_hour_cost.saturating_add(request_cost) > upstream.request_quota_5h.max(1) {
+            return Err(UpstreamAdmissionError::new(
+                format!(
+                    "upstream 5-hour quota exceeded: {}/{}",
+                    five_hour_cost.saturating_add(request_cost),
+                    upstream.request_quota_5h
+                ),
+                quota_retry_after_seconds(
+                    &state.five_hour_events,
+                    now,
+                    5 * 60 * 60,
+                    five_hour_cost
+                        .saturating_add(request_cost)
+                        .saturating_sub(upstream.request_quota_5h.max(1)),
+                ),
+            ));
+        }
+
+        state.in_flight = state.in_flight.saturating_add(1);
+        state.minute_events.push_back(QuotaEvent {
+            created_at: now,
+            cost: request_cost,
+        });
+        state.five_hour_events.push_back(QuotaEvent {
+            created_at: now,
+            cost: request_cost,
+        });
+        Ok(())
+    }
+
+    pub async fn release_upstream_request(&self, upstream_id: &str) {
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        if let Some(state) = runtime_state.get_mut(upstream_id) {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+
     pub async fn mark_upstream_failure(&self, upstream_id: &str) -> io::Result<()> {
         let mut state = self.inner.lock().await;
         if let Some(upstream) = state
@@ -457,34 +616,134 @@ impl AppState {
             log.created_at = unix_seconds();
         }
 
-        if self.postgres.is_some() {
+        {
+            let mut pending = self.pending_usage_logs.lock().await;
+            pending.push(log);
+        }
+
+        self.schedule_usage_log_flush();
+        Ok(())
+    }
+
+    fn schedule_usage_log_flush(&self) {
+        if self
+            .usage_log_flush_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let app = self.clone();
+            tokio::spawn(async move {
+                app.flush_pending_usage_logs().await;
+            });
+        }
+    }
+
+    pub async fn flush_usage_logs_for_test(&self) -> io::Result<()> {
+        loop {
+            if self
+                .usage_log_flush_running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let result = self.flush_pending_usage_logs_now().await;
+                self.usage_log_flush_running.store(false, Ordering::Release);
+                return result;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn flush_pending_usage_logs(self) {
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            if let Err(error) = self.flush_pending_usage_logs_now().await {
+                tracing::error!(error = %error, "failed to flush usage log batch");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+
+            let pending_is_empty = {
+                let pending = self.pending_usage_logs.lock().await;
+                pending.is_empty()
+            };
+
+            if pending_is_empty {
+                self.usage_log_flush_running.store(false, Ordering::Release);
+
+                let restart = {
+                    let pending = self.pending_usage_logs.lock().await;
+                    !pending.is_empty()
+                };
+                if restart
+                    && self
+                        .usage_log_flush_running
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    continue;
+                }
+                return;
+            }
+        }
+    }
+
+    async fn flush_pending_usage_logs_now(&self) -> io::Result<()> {
+        loop {
+            let batch = {
+                let mut pending = self.pending_usage_logs.lock().await;
+                if pending.is_empty() {
+                    Vec::new()
+                } else {
+                    std::mem::take(&mut *pending)
+                }
+            };
+
+            if batch.is_empty() {
+                return Ok(());
+            }
+
+            if let Err(error) = self.flush_usage_log_batch(&batch).await {
+                let mut pending = self.pending_usage_logs.lock().await;
+                let mut requeued = batch;
+                requeued.extend(pending.drain(..));
+                *pending = requeued;
+                return Err(error);
+            }
+        }
+    }
+
+    async fn flush_usage_log_batch(&self, batch: &[UsageLog]) -> io::Result<()> {
+        if let Some(postgres) = &self.postgres {
+            postgres.append_usage_logs(batch).await?;
             let mut state = self.inner.lock().await;
-            state.usage_logs.push(log);
-            let candidate_state = state.clone();
-            self.persist_state(&candidate_state).await?;
-            *state = candidate_state;
+            state.usage_logs.extend(batch.iter().cloned());
             return Ok(());
         }
 
-        let mut state = self.inner.lock().await;
-        state.usage_logs.push(log);
-        let mut candidate_state = state.clone();
-        let archived_logs = trim_usage_logs_for_rotation(
-            &mut candidate_state,
-            self.config.usage_log_rotation_max_bytes,
-        );
+        for log in batch.iter().cloned() {
+            let mut state = self.inner.lock().await;
+            state.usage_logs.push(log);
+            let mut candidate_state = state.clone();
+            let archived_logs = trim_usage_logs_for_rotation(
+                &mut candidate_state,
+                self.config.usage_log_rotation_max_bytes,
+            );
 
-        if !archived_logs.is_empty() {
-            self.write_usage_log_archive(&archived_logs).await?;
-            {
-                let mut archived = self.archived_usage_logs.lock().await;
-                archived.extend(archived_logs);
+            if !archived_logs.is_empty() {
+                self.write_usage_log_archive(&archived_logs).await?;
+                {
+                    let mut archived = self.archived_usage_logs.lock().await;
+                    archived.extend(archived_logs);
+                }
             }
+
+            self.persist_state(&candidate_state).await?;
+            *state = candidate_state;
+            self.enforce_usage_log_archive_limit().await?;
         }
 
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        self.enforce_usage_log_archive_limit().await?;
         Ok(())
     }
 
@@ -645,7 +904,7 @@ impl AppState {
     }
 
     pub async fn available_models_for_downstream(&self, secret: &str) -> Vec<String> {
-        let snapshot = self.snapshot().await;
+        let snapshot = self.routing_snapshot().await;
         let Some(downstream) = snapshot
             .downstreams
             .iter()
@@ -829,6 +1088,86 @@ async fn usage_log_archive_paths(store_path: &Path) -> io::Result<Vec<PathBuf>> 
 async fn load_usage_log_archive(path: &Path) -> io::Result<Vec<UsageLog>> {
     let bytes = fs::read(path).await?;
     Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+pub(crate) fn default_upstream_request_quota_5h() -> u32 {
+    600
+}
+
+pub(crate) fn default_upstream_requests_per_minute() -> u32 {
+    20
+}
+
+pub(crate) fn default_upstream_max_concurrency() -> u32 {
+    4
+}
+
+#[derive(Debug, Clone, Default)]
+struct UpstreamRuntimeState {
+    in_flight: u32,
+    minute_events: VecDeque<QuotaEvent>,
+    five_hour_events: VecDeque<QuotaEvent>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QuotaEvent {
+    created_at: u64,
+    cost: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamAdmissionError {
+    pub message: String,
+    pub retry_after_seconds: u64,
+}
+
+impl UpstreamAdmissionError {
+    fn new(message: String, retry_after_seconds: u64) -> Self {
+        Self {
+            message,
+            retry_after_seconds: retry_after_seconds.max(1),
+        }
+    }
+}
+
+fn quota_event_cost(events: &VecDeque<QuotaEvent>) -> u32 {
+    events.iter().map(|event| event.cost).sum()
+}
+
+fn prune_quota_events(events: &mut VecDeque<QuotaEvent>, now: u64, window_seconds: u64) {
+    let window_start = now.saturating_sub(window_seconds.saturating_sub(1));
+    while let Some(event) = events.front() {
+        if event.created_at < window_start {
+            events.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+fn quota_retry_after_seconds(
+    events: &VecDeque<QuotaEvent>,
+    now: u64,
+    window_seconds: u64,
+    deficit: u32,
+) -> u64 {
+    if deficit == 0 {
+        return 1;
+    }
+
+    let mut freed = 0u32;
+    for event in events {
+        freed = freed.saturating_add(event.cost);
+        if freed >= deficit {
+            return event
+                .created_at
+                .saturating_add(window_seconds)
+                .saturating_sub(now)
+                .max(1);
+        }
+    }
+
+    window_seconds.max(1)
 }
 
 fn unix_millis() -> u128 {

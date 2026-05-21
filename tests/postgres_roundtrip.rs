@@ -1,7 +1,8 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, ModelAliasConfig, UpstreamConfig, UsageLog,
+    AppConfig, AppState, DownstreamConfig, ModelAliasConfig, ModelRequestCostConfig,
+    UpstreamConfig, UsageLog,
 };
 use std::env;
 use std::sync::{Mutex, OnceLock};
@@ -36,6 +37,19 @@ async fn postgres_roundtrip_preserves_normalized_state() {
             slug: "glm-5".into(),
             upstream_model: "GLM-5".into(),
         }],
+        request_quota_5h: 888,
+        requests_per_minute: 33,
+        max_concurrency: 7,
+        model_request_costs: vec![
+            ModelRequestCostConfig {
+                slug: "glm-5".into(),
+                cost: 2,
+            },
+            ModelRequestCostConfig {
+                slug: "glm-5.1".into(),
+                cost: 3,
+            },
+        ],
         active: true,
         failure_count: 2,
     };

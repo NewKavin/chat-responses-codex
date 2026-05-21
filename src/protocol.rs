@@ -51,7 +51,10 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
     if let Some(tool_choice) = input.get("tool_choice") {
         output.insert("tool_choice".into(), tool_choice.clone());
     } else if let Some(function_call) = input.get("function_call") {
-        output.insert("tool_choice".into(), chat_function_call_to_tool_choice(function_call)?);
+        output.insert(
+            "tool_choice".into(),
+            chat_function_call_to_tool_choice(function_call)?,
+        );
     }
     if let Some(max_tokens) = input
         .get("max_output_tokens")
@@ -118,10 +121,7 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
         let converted = tools
             .iter()
             .map(responses_tool_definition_to_chat_tool)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         if !converted.is_empty() {
             output.insert("tools".into(), Value::Array(converted));
         }
@@ -396,7 +396,9 @@ fn translate_responses_input_item(
                     messages.push(responses_message_object_to_chat_message(object)?);
                     Ok(())
                 }
-                _ => Ok(()),
+                _ => Err(ProtocolError::InvalidPayload(format!(
+                    "unsupported responses input item: {object:?}"
+                ))),
             }
         }
         other => Err(ProtocolError::InvalidPayload(format!(
@@ -405,7 +407,9 @@ fn translate_responses_input_item(
     }
 }
 
-fn responses_message_object_to_chat_message(object: &Map<String, Value>) -> Result<Value, ProtocolError> {
+fn responses_message_object_to_chat_message(
+    object: &Map<String, Value>,
+) -> Result<Value, ProtocolError> {
     let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
 
     if role == "tool" || role == "function" || object.contains_key("tool_call_id") {
@@ -422,7 +426,10 @@ fn responses_message_object_to_chat_message(object: &Map<String, Value>) -> Resu
     message.insert("role".into(), Value::String(role.to_string()));
 
     if let Some(content) = object.get("content") {
-        message.insert("content".into(), responses_content_to_chat_content(content)?);
+        message.insert(
+            "content".into(),
+            responses_content_to_chat_content(content)?,
+        );
     } else {
         message.insert("content".into(), Value::Null);
     }
@@ -467,40 +474,29 @@ fn responses_tool_output_object_to_chat_message(
 }
 
 fn response_output_item_to_chat_message(item: &Value) -> Result<Option<Value>, ProtocolError> {
-    let Some(object) = item.as_object() else {
-        return Ok(None);
-    };
+    let object = item.as_object().ok_or_else(|| {
+        ProtocolError::InvalidPayload(format!("unsupported responses output item: {item}"))
+    })?;
 
-    if object.get("type").and_then(Value::as_str) == Some("function_call") {
-        return Ok(None);
+    match response_output_item_kind(object)? {
+        ResponseOutputItemKind::FunctionCall => Ok(None),
+        ResponseOutputItemKind::Message => Ok(Some(
+            response_output_message_object_to_chat_message(object)?,
+        )),
     }
-
-    if object.contains_key("role")
-        || object.contains_key("content")
-        || object.contains_key("tool_calls")
-        || object.contains_key("tool_call_id")
-        || object.get("type").and_then(Value::as_str) == Some("message")
-    {
-        let mut cloned = object.clone();
-        cloned
-            .entry("role")
-            .or_insert_with(|| Value::String("assistant".into()));
-        return Ok(Some(responses_message_object_to_chat_message(&cloned)?));
-    }
-
-    Ok(None)
 }
 
 fn response_output_item_to_chat_tool_call(item: &Value) -> Result<Option<Value>, ProtocolError> {
-    let Some(object) = item.as_object() else {
-        return Ok(None);
-    };
+    let object = item.as_object().ok_or_else(|| {
+        ProtocolError::InvalidPayload(format!("unsupported responses output item: {item}"))
+    })?;
 
-    if object.get("type").and_then(Value::as_str) != Some("function_call") {
-        return Ok(None);
+    match response_output_item_kind(object)? {
+        ResponseOutputItemKind::FunctionCall => {
+            Ok(Some(response_function_call_item_to_chat_tool_call(object)?))
+        }
+        ResponseOutputItemKind::Message => Ok(None),
     }
-
-    Ok(Some(response_function_call_item_to_chat_tool_call(object)?))
 }
 
 fn response_function_call_output_to_chat_message(
@@ -547,10 +543,82 @@ fn response_function_call_item_to_chat_message(
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseOutputItemKind {
+    Message,
+    FunctionCall,
+}
+
+fn response_output_item_kind(
+    object: &Map<String, Value>,
+) -> Result<ResponseOutputItemKind, ProtocolError> {
+    match object.get("type").and_then(Value::as_str) {
+        Some("message") => Ok(ResponseOutputItemKind::Message),
+        Some("function_call") => Ok(ResponseOutputItemKind::FunctionCall),
+        Some(other) => Err(ProtocolError::InvalidPayload(format!(
+            "unsupported responses output item type: {other}"
+        ))),
+        None => {
+            if object.contains_key("role")
+                || object.contains_key("content")
+                || object.contains_key("tool_calls")
+                || object.contains_key("tool_call_id")
+            {
+                Ok(ResponseOutputItemKind::Message)
+            } else {
+                Err(ProtocolError::InvalidPayload(format!(
+                    "unsupported responses output item: {object:?}"
+                )))
+            }
+        }
+    }
+}
+
+fn response_output_message_object_to_chat_message(
+    object: &Map<String, Value>,
+) -> Result<Value, ProtocolError> {
+    if let Some(role) = object.get("role").and_then(Value::as_str) {
+        if role != "assistant" {
+            return Err(ProtocolError::InvalidPayload(format!(
+                "unsupported responses output role: {role}"
+            )));
+        }
+    }
+
+    let mut message = Map::new();
+    message.insert("role".into(), Value::String("assistant".into()));
+
+    if let Some(content) = object.get("content") {
+        message.insert(
+            "content".into(),
+            responses_content_to_chat_content(content)?,
+        );
+    } else {
+        message.insert("content".into(), Value::Null);
+    }
+
+    if let Some(tool_calls) = object.get("tool_calls").and_then(Value::as_array) {
+        let converted = tool_calls
+            .iter()
+            .map(|tool_call| {
+                let tool_call = tool_call.as_object().ok_or_else(|| {
+                    ProtocolError::InvalidPayload(format!("unsupported tool call: {tool_call}"))
+                })?;
+                response_function_call_item_to_chat_tool_call(tool_call)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !converted.is_empty() {
+            message.insert("tool_calls".into(), Value::Array(converted));
+        }
+    }
+
+    Ok(Value::Object(message))
+}
+
 fn chat_tool_call_to_function_call(tool_call: &Value) -> Result<Value, ProtocolError> {
-    let object = tool_call
-        .as_object()
-        .ok_or_else(|| ProtocolError::InvalidPayload(format!("unsupported tool call: {tool_call}")))?;
+    let object = tool_call.as_object().ok_or_else(|| {
+        ProtocolError::InvalidPayload(format!("unsupported tool call: {tool_call}"))
+    })?;
     let Some((name, arguments)) = extract_tool_call_details(object) else {
         return Err(ProtocolError::MissingField("function"));
     };
@@ -631,7 +699,12 @@ fn chat_function_call_to_tool_choice(function_call: &Value) -> Result<Value, Pro
         Value::Object(object) => {
             let name = object
                 .get("name")
-                .or_else(|| object.get("function").and_then(Value::as_object).and_then(|function| function.get("name")))
+                .or_else(|| {
+                    object
+                        .get("function")
+                        .and_then(Value::as_object)
+                        .and_then(|function| function.get("name"))
+                })
                 .and_then(Value::as_str)
                 .ok_or(ProtocolError::MissingField("name"))?;
             Ok(json!({
@@ -680,21 +753,23 @@ fn extract_tool_call_details(object: &Map<String, Value>) -> Option<(Option<Stri
     }
 }
 
-fn responses_tool_definition_to_chat_tool(tool: &Value) -> Result<Option<Value>, ProtocolError> {
+fn responses_tool_definition_to_chat_tool(tool: &Value) -> Result<Value, ProtocolError> {
     let object = tool.as_object().ok_or_else(|| {
         ProtocolError::InvalidPayload(format!("unsupported tool definition: {tool}"))
     })?;
 
     if let Some(function) = object.get("function").and_then(Value::as_object) {
-        return Ok(Some(json!({
+        return Ok(json!({
             "type": "function",
             "function": function.clone()
-        })));
+        }));
     }
 
     if let Some(tool_type) = object.get("type").and_then(Value::as_str) {
         if tool_type != "function" {
-            return Ok(None);
+            return Err(ProtocolError::InvalidPayload(format!(
+                "unsupported responses tool type: {tool_type}"
+            )));
         }
     }
 
@@ -704,10 +779,10 @@ fn responses_tool_definition_to_chat_tool(tool: &Value) -> Result<Option<Value>,
         return Err(ProtocolError::MissingField("name"));
     }
 
-    Ok(Some(json!({
+    Ok(json!({
         "type": "function",
         "function": Value::Object(function)
-    })))
+    }))
 }
 
 fn responses_tool_choice_to_chat_tool_choice(
@@ -717,18 +792,31 @@ fn responses_tool_choice_to_chat_tool_choice(
     match tool_choice {
         Value::String(choice) => match choice.as_str() {
             "none" => Ok(Some(Value::String(choice.clone()))),
-            "auto" | "required" if has_supported_tools => Ok(Some(Value::String(choice.clone()))),
-            _ => Ok(None),
+            "auto" if has_supported_tools => Ok(Some(Value::String(choice.clone()))),
+            "auto" => Ok(None),
+            "required" if has_supported_tools => Ok(Some(Value::String(choice.clone()))),
+            "required" => Err(ProtocolError::InvalidPayload(
+                "responses tool_choice \"required\" requires at least one supported function tool"
+                    .into(),
+            )),
+            other => Err(ProtocolError::InvalidPayload(format!(
+                "unsupported responses tool_choice value: {other}"
+            ))),
         },
         Value::Object(object) => {
             if let Some(tool_type) = object.get("type").and_then(Value::as_str) {
                 if tool_type != "function" {
-                    return Ok(None);
+                    return Err(ProtocolError::InvalidPayload(format!(
+                        "unsupported responses tool_choice type: {tool_type}"
+                    )));
                 }
             }
 
             if !has_supported_tools {
-                return Ok(None);
+                return Err(ProtocolError::InvalidPayload(
+                    "responses function tool_choice requires at least one supported function tool"
+                        .into(),
+                ));
             }
 
             if let Some(function) = object.get("function").and_then(Value::as_object) {
@@ -753,9 +841,11 @@ fn responses_tool_choice_to_chat_tool_choice(
                 })));
             }
 
-            Ok(None)
+            Err(ProtocolError::MissingField("name"))
         }
-        _ => Ok(None),
+        other => Err(ProtocolError::InvalidPayload(format!(
+            "unsupported responses tool_choice value: {other}"
+        ))),
     }
 }
 
@@ -814,7 +904,8 @@ fn chat_content_part_to_responses_input_part(part: &Value) -> Result<Value, Prot
             }))
         }
         "image_url" | "input_image" => {
-            let image_url = image_url_string(object).ok_or(ProtocolError::MissingField("image_url"))?;
+            let image_url =
+                image_url_string(object).ok_or(ProtocolError::MissingField("image_url"))?;
             let mut image = Map::new();
             image.insert("type".into(), Value::String("input_image".into()));
             image.insert("image_url".into(), Value::String(image_url));
@@ -1163,7 +1254,11 @@ impl ChatToResponsesState {
             self.emit_created(&mut output);
         }
 
-        if choice.get("finish_reason").and_then(Value::as_str).is_some() {
+        if choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .is_some()
+        {
             self.emit_created(&mut output);
             output.extend(self.finish()?);
         }
@@ -1383,14 +1478,17 @@ impl ChatToResponsesState {
         let mut delta_event = None;
 
         {
-            let entry = self.tool_calls.entry(index).or_insert_with(|| ChatToolCallState {
-                item_id: call_id.clone(),
-                call_id: call_id.clone(),
-                name: name.clone(),
-                arguments: String::new(),
-                added_emitted: false,
-                done_emitted: false,
-            });
+            let entry = self
+                .tool_calls
+                .entry(index)
+                .or_insert_with(|| ChatToolCallState {
+                    item_id: call_id.clone(),
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    arguments: String::new(),
+                    added_emitted: false,
+                    done_emitted: false,
+                });
             if entry.item_id.is_empty() {
                 entry.item_id = call_id.clone();
             }
@@ -1468,14 +1566,17 @@ impl ChatToResponsesState {
         let mut delta_event = None;
 
         {
-            let entry = self.tool_calls.entry(index).or_insert_with(|| ChatToolCallState {
-                item_id: call_id.to_string(),
-                call_id: call_id.to_string(),
-                name: Some(name.to_string()),
-                arguments: String::new(),
-                added_emitted: false,
-                done_emitted: false,
-            });
+            let entry = self
+                .tool_calls
+                .entry(index)
+                .or_insert_with(|| ChatToolCallState {
+                    item_id: call_id.to_string(),
+                    call_id: call_id.to_string(),
+                    name: Some(name.to_string()),
+                    arguments: String::new(),
+                    added_emitted: false,
+                    done_emitted: false,
+                });
             if entry.name.is_none() {
                 entry.name = Some(name.to_string());
             }
@@ -1597,15 +1698,15 @@ impl ResponsesToChatState {
             }
             "response.output_item.added" => {
                 if let Some(item) = event.get("item").and_then(Value::as_object) {
-                    match item.get("type").and_then(Value::as_str) {
-                        Some("function_call") => {
+                    match response_output_item_kind(item)? {
+                        ResponseOutputItemKind::FunctionCall => {
                             self.emit_assistant_role(&mut output);
                             self.emit_function_call_item_added(event, item, &mut output)?;
                         }
-                        Some("message") => {
+                        ResponseOutputItemKind::Message => {
+                            response_output_message_object_to_chat_message(item)?;
                             self.emit_assistant_role(&mut output);
                         }
-                        _ => {}
                     }
                 }
             }
@@ -1631,6 +1732,7 @@ impl ResponsesToChatState {
             }
             "response.completed" => {
                 self.emit_assistant_role(&mut output);
+                self.validate_completed_response_output(event)?;
                 output.extend(self.finish()?);
             }
             _ => {}
@@ -1700,16 +1802,13 @@ impl ResponsesToChatState {
         }
 
         if self.created_at.is_none() {
-            self.created_at = event
-                .get("created")
-                .and_then(Value::as_u64)
-                .or_else(|| {
-                    event
-                        .get("response")
-                        .and_then(Value::as_object)
-                        .and_then(|response| response.get("created_at"))
-                        .and_then(Value::as_u64)
-                });
+            self.created_at = event.get("created").and_then(Value::as_u64).or_else(|| {
+                event
+                    .get("response")
+                    .and_then(Value::as_object)
+                    .and_then(|response| response.get("created_at"))
+                    .and_then(Value::as_u64)
+            });
         }
     }
 
@@ -1829,13 +1928,16 @@ impl ResponsesToChatState {
         let mut added_event = None;
 
         {
-            let entry = self.tool_calls.entry(output_index).or_insert_with(|| ResponsesToolCallState {
-                item_id: item_id.clone(),
-                call_id: call_id.clone(),
-                name: Some(name.clone()),
-                arguments: String::new(),
-                added_emitted: false,
-            });
+            let entry =
+                self.tool_calls
+                    .entry(output_index)
+                    .or_insert_with(|| ResponsesToolCallState {
+                        item_id: item_id.clone(),
+                        call_id: call_id.clone(),
+                        name: Some(name.clone()),
+                        arguments: String::new(),
+                        added_emitted: false,
+                    });
             if entry.item_id.is_empty() {
                 entry.item_id = item_id.clone();
             }
@@ -1891,7 +1993,9 @@ impl ResponsesToChatState {
             .get("output_index")
             .and_then(Value::as_u64)
             .map(|value| value as usize)
-            .or_else(|| self.find_tool_call_index_by_item_id(event.get("item_id").and_then(Value::as_str)))
+            .or_else(|| {
+                self.find_tool_call_index_by_item_id(event.get("item_id").and_then(Value::as_str))
+            })
             .unwrap_or(0);
         let delta = event
             .get("delta")
@@ -1901,24 +2005,27 @@ impl ResponsesToChatState {
         let model = self.model_value();
         let created_at = self.created_at_value();
         let (item_id, name) = {
-            let entry = self.tool_calls.entry(output_index).or_insert_with(|| ResponsesToolCallState {
-                item_id: event
-                    .get("item_id")
-                    .and_then(Value::as_str)
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| format!("call-{}", output_index)),
-                call_id: event
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| format!("call-{}", output_index)),
-                name: event
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(|value| value.to_string()),
-                arguments: String::new(),
-                added_emitted: false,
-            });
+            let entry =
+                self.tool_calls
+                    .entry(output_index)
+                    .or_insert_with(|| ResponsesToolCallState {
+                        item_id: event
+                            .get("item_id")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| format!("call-{}", output_index)),
+                        call_id: event
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| format!("call-{}", output_index)),
+                        name: event
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string()),
+                        arguments: String::new(),
+                        added_emitted: false,
+                    });
             entry.arguments.push_str(delta);
             (
                 entry.item_id.clone(),
@@ -1951,7 +2058,9 @@ impl ResponsesToChatState {
             .get("output_index")
             .and_then(Value::as_u64)
             .map(|value| value as usize)
-            .or_else(|| self.find_tool_call_index_by_item_id(event.get("item_id").and_then(Value::as_str)))
+            .or_else(|| {
+                self.find_tool_call_index_by_item_id(event.get("item_id").and_then(Value::as_str))
+            })
             .unwrap_or(0);
         if let Some(entry) = self.tool_calls.get_mut(&output_index) {
             if let Some(arguments) = event.get("arguments").and_then(Value::as_str) {
@@ -1972,12 +2081,41 @@ impl ResponsesToChatState {
         let Some(item) = event.get("item").and_then(Value::as_object) else {
             return Ok(());
         };
-        match item.get("type").and_then(Value::as_str) {
-            Some("function_call") | Some("message") => {
+        match response_output_item_kind(item)? {
+            ResponseOutputItemKind::FunctionCall => {
                 self.emit_function_call_arguments_done(event);
             }
-            _ => {}
+            ResponseOutputItemKind::Message => {
+                response_output_message_object_to_chat_message(item)?;
+                self.emit_function_call_arguments_done(event);
+            }
         }
+        Ok(())
+    }
+
+    fn validate_completed_response_output(&self, event: &Value) -> Result<(), ProtocolError> {
+        let Some(response) = event.get("response").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        let Some(output) = response.get("output").and_then(Value::as_array) else {
+            return Ok(());
+        };
+
+        for item in output {
+            let object = item.as_object().ok_or_else(|| {
+                ProtocolError::InvalidPayload(format!("unsupported responses output item: {item}"))
+            })?;
+
+            match response_output_item_kind(object)? {
+                ResponseOutputItemKind::FunctionCall => {
+                    response_function_call_item_to_chat_tool_call(object)?;
+                }
+                ResponseOutputItemKind::Message => {
+                    response_output_message_object_to_chat_message(object)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2250,4 +2388,173 @@ fn make_chat_completion_chunk(
                 .unwrap_or(Value::Null)
         }]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routing::UpstreamProtocol;
+    use serde_json::json;
+
+    #[test]
+    fn responses_stream_translator_rejects_unknown_output_item_types_on_added_events() {
+        let mut translator = StreamTranslator::new(
+            UpstreamProtocol::Responses,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .expect("translator should exist");
+
+        let event = json!({
+            "type": "response.output_item.added",
+            "response_id": "resp-1",
+            "output_index": 0,
+            "item": {
+                "id": "item-1",
+                "type": "reasoning",
+                "status": "in_progress"
+            }
+        });
+
+        let error = translator
+            .translate_event(&event)
+            .expect_err("translation should fail");
+        assert!(error
+            .to_string()
+            .contains("unsupported responses output item type"));
+    }
+
+    #[test]
+    fn responses_stream_translator_rejects_unknown_output_item_types_on_done_events() {
+        let mut translator = StreamTranslator::new(
+            UpstreamProtocol::Responses,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .expect("translator should exist");
+
+        let event = json!({
+            "type": "response.output_item.done",
+            "response_id": "resp-1",
+            "output_index": 0,
+            "item": {
+                "id": "item-1",
+                "type": "reasoning",
+                "status": "completed"
+            }
+        });
+
+        let error = translator
+            .translate_event(&event)
+            .expect_err("translation should fail");
+        assert!(error
+            .to_string()
+            .contains("unsupported responses output item type"));
+    }
+
+    #[test]
+    fn responses_stream_translator_rejects_non_assistant_output_roles() {
+        let mut translator = StreamTranslator::new(
+            UpstreamProtocol::Responses,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .expect("translator should exist");
+
+        let event = json!({
+            "type": "response.output_item.done",
+            "response_id": "resp-1",
+            "output_index": 0,
+            "item": {
+                "id": "msg-1",
+                "type": "message",
+                "status": "completed",
+                "role": "user",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Hi",
+                    "annotations": []
+                }]
+            }
+        });
+
+        let error = translator
+            .translate_event(&event)
+            .expect_err("translation should fail");
+        assert!(error
+            .to_string()
+            .contains("unsupported responses output role"));
+    }
+
+    #[test]
+    fn responses_stream_translator_rejects_unknown_output_item_types_on_completed_events() {
+        let mut translator = StreamTranslator::new(
+            UpstreamProtocol::Responses,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .expect("translator should exist");
+
+        let event = json!({
+            "type": "response.completed",
+            "response_id": "resp-1",
+            "response": {
+                "id": "resp-1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "gpt-4.1-mini",
+                "output": [
+                    {
+                        "id": "reasoning_1",
+                        "type": "reasoning"
+                    }
+                ]
+            }
+        });
+
+        let error = translator
+            .translate_event(&event)
+            .expect_err("translation should fail");
+        assert!(error
+            .to_string()
+            .contains("unsupported responses output item type"));
+    }
+
+    #[test]
+    fn responses_stream_translator_rejects_non_assistant_output_roles_on_completed_events() {
+        let mut translator = StreamTranslator::new(
+            UpstreamProtocol::Responses,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .expect("translator should exist");
+
+        let event = json!({
+            "type": "response.completed",
+            "response_id": "resp-1",
+            "response": {
+                "id": "resp-1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "gpt-4.1-mini",
+                "output": [
+                    {
+                        "id": "msg-1",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "user",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "Hi",
+                            "annotations": []
+                        }]
+                    }
+                ]
+            }
+        });
+
+        let error = translator
+            .translate_event(&event)
+            .expect_err("translation should fail");
+        assert!(error
+            .to_string()
+            .contains("unsupported responses output role"));
+    }
 }

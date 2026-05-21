@@ -35,6 +35,8 @@ async fn usage_logs_rotate_by_size_into_archive_files() {
             .unwrap();
     }
 
+    state.flush_usage_logs_for_test().await.unwrap();
+
     let snapshot = state.snapshot().await;
     let ids = snapshot
         .usage_logs
@@ -97,6 +99,8 @@ async fn load_from_path_loads_rotated_usage_logs() {
             .unwrap();
     }
 
+    state.flush_usage_logs_for_test().await.unwrap();
+
     let reloaded = AppState::load_from_path(
         &state_path,
         AppConfig {
@@ -150,6 +154,8 @@ async fn usage_log_archives_are_capped_by_count() {
             .unwrap();
     }
 
+    state.flush_usage_logs_for_test().await.unwrap();
+
     let archive_files = archive_files(&tempdir);
     assert_eq!(archive_files.len(), 2);
 
@@ -195,6 +201,8 @@ async fn load_from_path_prunes_existing_usage_log_archives() {
             .await
             .unwrap();
     }
+
+    state.flush_usage_logs_for_test().await.unwrap();
 
     let reloaded = AppState::load_from_path(
         &state_path,
