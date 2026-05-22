@@ -33,6 +33,8 @@ pub struct AppConfig {
     pub app_name: String,
     pub usage_log_rotation_max_bytes: usize,
     pub usage_log_archive_max_files: usize,
+    pub upstream_rate_limit_default_retry_seconds: u64,
+    pub upstream_rate_limit_retry_window_seconds: u64,
 }
 
 impl Default for AppConfig {
@@ -43,6 +45,8 @@ impl Default for AppConfig {
             app_name: "chat-responses-codex".into(),
             usage_log_rotation_max_bytes: 1_048_576,
             usage_log_archive_max_files: 10,
+            upstream_rate_limit_default_retry_seconds: 30,
+            upstream_rate_limit_retry_window_seconds: 300,
         }
     }
 }
@@ -152,9 +156,23 @@ pub struct DownstreamConfig {
     pub per_minute_limit: u32,
     pub daily_token_limit: Option<u64>,
     pub monthly_token_limit: Option<u64>,
+    #[serde(default)]
+    pub request_quota_window_hours: Option<u32>,
+    #[serde(default)]
+    pub request_quota_requests: Option<u32>,
     pub ip_allowlist: Vec<String>,
     pub expires_at: Option<u64>,
     pub active: bool,
+}
+
+impl DownstreamConfig {
+    pub fn uses_request_quota(&self) -> bool {
+        self.request_quota_window_hours.is_some() && self.request_quota_requests.is_some()
+    }
+
+    pub fn uses_token_quota(&self) -> bool {
+        self.daily_token_limit.is_some() || self.monthly_token_limit.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +206,7 @@ pub struct AppState {
     usage_log_flush_running: Arc<AtomicBool>,
     upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
+    downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
     pub store_path: PathBuf,
     pub config: AppConfig,
@@ -206,13 +225,24 @@ impl AppState {
         store_path: impl Into<PathBuf>,
         config: AppConfig,
     ) -> Self {
+        let downstream_usage_logs = state
+            .usage_logs
+            .iter()
+            .cloned()
+            .chain(archived_usage_logs.iter().cloned())
+            .collect::<Vec<_>>();
         Self {
             inner: Arc::new(Mutex::new(state)),
             archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
-            downstream_request_windows: Arc::new(Mutex::new(HashMap::new())),
+            downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
+                &downstream_usage_logs,
+            ))),
+            downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
+                &downstream_usage_logs,
+            ))),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: store_path.into(),
             config,
@@ -226,13 +256,19 @@ impl AppState {
         config: AppConfig,
         postgres: PostgresStateStore,
     ) -> Self {
+        let downstream_usage_logs = state.usage_logs.clone();
         Self {
             inner: Arc::new(Mutex::new(state)),
             archived_usage_logs: Arc::new(Mutex::new(Vec::new())),
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
-            downstream_request_windows: Arc::new(Mutex::new(HashMap::new())),
+            downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
+                &downstream_usage_logs,
+            ))),
+            downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
+                &downstream_usage_logs,
+            ))),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: PathBuf::new(),
             config,
@@ -489,14 +525,6 @@ impl AppState {
             .collect()
     }
 
-    pub async fn upstream_in_flight_counts(&self) -> HashMap<String, u32> {
-        let runtime_state = self.upstream_runtime_state.lock().await;
-        runtime_state
-            .iter()
-            .map(|(upstream_id, state)| (upstream_id.clone(), state.in_flight))
-            .collect()
-    }
-
     pub async fn try_reserve_upstream_request(
         &self,
         upstream: &UpstreamConfig,
@@ -518,54 +546,6 @@ impl AppState {
         prune_quota_events(&mut state.minute_events, now, 60);
         prune_quota_events(&mut state.five_hour_events, now, 5 * 60 * 60);
 
-        if state.in_flight >= upstream.max_concurrency.max(1) {
-            return Err(UpstreamAdmissionError::new(
-                format!(
-                    "upstream concurrency limit exceeded: {}/{}",
-                    state.in_flight, upstream.max_concurrency
-                ),
-                1,
-            ));
-        }
-
-        let minute_cost = quota_event_cost(&state.minute_events);
-        if minute_cost.saturating_add(request_cost) > upstream.requests_per_minute.max(1) {
-            return Err(UpstreamAdmissionError::new(
-                format!(
-                    "upstream per-minute quota exceeded: {}/{}",
-                    minute_cost.saturating_add(request_cost),
-                    upstream.requests_per_minute
-                ),
-                quota_retry_after_seconds(
-                    &state.minute_events,
-                    now,
-                    60,
-                    minute_cost
-                        .saturating_add(request_cost)
-                        .saturating_sub(upstream.requests_per_minute.max(1)),
-                ),
-            ));
-        }
-
-        let five_hour_cost = quota_event_cost(&state.five_hour_events);
-        if five_hour_cost.saturating_add(request_cost) > upstream.request_quota_5h.max(1) {
-            return Err(UpstreamAdmissionError::new(
-                format!(
-                    "upstream 5-hour quota exceeded: {}/{}",
-                    five_hour_cost.saturating_add(request_cost),
-                    upstream.request_quota_5h
-                ),
-                quota_retry_after_seconds(
-                    &state.five_hour_events,
-                    now,
-                    5 * 60 * 60,
-                    five_hour_cost
-                        .saturating_add(request_cost)
-                        .saturating_sub(upstream.request_quota_5h.max(1)),
-                ),
-            ));
-        }
-
         state.in_flight = state.in_flight.saturating_add(1);
         state.minute_events.push_back(QuotaEvent {
             created_at: now,
@@ -576,6 +556,27 @@ impl AppState {
             cost: request_cost,
         });
         Ok(())
+    }
+
+    pub async fn upstream_runtime_snapshots(&self) -> HashMap<String, UpstreamRuntimeSnapshot> {
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        let now = unix_seconds();
+        runtime_state
+            .iter_mut()
+            .map(|(upstream_id, state)| {
+                prune_quota_events(&mut state.minute_events, now, 60);
+                prune_quota_events(&mut state.five_hour_events, now, 5 * 60 * 60);
+                (
+                    upstream_id.clone(),
+                    UpstreamRuntimeSnapshot {
+                        in_flight: state.in_flight,
+                        minute_cost: quota_event_cost(&state.minute_events),
+                        five_hour_cost: quota_event_cost(&state.five_hour_events),
+                        cooldown_until: state.cooldown_until,
+                    },
+                )
+            })
+            .collect()
     }
 
     pub async fn release_upstream_request(&self, upstream_id: &str) {
@@ -606,7 +607,25 @@ impl AppState {
         {
             upstream.failure_count = 0;
         }
-        self.persist_state(&state).await
+        let persist_result = self.persist_state(&state).await;
+        drop(state);
+
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        if let Some(runtime) = runtime_state.get_mut(upstream_id) {
+            runtime.cooldown_until = 0;
+        }
+
+        persist_result
+    }
+
+    pub async fn mark_upstream_rate_limited(&self, upstream_id: &str, retry_after_seconds: u64) {
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        let state = runtime_state
+            .entry(upstream_id.to_string())
+            .or_insert_with(UpstreamRuntimeState::default);
+        let now = unix_seconds();
+        let cooldown_until = now.saturating_add(retry_after_seconds.max(1));
+        state.cooldown_until = state.cooldown_until.max(cooldown_until);
     }
 
     pub async fn append_usage_log(&self, mut log: UsageLog) -> io::Result<()> {
@@ -619,11 +638,24 @@ impl AppState {
 
         {
             let mut pending = self.pending_usage_logs.lock().await;
-            pending.push(log);
+            pending.push(log.clone());
         }
+
+        self.record_downstream_usage_event(&log).await;
 
         self.schedule_usage_log_flush();
         Ok(())
+    }
+
+    async fn record_downstream_usage_event(&self, log: &UsageLog) {
+        let mut windows = self.downstream_token_windows.lock().await;
+        windows
+            .entry(log.downstream_key_id.clone())
+            .or_insert_with(VecDeque::new)
+            .push_back(DownstreamTokenEvent {
+                created_at: log.created_at,
+                tokens: log.total_tokens,
+            });
     }
 
     fn schedule_usage_log_flush(&self) {
@@ -750,15 +782,19 @@ impl AppState {
 
     pub async fn reserve_downstream_request(
         &self,
-        downstream_id: &str,
-        per_minute_limit: u32,
+        downstream: &DownstreamConfig,
     ) -> Result<(), u64> {
         let mut windows = self.downstream_request_windows.lock().await;
         let window = windows
-            .entry(downstream_id.to_string())
+            .entry(downstream.id.clone())
             .or_insert_with(VecDeque::new);
         let now = unix_seconds();
-        let window_start = now.saturating_sub(59);
+        let request_quota_window_seconds = downstream
+            .request_quota_window_hours
+            .zip(downstream.request_quota_requests)
+            .map(|(hours, _)| u64::from(hours.max(1)).saturating_mul(60 * 60));
+        let retention_seconds = request_quota_window_seconds.unwrap_or(60).max(60);
+        let window_start = now.saturating_sub(retention_seconds.saturating_sub(1));
 
         while let Some(&timestamp) = window.front() {
             if timestamp < window_start {
@@ -768,10 +804,111 @@ impl AppState {
             }
         }
 
-        if window.len() >= per_minute_limit as usize {
-            let oldest = window.front().copied().unwrap_or(now);
+        let minute_start = now.saturating_sub(59);
+        let minute_count = window
+            .iter()
+            .filter(|&&timestamp| timestamp >= minute_start)
+            .count();
+        if minute_count >= downstream.per_minute_limit as usize {
+            let oldest = window
+                .iter()
+                .copied()
+                .find(|timestamp| *timestamp >= minute_start)
+                .unwrap_or(now);
             let retry_after = oldest.saturating_add(60).saturating_sub(now).max(1);
             return Err(retry_after);
+        }
+
+        if let Some(request_quota_window_seconds) = request_quota_window_seconds {
+            let request_quota_requests = downstream.request_quota_requests.unwrap_or(0).max(1);
+            let quota_start = now.saturating_sub(request_quota_window_seconds.saturating_sub(1));
+            let quota_count = window
+                .iter()
+                .filter(|&&timestamp| timestamp >= quota_start)
+                .count();
+            if quota_count >= request_quota_requests as usize {
+                let oldest = window
+                    .iter()
+                    .copied()
+                    .find(|timestamp| *timestamp >= quota_start)
+                    .unwrap_or(now);
+                let retry_after = oldest
+                    .saturating_add(request_quota_window_seconds)
+                    .saturating_sub(now)
+                    .max(1);
+                return Err(retry_after);
+            }
+        }
+
+        if downstream.uses_token_quota() && !downstream.uses_request_quota() {
+            let mut token_windows = self.downstream_token_windows.lock().await;
+            let token_window = token_windows
+                .entry(downstream.id.clone())
+                .or_insert_with(VecDeque::new);
+            let token_retention_seconds = downstream_token_retention_seconds(downstream);
+            let token_window_start = now.saturating_sub(token_retention_seconds.saturating_sub(1));
+
+            while let Some(event) = token_window.front() {
+                if event.created_at < token_window_start {
+                    token_window.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            let mut retry_after_seconds = 0u64;
+
+            if let Some(daily_token_limit) = downstream.daily_token_limit {
+                let daily_used = token_window
+                    .iter()
+                    .filter(|event| {
+                        event.created_at
+                            >= now.saturating_sub(
+                                DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
+                            )
+                    })
+                    .map(|event| event.tokens)
+                    .sum::<u64>();
+                if daily_used >= daily_token_limit.max(1) {
+                    retry_after_seconds =
+                        retry_after_seconds.max(downstream_token_retry_after_seconds(
+                            token_window,
+                            now,
+                            DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
+                            daily_used
+                                .saturating_add(1)
+                                .saturating_sub(daily_token_limit.max(1)),
+                        ));
+                }
+            }
+
+            if let Some(monthly_token_limit) = downstream.monthly_token_limit {
+                let monthly_used = token_window
+                    .iter()
+                    .filter(|event| {
+                        event.created_at
+                            >= now.saturating_sub(
+                                DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
+                            )
+                    })
+                    .map(|event| event.tokens)
+                    .sum::<u64>();
+                if monthly_used >= monthly_token_limit.max(1) {
+                    retry_after_seconds =
+                        retry_after_seconds.max(downstream_token_retry_after_seconds(
+                            token_window,
+                            now,
+                            DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
+                            monthly_used
+                                .saturating_add(1)
+                                .saturating_sub(monthly_token_limit.max(1)),
+                        ));
+                }
+            }
+
+            if retry_after_seconds > 0 {
+                return Err(retry_after_seconds.max(1));
+            }
         }
 
         window.push_back(now);
@@ -1108,6 +1245,31 @@ struct UpstreamRuntimeState {
     in_flight: u32,
     minute_events: VecDeque<QuotaEvent>,
     five_hour_events: VecDeque<QuotaEvent>,
+    cooldown_until: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UpstreamRuntimeSnapshot {
+    pub in_flight: u32,
+    pub minute_cost: u32,
+    pub five_hour_cost: u32,
+    pub cooldown_until: u64,
+}
+
+impl UpstreamRuntimeSnapshot {
+    pub fn is_cooled_down(&self, now: u64) -> bool {
+        self.cooldown_until > now
+    }
+
+    pub fn cooldown_remaining(&self, now: u64) -> u64 {
+        self.cooldown_until.saturating_sub(now)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DownstreamTokenEvent {
+    created_at: u64,
+    tokens: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1146,19 +1308,78 @@ fn prune_quota_events(events: &mut VecDeque<QuotaEvent>, now: u64, window_second
     }
 }
 
-fn quota_retry_after_seconds(
-    events: &VecDeque<QuotaEvent>,
+fn build_downstream_request_windows(logs: &[UsageLog]) -> HashMap<String, VecDeque<u64>> {
+    let mut windows = HashMap::new();
+    for log in normalized_usage_logs(logs) {
+        windows
+            .entry(log.downstream_key_id.clone())
+            .or_insert_with(VecDeque::new)
+            .push_back(log.created_at);
+    }
+    windows
+}
+
+fn build_downstream_token_windows(
+    logs: &[UsageLog],
+) -> HashMap<String, VecDeque<DownstreamTokenEvent>> {
+    let mut windows = HashMap::new();
+    for log in normalized_usage_logs(logs) {
+        windows
+            .entry(log.downstream_key_id.clone())
+            .or_insert_with(VecDeque::new)
+            .push_back(DownstreamTokenEvent {
+                created_at: log.created_at,
+                tokens: log.total_tokens,
+            });
+    }
+    windows
+}
+
+fn normalized_usage_logs(logs: &[UsageLog]) -> Vec<UsageLog> {
+    let mut logs = logs.to_vec();
+    logs.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then(left.request_id.cmp(&right.request_id))
+            .then(left.id.cmp(&right.id))
+    });
+
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::with_capacity(logs.len());
+    for log in logs {
+        if seen.insert(log.id.clone()) {
+            deduped.push(log);
+        }
+    }
+    deduped
+}
+
+const DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS: u64 = 24 * 60 * 60;
+const DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+fn downstream_token_retention_seconds(downstream: &DownstreamConfig) -> u64 {
+    if downstream.monthly_token_limit.is_some() {
+        DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS
+    } else if downstream.daily_token_limit.is_some() {
+        DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS
+    } else {
+        60
+    }
+}
+
+fn downstream_token_retry_after_seconds(
+    events: &VecDeque<DownstreamTokenEvent>,
     now: u64,
     window_seconds: u64,
-    deficit: u32,
+    deficit: u64,
 ) -> u64 {
     if deficit == 0 {
         return 1;
     }
 
-    let mut freed = 0u32;
+    let mut freed = 0u64;
     for event in events {
-        freed = freed.saturating_add(event.cost);
+        freed = freed.saturating_add(event.tokens);
         if freed >= deficit {
             return event
                 .created_at

@@ -93,6 +93,8 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 per_minute_limit: 10_000,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,

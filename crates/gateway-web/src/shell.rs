@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 pub const APP_NAME: &str = "chat-responses-codex";
+pub const APP_FAVICON_DATA_URI: &str = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTYiIGZpbGw9IiMwZmEzYjEiLz48dGV4dCB4PSI1MCUiIHk9IjU2JSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMjQiIGZvbnQtd2VpZ2h0PSI3MDAiIGxldHRlci1zcGFjaW5nPSItMC4wNmVtIiBmaWxsPSIjZmZmZmZmIj5DUkM8L3RleHQ+PC9zdmc+";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
@@ -113,6 +114,7 @@ button { cursor: pointer; }
   min-height: 100vh;
   display: grid;
   grid-template-columns: 286px minmax(0, 1fr);
+  align-items: stretch;
 }
 
 .sidebar {
@@ -125,6 +127,10 @@ button { cursor: pointer; }
   flex-direction: column;
   gap: 24px;
   border-right: 1px solid rgba(255, 255, 255, 0.06);
+  position: sticky;
+  top: 0;
+  min-height: 100vh;
+  overflow: auto;
 }
 
 .brand {
@@ -210,8 +216,13 @@ button { cursor: pointer; }
   margin-bottom: 8px;
 }
 
+.sidebar-footer-card p {
+  margin: 0;
+}
+
 .main {
-  padding: 28px;
+  min-width: 0;
+  padding: 32px;
 }
 
 .page-header {
@@ -220,6 +231,8 @@ button { cursor: pointer; }
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
 }
 
 .page-header h1,
@@ -237,7 +250,7 @@ button { cursor: pointer; }
 
 .page-header-actions {
   display: inline-flex;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   flex-wrap: wrap;
 }
@@ -258,7 +271,7 @@ button { cursor: pointer; }
 
 .summary-grid {
   display: grid;
-  gap: 14px;
+  gap: 12px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
@@ -303,15 +316,36 @@ button { cursor: pointer; }
 }
 
 .panel {
-  padding: 20px;
+  padding: 18px;
 }
 
 .panel-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.disclosure-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.disclosure-panel > summary {
+  list-style: none;
+  cursor: pointer;
+  margin-bottom: 0;
+}
+
+.disclosure-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure-panel-body {
+  display: grid;
+  gap: 14px;
+  padding: 0 18px 18px;
 }
 
 .panel-head h2,
@@ -327,9 +361,10 @@ button { cursor: pointer; }
 
 .panel-toolbar {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .table-shell {
@@ -363,13 +398,17 @@ button { cursor: pointer; }
 
 .table tr:last-child td { border-bottom: 0; }
 
+.table tbody tr:hover {
+  background: rgba(15, 23, 42, 0.02);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap: 5px;
+  padding: 5px 9px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
 }
@@ -401,19 +440,20 @@ button { cursor: pointer; }
 
 .form-grid {
   display: grid;
-  gap: 14px;
+  gap: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .field {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .field label {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
   font-weight: 700;
+  line-height: 1.2;
 }
 
 .field input,
@@ -421,52 +461,107 @@ button { cursor: pointer; }
 .field textarea {
   width: 100%;
   border: 1px solid var(--border-strong);
-  border-radius: 16px;
-  background: #fff;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
   color: var(--text);
-  padding: 13px 14px;
+  padding: 10px 12px;
+  min-height: 40px;
   outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+}
+
+.field select {
+  padding-right: 34px;
 }
 
 .field textarea {
-  min-height: 120px;
+  min-height: 104px;
   resize: vertical;
+}
+
+.field input[type="checkbox"],
+.field input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 2px 0 0;
+  justify-self: start;
+  align-self: start;
+  accent-color: var(--accent);
+  background: transparent;
+  border-radius: 4px;
 }
 
 .field input:focus,
 .field select:focus,
 .field textarea:focus {
   border-color: rgba(15, 163, 177, 0.45);
-  box-shadow: 0 0 0 4px rgba(15, 163, 177, 0.10);
+  box-shadow: 0 0 0 3px rgba(15, 163, 177, 0.12);
+}
+
+.field input:focus-visible,
+.field select:focus-visible,
+.field textarea:focus-visible,
+.button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(15, 163, 177, 0.18);
 }
 
 .field .hint {
   color: var(--muted);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.35;
 }
 
 .section-stack {
   display: grid;
-  gap: 18px;
+  gap: 14px;
+}
+
+.editor-disclosure {
+  display: grid;
+  gap: 14px;
+}
+
+.editor-disclosure > summary {
+  justify-self: end;
+  list-style: none;
+}
+
+.editor-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.editor-disclosure-body {
+  display: grid;
+  gap: 14px;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 12px 16px;
-  border-radius: 14px;
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 12px;
   border: 1px solid transparent;
   font-weight: 800;
-  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
 .button:hover {
@@ -476,19 +571,29 @@ button { cursor: pointer; }
 .button.primary {
   color: #fff;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  box-shadow: 0 18px 30px rgba(15, 163, 177, 0.18);
+  box-shadow: 0 12px 22px rgba(15, 163, 177, 0.18);
 }
 
 .button.secondary {
   color: var(--text);
-  background: #fff;
-  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(15, 23, 42, 0.10);
 }
 
 .button.ghost {
-  color: var(--muted);
-  background: transparent;
+  color: #4d5b6c;
+  background: rgba(15, 23, 42, 0.03);
   border-color: transparent;
+}
+
+.button.secondary:hover,
+.button.ghost:hover {
+  border-color: rgba(15, 23, 42, 0.14);
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.button.ghost:hover {
+  background: rgba(15, 23, 42, 0.06);
 }
 
 .auth-page {
@@ -505,6 +610,8 @@ button { cursor: pointer; }
   background: var(--panel);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
+  position: relative;
+  overflow: hidden;
 }
 
 .auth-grid {
@@ -515,6 +622,16 @@ button { cursor: pointer; }
 
 .auth-copy {
   padding: 12px 0;
+}
+
+.auth-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 280px;
+  height: 280px;
+  background: radial-gradient(circle, rgba(15, 163, 177, 0.12), transparent 68%);
+  pointer-events: none;
 }
 
 .auth-copy h1 {
@@ -558,12 +675,12 @@ button { cursor: pointer; }
 }
 
 .auth-form {
-  padding: 24px;
+  padding: 22px;
   border-radius: 24px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.76);
   display: grid;
-  gap: 16px;
+  gap: 14px;
 }
 
 .code-block {
@@ -578,11 +695,26 @@ button { cursor: pointer; }
 }
 
 .note {
-  padding: 16px 18px;
-  border-radius: 18px;
-  background: rgba(47, 124, 246, 0.08);
-  color: #204893;
-  border: 1px solid rgba(47, 124, 246, 0.12);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(15, 163, 177, 0.10), rgba(47, 124, 246, 0.08));
+  color: #1f4f57;
+  border: 1px solid rgba(15, 163, 177, 0.14);
+  line-height: 1.45;
+  font-size: 13px;
+}
+
+.note::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 0 4px rgba(15, 163, 177, 0.10);
 }
 
 .empty-state {
@@ -593,7 +725,7 @@ button { cursor: pointer; }
   background: rgba(255, 255, 255, 0.6);
 }
 
-@media (max-width: 1180px) {
+  @media (max-width: 1180px) {
   .page-root {
     grid-template-columns: 1fr;
   }
@@ -601,6 +733,8 @@ button { cursor: pointer; }
   .sidebar {
     border-right: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    position: static;
+    min-height: auto;
   }
 
   .summary-grid,
@@ -620,7 +754,7 @@ pub fn AppLayout(
     #[prop(into)] title: String,
     #[prop(into)] subtitle: String,
     active: Section,
-    #[prop(children)] children: Children,
+    children: Children,
 ) -> impl IntoView {
     let page_title = title.clone();
     let page_subtitle = subtitle.clone();
@@ -630,8 +764,9 @@ pub fn AppLayout(
         <!DOCTYPE html>
         <html lang="zh-CN">
           <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <link rel="icon" type="image/svg+xml" href=APP_FAVICON_DATA_URI />
             <title>{format!("{page_title} - {APP_NAME}")}</title>
             <style>{APP_CSS}</style>
           </head>
@@ -664,7 +799,7 @@ pub fn AppLayout(
                 <div class="sidebar-footer">
                   <div class="sidebar-footer-card">
                     <strong>SSR-first scaffold</strong>
-                    <p class="muted">Leptos 管理后台骨架，后续接入真实 core state 和 session。</p>
+                    <p class="muted">{"管理后台直接消费共享 core model，协议转换和路由仍留在后端。"}</p>
                   </div>
                 </div>
               </aside>
@@ -696,7 +831,7 @@ pub fn AppLayout(
 pub fn AuthLayout(
     #[prop(into)] title: String,
     #[prop(into)] subtitle: String,
-    #[prop(children)] children: Children,
+    children: Children,
 ) -> impl IntoView {
     let page_title = title.clone();
     let page_subtitle = subtitle.clone();
@@ -705,8 +840,9 @@ pub fn AuthLayout(
         <!DOCTYPE html>
         <html lang="zh-CN">
           <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <link rel="icon" type="image/svg+xml" href=APP_FAVICON_DATA_URI />
             <title>{format!("{page_title} - {APP_NAME}")}</title>
             <style>{APP_CSS}</style>
           </head>
@@ -719,9 +855,9 @@ pub fn AuthLayout(
                     <h1>{page_title}</h1>
                     <p>{page_subtitle}</p>
                     <ul class="feature-list">
-                      <li>管理员会话登录，不再弹出浏览器基础认证</li>
-                      <li>SSR 页面，后续可逐步接入核心数据</li>
-                      <li>保留协议转换与能力保留的后端边界</li>
+                      <li>{"管理员会话登录，不再弹出浏览器基础认证"}</li>
+                      <li>{"页面直接消费 gateway-core 里的共享模型"}</li>
+                      <li>{"协议转换与能力保留仍然只在后端执行"}</li>
                     </ul>
                   </section>
                   <section>
@@ -739,7 +875,7 @@ pub fn AuthLayout(
 pub fn Panel(
     #[prop(into)] title: String,
     #[prop(into)] subtitle: String,
-    #[prop(children)] children: Children,
+    children: Children,
 ) -> impl IntoView {
     view! {
         <section class="panel card">
@@ -751,6 +887,30 @@ pub fn Panel(
           </div>
           {children()}
         </section>
+    }
+}
+
+#[component]
+pub fn DisclosurePanel(
+    #[prop(into)] title: String,
+    #[prop(into)] subtitle: String,
+    #[prop(into)] action_label: String,
+    open: bool,
+    children: Children,
+) -> impl IntoView {
+    view! {
+        <details class="panel card disclosure-panel" open=open>
+          <summary class="panel-head">
+            <div>
+              <h2>{title}</h2>
+              <p>{subtitle}</p>
+            </div>
+            <span class="button primary">{action_label}</span>
+          </summary>
+          <div class="disclosure-panel-body">
+            {children()}
+          </div>
+        </details>
     }
 }
 
@@ -769,4 +929,3 @@ pub fn StatCard(
       </article>
     }
 }
-

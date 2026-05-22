@@ -25,6 +25,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_name: env_or("APP_NAME", "chat-responses-codex"),
         usage_log_rotation_max_bytes: env_usize("USAGE_LOG_ROTATION_MAX_BYTES", 1_048_576).max(1),
         usage_log_archive_max_files: env_usize("USAGE_LOG_ARCHIVE_MAX_FILES", 10).max(1),
+        upstream_rate_limit_default_retry_seconds: env_u64(
+            "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS",
+            30,
+        )
+        .max(1),
+        upstream_rate_limit_retry_window_seconds: env_u64(
+            "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS",
+            300,
+        )
+        .max(1),
     };
 
     init_tracing(&log_path);
@@ -119,6 +129,13 @@ fn env_usize(key: &str, default: usize) -> usize {
     env::var(key)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
 }
 

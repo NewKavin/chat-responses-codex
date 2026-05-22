@@ -494,6 +494,33 @@ async fn admin_logs_page_uses_summary_cards_and_context_panel() {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "Primary Account".into(),
+                base_url: "https://example.com".into(),
+                api_key: "sk-demo".into(),
+                protocol: UpstreamProtocol::Responses,
+                supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "Team Alpha".into(),
+                hash: "sha256:demo".into(),
+                plaintext_key: Some("sk-demo".into()),
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 20,
+                daily_token_limit: Some(1_000),
+                monthly_token_limit: Some(2_000),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
             usage_logs: vec![chat_responses_codex::state::UsageLog {
                 id: "log-1".into(),
                 downstream_key_id: "down-1".into(),
@@ -533,9 +560,13 @@ async fn admin_logs_page_uses_summary_cards_and_context_panel() {
     assert!(html.contains("运行概览"));
     assert!(html.contains("最近 50 条"));
     assert!(html.contains("Total tokens"));
-    assert!(html.contains("Tokens"));
+    assert!(html.contains("Token 吞吐"));
     assert!(html.contains("最新请求"));
     assert!(html.contains("请求 ID"));
+    assert!(html.contains("Team Alpha"));
+    assert!(html.contains("Primary Account"));
+    assert!(!html.contains("down-1"));
+    assert!(!html.contains("up-1"));
 }
 
 #[tokio::test]
@@ -712,6 +743,8 @@ async fn admin_can_edit_downstream_metadata_without_changing_the_secret() {
                 per_minute_limit: 60,
                 daily_token_limit: Some(1_000),
                 monthly_token_limit: Some(2_000),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
                 ip_allowlist: vec!["1.2.3.4".into()],
                 expires_at: Some(1_900_000_000),
                 active: true,
@@ -768,6 +801,11 @@ async fn admin_can_edit_downstream_metadata_without_changing_the_secret() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("已保存下游密钥"));
+    assert!(html.contains(r#"<div class="grid drawer-layout" data-drawer-state="closed">"#));
+
     let snapshot = state.snapshot().await;
     let downstream = &snapshot.downstreams[0];
     assert_eq!(downstream.name, "Team Alpha Updated");
@@ -790,6 +828,82 @@ async fn admin_can_edit_downstream_metadata_without_changing_the_secret() {
 }
 
 #[tokio::test]
+async fn admin_can_save_request_quota_downstreams_with_token_reference_values_intact() {
+    let tempdir = tempdir().unwrap();
+    let generated = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "Team Alpha".into(),
+                hash: generated.hash.clone(),
+                plaintext_key: Some(generated.plaintext.clone()),
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                daily_token_limit: Some(1_000),
+                monthly_token_limit: Some(2_000),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec!["1.2.3.4".into()],
+                expires_at: Some(1_900_000_000),
+                active: true,
+            }],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state.clone());
+
+    let form = serde_urlencoded::to_string(json!({
+        "name": "Team Alpha Updated",
+        "models": "gpt-4.1-mini,gpt-4o-mini",
+        "limit_mode": "requests",
+        "per_minute_limit": 120,
+        "daily_token_limit": 3000,
+        "monthly_token_limit": 4000,
+        "request_quota_window_hours": 5,
+        "request_quota_requests": 600,
+        "ip_allowlist": "1.2.3.4,5.6.7.8",
+        "expires_at": 1_950_000_000u64,
+        "active": "on"
+    }))
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/downstreams/down-1")
+                .header(header::AUTHORIZATION, basic_auth("admin", "admin"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("已保存下游密钥"));
+
+    let snapshot = state.snapshot().await;
+    let downstream = &snapshot.downstreams[0];
+    assert_eq!(downstream.name, "Team Alpha Updated");
+    assert_eq!(downstream.per_minute_limit, 120);
+    assert_eq!(downstream.daily_token_limit, Some(3_000));
+    assert_eq!(downstream.monthly_token_limit, Some(4_000));
+    assert_eq!(downstream.request_quota_window_hours, Some(5));
+    assert_eq!(downstream.request_quota_requests, Some(600));
+    assert_eq!(downstream.expires_at, Some(1_950_000_000));
+    assert_eq!(
+        downstream.plaintext_key.as_deref(),
+        Some(generated.plaintext.as_str())
+    );
+}
+
+#[tokio::test]
 async fn admin_can_rotate_a_downstream_secret() {
     let tempdir = tempdir().unwrap();
     let generated = generate_downstream_key("gw");
@@ -804,6 +918,8 @@ async fn admin_can_rotate_a_downstream_secret() {
                 per_minute_limit: 60,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
@@ -864,6 +980,8 @@ async fn admin_can_delete_a_downstream_record() {
                 per_minute_limit: 60,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
@@ -910,6 +1028,8 @@ async fn admin_can_filter_downstreams_by_name_status_and_lifetime() {
                     per_minute_limit: 60,
                     daily_token_limit: None,
                     monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
@@ -923,6 +1043,8 @@ async fn admin_can_filter_downstreams_by_name_status_and_lifetime() {
                     per_minute_limit: 60,
                     daily_token_limit: None,
                     monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
                     ip_allowlist: vec![],
                     expires_at: Some(1_950_000_000),
                     active: true,
@@ -936,6 +1058,8 @@ async fn admin_can_filter_downstreams_by_name_status_and_lifetime() {
                     per_minute_limit: 60,
                     daily_token_limit: None,
                     monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: false,
@@ -989,6 +1113,8 @@ async fn admin_can_search_downstreams_by_secret_fragment() {
                     per_minute_limit: 60,
                     daily_token_limit: None,
                     monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
@@ -1002,6 +1128,8 @@ async fn admin_can_search_downstreams_by_secret_fragment() {
                     per_minute_limit: 60,
                     daily_token_limit: None,
                     monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
                     ip_allowlist: vec![],
                     expires_at: Some(1_950_000_000),
                     active: false,
@@ -1092,6 +1220,8 @@ async fn admin_can_disable_downstream_key_and_block_requests() {
                 per_minute_limit: 60,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
@@ -1175,6 +1305,8 @@ async fn admin_can_disable_upstream_key_and_remove_its_models() {
                 per_minute_limit: 60,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,

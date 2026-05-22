@@ -123,9 +123,17 @@ impl PostgresStateStore {
                 per_minute_limit INTEGER NOT NULL,
                 daily_token_limit BIGINT NULL,
                 monthly_token_limit BIGINT NULL,
+                request_quota_window_hours INTEGER NULL,
+                request_quota_requests INTEGER NULL,
                 expires_at BIGINT NULL,
                 active BOOLEAN NOT NULL
             );
+
+            ALTER TABLE downstreams
+                ADD COLUMN IF NOT EXISTS request_quota_window_hours INTEGER NULL;
+
+            ALTER TABLE downstreams
+                ADD COLUMN IF NOT EXISTS request_quota_requests INTEGER NULL;
 
             CREATE TABLE IF NOT EXISTS downstream_model_allowlist (
                 downstream_id TEXT NOT NULL REFERENCES downstreams(id) ON DELETE CASCADE,
@@ -439,7 +447,8 @@ impl PgConnection {
         for row in self
             .query(
                 "SELECT id, name, hash, plaintext_key, per_minute_limit, \
-                 daily_token_limit, monthly_token_limit, expires_at, active \
+                 daily_token_limit, monthly_token_limit, request_quota_window_hours, \
+                 request_quota_requests, expires_at, active \
                  FROM downstreams ORDER BY id",
             )
             .await?
@@ -461,12 +470,20 @@ impl PgConnection {
                     .map(|value| value.parse::<u64>())
                     .transpose()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                request_quota_window_hours: optional_text(&row, 7)
+                    .map(|value| value.parse::<u32>())
+                    .transpose()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                request_quota_requests: optional_text(&row, 8)
+                    .map(|value| value.parse::<u32>())
+                    .transpose()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 ip_allowlist: Vec::new(),
-                expires_at: optional_text(&row, 7)
+                expires_at: optional_text(&row, 9)
                     .map(|value| value.parse::<u64>())
                     .transpose()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                active: parse_bool(required_text(&row, 8, "downstreams.active")?)?,
+                active: parse_bool(required_text(&row, 10, "downstreams.active")?)?,
             });
         }
 
@@ -615,8 +632,8 @@ impl PgConnection {
 
             for downstream in &state.downstreams {
                 self.batch_execute(&format!(
-                    "INSERT INTO downstreams (id, name, hash, plaintext_key, per_minute_limit, daily_token_limit, monthly_token_limit, expires_at, active) \
-                     VALUES ({id}, {name}, {hash}, {plaintext_key}, {per_minute_limit}, {daily_token_limit}, {monthly_token_limit}, {expires_at}, {active})",
+                    "INSERT INTO downstreams (id, name, hash, plaintext_key, per_minute_limit, daily_token_limit, monthly_token_limit, request_quota_window_hours, request_quota_requests, expires_at, active) \
+                     VALUES ({id}, {name}, {hash}, {plaintext_key}, {per_minute_limit}, {daily_token_limit}, {monthly_token_limit}, {request_quota_window_hours}, {request_quota_requests}, {expires_at}, {active})",
                     id = sql_string(&downstream.id),
                     name = sql_string(&downstream.name),
                     hash = sql_string(&downstream.hash),
@@ -624,6 +641,8 @@ impl PgConnection {
                     per_minute_limit = downstream.per_minute_limit,
                     daily_token_limit = sql_optional_u64(downstream.daily_token_limit),
                     monthly_token_limit = sql_optional_u64(downstream.monthly_token_limit),
+                    request_quota_window_hours = sql_optional_u32(downstream.request_quota_window_hours),
+                    request_quota_requests = sql_optional_u32(downstream.request_quota_requests),
                     expires_at = sql_optional_u64(downstream.expires_at),
                     active = sql_bool(downstream.active),
                 ))
@@ -1109,6 +1128,12 @@ fn sql_optional_string(value: Option<&str>) -> String {
 }
 
 fn sql_optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "NULL".to_string())
+}
+
+fn sql_optional_u32(value: Option<u32>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "NULL".to_string())

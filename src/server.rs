@@ -8,7 +8,7 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     default_upstream_max_concurrency, default_upstream_request_quota_5h,
     default_upstream_requests_per_minute, join_upstream_url, new_id, unix_seconds, AppConfig,
-    AppState, DownstreamConfig, ModelRequestCostConfig, UpstreamConfig, UsageLog,
+    AppState, DownstreamConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UsageLog,
     ADMIN_SESSION_TTL_SECONDS,
 };
 use axum::body::Body;
@@ -22,7 +22,7 @@ use bytes::Bytes;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -30,8 +30,14 @@ use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+use crate::admin::{
+    normalize_fetched_models, DownstreamForm, DownstreamFormView, DownstreamLifetimeFilter,
+    DownstreamListQuery, DownstreamStatusFilter, UpstreamForm, UpstreamFormView,
+};
+
 const ADMIN_SESSION_COOKIE: &str = "chat_responses_codex_admin_session";
 const ADMIN_LOGIN_PATH: &str = "/admin/login";
+const APP_FAVICON_DATA_URI: &str = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTYiIGZpbGw9IiMwZmEzYjEiLz48dGV4dCB4PSI1MCUiIHk9IjU2JSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9Im1pZGRsZSIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMjQiIGZvbnQtd2VpZ2h0PSI3MDAiIGxldHRlci1zcGFjaW5nPSItMC4wNmVtIiBmaWxsPSIjZmZmZmZmIj5DUkM8L3RleHQ+PC9zdmc+";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EndpointKind {
@@ -68,12 +74,272 @@ enum DispatchBody {
     Stream(Body),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageLogTiming {
+    Immediate,
+    DeferredUntilStreamEnd,
+}
+
 #[derive(Debug)]
 struct DispatchResult {
     status: StatusCode,
     body: DispatchBody,
     request_id: String,
     usage: (u64, u64, u64),
+    usage_log_timing: UsageLogTiming,
+}
+
+#[derive(Clone)]
+struct StreamUsageLogContext {
+    state: AppState,
+    request_id: String,
+    downstream_key_id: String,
+    upstream_key_id: String,
+    upstream_protocol: UpstreamProtocol,
+    endpoint: String,
+    model: String,
+    normalized_model: String,
+    status: StatusCode,
+    started: Instant,
+}
+
+impl std::fmt::Debug for StreamUsageLogContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamUsageLogContext")
+            .field("request_id", &self.request_id)
+            .field("downstream_key_id", &self.downstream_key_id)
+            .field("upstream_key_id", &self.upstream_key_id)
+            .field("upstream_protocol", &self.upstream_protocol)
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("normalized_model", &self.normalized_model)
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
+impl StreamUsageLogContext {
+    async fn emit(self, usage: (u64, u64, u64)) {
+        let StreamUsageLogContext {
+            state,
+            request_id,
+            downstream_key_id,
+            upstream_key_id,
+            upstream_protocol,
+            endpoint,
+            model,
+            normalized_model,
+            status,
+            started,
+        } = self;
+
+        let log = UsageLog {
+            id: request_id.clone(),
+            downstream_key_id: downstream_key_id.clone(),
+            upstream_key_id: upstream_key_id.clone(),
+            endpoint: endpoint.clone(),
+            model: model.clone(),
+            request_id: request_id.clone(),
+            status_code: status.as_u16(),
+            prompt_tokens: usage.0,
+            completion_tokens: usage.1,
+            total_tokens: usage.2,
+            latency_ms: started.elapsed().as_millis() as u64,
+            created_at: unix_seconds(),
+        };
+
+        if let Err(error) = state.append_usage_log(log).await {
+            tracing::error!(
+                request_id = %request_id,
+                downstream_key_id = %downstream_key_id,
+                path = %endpoint,
+                original_model = %model,
+                normalized_model = %normalized_model,
+                selected_upstream_id = %upstream_key_id,
+                selected_upstream_protocol = ?upstream_protocol,
+                error = %error,
+                "failed to save usage log"
+            );
+        }
+    }
+}
+
+fn stream_usage_from_value(value: &Value) -> Option<(u64, u64, u64)> {
+    if let Some(usage) = value.get("usage") {
+        return Some(usage_from_usage_value(usage));
+    }
+
+    value
+        .get("response")
+        .and_then(Value::as_object)
+        .and_then(|response| response.get("usage"))
+        .map(usage_from_usage_value)
+}
+
+fn usage_from_usage_value(usage: &Value) -> (u64, u64, u64) {
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(prompt_tokens + completion_tokens);
+    (prompt_tokens, completion_tokens, total_tokens)
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct LogListQuery {
+    request_id: Option<String>,
+    downstream: Option<String>,
+    upstream: Option<String>,
+    endpoint: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogStatusFilter {
+    All,
+    Success,
+    Warning,
+}
+
+impl LogListQuery {
+    fn request_id_value(&self) -> String {
+        normalized_text(&self.request_id)
+    }
+
+    fn downstream_value(&self) -> String {
+        normalized_text(&self.downstream)
+    }
+
+    fn upstream_value(&self) -> String {
+        normalized_text(&self.upstream)
+    }
+
+    fn endpoint_value(&self) -> String {
+        normalized_text(&self.endpoint)
+    }
+
+    #[cfg(test)]
+    fn normalized(&self) -> Self {
+        Self {
+            request_id: normalized_option_text(&self.request_id),
+            downstream: normalized_option_text(&self.downstream),
+            upstream: normalized_option_text(&self.upstream),
+            endpoint: normalized_option_text(&self.endpoint),
+            status: match self.status_filter() {
+                LogStatusFilter::Success => Some("success".to_string()),
+                LogStatusFilter::Warning => Some("warning".to_string()),
+                LogStatusFilter::All => None,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn query_suffix(&self) -> String {
+        let encoded = serde_urlencoded::to_string(&self.normalized()).unwrap_or_default();
+        if encoded.is_empty() {
+            String::new()
+        } else {
+            format!("?{encoded}")
+        }
+    }
+
+    fn status_filter(&self) -> LogStatusFilter {
+        match self.status.as_deref().map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case("success") => LogStatusFilter::Success,
+            Some(value) if value.eq_ignore_ascii_case("warning") => LogStatusFilter::Warning,
+            _ => LogStatusFilter::All,
+        }
+    }
+
+    fn matches(&self, state: &crate::state::PersistedState, log: &UsageLog) -> bool {
+        let request_id = self.request_id_value();
+        if !contains_filter(&log.request_id, &request_id) {
+            return false;
+        }
+
+        let downstream = self.downstream_value();
+        if !downstream.is_empty() {
+            let downstream_name = resolve_downstream_name(state, &log.downstream_key_id);
+            if !contains_filter(&downstream_name, &downstream)
+                && !contains_filter(&log.downstream_key_id, &downstream)
+            {
+                return false;
+            }
+        }
+
+        let upstream = self.upstream_value();
+        if !upstream.is_empty() {
+            let upstream_name = resolve_upstream_name(state, &log.upstream_key_id);
+            if !contains_filter(&upstream_name, &upstream)
+                && !contains_filter(&log.upstream_key_id, &upstream)
+            {
+                return false;
+            }
+        }
+
+        let endpoint = self.endpoint_value();
+        if !contains_filter(&log.endpoint, &endpoint) {
+            return false;
+        }
+
+        match self.status_filter() {
+            LogStatusFilter::All => {}
+            LogStatusFilter::Success if !matches!(log.status_code, 200..=299) => return false,
+            LogStatusFilter::Warning if log.status_code < 400 => return false,
+            LogStatusFilter::Success | LogStatusFilter::Warning => {}
+        }
+
+        true
+    }
+}
+
+fn normalized_text(value: &Option<String>) -> String {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[cfg(test)]
+fn normalized_option_text(value: &Option<String>) -> Option<String> {
+    let value = normalized_text(value);
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn contains_filter(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn throughput_label(total_tokens: u64, latency_ms: u64) -> String {
+    let latency = latency_ms.max(1) as u128;
+    let throughput = (total_tokens as u128 * 1_000) / latency;
+    format!("{throughput} tok/s")
+}
+
+fn token_breakdown_label(log: &UsageLog) -> String {
+    format!(
+        "{} / {} / {} tokens",
+        log.prompt_tokens, log.completion_tokens, log.total_tokens
+    )
 }
 
 #[derive(Debug)]
@@ -301,17 +567,7 @@ async fn portal(State(state): State<AppState>, headers: HeaderMap) -> impl IntoR
         return GatewayError::Unauthorized("invalid key".into()).into_response();
     };
 
-    let models = state.available_models_for_downstream(&secret).await;
-    let logs = snapshot
-        .usage_logs
-        .iter()
-        .rev()
-        .filter(|log| log.downstream_key_id == downstream.id)
-        .take(20)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Html(render_portal_page(&downstream, &models, &logs)).into_response()
+    Html(render_portal_page(&snapshot, &downstream)).into_response()
 }
 
 async fn admin_dashboard(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -456,13 +712,26 @@ async fn update_downstream(
         Some(id.clone()),
         existing.plaintext_key.clone(),
     );
-    let downstream = downstream_from_form(
+    let downstream = match downstream_from_form(
         &form_view,
         existing.hash.clone(),
         existing.plaintext_key.clone(),
         Some(&existing),
         id.clone(),
-    );
+    ) {
+        Ok(downstream) => downstream,
+        Err(error) => {
+            return Html(render_downstreams_page(
+                &snapshot,
+                &form_view,
+                None,
+                Some(&error),
+                &filters,
+                true,
+            ))
+            .into_response();
+        }
+    };
 
     match state.update_downstream(&id, downstream).await {
         Ok(true) => {
@@ -482,7 +751,7 @@ async fn update_downstream(
                 None,
                 Some("已保存下游密钥"),
                 &filters,
-                true,
+                false,
             ))
             .into_response()
         }
@@ -523,6 +792,8 @@ async fn rotate_downstream(
         per_minute_limit: existing.per_minute_limit,
         daily_token_limit: existing.daily_token_limit,
         monthly_token_limit: existing.monthly_token_limit,
+        request_quota_window_hours: existing.request_quota_window_hours,
+        request_quota_requests: existing.request_quota_requests,
         ip_allowlist: existing.ip_allowlist.clone(),
         expires_at: existing.expires_at,
         active: existing.active,
@@ -587,423 +858,17 @@ async fn delete_downstream(
     }
 }
 
-async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+async fn admin_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(filters): Query<LogListQuery>,
+) -> impl IntoResponse {
     if let Err(response) = ensure_admin(&headers, &state) {
         return response;
     }
 
     let snapshot = state.snapshot().await;
-    Html(render_logs_page(&snapshot)).into_response()
-}
-
-#[derive(Debug, Deserialize)]
-struct UpstreamForm {
-    intent: Option<String>,
-    name: String,
-    base_url: String,
-    api_key: String,
-    protocol: String,
-    models: String,
-    model_aliases: Option<String>,
-    request_quota_5h: Option<u32>,
-    requests_per_minute: Option<u32>,
-    max_concurrency: Option<u32>,
-    model_request_costs: Option<String>,
-    active: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DownstreamForm {
-    name: String,
-    models: String,
-    per_minute_limit: Option<u32>,
-    daily_token_limit: Option<u64>,
-    monthly_token_limit: Option<u64>,
-    ip_allowlist: Option<String>,
-    expires_at: Option<String>,
-    never_expires: Option<String>,
-    active: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-struct DownstreamListQuery {
-    search: Option<String>,
-    status: Option<String>,
-    lifetime: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DownstreamStatusFilter {
-    All,
-    Active,
-    Inactive,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DownstreamLifetimeFilter {
-    All,
-    Unlimited,
-    Expiring,
-}
-
-impl DownstreamListQuery {
-    fn search_value(&self) -> String {
-        self.search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default()
-            .to_string()
-    }
-
-    fn status_filter(&self) -> DownstreamStatusFilter {
-        match self.status.as_deref().map(str::trim) {
-            Some("active") => DownstreamStatusFilter::Active,
-            Some("inactive") => DownstreamStatusFilter::Inactive,
-            _ => DownstreamStatusFilter::All,
-        }
-    }
-
-    fn lifetime_filter(&self) -> DownstreamLifetimeFilter {
-        match self.lifetime.as_deref().map(str::trim) {
-            Some("unlimited") => DownstreamLifetimeFilter::Unlimited,
-            Some("expiring") => DownstreamLifetimeFilter::Expiring,
-            _ => DownstreamLifetimeFilter::All,
-        }
-    }
-
-    fn matches(&self, downstream: &DownstreamConfig) -> bool {
-        let search = self.search_value();
-        if !search.is_empty() {
-            let search = search.to_lowercase();
-            let name_matches = downstream.name.to_lowercase().contains(&search);
-            let secret_matches = downstream
-                .plaintext_key
-                .as_deref()
-                .map(|secret| secret.to_lowercase().contains(&search))
-                .unwrap_or(false);
-            if !name_matches && !secret_matches {
-                return false;
-            }
-        }
-
-        match self.status_filter() {
-            DownstreamStatusFilter::All => {}
-            DownstreamStatusFilter::Active => {
-                if !downstream.active {
-                    return false;
-                }
-            }
-            DownstreamStatusFilter::Inactive => {
-                if downstream.active {
-                    return false;
-                }
-            }
-        }
-
-        match self.lifetime_filter() {
-            DownstreamLifetimeFilter::All => {}
-            DownstreamLifetimeFilter::Unlimited => {
-                if downstream.expires_at.is_some() {
-                    return false;
-                }
-            }
-            DownstreamLifetimeFilter::Expiring => {
-                if downstream.expires_at.is_none() {
-                    return false;
-                }
-            }
-        }
-
-        true
-    }
-
-    fn normalized(&self) -> Self {
-        Self {
-            search: {
-                let search = self.search_value();
-                if search.is_empty() {
-                    None
-                } else {
-                    Some(search)
-                }
-            },
-            status: match self.status_filter() {
-                DownstreamStatusFilter::Active => Some("active".to_string()),
-                DownstreamStatusFilter::Inactive => Some("inactive".to_string()),
-                DownstreamStatusFilter::All => None,
-            },
-            lifetime: match self.lifetime_filter() {
-                DownstreamLifetimeFilter::Unlimited => Some("unlimited".to_string()),
-                DownstreamLifetimeFilter::Expiring => Some("expiring".to_string()),
-                DownstreamLifetimeFilter::All => None,
-            },
-        }
-    }
-
-    fn query_suffix(&self) -> String {
-        let query = self.normalized();
-        let encoded = serde_urlencoded::to_string(&query).unwrap_or_default();
-        if encoded.is_empty() {
-            String::new()
-        } else {
-            format!("?{encoded}")
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct DownstreamFormView {
-    action: String,
-    heading: String,
-    submit_label: String,
-    delete_action: Option<String>,
-    rotate_action: Option<String>,
-    id: Option<String>,
-    name: String,
-    models: String,
-    per_minute_limit: String,
-    daily_token_limit: String,
-    monthly_token_limit: String,
-    ip_allowlist: String,
-    expires_at: String,
-    never_expires: bool,
-    active: bool,
-    plaintext_key: Option<String>,
-    legacy_secret: bool,
-}
-
-impl DownstreamFormView {
-    fn blank() -> Self {
-        Self {
-            action: "/admin/downstreams".to_string(),
-            heading: "创建下游密钥".to_string(),
-            submit_label: "创建密钥".to_string(),
-            delete_action: None,
-            rotate_action: None,
-            id: None,
-            name: String::new(),
-            models: String::new(),
-            per_minute_limit: "60".to_string(),
-            daily_token_limit: String::new(),
-            monthly_token_limit: String::new(),
-            ip_allowlist: String::new(),
-            expires_at: String::new(),
-            never_expires: true,
-            active: true,
-            plaintext_key: None,
-            legacy_secret: false,
-        }
-    }
-
-    fn from_downstream(downstream: &DownstreamConfig) -> Self {
-        Self {
-            action: format!("/admin/downstreams/{}", downstream.id),
-            heading: "编辑下游密钥".to_string(),
-            submit_label: "保存修改".to_string(),
-            delete_action: Some(format!("/admin/downstreams/{}/delete", downstream.id)),
-            rotate_action: Some(format!("/admin/downstreams/{}/rotate", downstream.id)),
-            id: Some(downstream.id.clone()),
-            name: downstream.name.clone(),
-            models: downstream.model_allowlist.join(","),
-            per_minute_limit: downstream.per_minute_limit.to_string(),
-            daily_token_limit: downstream
-                .daily_token_limit
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            monthly_token_limit: downstream
-                .monthly_token_limit
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            ip_allowlist: downstream.ip_allowlist.join(","),
-            expires_at: downstream
-                .expires_at
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            never_expires: downstream.expires_at.is_none(),
-            active: downstream.active,
-            plaintext_key: downstream.plaintext_key.clone(),
-            legacy_secret: downstream.plaintext_key.is_none(),
-        }
-    }
-
-    fn from_form(
-        form: &DownstreamForm,
-        action: String,
-        downstream_id: Option<String>,
-        secret: Option<String>,
-    ) -> Self {
-        let is_editing = downstream_id.is_some();
-        Self {
-            action: action.clone(),
-            heading: if is_editing {
-                "编辑下游密钥".to_string()
-            } else {
-                "创建下游密钥".to_string()
-            },
-            submit_label: if is_editing {
-                "保存修改".to_string()
-            } else {
-                "创建密钥".to_string()
-            },
-            delete_action: downstream_id
-                .as_ref()
-                .map(|value| format!("/admin/downstreams/{value}/delete")),
-            rotate_action: downstream_id
-                .as_ref()
-                .map(|value| format!("/admin/downstreams/{value}/rotate")),
-            id: downstream_id,
-            name: form.name.clone(),
-            models: form.models.clone(),
-            per_minute_limit: form
-                .per_minute_limit
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "60".to_string()),
-            daily_token_limit: form
-                .daily_token_limit
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            monthly_token_limit: form
-                .monthly_token_limit
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            ip_allowlist: form.ip_allowlist.clone().unwrap_or_default(),
-            expires_at: if form.never_expires.is_some() {
-                String::new()
-            } else {
-                form.expires_at
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or_default()
-                    .to_string()
-            },
-            never_expires: form.never_expires.is_some()
-                || form
-                    .expires_at
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or_default()
-                    .is_empty(),
-            active: form_toggle_enabled(&form.active),
-            plaintext_key: secret.clone(),
-            legacy_secret: secret.is_none(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct UpstreamFormView {
-    action: String,
-    heading: String,
-    submit_label: String,
-    name: String,
-    base_url: String,
-    api_key: String,
-    protocol: UpstreamProtocol,
-    models: String,
-    model_aliases: String,
-    request_quota_5h: String,
-    requests_per_minute: String,
-    max_concurrency: String,
-    model_request_costs: String,
-    active: bool,
-}
-
-impl UpstreamFormView {
-    fn blank() -> Self {
-        Self {
-            action: "/admin/upstreams".to_string(),
-            heading: "新增上游".to_string(),
-            submit_label: "保存上游".to_string(),
-            name: String::new(),
-            base_url: String::new(),
-            api_key: String::new(),
-            protocol: UpstreamProtocol::ChatCompletions,
-            models: String::new(),
-            model_aliases: String::new(),
-            request_quota_5h: default_upstream_request_quota_5h().to_string(),
-            requests_per_minute: default_upstream_requests_per_minute().to_string(),
-            max_concurrency: default_upstream_max_concurrency().to_string(),
-            model_request_costs: String::new(),
-            active: true,
-        }
-    }
-
-    fn from_upstream(upstream: &UpstreamConfig) -> Self {
-        Self {
-            action: format!("/admin/upstreams/{}", upstream.id),
-            heading: "编辑上游".to_string(),
-            submit_label: "保存修改".to_string(),
-            name: upstream.name.clone(),
-            base_url: upstream.base_url.clone(),
-            api_key: upstream.api_key.clone(),
-            protocol: upstream.protocol,
-            models: upstream.route_models().join(","),
-            model_aliases: format_model_aliases(&upstream.model_aliases),
-            request_quota_5h: upstream.request_quota_5h.to_string(),
-            requests_per_minute: upstream.requests_per_minute.to_string(),
-            max_concurrency: upstream.max_concurrency.to_string(),
-            model_request_costs: format_model_request_costs(&upstream.model_request_costs),
-            active: upstream.active,
-        }
-    }
-
-    fn from_form(form: &UpstreamForm, action: String, existing: Option<&UpstreamConfig>) -> Self {
-        let is_editing = action != "/admin/upstreams";
-        let existing_request_quota_5h = existing.map(|upstream| upstream.request_quota_5h);
-        let existing_requests_per_minute = existing.map(|upstream| upstream.requests_per_minute);
-        let existing_max_concurrency = existing.map(|upstream| upstream.max_concurrency);
-        Self {
-            action,
-            heading: if is_editing {
-                "编辑上游".to_string()
-            } else {
-                "新增上游".to_string()
-            },
-            submit_label: if is_editing {
-                "保存修改".to_string()
-            } else {
-                "保存上游".to_string()
-            },
-            name: form.name.clone(),
-            base_url: form.base_url.clone(),
-            api_key: form.api_key.clone(),
-            protocol: parse_upstream_protocol(&form.protocol),
-            models: form.models.clone(),
-            model_aliases: form.model_aliases.clone().unwrap_or_default(),
-            request_quota_5h: upstream_form_u32_string(
-                form.request_quota_5h,
-                existing_request_quota_5h,
-                default_upstream_request_quota_5h(),
-            ),
-            requests_per_minute: upstream_form_u32_string(
-                form.requests_per_minute,
-                existing_requests_per_minute,
-                default_upstream_requests_per_minute(),
-            ),
-            max_concurrency: upstream_form_u32_string(
-                form.max_concurrency,
-                existing_max_concurrency,
-                default_upstream_max_concurrency(),
-            ),
-            model_request_costs: form
-                .model_request_costs
-                .clone()
-                .or_else(|| {
-                    existing
-                        .map(|upstream| format_model_request_costs(&upstream.model_request_costs))
-                })
-                .unwrap_or_default(),
-            active: form_toggle_enabled(&form.active),
-        }
-    }
-
-    fn with_fetched_models(&self, models: String, model_aliases: String) -> Self {
-        let mut next = self.clone();
-        next.models = models;
-        next.model_aliases = merge_csv_values(&self.model_aliases, &model_aliases);
-        next
-    }
+    Html(render_logs_page_with_query(&snapshot, &filters)).into_response()
 }
 
 async fn submit_upstream(
@@ -1121,7 +986,15 @@ async fn handle_upstream_form_submit(
     if form.intent.as_deref() == Some("fetch") {
         return match fetch_upstream_models(&state, &form).await {
             Ok(models) => {
+                let fetched_model_count = models.len();
                 let (models, model_aliases) = normalize_fetched_models(models);
+                tracing::info!(
+                    upstream = %upstream_id.as_deref().unwrap_or("new"),
+                    fetched_model_count,
+                    normalized_models = %models,
+                    model_aliases = %model_aliases,
+                    "normalized fetched upstream models"
+                );
                 let fetched = form_view.with_fetched_models(models, model_aliases);
                 Html(render_upstreams_page(
                     &snapshot,
@@ -1227,28 +1100,14 @@ async fn fetch_upstream_models(
         .await
 }
 
-fn parse_upstream_protocol(value: &str) -> UpstreamProtocol {
-    match value {
-        "responses" => UpstreamProtocol::Responses,
-        _ => UpstreamProtocol::ChatCompletions,
-    }
-}
-
-fn form_toggle_enabled(value: &Option<String>) -> bool {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-}
-
 fn downstream_from_form(
     form_view: &DownstreamFormView,
     hash: String,
     plaintext_key: Option<String>,
     existing: Option<&DownstreamConfig>,
     fallback_id: String,
-) -> DownstreamConfig {
+) -> Result<DownstreamConfig, String> {
+    let limit_mode = parse_downstream_limit_mode(&form_view.limit_mode)?;
     let per_minute_limit = form_view
         .per_minute_limit
         .trim()
@@ -1258,8 +1117,16 @@ fn downstream_from_form(
         .unwrap_or(60);
     let daily_token_limit = parse_optional_u64(&form_view.daily_token_limit);
     let monthly_token_limit = parse_optional_u64(&form_view.monthly_token_limit);
+    let request_quota_window_hours = parse_optional_u32(&form_view.request_quota_window_hours);
+    let request_quota_requests = parse_optional_u32(&form_view.request_quota_requests);
 
-    DownstreamConfig {
+    if matches!(limit_mode, DownstreamLimitMode::RequestQuota)
+        && (request_quota_window_hours.is_none() || request_quota_requests.is_none())
+    {
+        return Err("请填写请求窗口小时数和请求次数".into());
+    }
+
+    Ok(DownstreamConfig {
         id: form_view.id.clone().unwrap_or(fallback_id),
         name: form_view.name.clone(),
         hash,
@@ -1268,6 +1135,16 @@ fn downstream_from_form(
         per_minute_limit,
         daily_token_limit,
         monthly_token_limit,
+        request_quota_window_hours: if matches!(limit_mode, DownstreamLimitMode::RequestQuota) {
+            request_quota_window_hours
+        } else {
+            None
+        },
+        request_quota_requests: if matches!(limit_mode, DownstreamLimitMode::RequestQuota) {
+            request_quota_requests
+        } else {
+            None
+        },
         ip_allowlist: parse_csv(&form_view.ip_allowlist),
         expires_at: if form_view.never_expires {
             None
@@ -1275,7 +1152,7 @@ fn downstream_from_form(
             parse_optional_u64(&form_view.expires_at)
         },
         active: form_view.active,
-    }
+    })
 }
 
 fn parse_optional_u64(value: &str) -> Option<u64> {
@@ -1284,6 +1161,29 @@ fn parse_optional_u64(value: &str) -> Option<u64> {
         None
     } else {
         trimmed.parse::<u64>().ok()
+    }
+}
+
+fn parse_optional_u32(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        trimmed.parse::<u32>().ok()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DownstreamLimitMode {
+    Tokens,
+    RequestQuota,
+}
+
+fn parse_downstream_limit_mode(value: &str) -> Result<DownstreamLimitMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "request" | "requests" | "request_quota" => Ok(DownstreamLimitMode::RequestQuota),
+        "token" | "tokens" | "" => Ok(DownstreamLimitMode::Tokens),
+        other => Err(format!("未知的下游限制模式: {other}")),
     }
 }
 
@@ -1298,18 +1198,33 @@ async fn create_downstream(
     }
 
     let generated = generate_downstream_key("gw");
-    let downstream = downstream_from_form(
-        &DownstreamFormView::from_form(
-            &form,
-            "/admin/downstreams".to_string(),
-            None,
-            Some(generated.plaintext.clone()),
-        ),
+    let form_view = DownstreamFormView::from_form(
+        &form,
+        "/admin/downstreams".to_string(),
+        None,
+        Some(generated.plaintext.clone()),
+    );
+    let downstream = match downstream_from_form(
+        &form_view,
         generated.hash.clone(),
         Some(generated.plaintext.clone()),
         None,
         new_id("down"),
-    );
+    ) {
+        Ok(downstream) => downstream,
+        Err(error) => {
+            let snapshot = state.snapshot().await;
+            return Html(render_downstreams_page(
+                &snapshot,
+                &form_view,
+                None,
+                Some(&error),
+                &filters,
+                true,
+            ))
+            .into_response();
+        }
+    };
 
     if let Err(error) = state.insert_downstream(downstream).await {
         return GatewayError::Upstream(format!("failed to save downstream key: {error}"))
@@ -1346,10 +1261,20 @@ async fn process_gateway_request(
         .ok_or_else(|| GatewayError::Unauthorized("invalid downstream key".into()))?;
 
     let request_id = Uuid::new_v4().to_string();
+    let request_path = endpoint.path();
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
+    let normalized_model = model;
+    let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     tracing::info!(
         request_id = %request_id,
-        downstream = %downstream.id,
-        endpoint = %endpoint.path(),
+        downstream_key_id = %downstream.id,
+        path = %request_path,
+        original_model = %model,
+        normalized_model = %normalized_model,
+        stream = request_stream,
         "received downstream request"
     );
 
@@ -1357,7 +1282,10 @@ async fn process_gateway_request(
         if unix_seconds() > expires_at {
             tracing::warn!(
                 request_id = %request_id,
-                downstream = %downstream.id,
+                downstream_key_id = %downstream.id,
+                path = %request_path,
+                original_model = %model,
+                normalized_model = %normalized_model,
                 expires_at,
                 "downstream key expired"
             );
@@ -1374,7 +1302,10 @@ async fn process_gateway_request(
         {
             tracing::warn!(
                 request_id = %request_id,
-                downstream = %downstream.id,
+                downstream_key_id = %downstream.id,
+                path = %request_path,
+                original_model = %model,
+                normalized_model = %normalized_model,
                 client_ip = %client_ip,
                 "client IP not allowed"
             );
@@ -1382,10 +1313,6 @@ async fn process_gateway_request(
         }
     }
 
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
     if !downstream.model_allowlist.is_empty()
         && !downstream
             .model_allowlist
@@ -1394,20 +1321,22 @@ async fn process_gateway_request(
     {
         tracing::warn!(
             request_id = %request_id,
-            downstream = %downstream.id,
-            model = %model,
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %normalized_model,
             "model not allowed"
         );
         return Err(GatewayError::Forbidden("model not allowed".into()));
     }
 
-    if let Err(retry_after_seconds) = state
-        .reserve_downstream_request(&downstream.id, downstream.per_minute_limit)
-        .await
-    {
+    if let Err(retry_after_seconds) = state.reserve_downstream_request(&downstream).await {
         tracing::warn!(
             request_id = %request_id,
-            downstream = %downstream.id,
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %normalized_model,
             retry_after_seconds,
             "downstream per-minute request limit exceeded"
         );
@@ -1417,7 +1346,6 @@ async fn process_gateway_request(
         });
     }
 
-    let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let requires_responses_tooling =
         endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
     let fallback_to_chat = requires_responses_tooling
@@ -1426,10 +1354,29 @@ async fn process_gateway_request(
                 && upstream.protocol == UpstreamProtocol::Responses
                 && upstream.supports_model(model)
         });
+    if requires_responses_tooling {
+        tracing::info!(
+            request_id = %request_id,
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %normalized_model,
+            stream = request_stream,
+            routing_fallback = fallback_to_chat,
+            routing_fallback_reason = if fallback_to_chat {
+                "no_responses_upstream_supports_model"
+            } else {
+                "responses_upstream_available"
+            },
+            "evaluated Responses routing strategy"
+        );
+    }
 
     let started = Instant::now();
 
-    let upstream_in_flight_counts = state.upstream_in_flight_counts().await;
+    let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
+    let now = unix_seconds();
+    let mut rate_limit_retry_attempted = false;
     let candidate_protocols = if requires_responses_tooling {
         if fallback_to_chat {
             vec![UpstreamProtocol::ChatCompletions]
@@ -1439,6 +1386,16 @@ async fn process_gateway_request(
     } else {
         vec![endpoint.native_protocol(), endpoint.opposite()]
     };
+    tracing::debug!(
+        request_id = %request_id,
+        downstream_key_id = %downstream.id,
+        path = %request_path,
+        original_model = %model,
+        normalized_model = %normalized_model,
+        stream = request_stream,
+        candidate_protocols = ?candidate_protocols,
+        "resolved candidate protocols"
+    );
     let mut last_error = None;
 
     for protocol in candidate_protocols {
@@ -1451,60 +1408,102 @@ async fn process_gateway_request(
             .cloned()
             .collect::<Vec<_>>();
         upstreams.sort_by_key(|upstream| {
+            let runtime = upstream_runtime_snapshots
+                .get(&upstream.id)
+                .copied()
+                .unwrap_or_default();
+            let request_cost = upstream.request_cost_for_model(model);
+            let minute_pressure = runtime.minute_cost.saturating_add(request_cost);
+            let five_hour_pressure = runtime.five_hour_cost.saturating_add(request_cost);
             (
-                upstream_in_flight_counts
-                    .get(&upstream.id)
-                    .copied()
-                    .unwrap_or(0),
+                runtime.is_cooled_down(now),
+                runtime.cooldown_remaining(now),
+                runtime.in_flight,
+                minute_pressure as u64 * 1_000 / upstream.requests_per_minute.max(1) as u64,
+                five_hour_pressure as u64 * 1_000 / upstream.request_quota_5h.max(1) as u64,
                 upstream.failure_count,
                 upstream.id.clone(),
             )
         });
+        let candidate_summary = upstreams
+            .iter()
+            .map(|upstream| {
+                let runtime = upstream_runtime_snapshots
+                    .get(&upstream.id)
+                    .copied()
+                    .unwrap_or_default();
+                let request_cost = upstream.request_cost_for_model(model);
+                let minute_cost = runtime.minute_cost.saturating_add(request_cost);
+                let five_hour_cost = runtime.five_hour_cost.saturating_add(request_cost);
+                format!(
+                    "{}|{}|{:?}|in_flight={}|cooldown_remaining={}|minute_cost={}/{}|five_hour_cost={}/{}|failure_count={}|request_cost={}",
+                    upstream.id,
+                    upstream.name,
+                    upstream.protocol,
+                    runtime.in_flight,
+                    runtime.cooldown_remaining(now),
+                    minute_cost,
+                    upstream.requests_per_minute,
+                    five_hour_cost,
+                    upstream.request_quota_5h,
+                    upstream.failure_count,
+                    request_cost
+                )
+            })
+            .collect::<Vec<_>>();
+        let upstreams_for_retry = upstreams.clone();
+        tracing::debug!(
+            request_id = %request_id,
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %normalized_model,
+            protocol = ?protocol,
+            candidates = ?candidate_summary,
+            "sorted upstream candidates"
+        );
 
         for upstream in upstreams {
-            let in_flight = upstream_in_flight_counts
+            let runtime = upstream_runtime_snapshots
                 .get(&upstream.id)
                 .copied()
-                .unwrap_or(0);
+                .unwrap_or_default();
             let request_cost = upstream.request_cost_for_model(model);
+            let minute_cost = runtime.minute_cost.saturating_add(request_cost);
+            let five_hour_cost = runtime.five_hour_cost.saturating_add(request_cost);
             tracing::info!(
                 request_id = %request_id,
-                upstream = %upstream.id,
-                upstream_name = %upstream.name,
-                protocol = ?upstream.protocol,
-                endpoint = %endpoint.path(),
+                downstream_key_id = %downstream.id,
+                path = %request_path,
+                original_model = %model,
+                normalized_model = %normalized_model,
+                selected_upstream_id = %upstream.id,
+                selected_upstream_name = %upstream.name,
+                selected_upstream_protocol = ?upstream.protocol,
                 stream = request_stream,
-                in_flight,
+                in_flight = runtime.in_flight,
+                cooldown_remaining = runtime.cooldown_remaining(now),
                 request_cost,
+                minute_cost,
+                minute_quota = upstream.requests_per_minute,
+                five_hour_cost,
+                five_hour_quota = upstream.request_quota_5h,
                 failure_count = upstream.failure_count,
                 "considering upstream candidate"
             );
 
             let mut attempt_stream = request_stream;
             loop {
-                let admission = match state.try_reserve_upstream_request(&upstream, model).await {
-                    Ok(()) => None,
-                    Err(error) => Some(error),
-                };
-
-                if let Some(admission) = admission {
-                    tracing::warn!(
-                        request_id = %request_id,
-                        upstream = %upstream.id,
-                        error = %admission.message,
-                        retry_after_seconds = admission.retry_after_seconds,
-                        "upstream quota admission rejected"
-                    );
-                    last_error = Some(GatewayError::TooManyRequests {
-                        message: admission.message,
-                        retry_after_seconds: Some(admission.retry_after_seconds),
-                    });
-                    break;
-                }
+                let _ = state.try_reserve_upstream_request(&upstream, model).await;
 
                 tracing::info!(
                     request_id = %request_id,
-                    upstream = %upstream.id,
+                    downstream_key_id = %downstream.id,
+                    path = %request_path,
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    selected_upstream_id = %upstream.id,
+                    selected_upstream_protocol = ?upstream.protocol,
                     attempt_stream,
                     request_cost,
                     "reserved upstream capacity"
@@ -1517,8 +1516,11 @@ async fn process_gateway_request(
                     endpoint,
                     request_stream,
                     attempt_stream,
+                    started,
                     &request_id,
                     model,
+                    normalized_model,
+                    &downstream.id,
                     fallback_to_chat,
                 )
                 .await;
@@ -1528,44 +1530,142 @@ async fn process_gateway_request(
                     Ok(mut result) => {
                         result.request_id = request_id.clone();
                         let completed_after_stream_fallback = request_stream && !attempt_stream;
+                        state.mark_upstream_success(&upstream.id).await.ok();
                         tracing::info!(
                             request_id = %request_id,
-                            upstream = %upstream.id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_protocol = ?upstream.protocol,
                             status = result.status.as_u16(),
                             latency_ms = started.elapsed().as_millis() as u64,
                             attempt_stream,
                             completed_after_stream_fallback,
                             "upstream request completed"
                         );
-                        let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
-                        let log = UsageLog {
-                            id: request_id.clone(),
-                            downstream_key_id: downstream.id.clone(),
-                            upstream_key_id: upstream.id.clone(),
-                            endpoint: endpoint.path().to_string(),
-                            model: model.to_string(),
-                            request_id: request_id.clone(),
-                            status_code: result.status.as_u16(),
-                            prompt_tokens,
-                            completion_tokens,
-                            total_tokens,
-                            latency_ms: started.elapsed().as_millis() as u64,
-                            created_at: unix_seconds(),
-                        };
-                        if let Err(error) = state.append_usage_log(log).await {
-                            tracing::error!(
-                                upstream = %upstream.id,
-                                request_id = %request_id,
-                                error = %error,
-                                "failed to save usage log"
-                            );
+                        if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
+                            let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
+                            let log = UsageLog {
+                                id: request_id.clone(),
+                                downstream_key_id: downstream.id.clone(),
+                                upstream_key_id: upstream.id.clone(),
+                                endpoint: request_path.to_string(),
+                                model: model.to_string(),
+                                request_id: request_id.clone(),
+                                status_code: result.status.as_u16(),
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens,
+                                latency_ms: started.elapsed().as_millis() as u64,
+                                created_at: unix_seconds(),
+                            };
+                            if let Err(error) = state.append_usage_log(log).await {
+                                tracing::error!(
+                                    request_id = %request_id,
+                                    downstream_key_id = %downstream.id,
+                                    path = %request_path,
+                                    original_model = %model,
+                                    normalized_model = %normalized_model,
+                                    selected_upstream_id = %upstream.id,
+                                    selected_upstream_protocol = ?upstream.protocol,
+                                    error = %error,
+                                    "failed to save usage log"
+                                );
+                            }
                         }
                         return Ok(result);
                     }
-                    Err(error) if attempt_stream => {
+                    Err(GatewayError::TooManyRequests {
+                        message,
+                        retry_after_seconds,
+                    }) => {
+                        let retry_after_seconds = retry_after_seconds.unwrap_or(
+                            state
+                                .config
+                                .upstream_rate_limit_default_retry_seconds
+                                .max(1),
+                        );
                         tracing::warn!(
                             request_id = %request_id,
-                            upstream = %upstream.id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_name = %upstream.name,
+                            selected_upstream_protocol = ?upstream.protocol,
+                            error = %message,
+                            retry_after_seconds,
+                            "upstream rate limited"
+                        );
+                        state
+                            .mark_upstream_rate_limited(&upstream.id, retry_after_seconds)
+                            .await;
+                        last_error = Some(GatewayError::TooManyRequests {
+                            message,
+                            retry_after_seconds: Some(retry_after_seconds),
+                        });
+
+                        let has_uncooled_alternative =
+                            upstreams_for_retry.iter().any(|candidate| {
+                                candidate.id != upstream.id
+                                    && upstream_runtime_snapshots
+                                        .get(&candidate.id)
+                                        .map(|runtime| !runtime.is_cooled_down(now))
+                                        .unwrap_or(true)
+                            });
+                        if request_cost >= 2
+                            && !has_uncooled_alternative
+                            && !rate_limit_retry_attempted
+                            && retry_after_seconds
+                                <= state.config.upstream_rate_limit_retry_window_seconds.max(1)
+                        {
+                            rate_limit_retry_attempted = true;
+                            tracing::info!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_name = %upstream.name,
+                                selected_upstream_protocol = ?upstream.protocol,
+                                retry_after_seconds,
+                                "waiting for upstream rate limit cooldown before retrying"
+                            );
+                            tokio::time::sleep(Duration::from_secs(retry_after_seconds)).await;
+                            continue;
+                        }
+
+                        break;
+                    }
+                    Err(GatewayError::BadRequest(error)) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_protocol = ?upstream.protocol,
+                            error = %error,
+                            "upstream rejected request payload"
+                        );
+                        last_error = Some(GatewayError::BadRequest(error));
+                        break;
+                    }
+                    Err(error) if attempt_stream => {
+                        tracing::debug!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_protocol = ?upstream.protocol,
+                            attempt_stream,
                             error = %error,
                             "streaming upstream attempt failed; retrying without stream"
                         );
@@ -1575,7 +1675,12 @@ async fn process_gateway_request(
                     Err(error) => {
                         tracing::warn!(
                             request_id = %request_id,
-                            upstream = %upstream.id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_protocol = ?upstream.protocol,
                             error = %error,
                             "upstream request failed"
                         );
@@ -1591,8 +1696,11 @@ async fn process_gateway_request(
     if let Some(error) = last_error {
         tracing::error!(
             request_id = %request_id,
-            model = %model,
-            endpoint = %endpoint.path(),
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %normalized_model,
+            endpoint = %request_path,
             error = %error,
             "request failed after exhausting upstream candidates"
         );
@@ -1601,8 +1709,11 @@ async fn process_gateway_request(
 
     tracing::warn!(
         request_id = %request_id,
-        model = %model,
-        endpoint = %endpoint.path(),
+        downstream_key_id = %downstream.id,
+        path = %request_path,
+        original_model = %model,
+        normalized_model = %normalized_model,
+        endpoint = %request_path,
         "no routable upstream found for request"
     );
     Err(no_routable_model_error(&routing_snapshot, model))
@@ -1687,6 +1798,7 @@ struct ResponsesChatFallbackReport {
     tool_choice_dropped: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct StreamRetryReport {
     attempted_stream: bool,
@@ -1719,6 +1831,7 @@ fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallback
     report
 }
 
+#[cfg(test)]
 fn stream_retry_report(
     body: &Value,
     endpoint: EndpointKind,
@@ -1794,7 +1907,10 @@ fn responses_tool_choice_summary(tool_choice: &Value) -> String {
     }
 }
 
-fn responses_tool_choice_requires_chat_fallback(tool_choice: &Value, has_supported_tools: bool) -> bool {
+fn responses_tool_choice_requires_chat_fallback(
+    tool_choice: &Value,
+    has_supported_tools: bool,
+) -> bool {
     match tool_choice {
         Value::String(choice) => match choice.as_str() {
             "none" => false,
@@ -1821,6 +1937,27 @@ fn responses_tool_choice_requires_chat_fallback(tool_choice: &Value, has_support
     }
 }
 
+fn parse_retry_after_seconds(
+    headers: &reqwest::header::HeaderMap,
+    default_retry_seconds: u64,
+) -> u64 {
+    headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default_retry_seconds.max(1))
+        .max(1)
+}
+
+fn is_context_limit_error(error_text: &str) -> bool {
+    let normalized = error_text.to_ascii_lowercase();
+    normalized.contains("request exceeds limit")
+        || normalized.contains("exceeded by")
+        || normalized.contains("context length")
+        || normalized.contains("context window")
+        || normalized.contains("token limit")
+}
+
 async fn send_to_upstream(
     state: &AppState,
     upstream: &UpstreamConfig,
@@ -1828,8 +1965,11 @@ async fn send_to_upstream(
     endpoint: EndpointKind,
     request_stream: bool,
     try_upstream_stream: bool,
+    started: Instant,
     request_id: &str,
     model: &str,
+    normalized_model: &str,
+    downstream_key_id: &str,
     chat_fallback_requested: bool,
 ) -> Result<DispatchResult, GatewayError> {
     let upstream_body = match (endpoint, upstream.protocol) {
@@ -1840,30 +1980,33 @@ async fn send_to_upstream(
         (EndpointKind::Responses, UpstreamProtocol::Responses) => body.clone(),
         (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
             let fallback_report = responses_request_chat_fallback_report(body);
+            let mut fallback_reasons = Vec::new();
             if chat_fallback_requested {
+                fallback_reasons.push("no_responses_upstream_supports_model");
+            }
+            if !fallback_report.stripped_tools.is_empty() {
+                fallback_reasons.push("unsupported_tools");
+            }
+            if fallback_report.tool_choice_dropped {
+                fallback_reasons.push("tool_choice_dropped");
+            }
+            if !fallback_reasons.is_empty() {
                 tracing::warn!(
                     request_id = %request_id,
-                    model = %model,
-                    endpoint = %endpoint.path(),
+                    downstream_key_id = %downstream_key_id,
+                    path = %endpoint.path(),
+                    original_model = %model,
+                    normalized_model = %normalized_model,
                     retained_tools = ?fallback_report.retained_tools,
                     stripped_tools = ?fallback_report.stripped_tools,
                     tool_choice = ?fallback_report.tool_choice,
                     tool_choice_dropped = fallback_report.tool_choice_dropped,
-                    "responses request downgraded to ChatCompletions because no Responses upstream supports the model"
-                );
-            } else if !fallback_report.stripped_tools.is_empty() || fallback_report.tool_choice_dropped {
-                tracing::warn!(
-                    request_id = %request_id,
-                    model = %model,
-                    endpoint = %endpoint.path(),
-                    retained_tools = ?fallback_report.retained_tools,
-                    stripped_tools = ?fallback_report.stripped_tools,
-                    tool_choice = ?fallback_report.tool_choice,
-                    tool_choice_dropped = fallback_report.tool_choice_dropped,
-                    "responses request sanitized before ChatCompletions conversion"
+                    fallback_reasons = ?fallback_reasons,
+                    "responses request downgraded to ChatCompletions"
                 );
             }
-            responses_request_to_chat_payload_with_fallback(body).map_err(protocol_error_to_gateway)?
+            responses_request_to_chat_payload_with_fallback(body)
+                .map_err(protocol_error_to_gateway)?
         }
     };
     let mut upstream_body = upstream_body;
@@ -1874,21 +2017,70 @@ async fn send_to_upstream(
                 upstream.name
             ))
         })?;
+        let model_rewritten = resolved_model != request_model;
+        let protocol_path = protocol_transition_label(endpoint, upstream.protocol);
         if let Some(object) = upstream_body.as_object_mut() {
-            object.insert("model".into(), Value::String(resolved_model));
+            object.insert("model".into(), Value::String(resolved_model.clone()));
+        }
+        tracing::info!(
+            request_id = %request_id,
+            downstream_key_id = %downstream_key_id,
+            path = %endpoint.path(),
+            original_model = %model,
+            normalized_model = %normalized_model,
+            selected_upstream_id = %upstream.id,
+            selected_upstream_name = %upstream.name,
+            selected_upstream_protocol = ?upstream.protocol,
+            upstream_model = %request_model,
+            final_upstream_model = %resolved_model,
+            model_rewritten = model_rewritten,
+            protocol_transition = %protocol_path,
+            request_stream,
+            try_upstream_stream,
+            "prepared upstream request body"
+        );
+        if model_rewritten {
+            tracing::info!(
+                request_id = %request_id,
+                downstream_key_id = %downstream_key_id,
+                path = %endpoint.path(),
+                original_model = %model,
+                normalized_model = %normalized_model,
+                selected_upstream_id = %upstream.id,
+                selected_upstream_name = %upstream.name,
+                selected_upstream_protocol = ?upstream.protocol,
+                upstream_model = %request_model,
+                final_upstream_model = %resolved_model,
+                "upstream model alias rewrote request model"
+            );
         }
     }
     if !try_upstream_stream {
         if let Some(object) = upstream_body.as_object_mut() {
             object.insert("stream".into(), Value::Bool(false));
         }
+    } else if upstream.protocol == UpstreamProtocol::ChatCompletions {
+        if let Some(object) = upstream_body.as_object_mut() {
+            object.insert(
+                "stream_options".into(),
+                json!({
+                    "include_usage": true
+                }),
+            );
+        }
     }
 
     let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream.protocol));
     tracing::info!(
-        upstream = %upstream.id,
+        request_id = %request_id,
+        downstream_key_id = %downstream_key_id,
+        path = %endpoint.path(),
+        original_model = %model,
+        normalized_model = %normalized_model,
+        selected_upstream_id = %upstream.id,
+        selected_upstream_name = %upstream.name,
+        selected_upstream_protocol = ?upstream.protocol,
         url = %url,
-        protocol = ?upstream.protocol,
         request_stream,
         try_upstream_stream,
         "dispatching request to upstream service"
@@ -1905,7 +2097,14 @@ async fn send_to_upstream(
         .await
         .map_err(|error| {
             tracing::warn!(
-                upstream = %upstream.id,
+                request_id = %request_id,
+                downstream_key_id = %downstream_key_id,
+                path = %endpoint.path(),
+                original_model = %model,
+                normalized_model = %normalized_model,
+                selected_upstream_id = %upstream.id,
+                selected_upstream_name = %upstream.name,
+                selected_upstream_protocol = ?upstream.protocol,
                 url = %url,
                 error = %error,
                 "upstream request failed"
@@ -1916,15 +2115,46 @@ async fn send_to_upstream(
     let status = response.status();
 
     if !status.is_success() {
+        let retry_after_seconds = if status == StatusCode::TOO_MANY_REQUESTS {
+            Some(parse_retry_after_seconds(
+                response.headers(),
+                state.config.upstream_rate_limit_default_retry_seconds,
+            ))
+        } else {
+            None
+        };
         let error_text = response.text().await.unwrap_or_default();
         let error_excerpt = error_text.chars().take(512).collect::<String>();
         tracing::warn!(
-            upstream = %upstream.id,
+            request_id = %request_id,
+            downstream_key_id = %downstream_key_id,
+            path = %endpoint.path(),
+            original_model = %model,
+            normalized_model = %normalized_model,
+            selected_upstream_id = %upstream.id,
+            selected_upstream_name = %upstream.name,
+            selected_upstream_protocol = ?upstream.protocol,
             url = %url,
             status = status.as_u16(),
             error_excerpt = %error_excerpt,
             "upstream responded with a non-success status"
         );
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(GatewayError::TooManyRequests {
+                message: if error_excerpt.is_empty() {
+                    "upstream rate limited".into()
+                } else {
+                    format!("upstream rate limited: {error_excerpt}")
+                },
+                retry_after_seconds,
+            });
+        }
+        if is_context_limit_error(&error_text) {
+            return Err(GatewayError::BadRequest(
+                "upstream request exceeded the model context window; reduce prompt size or use a model with a larger context window"
+                    .into(),
+            ));
+        }
         return Err(GatewayError::Upstream(format!(
             "upstream responded with status {}{}",
             status,
@@ -1946,17 +2176,27 @@ async fn send_to_upstream(
 
         let mut usage_body = None;
         let body = if content_type.contains("text/event-stream") {
+            let stream_log_context = StreamUsageLogContext {
+                state: state.clone(),
+                request_id: request_id.to_string(),
+                downstream_key_id: downstream_key_id.to_string(),
+                upstream_key_id: upstream.id.clone(),
+                upstream_protocol: upstream.protocol,
+                endpoint: endpoint.path().to_string(),
+                model: model.to_string(),
+                normalized_model: normalized_model.to_string(),
+                status,
+                started,
+            };
             if upstream.protocol == endpoint.native_protocol() {
-                let stream = stream::try_unfold(response, |mut response| async move {
-                    match response.chunk().await {
-                        Ok(Some(chunk)) => Ok(Some((chunk, response))),
-                        Ok(None) => Ok(None),
-                        Err(error) => Err(std::io::Error::other(error.to_string())),
-                    }
-                });
-                Body::from_stream(stream)
+                proxied_stream_body(response, stream_log_context)?
             } else {
-                translated_stream_body(response, upstream.protocol, endpoint.native_protocol())?
+                translated_stream_body(
+                    response,
+                    upstream.protocol,
+                    endpoint.native_protocol(),
+                    stream_log_context,
+                )?
             }
         } else {
             let bytes = response.bytes().await.map_err(|error| {
@@ -1987,6 +2227,11 @@ async fn send_to_upstream(
             status,
             body: DispatchBody::Stream(body),
             request_id: String::new(),
+            usage_log_timing: if usage_body.is_some() {
+                UsageLogTiming::Immediate
+            } else {
+                UsageLogTiming::DeferredUntilStreamEnd
+            },
             usage: usage_body
                 .as_ref()
                 .map(usage_from_body)
@@ -2019,6 +2264,7 @@ async fn send_to_upstream(
         body: DispatchBody::Json(body),
         request_id: String::new(),
         usage,
+        usage_log_timing: UsageLogTiming::Immediate,
     })
 }
 
@@ -2048,6 +2294,18 @@ fn endpoint_for_upstream(protocol: UpstreamProtocol) -> &'static str {
     match protocol {
         UpstreamProtocol::ChatCompletions => "/v1/chat/completions",
         UpstreamProtocol::Responses => "/v1/responses",
+    }
+}
+
+fn protocol_transition_label(
+    endpoint: EndpointKind,
+    upstream_protocol: UpstreamProtocol,
+) -> &'static str {
+    match (endpoint, upstream_protocol) {
+        (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => "native",
+        (EndpointKind::Responses, UpstreamProtocol::Responses) => "native",
+        (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => "chat_to_responses",
+        (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => "responses_to_chat",
     }
 }
 
@@ -2383,10 +2641,115 @@ fn dispatch_success(result: DispatchResult) -> Response {
     }
 }
 
+fn proxied_stream_body(
+    response: reqwest::Response,
+    log_context: StreamUsageLogContext,
+) -> Result<Body, GatewayError> {
+    let state = ProxiedStreamState {
+        response,
+        buffer: Vec::new(),
+        usage: None,
+        log_context: Some(log_context),
+        finished: false,
+        usage_log_flushed: false,
+    };
+    let stream = stream::try_unfold(state, |mut state| async move {
+        loop {
+            if state.finished {
+                state.flush_usage_log().await?;
+                return Ok(None);
+            }
+
+            match state.response.chunk().await {
+                Ok(Some(chunk)) => {
+                    state.buffer.extend_from_slice(&chunk);
+                    state.drain_usage_from_buffer()?;
+                    if state.finished {
+                        state.flush_usage_log().await?;
+                    }
+                    return Ok(Some((chunk, state)));
+                }
+                Ok(None) => {
+                    state.finish_stream();
+                    state.flush_usage_log().await?;
+                    return Ok(None);
+                }
+                Err(error) => {
+                    return Err(std::io::Error::other(error.to_string()));
+                }
+            }
+        }
+    });
+
+    Ok(Body::from_stream(stream))
+}
+
+#[derive(Debug)]
+struct ProxiedStreamState {
+    response: reqwest::Response,
+    buffer: Vec<u8>,
+    usage: Option<(u64, u64, u64)>,
+    log_context: Option<StreamUsageLogContext>,
+    finished: bool,
+    usage_log_flushed: bool,
+}
+
+impl ProxiedStreamState {
+    fn drain_usage_from_buffer(&mut self) -> Result<(), std::io::Error> {
+        while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
+            let payload = match parse_sse_data_payload(&frame)? {
+                Some(payload) => payload,
+                None => {
+                    self.buffer.drain(..frame.len() + delimiter_len);
+                    continue;
+                }
+            };
+
+            self.buffer.drain(..frame.len() + delimiter_len);
+
+            if payload.trim() == "[DONE]" {
+                self.finish_stream();
+                break;
+            }
+
+            let event: Value = serde_json::from_str(&payload)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if let Some(usage) = stream_usage_from_value(&event) {
+                self.usage = Some(usage);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn finish_stream(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        self.finished = true;
+        self.buffer.clear();
+    }
+
+    async fn flush_usage_log(&mut self) -> Result<(), std::io::Error> {
+        if self.usage_log_flushed {
+            return Ok(());
+        }
+
+        self.usage_log_flushed = true;
+        if let Some(log_context) = self.log_context.take() {
+            log_context.emit(self.usage.unwrap_or((0, 0, 0))).await;
+        }
+
+        Ok(())
+    }
+}
+
 fn translated_stream_body(
     response: reqwest::Response,
     source_protocol: UpstreamProtocol,
     target_protocol: UpstreamProtocol,
+    log_context: StreamUsageLogContext,
 ) -> Result<Body, GatewayError> {
     let translator = StreamTranslator::new(source_protocol, target_protocol).ok_or_else(|| {
         GatewayError::BadRequest(
@@ -2399,7 +2762,10 @@ fn translated_stream_body(
         translator,
         buffer: Vec::new(),
         pending: VecDeque::new(),
+        usage: None,
+        log_context: Some(log_context),
         finished: false,
+        usage_log_flushed: false,
     };
     let stream = stream::try_unfold(state, |mut state| async move {
         loop {
@@ -2408,6 +2774,7 @@ fn translated_stream_body(
             }
 
             if state.finished {
+                state.flush_usage_log().await?;
                 return Ok(None);
             }
 
@@ -2421,6 +2788,7 @@ fn translated_stream_body(
                     if let Some(bytes) = state.pending.pop_front() {
                         return Ok(Some((bytes, state)));
                     }
+                    state.flush_usage_log().await?;
                     return Ok(None);
                 }
                 Err(error) => {
@@ -2439,7 +2807,10 @@ struct TranslatedStreamState {
     translator: StreamTranslator,
     buffer: Vec<u8>,
     pending: VecDeque<Bytes>,
+    usage: Option<(u64, u64, u64)>,
+    log_context: Option<StreamUsageLogContext>,
     finished: bool,
+    usage_log_flushed: bool,
 }
 
 impl TranslatedStreamState {
@@ -2462,6 +2833,9 @@ impl TranslatedStreamState {
 
             let event: Value = serde_json::from_str(&payload)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if let Some(usage) = stream_usage_from_value(&event) {
+                self.usage = Some(usage);
+            }
             let translated = self
                 .translator
                 .translate_event(&event)
@@ -2489,6 +2863,19 @@ impl TranslatedStreamState {
         self.pending.push_back(sse_done_frame());
         self.finished = true;
         self.buffer.clear();
+        Ok(())
+    }
+
+    async fn flush_usage_log(&mut self) -> Result<(), std::io::Error> {
+        if self.usage_log_flushed {
+            return Ok(());
+        }
+
+        self.usage_log_flushed = true;
+        if let Some(log_context) = self.log_context.take() {
+            log_context.emit(self.usage.unwrap_or((0, 0, 0))).await;
+        }
+
         Ok(())
     }
 }
@@ -2791,30 +3178,6 @@ fn parse_model_aliases(input: &str) -> Result<Vec<crate::state::ModelAliasConfig
     Ok(aliases)
 }
 
-fn format_model_aliases(aliases: &[crate::state::ModelAliasConfig]) -> String {
-    if aliases.is_empty() {
-        return String::new();
-    }
-
-    aliases
-        .iter()
-        .map(|alias| format!("{}={}", alias.slug, alias.upstream_model))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_model_request_costs(costs: &[ModelRequestCostConfig]) -> String {
-    if costs.is_empty() {
-        return String::new();
-    }
-
-    costs
-        .iter()
-        .map(|rule| format!("{}={}", rule.slug, rule.cost))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn parse_model_request_costs(input: &str) -> Result<Vec<ModelRequestCostConfig>, String> {
     let mut costs = Vec::new();
 
@@ -2847,10 +3210,6 @@ fn parse_model_request_costs(input: &str) -> Result<Vec<ModelRequestCostConfig>,
     Ok(costs)
 }
 
-fn upstream_form_u32_string(value: Option<u32>, existing: Option<u32>, default: u32) -> String {
-    value.or(existing).unwrap_or(default).to_string()
-}
-
 fn parse_upstream_u32(value: &str, existing: Option<u32>, default: u32) -> Result<u32, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -2876,49 +3235,6 @@ fn parse_csv(input: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_fetched_models(models: Vec<String>) -> (String, String) {
-    let mut seen = HashSet::new();
-    let mut normalized_models = Vec::new();
-    let mut aliases = Vec::new();
-
-    for model in models {
-        let original = model.trim();
-        if original.is_empty() {
-            continue;
-        }
-
-        let slug = original.to_lowercase();
-        if seen.insert(slug.clone()) {
-            normalized_models.push(slug.clone());
-            if slug != original {
-                aliases.push(format!("{slug}={original}"));
-            }
-        }
-    }
-
-    (normalized_models.join(","), aliases.join(","))
-}
-
-fn merge_csv_values(existing: &str, generated: &str) -> String {
-    let mut seen = HashSet::new();
-    let mut values = Vec::new();
-
-    for source in [existing, generated] {
-        for raw_item in source.split(',') {
-            let item = raw_item.trim();
-            if item.is_empty() {
-                continue;
-            }
-
-            if seen.insert(item.to_string()) {
-                values.push(item.to_string());
-            }
-        }
-    }
-
-    values.join(",")
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ShellSection {
     Dashboard,
@@ -2935,6 +3251,7 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="{APP_FAVICON_DATA_URI}">
   <title>{title}</title>
     <style>
     :root {{
@@ -3223,6 +3540,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       display: grid;
       gap: 12px;
     }}
+    .context-list.wide {{
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }}
     .context-item {{
       display: grid;
       gap: 6px;
@@ -3418,6 +3738,46 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       border-color: rgba(248, 113, 113, 0.24);
       background: rgba(248, 113, 113, 0.08);
     }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+    }}
+    .badge-muted {{
+      background: rgba(96, 113, 133, 0.12);
+      color: #425066;
+    }}
+    .badge-success {{
+      background: rgba(19, 181, 166, 0.12);
+      color: #0d6f79;
+    }}
+    .badge-warning {{
+      background: rgba(239, 125, 87, 0.12);
+      color: #b5532d;
+    }}
+    .badge-info {{
+      background: rgba(47, 124, 246, 0.12);
+      color: #295dc1;
+    }}
+    .badge-strong {{
+      background: rgba(124, 92, 255, 0.12);
+      color: #5f41dd;
+    }}
+    .code-block {{
+      margin: 0;
+      padding: 16px;
+      border-radius: 18px;
+      background: #0f172a;
+      color: #e2e8f0;
+      overflow: auto;
+      font-size: 13px;
+      line-height: 1.6;
+    }}
     .muted {{ color: var(--muted); }}
     .notice {{
       margin-bottom: 16px;
@@ -3425,6 +3785,26 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       border: 1px solid rgba(19, 181, 166, 0.22);
       border-radius: 16px;
       background: rgba(19, 181, 166, 0.08);
+    }}
+    .notice-inline {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px 14px;
+      flex-wrap: wrap;
+    }}
+    .notice-inline strong {{
+      color: var(--accent);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      flex: 0 0 auto;
+    }}
+    .notice-inline span {{
+      color: var(--text);
+      line-height: 1.6;
+      flex: 1 1 320px;
+      min-width: 0;
     }}
     .notice h2 {{
       margin: 0 0 8px;
@@ -3454,8 +3834,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       background: rgba(255, 255, 255, 0.88);
       color: var(--text);
       border: 1px solid rgba(148, 163, 184, 0.24);
-      border-radius: 14px;
-      padding: 12px 14px;
+      border-radius: 12px;
+      padding: 10px 12px;
+      min-height: 40px;
       font: inherit;
       box-shadow: inset 0 1px 1px rgba(255,255,255,0.65);
     }}
@@ -3464,10 +3845,11 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       border-color: rgba(19, 181, 166, 0.4);
       box-shadow: 0 0 0 4px rgba(19, 181, 166, 0.12);
     }}
-    textarea {{ min-height: 110px; resize: vertical; }}
+    textarea {{ min-height: 104px; resize: vertical; }}
     .actions {{
       display: flex;
       justify-content: flex-end;
+      align-items: center;
       gap: 10px;
       flex-wrap: wrap;
     }}
@@ -3475,8 +3857,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       background: linear-gradient(135deg, var(--accent), #34d399);
       color: #fff;
       border: 0;
-      border-radius: 999px;
-      padding: 11px 16px;
+      border-radius: 12px;
+      padding: 0 14px;
+      min-height: 40px;
       font-weight: 700;
       cursor: pointer;
       box-shadow: 0 10px 22px rgba(19, 181, 166, 0.22);
@@ -3496,8 +3879,9 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 8px 12px;
-      border-radius: 999px;
+      padding: 0 14px;
+      min-height: 40px;
+      border-radius: 12px;
       border: 1px solid var(--border);
       background: rgba(255, 255, 255, 0.78);
       color: var(--text);
@@ -3542,10 +3926,18 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       gap: 12px;
       flex-wrap: wrap;
       width: 100%;
+      align-items: end;
     }}
     .searchbar .field {{
       flex: 1 1 220px;
       min-width: 200px;
+    }}
+    .searchbar .actions {{
+      flex: 0 0 auto;
+      align-self: end;
+    }}
+    .searchbar .actions > * {{
+      min-width: 104px;
     }}
     .secret-chip {{
       display: flex;
@@ -3601,6 +3993,12 @@ fn render_shell(title: &str, section: ShellSection, body: &str) -> String {
       font-size: 13px;
       color: var(--muted);
       line-height: 1.5;
+    }}
+    .field .helper {{
+      margin-top: 2px;
+    }}
+    .field .helper:not(:last-child) {{
+      margin-bottom: 2px;
     }}
     .spacer {{
       height: 12px;
@@ -3854,6 +4252,7 @@ fn render_login_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="{APP_FAVICON_DATA_URI}">
   <title>{app_name} - 管理员登录</title>
   <style>
     :root {{
@@ -4387,9 +4786,7 @@ fn render_upstreams_page(
   <span class="pill">/min {}</span>
   <span class="pill">并发 {}</span>
 </div>"#,
-            upstream.request_quota_5h,
-            upstream.requests_per_minute,
-            upstream.max_concurrency
+            upstream.request_quota_5h, upstream.requests_per_minute, upstream.max_concurrency
         );
         let cost_details = if upstream.model_request_costs.is_empty() {
             "<span class=\"muted\">默认 1</span>".to_string()
@@ -4766,22 +5163,45 @@ fn render_downstreams_page(
             } else {
                 "启用"
             };
-            let limit_summary = format!(
-                r#"<div class="secret-stack">
+            let limit_summary = if downstream.uses_request_quota() {
+                format!(
+                    r#"<div class="secret-stack">
+  <span class="pill">每分钟 {}</span>
+  <span class="pill">{} 小时 / {} 次</span>
+  <span class="pill">{}</span>
+  <span class="pill">{}</span>
+  <span class="pill ok">请求次数限额</span>
+</div>"#,
+                    downstream.per_minute_limit,
+                    downstream.request_quota_window_hours.unwrap_or(0),
+                    downstream.request_quota_requests.unwrap_or(0),
+                    downstream
+                        .daily_token_limit
+                        .map(|value| format!("Daily token limit {}", value))
+                        .unwrap_or_else(|| "Daily token limit unlimited".to_string()),
+                    downstream
+                        .monthly_token_limit
+                        .map(|value| format!("Monthly token limit {}", value))
+                        .unwrap_or_else(|| "Monthly token limit unlimited".to_string()),
+                )
+            } else {
+                format!(
+                    r#"<div class="secret-stack">
   <span class="pill">每分钟 {}</span>
   <span class="pill">{}</span>
   <span class="pill">{}</span>
 </div>"#,
-                downstream.per_minute_limit,
-                downstream
-                    .daily_token_limit
-                    .map(|value| format!("Daily token limit {}", value))
-                    .unwrap_or_else(|| "Daily token limit unlimited".to_string()),
-                downstream
-                    .monthly_token_limit
-                    .map(|value| format!("Monthly token limit {}", value))
-                    .unwrap_or_else(|| "Monthly token limit unlimited".to_string()),
-            );
+                    downstream.per_minute_limit,
+                    downstream
+                        .daily_token_limit
+                        .map(|value| format!("Daily token limit {}", value))
+                        .unwrap_or_else(|| "Daily token limit unlimited".to_string()),
+                    downstream
+                        .monthly_token_limit
+                        .map(|value| format!("Monthly token limit {}", value))
+                        .unwrap_or_else(|| "Monthly token limit unlimited".to_string()),
+                )
+            };
             let edit_href = escape_html(&format!(
                 "/admin/downstreams/{}/edit{query_suffix}",
                 downstream.id
@@ -4913,6 +5333,16 @@ fn render_downstreams_page(
 
     let active_selected = if drawer.active { "selected" } else { "" };
     let inactive_selected = if drawer.active { "" } else { "selected" };
+    let limit_mode_tokens_selected = if drawer.limit_mode == "tokens" {
+        "selected"
+    } else {
+        ""
+    };
+    let limit_mode_requests_selected = if drawer.limit_mode == "requests" {
+        "selected"
+    } else {
+        ""
+    };
     let never_expires_checked = if drawer.never_expires { "checked" } else { "" };
     let expires_at_disabled = if drawer.never_expires { "disabled" } else { "" };
     let header = format!(
@@ -5003,6 +5433,14 @@ fn render_downstreams_page(
           <input name="models" placeholder="gpt-4.1-mini,gpt-4o-mini" value="{models}">
         </div>
         <div class="field">
+          <label>访问限制模式</label>
+          <select name="limit_mode">
+            <option value="tokens" {limit_mode_tokens_selected}>Token 限额</option>
+            <option value="requests" {limit_mode_requests_selected}>请求次数限额</option>
+          </select>
+          <div class="helper">当前模式决定实际拦截逻辑，另一组数值会保留为参考数据；请求次数限额会按“xx 小时 / xx 次”生效。</div>
+        </div>
+        <div class="field">
           <label>每分钟限额</label>
           <input name="per_minute_limit" type="number" value="{per_minute_limit}">
         </div>
@@ -5013,6 +5451,14 @@ fn render_downstreams_page(
         <div class="field">
           <label>Monthly token limit</label>
           <input name="monthly_token_limit" type="number" placeholder="Optional" value="{monthly_token_limit}">
+        </div>
+        <div class="field">
+          <label>请求窗口小时数</label>
+          <input name="request_quota_window_hours" type="number" min="1" step="1" placeholder="例如 5" value="{request_quota_window_hours}">
+        </div>
+        <div class="field">
+          <label>窗口请求次数</label>
+          <input name="request_quota_requests" type="number" min="1" step="1" placeholder="例如 600" value="{request_quota_requests}">
         </div>
         <div class="field">
           <label>IP 白名单</label>
@@ -5053,9 +5499,6 @@ fn render_downstreams_page(
   </section>
 </div>"#,
         header = header,
-        notice = notice
-            .map(|message| format!(r#"<div class="notice">{}</div>"#, escape_html(message)))
-            .unwrap_or_default(),
         generated = generated,
         rows = rows,
         filtered_count = filtered_count,
@@ -5071,9 +5514,13 @@ fn render_downstreams_page(
         action = action,
         name = escape_html(&drawer.name),
         models = escape_html(&drawer.models),
+        limit_mode_tokens_selected = limit_mode_tokens_selected,
+        limit_mode_requests_selected = limit_mode_requests_selected,
         per_minute_limit = escape_html(&drawer.per_minute_limit),
         daily_token_limit = escape_html(&drawer.daily_token_limit),
         monthly_token_limit = escape_html(&drawer.monthly_token_limit),
+        request_quota_window_hours = escape_html(&drawer.request_quota_window_hours),
+        request_quota_requests = escape_html(&drawer.request_quota_requests),
         ip_allowlist = escape_html(&drawer.ip_allowlist),
         expires_at = escape_html(&drawer.expires_at),
         never_expires_checked = never_expires_checked,
@@ -5088,6 +5535,14 @@ fn render_downstreams_page(
         drawer_state = drawer_state,
         create_href = create_href,
         create_label = create_label,
+        notice = notice
+            .map(|message| {
+                format!(
+                    r#"<div class="notice notice-inline"><strong>运维提示</strong><span>{}</span></div>"#,
+                    escape_html(message)
+                )
+            })
+            .unwrap_or_default(),
     );
 
     render_shell("下游密钥", ShellSection::Downstreams, &body)
@@ -5163,21 +5618,34 @@ fn legacy_secret_hint(secret: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
+#[cfg(test)]
 fn render_logs_page(state: &crate::state::PersistedState) -> String {
-    let total_logs = state.usage_logs.len();
-    let total_tokens = state
-        .usage_logs
+    render_logs_page_with_query(state, &LogListQuery::default())
+}
+
+fn render_logs_page_with_query(
+    state: &crate::state::PersistedState,
+    filters: &LogListQuery,
+) -> String {
+    let filtered_logs = filtered_usage_logs(state, filters);
+    let total_logs = filtered_logs.len();
+    let total_tokens = filtered_logs
         .iter()
         .map(|log| log.total_tokens)
         .sum::<u64>();
-    let error_logs = state
-        .usage_logs
+    let error_logs = filtered_logs
         .iter()
         .filter(|log| log.status_code >= 400)
         .count();
-    let latest_log = state.usage_logs.last();
+    let latest_log = filtered_logs.first();
     let latest_request_id = latest_log
         .map(|log| log.request_id.clone())
+        .unwrap_or_else(|| "暂无".to_string());
+    let latest_downstream = latest_log
+        .map(|log| resolve_downstream_name(state, &log.downstream_key_id))
+        .unwrap_or_else(|| "暂无".to_string());
+    let latest_upstream = latest_log
+        .map(|log| resolve_upstream_name(state, &log.upstream_key_id))
         .unwrap_or_else(|| "暂无".to_string());
     let latest_endpoint = latest_log
         .map(|log| log.endpoint.clone())
@@ -5186,35 +5654,42 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
         .map(|log| log.model.clone())
         .unwrap_or_else(|| "暂无".to_string());
     let latest_status = latest_log
-        .map(|log| log.status_code.to_string())
+        .map(|log| status_label(log.status_code))
         .unwrap_or_else(|| "暂无".to_string());
     let latest_latency = latest_log
         .map(|log| format!("{} ms", log.latency_ms))
         .unwrap_or_else(|| "暂无".to_string());
     let latest_tokens = latest_log
-        .map(|log| log.total_tokens.to_string())
+        .map(|log| {
+            format!(
+                "{} tokens · {}",
+                log.total_tokens,
+                throughput_label(log.total_tokens, log.latency_ms)
+            )
+        })
         .unwrap_or_else(|| "暂无".to_string());
-
-    let mut rows = String::new();
-    for log in state.usage_logs.iter().rev().take(50) {
-        let _ = write!(
-            rows,
-            r#"<tr>
-  <td>{endpoint}</td>
-  <td>{model}</td>
-  <td>{status}</td>
-  <td>{tokens}</td>
-  <td>{latency} ms</td>
-  <td>{request_id}</td>
-</tr>"#,
-            endpoint = escape_html(&log.endpoint),
-            model = escape_html(&log.model),
-            status = log.status_code,
-            tokens = log.total_tokens,
-            latency = log.latency_ms,
-            request_id = escape_html(&log.request_id),
-        );
-    }
+    let rows = render_log_rows(state, &filtered_logs);
+    let recent_excerpt = recent_log_excerpt(&filtered_logs, state);
+    let search_request_id = escape_html(&filters.request_id_value());
+    let search_downstream = escape_html(&filters.downstream_value());
+    let search_upstream = escape_html(&filters.upstream_value());
+    let search_endpoint = escape_html(&filters.endpoint_value());
+    let status_filter = filters.status_filter();
+    let status_all_selected = if matches!(status_filter, LogStatusFilter::All) {
+        "selected"
+    } else {
+        ""
+    };
+    let status_success_selected = if matches!(status_filter, LogStatusFilter::Success) {
+        "selected"
+    } else {
+        ""
+    };
+    let status_warning_selected = if matches!(status_filter, LogStatusFilter::Warning) {
+        "selected"
+    } else {
+        ""
+    };
 
     let body = format!(
         r#"{topbar}
@@ -5232,12 +5707,12 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
   <section class="summary-card">
     <strong>{total_logs}</strong>
     <span>日志总数</span>
-    <small>最近 50 条在表格中展示</small>
+    <small>当前筛选命中的记录数</small>
   </section>
   <section class="summary-card">
     <strong>{total_tokens}</strong>
     <span>Total tokens</span>
-    <small>Token usage across all records</small>
+    <small>Token usage across matching records</small>
   </section>
   <section class="summary-card">
     <strong>{error_logs}</strong>
@@ -5247,47 +5722,34 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
   <section class="summary-card">
     <strong>{latest_latency}</strong>
     <span>最新延迟</span>
-    <small>最近一条请求的响应耗时</small>
+    <small>最近一条匹配请求的响应耗时</small>
   </section>
 </div>
-<div class="grid">
-  <section class="panel wide">
-    <div class="section-head">
-      <div>
-        <h2>最近 50 条</h2>
-        <p>按最新时间倒序显示请求摘要、模型、状态和请求 ID。</p>
-      </div>
-      <div class="muted">共 {total_logs} 条</div>
+<div class="note">
+  <strong>提示</strong>
+  <span>Token 数据仅供参考，不影响限额判断。</span>
+</div>
+<section class="panel wide">
+  <div class="section-head">
+    <div>
+      <h2>最新请求</h2>
+      <p>这块保留最近一条日志的关键信息，直接放在四个概览卡片下面，方便一眼核对路由和响应状态。</p>
     </div>
-    <div class="table-shell">
-      <div class="table-frame">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>接口</th>
-              <th>模型</th>
-              <th>状态</th>
-              <th>Tokens</th>
-              <th>延迟</th>
-              <th>请求 ID</th>
-            </tr>
-          </thead>
-          <tbody>{rows}</tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-  <section class="panel drawer">
-    <div class="section-head">
-      <div>
-        <h2>最新请求</h2>
-        <p>这块保留最近一条日志的关键信息，方便直接核对路由和响应状态。</p>
-      </div>
-    </div>
-    <div class="context-list">
+    <div class="muted">共 {total_logs} 条</div>
+  </div>
+  <div class="section-stack">
+    <div class="context-list wide">
       <div class="context-item">
         <strong>请求 ID</strong>
         <span>{latest_request_id}</span>
+      </div>
+      <div class="context-item">
+        <strong>下游</strong>
+        <span>{latest_downstream}</span>
+      </div>
+      <div class="context-item">
+        <strong>上游</strong>
+        <span>{latest_upstream}</span>
       </div>
       <div class="context-item">
         <strong>接口</strong>
@@ -5299,87 +5761,559 @@ fn render_logs_page(state: &crate::state::PersistedState) -> String {
       </div>
       <div class="context-item">
         <strong>状态</strong>
-        <span>{latest_status} · {latest_latency} · {latest_tokens} tokens</span>
+        <span>{latest_status} · {latest_latency} · {latest_tokens}</span>
+      </div>
+    </div>
+    <div class="code-block">{recent_excerpt}</div>
+  </div>
+</section>
+<div class="grid">
+  <section class="panel wide">
+    <div class="section-head">
+      <div>
+        <h2>最近 50 条</h2>
+        <p>按最新时间倒序显示请求、上下游名称、模型、状态、Token 吞吐和请求 ID。</p>
+      </div>
+    </div>
+    <form class="searchbar" method="get" action="/admin/logs" data-log-filter="true">
+      <div class="field">
+        <label for="request_id">请求 ID</label>
+        <input id="request_id" name="request_id" value="{request_id}" placeholder="REQ-1041">
+      </div>
+      <div class="field">
+        <label for="downstream">下游</label>
+        <input id="downstream" name="downstream" value="{downstream}" placeholder="Team A">
+      </div>
+      <div class="field">
+        <label for="upstream">上游</label>
+        <input id="upstream" name="upstream" value="{upstream}" placeholder="GLM 主账号">
+      </div>
+      <div class="field">
+        <label for="endpoint">路径</label>
+        <input id="endpoint" name="endpoint" value="{endpoint}" placeholder="/v1/responses">
+      </div>
+      <div class="field">
+        <label for="status">状态</label>
+        <select id="status" name="status">
+          <option value="" {status_all_selected}>全部</option>
+          <option value="success" {status_success_selected}>成功</option>
+          <option value="warning" {status_warning_selected}>告警</option>
+        </select>
+      </div>
+      <div class="actions">
+        <button class="button-link primary" type="submit">应用筛选</button>
+        <a class="button-link ghost" href="/admin/logs">重置筛选</a>
+      </div>
+    </form>
+    <div class="table-shell">
+      <div class="table-frame">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>请求 ID</th>
+              <th>下游</th>
+              <th>上游</th>
+              <th>模型</th>
+              <th>路径</th>
+              <th>状态</th>
+              <th>Token 吞吐</th>
+              <th>耗时</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
       </div>
     </div>
   </section>
 </div>"#,
         topbar = render_topbar("运行日志", "最近的网关使用、错误与降级记录"),
-        rows = rows,
         total_logs = total_logs,
         total_tokens = total_tokens,
         error_logs = error_logs,
         latest_latency = latest_latency,
         latest_request_id = escape_html(&latest_request_id),
+        latest_downstream = escape_html(&latest_downstream),
+        latest_upstream = escape_html(&latest_upstream),
         latest_endpoint = escape_html(&latest_endpoint),
         latest_model = escape_html(&latest_model),
         latest_status = escape_html(&latest_status),
         latest_tokens = escape_html(&latest_tokens),
+        request_id = search_request_id,
+        downstream = search_downstream,
+        upstream = search_upstream,
+        endpoint = search_endpoint,
+        status_all_selected = status_all_selected,
+        status_success_selected = status_success_selected,
+        status_warning_selected = status_warning_selected,
+        rows = rows,
     );
     render_shell("运行日志", ShellSection::Logs, &body)
 }
 
-fn render_portal_page(
-    downstream: &DownstreamConfig,
-    models: &[String],
-    logs: &[UsageLog],
-) -> String {
-    let mut model_items = String::new();
-    for model in models {
-        let _ = write!(
-            model_items,
-            r#"<span class="pill">{}</span> "#,
-            escape_html(model)
-        );
+fn filtered_usage_logs(
+    state: &crate::state::PersistedState,
+    filters: &LogListQuery,
+) -> Vec<UsageLog> {
+    state
+        .usage_logs
+        .iter()
+        .rev()
+        .filter(|log| filters.matches(state, log))
+        .cloned()
+        .collect()
+}
+
+fn render_log_rows(state: &crate::state::PersistedState, logs: &[UsageLog]) -> String {
+    if logs.is_empty() {
+        return r#"<tr>
+  <td colspan="9" class="muted">没有匹配的日志记录</td>
+</tr>"#
+            .to_string();
     }
 
+    let now = unix_seconds();
     let mut rows = String::new();
-    for log in logs {
+    for log in logs.iter().take(50) {
         let _ = write!(
             rows,
             r#"<tr>
-  <td>{endpoint}</td>
+  <td>{age_label}</td>
+  <td><strong>{request_id}</strong></td>
+  <td>
+    <strong>{downstream_name}</strong>
+  </td>
+  <td>
+    <strong>{upstream_name}</strong>
+  </td>
   <td>{model}</td>
-  <td>{status}</td>
-  <td>{tokens}</td>
+  <td>{endpoint}</td>
+  <td><span class="{status_class}">{status_label}</span></td>
+  <td>
+    <strong>{throughput}</strong>
+    <div class="hint">{token_breakdown}</div>
+  </td>
+  <td>{latency}</td>
 </tr>"#,
-            endpoint = escape_html(&log.endpoint),
+            age_label = age_label(now.saturating_sub(log.created_at)),
+            request_id = escape_html(&log.request_id),
+            downstream_name = escape_html(&resolve_downstream_name(state, &log.downstream_key_id)),
+            upstream_name = escape_html(&resolve_upstream_name(state, &log.upstream_key_id)),
             model = escape_html(&log.model),
-            status = log.status_code,
-            tokens = log.total_tokens,
+            endpoint = escape_html(&log.endpoint),
+            status_class = status_class(log.status_code),
+            status_label = escape_html(&status_label(log.status_code)),
+            throughput = escape_html(&throughput_label(log.total_tokens, log.latency_ms)),
+            token_breakdown = escape_html(&token_breakdown_label(log)),
+            latency = escape_html(&format!("{} ms", log.latency_ms)),
+        );
+    }
+
+    rows
+}
+
+fn resolve_downstream_name(
+    state: &crate::state::PersistedState,
+    downstream_key_id: &str,
+) -> String {
+    state
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == downstream_key_id)
+        .map(|downstream| downstream.name.clone())
+        .unwrap_or_else(|| downstream_key_id.to_string())
+}
+
+fn resolve_upstream_name(state: &crate::state::PersistedState, upstream_key_id: &str) -> String {
+    state
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == upstream_key_id)
+        .map(|upstream| upstream.name.clone())
+        .unwrap_or_else(|| upstream_key_id.to_string())
+}
+
+fn status_label(status_code: u16) -> String {
+    match status_code {
+        200..=299 => format!("{status_code} OK"),
+        300..=399 => format!("{status_code} Redirect"),
+        400..=499 => format!("{status_code} Client"),
+        _ => format!("{status_code} Upstream"),
+    }
+}
+
+fn status_class(status_code: u16) -> &'static str {
+    match status_code {
+        200..=299 => "badge badge-success",
+        300..=399 => "badge badge-info",
+        400..=499 => "badge badge-warning",
+        _ => "badge badge-strong",
+    }
+}
+
+fn age_label(age_seconds: u64) -> String {
+    match age_seconds {
+        0..=59 => "刚刚".to_string(),
+        60..=3_599 => format!("{} 分钟前", age_seconds / 60),
+        3_600..=86_399 => format!("{} 小时前", age_seconds / 3_600),
+        _ => format!("{} 天前", age_seconds / 86_400),
+    }
+}
+
+fn recent_log_excerpt(logs: &[UsageLog], state: &crate::state::PersistedState) -> String {
+    if logs.is_empty() {
+        return "暂无日志".to_string();
+    }
+
+    let now = unix_seconds();
+    logs.iter()
+        .take(3)
+        .map(|log| {
+            format!(
+                "{} {} {} {} {} {}",
+                age_label(now.saturating_sub(log.created_at)),
+                escape_html(&log.request_id),
+                escape_html(&resolve_downstream_name(state, &log.downstream_key_id)),
+                escape_html(&resolve_upstream_name(state, &log.upstream_key_id)),
+                escape_html(&status_label(log.status_code)),
+                escape_html(&throughput_label(log.total_tokens, log.latency_ms)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortalSummary {
+    active_downstreams: usize,
+    visible_models: usize,
+    responses_ready: usize,
+    chat_ready: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortalCurrentSession {
+    name: String,
+    secret_preview: String,
+    models: String,
+    limits: String,
+    status_label: String,
+    status_class: String,
+    note: String,
+    curl_example: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortalModelRow {
+    model: String,
+    downstreams: String,
+    support_label: String,
+    status_class: String,
+    routing_note: String,
+}
+
+fn render_portal_page(state: &PersistedState, downstream: &DownstreamConfig) -> String {
+    let active_downstreams = state
+        .downstreams
+        .iter()
+        .filter(|downstream| downstream.active)
+        .count();
+    let model_rows = portal_model_rows(state);
+    let summary = portal_summary(active_downstreams, &model_rows);
+    let current_session = current_session_card(downstream);
+    let mut model_rows_html = String::new();
+
+    for row in &model_rows {
+        let _ = write!(
+            model_rows_html,
+            r#"<tr>
+  <td><strong>{model}</strong></td>
+  <td>{downstreams}</td>
+  <td><span class="{status_class}">{support_label}</span></td>
+  <td>{routing_note}</td>
+</tr>"#,
+            model = escape_html(&row.model),
+            downstreams = escape_html(&row.downstreams),
+            status_class = escape_html(&row.status_class),
+            support_label = escape_html(&row.support_label),
+            routing_note = escape_html(&row.routing_note),
         );
     }
 
     let body = format!(
         r#"{topbar}
+<section class="summary-grid">
+  <section class="summary-card">
+    <strong>{active_downstreams}</strong>
+    <span>活跃密钥</span>
+    <small>当前可供下游使用的会话</small>
+  </section>
+  <section class="summary-card">
+    <strong>{visible_models}</strong>
+    <span>可见模型</span>
+    <small>下游白名单里的唯一模型</small>
+  </section>
+  <section class="summary-card">
+    <strong>{responses_ready}</strong>
+    <span>Responses 支持</span>
+    <small>可直接走 Responses 的模型</small>
+  </section>
+  <section class="summary-card">
+    <strong>{chat_ready}</strong>
+    <span>Chat 支持</span>
+    <small>仅能通过 ChatCompletions 提供的模型</small>
+  </section>
+</section>
 <div class="grid">
   <section class="panel wide">
-    <h2>你的密钥</h2>
-    <p class="muted">密钥名称：<strong>{name}</strong></p>
-    <p class="muted">允许的模型：</p>
-    <div>{models}</div>
+    <div class="section-head">
+      <div>
+        <h2>当前会话</h2>
+        <p>门户只展示下游视图，不参与网关决策。</p>
+      </div>
+    </div>
+    <div class="section-stack">
+      <div class="note">{current_session_note}</div>
+      <div class="table-shell">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>密钥预览</th>
+              <th>模型</th>
+              <th>限制</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>{session_name}</strong></td>
+              <td>{session_secret}</td>
+              <td>{session_models}</td>
+              <td>{session_limits}</td>
+              <td><span class="{session_status_class}">{session_status_label}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </section>
   <section class="panel wide">
-    <h2>最近使用</h2>
-    <table class="table">
-      <thead>
-        <tr>
-          <th>接口</th>
-          <th>模型</th>
-          <th>状态</th>
-          <th>Tokens</th>
-        </tr>
-      </thead>
-      <tbody>{rows}</tbody>
-    </table>
+    <div class="section-head">
+      <div>
+        <h2>模型目录</h2>
+        <p>展示每个模型的下游覆盖和上游支持能力。</p>
+      </div>
+    </div>
+    <div class="table-shell">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>模型</th>
+            <th>下游覆盖</th>
+            <th>支持协议</th>
+            <th>路由建议</th>
+          </tr>
+        </thead>
+        <tbody>{model_rows_html}</tbody>
+      </table>
+    </div>
+  </section>
+  <section class="panel wide">
+    <div class="section-head">
+      <div>
+        <h2>接入示例</h2>
+        <p>这部分只负责呈现，真实鉴权仍在后端完成。</p>
+      </div>
+    </div>
+    <div class="section-stack">
+      <div class="note">门户不会拦截模型请求，只读取下游配置并提示当前能用哪些模型。</div>
+      <pre class="code-block">{curl_example}</pre>
+    </div>
   </section>
 </div>"#,
-        topbar = render_topbar("自助门户", "下游客户端的自助视图"),
-        name = escape_html(&downstream.name),
-        models = model_items,
-        rows = rows,
+        topbar = render_topbar("自助门户", "展示下游可见模型和路由能力"),
+        active_downstreams = summary.active_downstreams,
+        visible_models = summary.visible_models,
+        responses_ready = summary.responses_ready,
+        chat_ready = summary.chat_ready,
+        current_session_note = escape_html(&current_session.note),
+        session_name = escape_html(&current_session.name),
+        session_secret = escape_html(&current_session.secret_preview),
+        session_models = escape_html(&current_session.models),
+        session_limits = escape_html(&current_session.limits),
+        session_status_class = escape_html(&current_session.status_class),
+        session_status_label = escape_html(&current_session.status_label),
+        curl_example = escape_html(&current_session.curl_example),
+        model_rows_html = model_rows_html,
     );
     render_shell("自助门户", ShellSection::Portal, &body)
+}
+
+fn portal_summary(active_downstreams: usize, model_rows: &[PortalModelRow]) -> PortalSummary {
+    let visible_models = model_rows.len();
+    let responses_ready = model_rows
+        .iter()
+        .filter(|row| row.support_label == "Responses")
+        .count();
+    let chat_ready = model_rows
+        .iter()
+        .filter(|row| row.support_label == "ChatCompletions")
+        .count();
+
+    PortalSummary {
+        active_downstreams,
+        visible_models,
+        responses_ready,
+        chat_ready,
+    }
+}
+
+fn current_session_card(downstream: &DownstreamConfig) -> PortalCurrentSession {
+    let models = if downstream.model_allowlist.is_empty() {
+        "无模型白名单".to_string()
+    } else {
+        downstream.model_allowlist.join(", ")
+    };
+    let limits = format!(
+        "{} /min · 日 {} · 月 {}",
+        downstream.per_minute_limit,
+        downstream
+            .daily_token_limit
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "无限".to_string()),
+        downstream
+            .monthly_token_limit
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "无限".to_string()),
+    );
+    let status_label = if downstream.active {
+        "启用".to_string()
+    } else {
+        "停用".to_string()
+    };
+    let status_class = if downstream.active {
+        "badge badge-success".to_string()
+    } else {
+        "badge badge-warning".to_string()
+    };
+    let note = if downstream.active {
+        "当前门户默认展示第一个启用中的下游会话。".to_string()
+    } else {
+        "当前没有启用中的下游，展示的是一个备用记录。".to_string()
+    };
+    let curl_example = format!(
+        "curl -H 'Authorization: Bearer {}' \\\n  https://gateway.example.com/v1/responses",
+        downstream
+            .plaintext_key
+            .as_deref()
+            .unwrap_or("<downstream-key>")
+    );
+
+    PortalCurrentSession {
+        name: downstream.name.clone(),
+        secret_preview: preview_secret(downstream.plaintext_key.as_deref()),
+        models,
+        limits,
+        status_label,
+        status_class,
+        note,
+        curl_example,
+    }
+}
+
+fn portal_model_rows(state: &PersistedState) -> Vec<PortalModelRow> {
+    let mut models = BTreeMap::<String, Vec<String>>::new();
+
+    for downstream in state
+        .downstreams
+        .iter()
+        .filter(|downstream| downstream.active)
+    {
+        for model in &downstream.model_allowlist {
+            models
+                .entry(model.clone())
+                .or_default()
+                .push(downstream.name.clone());
+        }
+    }
+
+    models
+        .into_iter()
+        .map(|(model, downstreams)| {
+            let downstreams = unique_join(&downstreams);
+            let (support_label, status_class, routing_note) = model_support(state, &model);
+
+            PortalModelRow {
+                model,
+                downstreams,
+                support_label,
+                status_class,
+                routing_note,
+            }
+        })
+        .collect()
+}
+
+fn model_support(state: &PersistedState, model: &str) -> (String, String, String) {
+    let responses_supported = state.upstreams.iter().any(|upstream| {
+        upstream.active
+            && upstream.protocol == UpstreamProtocol::Responses
+            && upstream.supports_model(model)
+    });
+    if responses_supported {
+        return (
+            "Responses".to_string(),
+            "badge badge-success".to_string(),
+            "原生 Responses 路径可用".to_string(),
+        );
+    }
+
+    let chat_supported = state.upstreams.iter().any(|upstream| {
+        upstream.active
+            && upstream.protocol == UpstreamProtocol::ChatCompletions
+            && upstream.supports_model(model)
+    });
+    if chat_supported {
+        return (
+            "ChatCompletions".to_string(),
+            "badge badge-info".to_string(),
+            "需要通过 Chat 协议提供".to_string(),
+        );
+    }
+
+    (
+        "未配置".to_string(),
+        "badge badge-warning".to_string(),
+        "需要补充上游或别名映射".to_string(),
+    )
+}
+
+fn unique_join(values: &[String]) -> String {
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::new();
+
+    for value in values {
+        if seen.insert(value.clone()) {
+            ordered.push(value.clone());
+        }
+    }
+
+    ordered.join(", ")
+}
+
+fn preview_secret(secret: Option<&str>) -> String {
+    let Some(secret) = secret else {
+        return "未保存".to_string();
+    };
+
+    if secret.len() <= 8 {
+        return secret.to_string();
+    }
+
+    let head = &secret[..4];
+    let tail = &secret[secret.len().saturating_sub(4)..];
+    format!("{head}…{tail}")
 }
 
 fn active_models(state: &crate::state::PersistedState) -> usize {
@@ -5414,6 +6348,11 @@ fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routing::UpstreamProtocol;
+    use crate::state::{
+        DownstreamConfig, ModelAliasConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
+        UsageLog,
+    };
     use serde_json::json;
 
     #[test]
@@ -5502,5 +6441,248 @@ mod tests {
         assert_eq!(conversion.stripped_tools, vec!["web_search"]);
         assert_eq!(conversion.tool_choice.as_deref(), Some("web_search"));
         assert!(conversion.tool_choice_dropped);
+    }
+
+    #[test]
+    fn rendered_pages_include_favicon_link() {
+        let shell_html = render_shell("仪表盘", ShellSection::Dashboard, "<div></div>");
+        assert!(shell_html.contains(r#"rel="icon" type="image/svg+xml""#));
+
+        let login_html = render_login_page(&AppConfig::default(), "/", "admin", None);
+        assert!(login_html.contains(r#"rel="icon" type="image/svg+xml""#));
+    }
+
+    #[test]
+    fn render_logs_page_shows_names_throughput_and_header_filters() {
+        let state = PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "Primary Account".into(),
+                base_url: "https://example.com".into(),
+                api_key: "sk-demo".into(),
+                protocol: UpstreamProtocol::Responses,
+                supported_models: vec!["glm-5".into()],
+                model_aliases: vec![ModelAliasConfig {
+                    slug: "glm-5".into(),
+                    upstream_model: "GLM-5".into(),
+                }],
+                request_quota_5h: 600,
+                requests_per_minute: 20,
+                max_concurrency: 4,
+                model_request_costs: vec![ModelRequestCostConfig {
+                    slug: "glm-5".into(),
+                    cost: 2,
+                }],
+                active: true,
+                failure_count: 0,
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "Team Alpha".into(),
+                hash: "sha256:demo".into(),
+                plaintext_key: Some("sk-demo".into()),
+                model_allowlist: vec!["glm-5".into()],
+                per_minute_limit: 20,
+                daily_token_limit: Some(1_000),
+                monthly_token_limit: Some(2_000),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![UsageLog {
+                id: "log-1".into(),
+                downstream_key_id: "down-1".into(),
+                upstream_key_id: "up-1".into(),
+                endpoint: "/v1/responses".into(),
+                model: "glm-5".into(),
+                request_id: "REQ-1".into(),
+                status_code: 200,
+                prompt_tokens: 12,
+                completion_tokens: 8,
+                total_tokens: 20,
+                latency_ms: 250,
+                created_at: 1,
+            }],
+        };
+
+        let html = render_logs_page(&state);
+        assert!(html.contains("Team Alpha"));
+        assert!(html.contains("Primary Account"));
+        assert!(html.contains("Token 数据仅供参考，不影响限额判断"));
+        assert!(html.contains("tok/s"));
+        assert!(html.contains("data-log-filter"));
+        assert!(!html.contains("down-1"));
+        assert!(!html.contains("up-1"));
+    }
+
+    #[test]
+    fn render_logs_page_applies_query_filters_and_serializes_query_suffix() {
+        let state = PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "Primary Account".into(),
+                base_url: "https://example.com".into(),
+                api_key: "sk-demo".into(),
+                protocol: UpstreamProtocol::Responses,
+                supported_models: vec!["glm-5".into()],
+                model_aliases: vec![ModelAliasConfig {
+                    slug: "glm-5".into(),
+                    upstream_model: "GLM-5".into(),
+                }],
+                request_quota_5h: 600,
+                requests_per_minute: 20,
+                max_concurrency: 4,
+                model_request_costs: vec![ModelRequestCostConfig {
+                    slug: "glm-5".into(),
+                    cost: 2,
+                }],
+                active: true,
+                failure_count: 0,
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "Team Alpha".into(),
+                hash: "sha256:demo".into(),
+                plaintext_key: Some("sk-demo".into()),
+                model_allowlist: vec!["glm-5".into()],
+                per_minute_limit: 20,
+                daily_token_limit: Some(1_000),
+                monthly_token_limit: Some(2_000),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![
+                UsageLog {
+                    id: "log-1".into(),
+                    downstream_key_id: "down-1".into(),
+                    upstream_key_id: "up-1".into(),
+                    endpoint: "/v1/responses".into(),
+                    model: "glm-5".into(),
+                    request_id: "REQ-1".into(),
+                    status_code: 200,
+                    prompt_tokens: 12,
+                    completion_tokens: 8,
+                    total_tokens: 20,
+                    latency_ms: 250,
+                    created_at: 1,
+                },
+                UsageLog {
+                    id: "log-2".into(),
+                    downstream_key_id: "down-1".into(),
+                    upstream_key_id: "up-1".into(),
+                    endpoint: "/v1/chat/completions".into(),
+                    model: "glm-5".into(),
+                    request_id: "REQ-2".into(),
+                    status_code: 502,
+                    prompt_tokens: 5,
+                    completion_tokens: 0,
+                    total_tokens: 5,
+                    latency_ms: 50,
+                    created_at: 2,
+                },
+            ],
+        };
+        let query = LogListQuery {
+            request_id: Some("REQ-1".into()),
+            downstream: Some("Team Alpha".into()),
+            upstream: Some("Primary Account".into()),
+            endpoint: Some("/v1/responses".into()),
+            status: Some("success".into()),
+        };
+
+        assert!(query.query_suffix().contains("request_id=REQ-1"));
+
+        let html = render_logs_page_with_query(&state, &query);
+        assert!(html.contains("REQ-1"));
+        assert!(html.contains("Team Alpha"));
+        assert!(html.contains("Primary Account"));
+        assert!(html.contains("Token 数据仅供参考，不影响限额判断"));
+        assert!(html.contains("tok/s"));
+        assert!(!html.contains("down-1"));
+        assert!(!html.contains("up-1"));
+        assert!(!html.contains("REQ-2"));
+        assert!(!html.contains("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn render_portal_page_shows_model_directory_and_no_recent_usage_table() {
+        let state = PersistedState {
+            upstreams: vec![
+                UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "Responses".into(),
+                    base_url: "https://example.com".into(),
+                    api_key: "sk-demo".into(),
+                    protocol: UpstreamProtocol::Responses,
+                    supported_models: vec!["glm-5".into()],
+                    model_aliases: vec![ModelAliasConfig {
+                        slug: "glm-5".into(),
+                        upstream_model: "GLM-5".into(),
+                    }],
+                    request_quota_5h: 600,
+                    requests_per_minute: 20,
+                    max_concurrency: 4,
+                    model_request_costs: vec![ModelRequestCostConfig {
+                        slug: "glm-5".into(),
+                        cost: 2,
+                    }],
+                    active: true,
+                    failure_count: 0,
+                },
+                UpstreamConfig {
+                    id: "up-2".into(),
+                    name: "Chat".into(),
+                    base_url: "https://chat.example.com".into(),
+                    api_key: "sk-demo".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    model_aliases: vec![],
+                    request_quota_5h: 600,
+                    requests_per_minute: 20,
+                    max_concurrency: 4,
+                    model_request_costs: vec![],
+                    active: true,
+                    failure_count: 0,
+                },
+            ],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "Team Alpha".into(),
+                hash: "sha256:demo".into(),
+                plaintext_key: Some("sk-team-alpha-demo".into()),
+                model_allowlist: vec!["glm-5".into(), "gpt-4.1-mini".into()],
+                per_minute_limit: 20,
+                daily_token_limit: Some(1_000),
+                monthly_token_limit: Some(2_000),
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        };
+        let downstream = state.downstreams[0].clone();
+
+        let html = render_portal_page(&state, &downstream);
+        assert!(html.contains("展示下游可见模型和路由能力"));
+        assert!(html.contains("活跃密钥"));
+        assert!(html.contains("可见模型"));
+        assert!(html.contains("Responses 支持"));
+        assert!(html.contains("Chat 支持"));
+        assert!(html.contains("当前会话"));
+        assert!(html.contains("模型目录"));
+        assert!(html.contains("接入示例"));
+        assert!(html.contains("glm-5"));
+        assert!(html.contains("gpt-4.1-mini"));
+        assert!(html.contains("原生 Responses 路径可用"));
+        assert!(html.contains("需要通过 Chat 协议提供"));
+        assert!(html.contains("Authorization: Bearer"));
+        assert!(!html.contains("最近使用"));
     }
 }

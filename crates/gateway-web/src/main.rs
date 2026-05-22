@@ -1,10 +1,14 @@
+use axum::extract::Query;
 use axum::response::{Html, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
+use gateway_core::admin::DownstreamListQuery;
 use gateway_web::app::{
-    render_dashboard_page, render_downstreams_page, render_login_page, render_logs_page,
+    render_dashboard_page, render_downstreams_page, render_login_page, render_logs_page_with_query,
     render_portal_page, render_upstreams_page,
 };
+use gateway_web::pages::logs::LogListQuery;
+use serde::Deserialize;
 use std::env;
 use std::error::Error;
 use tokio::net::TcpListener;
@@ -40,8 +44,14 @@ fn build_router() -> Router {
         .route("/admin/login", get(admin_login).post(submit_admin_login))
         .route("/admin/logout", post(admin_logout))
         .route("/admin", get(admin_dashboard))
-        .route("/admin/upstreams", get(admin_upstreams).post(submit_upstreams))
-        .route("/admin/downstreams", get(admin_downstreams).post(submit_downstreams))
+        .route(
+            "/admin/upstreams",
+            get(admin_upstreams).post(submit_upstreams),
+        )
+        .route(
+            "/admin/downstreams",
+            get(admin_downstreams).post(submit_downstreams),
+        )
         .route("/admin/logs", get(admin_logs))
         .route("/portal", get(portal))
 }
@@ -70,26 +80,38 @@ async fn admin_dashboard() -> Html<String> {
     render_dashboard_page()
 }
 
-async fn admin_upstreams() -> Html<String> {
-    render_upstreams_page()
+async fn admin_upstreams(Query(query): Query<EditQuery>) -> Html<String> {
+    render_upstreams_page(query.edit.as_deref())
 }
 
 async fn submit_upstreams() -> Redirect {
     Redirect::to("/admin/upstreams")
 }
 
-async fn admin_downstreams() -> Html<String> {
-    render_downstreams_page()
+async fn admin_downstreams(Query(query): Query<DownstreamsPageQuery>) -> Html<String> {
+    render_downstreams_page(query.filters, query.edit.as_deref())
 }
 
 async fn submit_downstreams() -> Redirect {
     Redirect::to("/admin/downstreams")
 }
 
-async fn admin_logs() -> Html<String> {
-    render_logs_page()
+async fn admin_logs(Query(query): Query<LogListQuery>) -> Html<String> {
+    render_logs_page_with_query(query)
 }
 
 async fn portal() -> Html<String> {
     render_portal_page()
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct EditQuery {
+    edit: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DownstreamsPageQuery {
+    #[serde(flatten)]
+    filters: DownstreamListQuery,
+    edit: Option<String>,
 }

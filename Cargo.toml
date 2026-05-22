@@ -5,8 +5,8 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [workspace]
-members = [".", "crates/gateway-core"]
-default-members = ["."]
+members = [".", "crates/gateway-core", "crates/gateway-web"]
+default-members = ["crates/gateway-web"]
 resolver = "2"
 
 [dependencies]

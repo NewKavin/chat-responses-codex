@@ -62,6 +62,8 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         per_minute_limit: 42,
         daily_token_limit: Some(1_000),
         monthly_token_limit: Some(2_000),
+        request_quota_window_hours: Some(5),
+        request_quota_requests: Some(600),
         ip_allowlist: vec!["127.0.0.1".into()],
         expires_at: Some(1_725_000_000),
         active: true,
