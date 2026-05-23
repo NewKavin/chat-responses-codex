@@ -248,6 +248,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(responses))
+        .route("/api/admin/login", post(admin_login))
+        .route(
+            "/api/admin/dashboard",
+            get(admin_dashboard).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
@@ -2053,3 +2061,80 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
         })
 }
 
+
+// Admin API endpoints
+
+#[derive(Debug, serde::Deserialize)]
+struct AdminLoginRequest {
+    username: String,
+    password: String,
+}
+
+async fn admin_login(
+    State(state): State<AppState>,
+    Json(body): Json<AdminLoginRequest>,
+) -> impl IntoResponse {
+    if body.username != state.config.admin_username || body.password != state.config.admin_password {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": {
+                    "message": "Invalid credentials"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    match crate::auth::generate_admin_token(&body.username, &state.config.jwt_secret) {
+        Ok(token) => (
+            StatusCode::OK,
+            Json(json!({
+                "token": token
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": "Failed to generate token"
+                }
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn admin_dashboard(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    
+    Json(json!({
+        "upstreams_count": snapshot.upstreams.len(),
+        "downstreams_count": snapshot.downstreams.len(),
+        "logs_count": snapshot.usage_logs.len(),
+    }))
+    .into_response()
+}
+
+// JWT authentication middleware
+async fn admin_auth_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Result<Response, StatusCode> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    crate::auth::verify_admin_token(token, &state.config.jwt_secret)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    Ok(next.run(request).await)
+}

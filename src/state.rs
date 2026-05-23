@@ -30,6 +30,7 @@ pub const ADMIN_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 pub struct AppConfig {
     pub admin_username: String,
     pub admin_password: String,
+    pub jwt_secret: String,
     pub app_name: String,
     pub usage_log_rotation_max_bytes: usize,
     pub usage_log_archive_max_files: usize,
@@ -42,6 +43,7 @@ impl Default for AppConfig {
         Self {
             admin_username: "admin".into(),
             admin_password: "admin".into(),
+            jwt_secret: "change_me_in_production".into(),
             app_name: "chat-responses-codex".into(),
             usage_log_rotation_max_bytes: 1_048_576,
             usage_log_archive_max_files: 10,
