@@ -4,11 +4,6 @@ version = "0.1.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
-[workspace]
-members = [".", "crates/gateway-core", "crates/gateway-web"]
-default-members = ["crates/gateway-web"]
-resolver = "2"
-
 [dependencies]
 gateway-core = { path = "crates/gateway-core" }
 axum = "=0.8.9"
