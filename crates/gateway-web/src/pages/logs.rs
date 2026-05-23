@@ -213,7 +213,7 @@ pub fn LogsPage(config: AppConfig, state: PersistedState, query: LogListQuery) -
                           <th>模型</th>
                           <th>路径</th>
                           <th>状态</th>
-                          <th>Token 吞吐</th>
+                          <th>{"Token 吞吐（输入 / 输出 / 总计）"}</th>
                           <th>耗时</th>
                         </tr>
                       </thead>
@@ -571,9 +571,11 @@ mod tests {
     fn rendered_page_shows_resolved_names_tokens_and_filters() {
         let html = render_logs_page().0;
 
+        assert!(html.contains("运行日志"));
         assert!(html.contains("Team A"));
         assert!(html.contains("GLM 主账号"));
         assert!(html.contains("Token 数据仅供参考，不影响限额判断"));
+        assert!(html.contains("Token 吞吐（输入 / 输出 / 总计）"));
         assert!(html.contains("Token 吞吐"));
         assert!(html.contains("tok/s"));
         assert!(!html.contains("down-1"));

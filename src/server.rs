@@ -5817,7 +5817,7 @@ fn render_logs_page_with_query(
               <th>模型</th>
               <th>路径</th>
               <th>状态</th>
-              <th>Token 吞吐</th>
+              <th>Token 吞吐（输入 / 输出 / 总计）</th>
               <th>耗时</th>
             </tr>
           </thead>
@@ -5827,7 +5827,10 @@ fn render_logs_page_with_query(
     </div>
   </section>
 </div>"#,
-        topbar = render_topbar("运行日志", "最近的网关使用、错误与降级记录"),
+        topbar = render_topbar(
+            "运行日志",
+            "最近的网关使用、错误与降级记录",
+        ),
         total_logs = total_logs,
         total_tokens = total_tokens,
         error_logs = error_logs,
@@ -6508,9 +6511,11 @@ mod tests {
         };
 
         let html = render_logs_page(&state);
+        assert!(html.contains("运行日志"));
         assert!(html.contains("Team Alpha"));
         assert!(html.contains("Primary Account"));
         assert!(html.contains("Token 数据仅供参考，不影响限额判断"));
+        assert!(html.contains("Token 吞吐（输入 / 输出 / 总计）"));
         assert!(html.contains("tok/s"));
         assert!(html.contains("data-log-filter"));
         assert!(!html.contains("down-1"));
