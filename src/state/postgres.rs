@@ -90,6 +90,13 @@ impl PostgresStateStore {
                 PRIMARY KEY (upstream_id, model_slug)
             );
 
+            CREATE TABLE IF NOT EXISTS upstream_premium_models (
+                upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                model_slug TEXT NOT NULL,
+                PRIMARY KEY (upstream_id, model_slug)
+            );
+
             CREATE TABLE IF NOT EXISTS upstream_model_aliases (
                 upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
                 position INTEGER NOT NULL,
@@ -110,17 +117,31 @@ impl PostgresStateStore {
                 ADD COLUMN IF NOT EXISTS request_quota_5h INTEGER NOT NULL DEFAULT 600;
 
             ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS request_quota_window_hours INTEGER NOT NULL DEFAULT 5;
+
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS request_quota_requests INTEGER NOT NULL DEFAULT 600;
+
+            ALTER TABLE upstreams
                 ADD COLUMN IF NOT EXISTS requests_per_minute INTEGER NOT NULL DEFAULT 20;
 
             ALTER TABLE upstreams
                 ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 4;
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS premium_only BOOLEAN NOT NULL DEFAULT FALSE;
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS protect_premium_quota BOOLEAN NOT NULL DEFAULT FALSE;
 
             CREATE TABLE IF NOT EXISTS downstreams (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 hash TEXT NOT NULL,
                 plaintext_key TEXT NULL,
+                rate_limit_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 per_minute_limit INTEGER NOT NULL,
+                max_concurrency INTEGER NOT NULL DEFAULT 10,
                 daily_token_limit BIGINT NULL,
                 monthly_token_limit BIGINT NULL,
                 request_quota_window_hours INTEGER NULL,
@@ -134,6 +155,12 @@ impl PostgresStateStore {
 
             ALTER TABLE downstreams
                 ADD COLUMN IF NOT EXISTS request_quota_requests INTEGER NULL;
+
+            ALTER TABLE downstreams
+                ADD COLUMN IF NOT EXISTS rate_limit_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+
+            ALTER TABLE downstreams
+                ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 10;
 
             CREATE TABLE IF NOT EXISTS downstream_model_allowlist (
                 downstream_id TEXT NOT NULL REFERENCES downstreams(id) ON DELETE CASCADE,
@@ -353,8 +380,11 @@ impl PgConnection {
         let mut upstreams = Vec::new();
         for row in self
             .query(
-                "SELECT id, name, base_url, api_key, protocol, request_quota_5h, \
-                 requests_per_minute, max_concurrency, active, failure_count \
+                "SELECT id, name, base_url, api_key, protocol, \
+                 COALESCE(request_quota_window_hours, 5), \
+                 COALESCE(request_quota_requests, request_quota_5h, 600), \
+                 requests_per_minute, max_concurrency, priority, premium_only, \
+                 protect_premium_quota, active, failure_count \
                  FROM upstreams ORDER BY id",
             )
             .await?
@@ -368,17 +398,34 @@ impl PgConnection {
                 supported_models: Vec::new(),
                 model_aliases: Vec::new(),
                 model_request_costs: Vec::new(),
-                request_quota_5h: required_text(&row, 5, "upstreams.request_quota_5h")?
+                request_quota_window_hours: required_text(
+                    &row,
+                    5,
+                    "upstreams.request_quota_window_hours",
+                )?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                requests_per_minute: required_text(&row, 6, "upstreams.requests_per_minute")?
+                request_quota_requests: required_text(&row, 6, "upstreams.request_quota_requests")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                max_concurrency: required_text(&row, 7, "upstreams.max_concurrency")?
+                requests_per_minute: required_text(&row, 7, "upstreams.requests_per_minute")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                active: parse_bool(required_text(&row, 8, "upstreams.active")?)?,
-                failure_count: required_text(&row, 9, "upstreams.failure_count")?
+                max_concurrency: required_text(&row, 8, "upstreams.max_concurrency")?
+                    .parse::<u32>()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                priority: required_text(&row, 9, "upstreams.priority")?
+                    .parse::<u32>()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                premium_models: Vec::new(),
+                premium_only: parse_bool(required_text(&row, 10, "upstreams.premium_only")?)?,
+                protect_premium_quota: parse_bool(required_text(
+                    &row,
+                    11,
+                    "upstreams.protect_premium_quota",
+                )?)?,
+                active: parse_bool(required_text(&row, 12, "upstreams.active")?)?,
+                failure_count: required_text(&row, 13, "upstreams.failure_count")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
             });
@@ -400,6 +447,20 @@ impl PgConnection {
             let model_slug = required_text(&row, 1, "upstream_supported_models.model_slug")?;
             if let Some(&index) = upstream_index.get(&upstream_id) {
                 upstreams[index].supported_models.push(model_slug);
+            }
+        }
+
+        for row in self
+            .query(
+                "SELECT upstream_id, model_slug FROM upstream_premium_models \
+                 ORDER BY upstream_id, position, model_slug",
+            )
+            .await?
+        {
+            let upstream_id = required_text(&row, 0, "upstream_premium_models.upstream_id")?;
+            let model_slug = required_text(&row, 1, "upstream_premium_models.model_slug")?;
+            if let Some(&index) = upstream_index.get(&upstream_id) {
+                upstreams[index].premium_models.push(model_slug);
             }
         }
 
@@ -437,7 +498,7 @@ impl PgConnection {
                     .push(super::ModelRequestCostConfig {
                         slug: required_text(&row, 1, "upstream_model_request_costs.slug")?,
                         cost: required_text(&row, 2, "upstream_model_request_costs.cost")?
-                            .parse::<u32>()
+                            .parse::<f64>()
                             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                     });
             }
@@ -446,7 +507,7 @@ impl PgConnection {
         let mut downstreams = Vec::new();
         for row in self
             .query(
-                "SELECT id, name, hash, plaintext_key, per_minute_limit, \
+                "SELECT id, name, hash, plaintext_key, rate_limit_enabled, per_minute_limit, max_concurrency, \
                  daily_token_limit, monthly_token_limit, request_quota_window_hours, \
                  request_quota_requests, expires_at, active \
                  FROM downstreams ORDER BY id",
@@ -459,31 +520,35 @@ impl PgConnection {
                 hash: required_text(&row, 2, "downstreams.hash")?,
                 plaintext_key: optional_text(&row, 3),
                 model_allowlist: Vec::new(),
-                per_minute_limit: required_text(&row, 4, "downstreams.per_minute_limit")?
+                rate_limit_enabled: parse_bool(required_text(&row, 4, "downstreams.rate_limit_enabled")?)?,
+                per_minute_limit: required_text(&row, 5, "downstreams.per_minute_limit")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                daily_token_limit: optional_text(&row, 5)
+                max_concurrency: required_text(&row, 6, "downstreams.max_concurrency")?
+                    .parse::<u32>()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                daily_token_limit: optional_text(&row, 7)
                     .map(|value| value.parse::<u64>())
                     .transpose()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                monthly_token_limit: optional_text(&row, 6)
+                monthly_token_limit: optional_text(&row, 8)
                     .map(|value| value.parse::<u64>())
                     .transpose()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                request_quota_window_hours: optional_text(&row, 7)
+                request_quota_window_hours: optional_text(&row, 9)
                     .map(|value| value.parse::<u32>())
                     .transpose()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                request_quota_requests: optional_text(&row, 8)
+                request_quota_requests: optional_text(&row, 10)
                     .map(|value| value.parse::<u32>())
                     .transpose()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 ip_allowlist: Vec::new(),
-                expires_at: optional_text(&row, 9)
+                expires_at: optional_text(&row, 11)
                     .map(|value| value.parse::<u64>())
                     .transpose()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                active: parse_bool(required_text(&row, 10, "downstreams.active")?)?,
+                active: parse_bool(required_text(&row, 12, "downstreams.active")?)?,
             });
         }
 
@@ -571,6 +636,7 @@ impl PgConnection {
             self.batch_execute("DELETE FROM downstream_ip_allowlist").await?;
             self.batch_execute("DELETE FROM downstream_model_allowlist").await?;
             self.batch_execute("DELETE FROM downstreams").await?;
+            self.batch_execute("DELETE FROM upstream_premium_models").await?;
             self.batch_execute("DELETE FROM upstream_model_aliases").await?;
             self.batch_execute("DELETE FROM upstream_model_request_costs").await?;
             self.batch_execute("DELETE FROM upstream_supported_models").await?;
@@ -579,16 +645,21 @@ impl PgConnection {
 
             for upstream in &state.upstreams {
                 self.batch_execute(&format!(
-                    "INSERT INTO upstreams (id, name, base_url, api_key, protocol, request_quota_5h, requests_per_minute, max_concurrency, active, failure_count) \
-                     VALUES ({id}, {name}, {base_url}, {api_key}, {protocol}, {request_quota_5h}, {requests_per_minute}, {max_concurrency}, {active}, {failure_count})",
+                    "INSERT INTO upstreams (id, name, base_url, api_key, protocol, request_quota_5h, request_quota_window_hours, request_quota_requests, requests_per_minute, max_concurrency, priority, premium_only, protect_premium_quota, active, failure_count) \
+                     VALUES ({id}, {name}, {base_url}, {api_key}, {protocol}, {request_quota_5h}, {request_quota_window_hours}, {request_quota_requests}, {requests_per_minute}, {max_concurrency}, {priority}, {premium_only}, {protect_premium_quota}, {active}, {failure_count})",
                     id = sql_string(&upstream.id),
                     name = sql_string(&upstream.name),
                     base_url = sql_string(&upstream.base_url),
                     api_key = sql_string(&upstream.api_key),
                     protocol = sql_string(&format!("{:?}", upstream.protocol)),
-                    request_quota_5h = upstream.request_quota_5h,
+                    request_quota_5h = upstream.request_quota_requests,
+                    request_quota_window_hours = upstream.request_quota_window_hours,
+                    request_quota_requests = upstream.request_quota_requests,
                     requests_per_minute = upstream.requests_per_minute,
                     max_concurrency = upstream.max_concurrency,
+                    priority = upstream.priority,
+                    premium_only = sql_bool(upstream.premium_only),
+                    protect_premium_quota = sql_bool(upstream.protect_premium_quota),
                     active = sql_bool(upstream.active),
                     failure_count = upstream.failure_count,
                 ))
@@ -597,6 +668,17 @@ impl PgConnection {
                 for (position, model_slug) in upstream.supported_models.iter().enumerate() {
                     self.batch_execute(&format!(
                         "INSERT INTO upstream_supported_models (upstream_id, position, model_slug) \
+                         VALUES ({upstream_id}, {position}, {model_slug})",
+                        upstream_id = sql_string(&upstream.id),
+                        position = position as i64,
+                        model_slug = sql_string(model_slug),
+                    ))
+                    .await?;
+                }
+
+                for (position, model_slug) in upstream.premium_models.iter().enumerate() {
+                    self.batch_execute(&format!(
+                        "INSERT INTO upstream_premium_models (upstream_id, position, model_slug) \
                          VALUES ({upstream_id}, {position}, {model_slug})",
                         upstream_id = sql_string(&upstream.id),
                         position = position as i64,
@@ -632,13 +714,15 @@ impl PgConnection {
 
             for downstream in &state.downstreams {
                 self.batch_execute(&format!(
-                    "INSERT INTO downstreams (id, name, hash, plaintext_key, per_minute_limit, daily_token_limit, monthly_token_limit, request_quota_window_hours, request_quota_requests, expires_at, active) \
-                     VALUES ({id}, {name}, {hash}, {plaintext_key}, {per_minute_limit}, {daily_token_limit}, {monthly_token_limit}, {request_quota_window_hours}, {request_quota_requests}, {expires_at}, {active})",
+                    "INSERT INTO downstreams (id, name, hash, plaintext_key, rate_limit_enabled, per_minute_limit, max_concurrency, daily_token_limit, monthly_token_limit, request_quota_window_hours, request_quota_requests, expires_at, active) \
+                     VALUES ({id}, {name}, {hash}, {plaintext_key}, {rate_limit_enabled}, {per_minute_limit}, {max_concurrency}, {daily_token_limit}, {monthly_token_limit}, {request_quota_window_hours}, {request_quota_requests}, {expires_at}, {active})",
                     id = sql_string(&downstream.id),
                     name = sql_string(&downstream.name),
                     hash = sql_string(&downstream.hash),
                     plaintext_key = sql_optional_string(downstream.plaintext_key.as_deref()),
+                    rate_limit_enabled = sql_bool(downstream.rate_limit_enabled),
                     per_minute_limit = downstream.per_minute_limit,
+                    max_concurrency = downstream.max_concurrency,
                     daily_token_limit = sql_optional_u64(downstream.daily_token_limit),
                     monthly_token_limit = sql_optional_u64(downstream.monthly_token_limit),
                     request_quota_window_hours = sql_optional_u32(downstream.request_quota_window_hours),

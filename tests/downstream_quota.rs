@@ -19,6 +19,10 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: Some(10),
                 monthly_token_limit: Some(20),
                 request_quota_window_hours: None,

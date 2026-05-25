@@ -3,10 +3,12 @@ use crate::protocol::{
     responses_request_to_chat_payload, responses_response_to_chat_payload, ProtocolError,
     StreamTranslator,
 };
+use axum::extract::{Path, Query};
+use std::collections::HashMap;
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, unix_seconds,
-    AppState, UpstreamConfig, UsageLog,
+    AppState, UpstreamConfig, DownstreamConfig, UsageLog,
 };
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Json, State};
@@ -16,6 +18,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::stream;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -23,6 +26,12 @@ use std::time::{Duration, Instant};
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
+use rust_embed::RustEmbed;
+use mime_guess::from_path;
+
+#[derive(RustEmbed)]
+#[folder = "frontend/dist"]
+struct FrontendAssets;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EndpointKind {
@@ -256,6 +265,95 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
+        
+        // Admin API - Upstreams
+        .route(
+            "/api/admin/upstreams",
+            get(admin_list_upstreams)
+                .post(admin_create_upstream)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/models",
+            get(admin_list_models).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/upstreams/{id}",
+            get(admin_get_upstream)
+                .put(admin_update_upstream)
+                .delete(admin_delete_upstream)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/upstreams/{id}/toggle",
+            post(admin_toggle_upstream).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+
+        // Admin API - Downstreams
+        .route(
+            "/api/admin/downstreams",
+            get(admin_list_downstreams)
+                .post(admin_create_downstream)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/downstreams/{id}",
+            get(admin_get_downstream)
+                .put(admin_update_downstream)
+                .delete(admin_delete_downstream)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/downstreams/{id}/toggle",
+            post(admin_toggle_downstream).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/downstreams/{id}/rotate",
+            post(admin_rotate_downstream).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        
+        // Admin API - Logs
+        .route(
+            "/api/admin/logs",
+            get(admin_list_logs).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+
+        // Portal API
+        .route("/api/portal/login", post(portal_login))
+        .route("/api/portal/overview", get(portal_overview))
+        .route("/api/portal/quota", get(portal_quota))
+        .route("/api/portal/usage-history", get(portal_usage_history))
+        .route("/api/portal/models", get(portal_models))
+
+        // Frontend assets and SPA fallback
+        .fallback(serve_frontend)
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
@@ -321,6 +419,34 @@ fn header_value(headers: &HeaderMap, name: header::HeaderName) -> Option<String>
         .map(str::to_string)
 }
 
+async fn serve_frontend(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+
+    if let Some(asset) = FrontendAssets::get(path) {
+        let mime_type = from_path(path).first_or_octet_stream().as_ref().to_string();
+        return (
+            [(header::CONTENT_TYPE, mime_type)],
+            asset.data.into_response(),
+        )
+            .into_response();
+    }
+
+    if path.starts_with("api/") || path.starts_with("v1/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if let Some(asset) = FrontendAssets::get("index.html") {
+        let mime_type = "text/html; charset=utf-8".to_string();
+        return (
+            [(header::CONTENT_TYPE, mime_type)],
+            asset.data.into_response(),
+        )
+            .into_response();
+    }
+
+    (StatusCode::NOT_FOUND, "Not Found").into_response()
+}
+
 async fn healthz() -> impl IntoResponse {
     "ok"
 }
@@ -362,6 +488,25 @@ async fn responses(
         Err(error) => error.into_response(),
     }
 }
+
+struct DownstreamConcurrencyGuard {
+    state: AppState,
+    downstream_id: String,
+}
+
+impl DownstreamConcurrencyGuard {
+    fn new(state: AppState, downstream_id: String) -> Self {
+        Self { state, downstream_id }
+    }
+}
+
+impl Drop for DownstreamConcurrencyGuard {
+    fn drop(&mut self) {
+        self.state
+            .release_downstream_concurrency(&self.downstream_id);
+    }
+}
+
 async fn process_gateway_request(
     state: AppState,
     headers: HeaderMap,
@@ -465,6 +610,25 @@ async fn process_gateway_request(
         });
     }
 
+    if let Err(retry_after_seconds) = state.try_reserve_downstream_concurrency(&downstream) {
+        tracing::warn!(
+            request_id = %request_id,
+            downstream_key_id = %downstream.id,
+            path = %request_path,
+            original_model = %model,
+            normalized_model = %normalized_model,
+            retry_after_seconds,
+            max_concurrency = downstream.max_concurrency,
+            "downstream concurrency limit exceeded"
+        );
+        return Err(GatewayError::TooManyRequests {
+            message: "downstream concurrency limit exceeded".into(),
+            retry_after_seconds: Some(retry_after_seconds),
+        });
+    }
+    let _downstream_concurrency_guard =
+        DownstreamConcurrencyGuard::new(state.clone(), downstream.id.clone());
+
     let requires_responses_tooling =
         endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
     let fallback_to_chat = requires_responses_tooling
@@ -526,24 +690,40 @@ async fn process_gateway_request(
             .filter(|upstream| upstream.supports_model(model))
             .cloned()
             .collect::<Vec<_>>();
-        upstreams.sort_by_key(|upstream| {
+        let mut deprioritized_upstreams = Vec::new();
+        upstreams.retain(|upstream| {
+            let is_non_premium_request = !upstream.premium_models.iter().any(|m| m == model);
+            let should_deprioritize = upstream.protect_premium_quota
+                && !upstream.premium_models.is_empty()
+                && is_non_premium_request;
+            if should_deprioritize {
+                deprioritized_upstreams.push(upstream.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let ranking_key = |upstream: &UpstreamConfig| {
             let runtime = upstream_runtime_snapshots
                 .get(&upstream.id)
                 .copied()
                 .unwrap_or_default();
             let request_cost = upstream.request_cost_for_model(model);
-            let minute_pressure = runtime.minute_cost.saturating_add(request_cost);
-            let five_hour_pressure = runtime.five_hour_cost.saturating_add(request_cost);
+            let minute_pressure = runtime.minute_cost + request_cost;
+            let five_hour_pressure = runtime.five_hour_cost + request_cost;
             (
                 runtime.is_cooled_down(now),
                 runtime.cooldown_remaining(now),
                 runtime.in_flight,
                 minute_pressure as u64 * 1_000 / upstream.requests_per_minute.max(1) as u64,
-                five_hour_pressure as u64 * 1_000 / upstream.request_quota_5h.max(1) as u64,
+                five_hour_pressure as u64 * 1_000 / upstream.request_quota_requests.max(1) as u64,
                 upstream.failure_count,
                 upstream.id.clone(),
             )
-        });
+        };
+        upstreams.sort_by_key(&ranking_key);
+        deprioritized_upstreams.sort_by_key(ranking_key);
+        upstreams.extend(deprioritized_upstreams);
         let candidate_summary = upstreams
             .iter()
             .map(|upstream| {
@@ -552,10 +732,10 @@ async fn process_gateway_request(
                     .copied()
                     .unwrap_or_default();
                 let request_cost = upstream.request_cost_for_model(model);
-                let minute_cost = runtime.minute_cost.saturating_add(request_cost);
-                let five_hour_cost = runtime.five_hour_cost.saturating_add(request_cost);
+                let minute_cost = runtime.minute_cost + request_cost;
+                let five_hour_cost = runtime.five_hour_cost + request_cost;
                 format!(
-                    "{}|{}|{:?}|in_flight={}|cooldown_remaining={}|minute_cost={}/{}|five_hour_cost={}/{}|failure_count={}|request_cost={}",
+                    "{}|{}|{:?}|in_flight={}|cooldown_remaining={}|minute_cost={}/{}|five_hour_cost={}/{}|failure_count={}|request_cost={}|protect_premium_quota={}|premium_match={}",
                     upstream.id,
                     upstream.name,
                     upstream.protocol,
@@ -564,9 +744,11 @@ async fn process_gateway_request(
                     minute_cost,
                     upstream.requests_per_minute,
                     five_hour_cost,
-                    upstream.request_quota_5h,
+                    upstream.request_quota_requests,
                     upstream.failure_count,
-                    request_cost
+                    request_cost,
+                    upstream.protect_premium_quota,
+                    upstream.premium_models.iter().any(|m| m == model)
                 )
             })
             .collect::<Vec<_>>();
@@ -588,8 +770,8 @@ async fn process_gateway_request(
                 .copied()
                 .unwrap_or_default();
             let request_cost = upstream.request_cost_for_model(model);
-            let minute_cost = runtime.minute_cost.saturating_add(request_cost);
-            let five_hour_cost = runtime.five_hour_cost.saturating_add(request_cost);
+            let minute_cost = runtime.minute_cost + request_cost;
+            let five_hour_cost = runtime.five_hour_cost + request_cost;
             tracing::info!(
                 request_id = %request_id,
                 downstream_key_id = %downstream.id,
@@ -606,7 +788,7 @@ async fn process_gateway_request(
                 minute_cost,
                 minute_quota = upstream.requests_per_minute,
                 five_hour_cost,
-                five_hour_quota = upstream.request_quota_5h,
+                five_hour_quota = upstream.request_quota_requests,
                 failure_count = upstream.failure_count,
                 "considering upstream candidate"
             );
@@ -735,7 +917,7 @@ async fn process_gateway_request(
                                         .map(|runtime| !runtime.is_cooled_down(now))
                                         .unwrap_or(true)
                             });
-                        if request_cost >= 2
+                        if request_cost >= 2.0
                             && !has_uncooled_alternative
                             && !rate_limit_retry_attempted
                             && retry_after_seconds
@@ -2070,6 +2252,12 @@ struct AdminLoginRequest {
     password: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct PortalLoginRequest {
+    employee_id: String,
+    key: String,
+}
+
 async fn admin_login(
     State(state): State<AppState>,
     Json(body): Json<AdminLoginRequest>,
@@ -2108,13 +2296,68 @@ async fn admin_login(
 
 async fn admin_dashboard(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
-    
+
     Json(json!({
         "upstreams_count": snapshot.upstreams.len(),
+        "upstreams_active": snapshot.upstreams.iter().filter(|u| u.active).count(),
         "downstreams_count": snapshot.downstreams.len(),
+        "downstreams_active": snapshot.downstreams.iter().filter(|d| d.active).count(),
         "logs_count": snapshot.usage_logs.len(),
+        "active_models": snapshot.upstreams.iter()
+            .flat_map(|u| u.route_models())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "responses_upstreams": snapshot.upstreams.iter()
+            .filter(|u| u.active && u.protocol == UpstreamProtocol::Responses)
+            .count(),
+        "admin_username": state.config.admin_username.clone(),
+        "app_name": state.config.app_name.clone(),
     }))
     .into_response()
+}
+
+async fn portal_login(
+    State(state): State<AppState>,
+    Json(body): Json<PortalLoginRequest>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+
+    // Find downstream with matching key
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.active && crate::keys::verify_downstream_key(&body.key, &d.hash));
+
+    if downstream.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": {
+                    "message": "Invalid credentials"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    match crate::auth::generate_admin_token(&body.employee_id, &state.config.jwt_secret) {
+        Ok(token) => (
+            StatusCode::OK,
+            Json(json!({
+                "token": token
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": "Failed to generate token"
+                }
+            })),
+        )
+            .into_response(),
+    }
 }
 
 // JWT authentication middleware
@@ -2137,4 +2380,948 @@ async fn admin_auth_middleware(
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     Ok(next.run(request).await)
+}
+
+// ============================================================================
+// Admin API - Upstream Management
+// ============================================================================
+
+/// List all upstreams
+async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    let runtime_snapshots = state.upstream_runtime_snapshots().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    #[derive(serde::Serialize)]
+    struct UpstreamWithRuntime {
+        #[serde(flatten)]
+        config: UpstreamConfig,
+        runtime_state: Option<UpstreamRuntimeStateResponse>,
+    }
+    
+    #[derive(serde::Serialize)]
+    struct UpstreamRuntimeStateResponse {
+        in_flight: u32,
+        minute_cost: f64,
+        minute_limit: u32,
+        minute_percentage: f64,
+        five_hour_cost: f64,
+        five_hour_limit: u32,
+        five_hour_percentage: f64,
+        cooldown_until: u64,
+        cooldown_remaining: u64,
+    }
+    
+    let upstreams_with_runtime: Vec<UpstreamWithRuntime> = snapshot
+        .upstreams
+        .into_iter()
+        .map(|config| {
+            let runtime_state = runtime_snapshots.get(&config.id).map(|runtime| {
+                let minute_percentage = if config.requests_per_minute > 0 {
+                    (runtime.minute_cost as f64 / config.requests_per_minute as f64 * 100.0).min(100.0)
+                } else {
+                    0.0
+                };
+                
+                let five_hour_percentage = if config.request_quota_requests > 0 {
+                    (runtime.five_hour_cost as f64 / config.request_quota_requests as f64 * 100.0).min(100.0)
+                } else {
+                    0.0
+                };
+                
+                UpstreamRuntimeStateResponse {
+                    in_flight: runtime.in_flight,
+                    minute_cost: runtime.minute_cost,
+                    minute_limit: config.requests_per_minute,
+                    minute_percentage,
+                    five_hour_cost: runtime.five_hour_cost,
+                    five_hour_limit: config.request_quota_requests,
+                    five_hour_percentage,
+                    cooldown_until: runtime.cooldown_until,
+                    cooldown_remaining: runtime.cooldown_remaining(now),
+                }
+            });
+            
+            UpstreamWithRuntime {
+                config,
+                runtime_state,
+            }
+        })
+        .collect();
+    
+    Json(upstreams_with_runtime).into_response()
+}
+
+/// List all available models from all upstreams
+async fn admin_list_models(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+
+    let mut models: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for upstream in &snapshot.upstreams {
+        if upstream.active {
+            for model in &upstream.supported_models {
+                models.insert(model.clone());
+            }
+            for alias in &upstream.model_aliases {
+                models.insert(alias.slug.clone());
+            }
+        }
+    }
+
+    let mut models_list: Vec<String> = models.into_iter().collect();
+    models_list.sort();
+
+    Json(json!({
+        "models": models_list
+    })).into_response()
+}
+
+
+/// Create a new upstream
+async fn admin_create_upstream(
+    State(state): State<AppState>,
+    Json(mut upstream): Json<UpstreamConfig>,
+) -> impl IntoResponse {
+    // Generate ID if not provided
+    if upstream.id.is_empty() {
+        upstream.id = Uuid::new_v4().to_string();
+    }
+
+    // Validate required fields
+    if upstream.name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "Upstream name is required"
+                }
+            })),
+        ).into_response();
+    }
+
+    // Check if upstream with this ID already exists
+    let snapshot = state.snapshot().await;
+    if snapshot.upstreams.iter().any(|u| u.id == upstream.id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "message": format!("Upstream with ID '{}' already exists", upstream.id)
+                }
+            })),
+        ).into_response();
+    }
+
+    // Add the upstream
+    if let Err(e) = state.insert_upstream(upstream.clone()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to create upstream: {}", e)
+                }
+            })),
+        ).into_response();
+    }
+
+    (StatusCode::CREATED, Json(upstream)).into_response()
+}
+
+/// Get upstream by ID
+async fn admin_get_upstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    
+    if let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == id) {
+        Json(upstream.clone()).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Upstream '{}' not found", id)
+                }
+            })),
+        ).into_response()
+    }
+}
+
+/// Update upstream by ID
+async fn admin_update_upstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(updates): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    match state.update_upstream_by_id(&id, updates).await {
+        Ok(updated_upstream) => {
+            if let Err(e) = state.persist().await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": {
+                            "message": format!("Failed to persist state: {}", e)
+                        }
+                    })),
+                ).into_response();
+            }
+            Json(updated_upstream).into_response()
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": e
+                }
+            })),
+        ).into_response()
+    }
+}
+async fn admin_delete_upstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.remove_upstream(&id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Upstream '{}' not found", id)
+                }
+            })),
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to delete upstream: {}", e)
+                }
+            })),
+        ).into_response(),
+    }
+}
+
+/// Toggle upstream active status
+async fn admin_toggle_upstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+
+    if let Some(mut upstream) = snapshot.upstreams.iter().find(|u| u.id == id).cloned() {
+        upstream.active = !upstream.active;
+        let new_status = upstream.active;
+
+        match state.update_upstream(&id, upstream).await {
+            Ok(true) => Json(json!({ "active": new_status })).into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": {
+                        "message": format!("Upstream '{}' not found", id)
+                    }
+                })),
+            ).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": format!("Failed to update upstream: {}", e)
+                    }
+                })),
+            ).into_response(),
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Upstream '{}' not found", id)
+                }
+            })),
+        ).into_response()
+    }
+}
+
+// ============================================================================
+// Admin API - Downstream Management
+// ============================================================================
+
+use crate::keys::generate_downstream_key;
+use crate::keys::verify_downstream_key;
+
+/// List all downstreams with optional filtering
+async fn admin_list_downstreams(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    
+    let mut downstreams = snapshot.downstreams.clone();
+    
+    // Filter by status
+    if let Some(status) = params.get("status") {
+        match status.as_str() {
+            "active" => downstreams.retain(|d| d.active),
+            "inactive" => downstreams.retain(|d| !d.active),
+            _ => {} // "all" or unknown - no filter
+        }
+    }
+    
+    // Filter by lifecycle
+    if let Some(lifecycle) = params.get("lifecycle") {
+        match lifecycle.as_str() {
+            "trial" => downstreams.retain(|d| d.expires_at.is_some()),
+            "permanent" => downstreams.retain(|d| d.expires_at.is_none()),
+            _ => {} // "all" or unknown - no filter
+        }
+    }
+    
+    // Filter by search (name or ID)
+    if let Some(search) = params.get("search") {
+        let search_lower = search.to_lowercase();
+        downstreams.retain(|d| {
+            d.name.to_lowercase().contains(&search_lower) || d.id.to_lowercase().contains(&search_lower)
+        });
+    }
+    
+    Json(downstreams).into_response()
+}
+
+/// Create a new downstream
+/// Create a new downstream
+async fn admin_create_downstream(
+    State(state): State<AppState>,
+    Json(mut downstream): Json<DownstreamConfig>,
+) -> impl IntoResponse {
+    // Generate ID if not provided
+    if downstream.id.is_empty() {
+        downstream.id = Uuid::new_v4().to_string();
+    }
+
+    // Validate required fields
+    if downstream.name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "Downstream name is required"
+                }
+            })),
+        ).into_response();
+    }
+
+    // Check if downstream with this ID already exists
+    let snapshot = state.snapshot().await;
+    if snapshot.downstreams.iter().any(|d| d.id == downstream.id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "message": format!("Downstream with ID '{}' already exists", downstream.id)
+                }
+            })),
+        ).into_response();
+    }
+
+    // Generate key and hash
+    let generated = generate_downstream_key("sk");
+    let plaintext_key = generated.plaintext;
+    let hash = generated.hash;
+    downstream.hash = hash;
+    downstream.plaintext_key = Some(plaintext_key.clone());
+
+    // Add the downstream
+    if let Err(e) = state.insert_downstream(downstream.clone()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to create downstream: {}", e)
+                }
+            })),
+        ).into_response();
+    }
+
+    (StatusCode::CREATED, Json(downstream)).into_response()
+}
+
+/// Get downstream by ID
+async fn admin_get_downstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    
+    if let Some(downstream) = snapshot.downstreams.iter().find(|d| d.id == id) {
+        Json(downstream.clone()).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Downstream '{}' not found", id)
+                }
+            })),
+        ).into_response()
+    }
+}
+
+/// Update downstream by ID
+async fn admin_update_downstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(updates): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+
+    if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
+        // Apply updates (preserve hash)
+        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+            downstream.name = name.to_string();
+        }
+        if let Some(per_minute_limit) = updates.get("per_minute_limit").and_then(|v| v.as_u64()) {
+            downstream.per_minute_limit = per_minute_limit as u32;
+        }
+        if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
+            downstream.max_concurrency = max_concurrency as u32;
+        }
+        if let Some(rate_limit_enabled) = updates.get("rate_limit_enabled").and_then(|v| v.as_bool()) {
+            downstream.rate_limit_enabled = rate_limit_enabled;
+        }
+        if let Some(request_quota_window_hours) = updates
+            .get("request_quota_window_hours")
+            .and_then(|v| v.as_u64())
+        {
+            downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
+        }
+        if updates.get("request_quota_window_hours").is_some() && updates.get("request_quota_window_hours").is_some_and(Value::is_null) {
+            downstream.request_quota_window_hours = None;
+        }
+        if let Some(request_quota_requests) = updates
+            .get("request_quota_requests")
+            .and_then(|v| v.as_u64())
+        {
+            downstream.request_quota_requests = Some(request_quota_requests as u32);
+        }
+        if updates.get("request_quota_requests").is_some() && updates.get("request_quota_requests").is_some_and(Value::is_null) {
+            downstream.request_quota_requests = None;
+        }
+        if let Some(model_allowlist) = updates.get("model_allowlist").and_then(|v| v.as_array()) {
+            downstream.model_allowlist = model_allowlist
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
+            downstream.ip_allowlist = ip_allowlist
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(daily_token_limit) = updates.get("daily_token_limit").and_then(|v| v.as_u64()) {
+            downstream.daily_token_limit = Some(daily_token_limit);
+        }
+        if updates.get("daily_token_limit").is_some() && updates.get("daily_token_limit").is_some_and(Value::is_null) {
+            downstream.daily_token_limit = None;
+        }
+        if let Some(monthly_token_limit) = updates.get("monthly_token_limit").and_then(|v| v.as_u64()) {
+            downstream.monthly_token_limit = Some(monthly_token_limit);
+        }
+        if updates.get("monthly_token_limit").is_some() && updates.get("monthly_token_limit").is_some_and(Value::is_null) {
+            downstream.monthly_token_limit = None;
+        }
+        if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
+            downstream.active = active;
+        }
+
+        match state.update_downstream(&id, downstream.clone()).await {
+            Ok(true) => Json(downstream).into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": {
+                        "message": format!("Downstream '{}' not found", id)
+                    }
+                })),
+            ).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": format!("Failed to update downstream: {}", e)
+                    }
+                })),
+            ).into_response(),
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Downstream '{}' not found", id)
+                }
+            })),
+        ).into_response()
+    }
+}
+
+/// Delete downstream by ID
+async fn admin_delete_downstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.remove_downstream(&id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Downstream '{}' not found", id)
+                }
+            })),
+        ).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to delete downstream: {}", e)
+                }
+            })),
+        ).into_response(),
+    }
+}
+
+/// Toggle downstream active status
+async fn admin_toggle_downstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+
+    if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
+        downstream.active = !downstream.active;
+        let new_status = downstream.active;
+
+        match state.update_downstream(&id, downstream).await {
+            Ok(true) => Json(json!({ "active": new_status })).into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": {
+                        "message": format!("Downstream '{}' not found", id)
+                    }
+                })),
+            ).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": format!("Failed to update downstream: {}", e)
+                    }
+                })),
+            ).into_response(),
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Downstream '{}' not found", id)
+                }
+            })),
+        ).into_response()
+    }
+}
+
+/// Rotate downstream key
+async fn admin_rotate_downstream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+
+    if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
+        // Generate new key and hash
+        let generated = generate_downstream_key("sk");
+        let plaintext_key = generated.plaintext;
+        let hash = generated.hash;
+        downstream.hash = hash;
+
+        match state.update_downstream(&id, downstream).await {
+            Ok(true) => Json(json!({ "plaintext_key": plaintext_key })).into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": {
+                        "message": format!("Downstream '{}' not found", id)
+                    }
+                })),
+            ).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": format!("Failed to rotate key: {}", e)
+                    }
+                })),
+            ).into_response(),
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Downstream '{}' not found", id)
+                }
+            })),
+        ).into_response()
+    }
+}
+
+// ============================================================================
+// Admin API - Log Management
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default = "default_page_size")]
+    page_size: usize,
+    status_code: Option<u16>,
+    model: Option<String>,
+    #[serde(default = "default_time_range")]
+    time_range: String,
+}
+
+fn default_page() -> usize { 1 }
+fn default_page_size() -> usize { 10 }
+fn default_time_range() -> String { "7d".to_string() }
+
+#[derive(Debug, Clone, Serialize)]
+struct EnrichedUsageLog {
+    #[serde(flatten)]
+    log: UsageLog,
+    api_name: String,
+    inference_strength: String,
+    log_type: String,
+    billing_mode: String,
+    request_count: u64,
+    user_agent: String,
+}
+
+fn infer_inference_strength_by_model(model: &str) -> &'static str {
+    let name = model.to_ascii_lowercase();
+    if name.contains("o1") || name.contains("o3") || name.contains("o4") || name.contains("reason")
+    {
+        return "高";
+    }
+    if name.contains("gpt-4") || name.contains("claude-3") || name.contains("gemini") {
+        return "中";
+    }
+    if name.contains("mini") || name.contains("haiku") || name.contains("nano") {
+        return "低";
+    }
+    "标准"
+}
+
+fn resolve_api_name_and_type(endpoint: &str) -> (&'static str, &'static str) {
+    let lower = endpoint.to_ascii_lowercase();
+    if lower.contains("/files") && (lower.contains("/content") || lower.contains("/download")) {
+        return ("文件下载", "文件");
+    }
+    if lower.contains("/files") || lower.contains("/upload") {
+        return ("文件上传", "文件");
+    }
+    if lower.contains("/responses") {
+        return ("Responses API", "推理");
+    }
+    if lower.contains("/chat/completions") {
+        return ("ChatCompletions API", "对话");
+    }
+    if lower.contains("/embeddings") {
+        return ("Embeddings API", "向量");
+    }
+    ("通用 API", "其它")
+}
+
+fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
+    let (api_name, log_type) = resolve_api_name_and_type(&log.endpoint);
+    EnrichedUsageLog {
+        log: log.clone(),
+        api_name: api_name.to_string(),
+        inference_strength: infer_inference_strength_by_model(&log.model).to_string(),
+        log_type: log_type.to_string(),
+        billing_mode: if log.total_tokens > 0 {
+            "Token 计费".to_string()
+        } else {
+            "请求计费".to_string()
+        },
+        request_count: 1,
+        user_agent: "未采集".to_string(),
+    }
+}
+
+/// List logs with filtering and pagination
+async fn admin_list_logs(
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> impl IntoResponse {
+    // Flush pending logs before querying
+    let _ = state.flush_usage_logs_for_test().await;
+
+    let snapshot = state.snapshot().await;
+    let now = unix_seconds();
+    
+    // Parse time range
+    let time_range_seconds = match query.time_range.as_str() {
+        "1d" => 86400,
+        "7d" => 7 * 86400,
+        "30d" => 30 * 86400,
+        _ => 7 * 86400, // default to 7 days
+    };
+    
+    let cutoff_time = now.saturating_sub(time_range_seconds);
+    
+    // Filter logs
+    let mut logs: Vec<_> = snapshot
+        .usage_logs
+        .iter()
+        .filter(|log| {
+            // Time range filter
+            if log.created_at < cutoff_time {
+                return false;
+            }
+            
+            // Status code filter
+            if let Some(status_code) = query.status_code {
+                if log.status_code != status_code {
+                    return false;
+                }
+            }
+            
+            // Model filter
+            if let Some(ref model) = query.model {
+                if &log.model != model {
+                    return false;
+                }
+            }
+            
+            true
+        })
+        .collect();
+    
+    // Sort by created_at descending
+    logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    
+    let total = logs.len();
+    let page_size = query.page_size.min(200); // Max 200 per page
+    let total_pages = (total + page_size - 1) / page_size;
+    let page = query.page.max(1);
+    
+    // Paginate
+    let start = (page - 1) * page_size;
+    let end = (start + page_size).min(total);
+    let page_logs: Vec<_> = logs[start..end]
+        .iter()
+        .map(|log| enrich_usage_log(log))
+        .collect();
+    
+    Json(json!({
+        "logs": page_logs,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    })).into_response()
+}
+
+// ============================================================================
+// Portal API
+// ============================================================================
+
+/// Portal overview
+async fn portal_overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Extract downstream ID from Bearer token
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    
+    let snapshot = state.snapshot().await;
+    let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
+        Some(d) => d,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+    };
+    
+    let now = unix_seconds();
+    
+    // Compute quota summary
+    let per_minute = state.compute_per_minute_usage(&downstream_id).await;
+    let request_quota = state.compute_request_quota_usage(downstream).await;
+    let token_usage = state.compute_token_usage(&downstream_id, now).await;
+    
+    let quota_summary = json!({
+        "per_minute": per_minute,
+        "request_quota": request_quota,
+        "token_daily": token_usage.daily,
+        "token_monthly": token_usage.monthly,
+    });
+    
+    // Token summary
+    let token_summary = json!({
+        "today": token_usage.daily.as_ref().map(|t| t.used).unwrap_or(0),
+        "this_month": token_usage.monthly.as_ref().map(|t| t.used).unwrap_or(0),
+    });
+    
+    // Model summary
+    let model_stats = state.compute_model_stats(downstream).await;
+    let model_summary = json!({
+        "total_models": model_stats.len(),
+        "active_models": model_stats.iter().filter(|m| m.today_requests > 0).count(),
+    });
+    
+    Json(json!({
+        "quota_summary": quota_summary,
+        "token_summary": token_summary,
+        "model_summary": model_summary,
+    })).into_response()
+}
+
+/// Portal quota details
+async fn portal_quota(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    
+    let snapshot = state.snapshot().await;
+    let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
+        Some(d) => d,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+    };
+    
+    let per_minute_limit = state.compute_per_minute_usage(&downstream_id).await;
+    let request_quota = state.compute_request_quota_usage(downstream).await;
+    let now = unix_seconds();
+    let token_usage = state.compute_token_usage(&downstream_id, now).await;
+    
+    Json(json!({
+        "per_minute_limit": per_minute_limit,
+        "request_quota": request_quota,
+        "token_limits": {
+            "daily": token_usage.daily,
+            "monthly": token_usage.monthly,
+        },
+        "model_allowlist": downstream.model_allowlist,
+        "ip_allowlist": downstream.ip_allowlist,
+    })).into_response()
+}
+
+/// Portal usage history
+async fn portal_usage_history(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    
+    let time_range = params.get("time_range").map(|s| s.as_str()).unwrap_or("7d");
+    let days = match time_range {
+        "1d" => 1,
+        "7d" => 7,
+        "30d" => 30,
+        _ => 7,
+    };
+    
+    let daily_stats = state.compute_daily_stats(&downstream_id, days).await;
+    
+    let snapshot = state.snapshot().await;
+    let mut recent_logs: Vec<_> = snapshot
+        .usage_logs
+        .iter()
+        .filter(|log| log.downstream_key_id == downstream_id)
+        .collect();
+    recent_logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let recent_logs: Vec<_> = recent_logs.into_iter().take(10).cloned().collect();
+    
+    Json(json!({
+        "daily_stats": daily_stats,
+        "recent_logs": recent_logs,
+    })).into_response()
+}
+
+/// Portal models
+async fn portal_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    
+    let snapshot = state.snapshot().await;
+    let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
+        Some(d) => d,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+    };
+    
+    let model_stats = state.compute_model_stats(downstream).await;
+    
+    Json(model_stats).into_response()
+}
+
+/// Helper function to extract downstream ID from Bearer token
+async fn extract_downstream_id_from_bearer(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, Response> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": "Missing Authorization header"}})),
+            ).into_response()
+        })?;
+    
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": "Invalid Authorization header format"}})),
+            ).into_response()
+        })?;
+    
+    // Verify the token and get downstream ID
+    let snapshot = state.snapshot().await;
+    for downstream in &snapshot.downstreams {
+        if verify_downstream_key(token, &downstream.hash) {
+            return Ok(downstream.id.clone());
+        }
+    }
+    
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": {"message": "Invalid Bearer token"}})),
+    ).into_response())
 }

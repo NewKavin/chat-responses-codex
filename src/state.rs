@@ -1,4 +1,5 @@
 use crate::keys::verify_downstream_key;
+use chrono::Datelike;
 use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
@@ -55,6 +56,7 @@ impl Default for AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamConfig {
+    #[serde(default)]
     pub id: String,
     pub name: String,
     pub base_url: String,
@@ -63,15 +65,27 @@ pub struct UpstreamConfig {
     pub supported_models: Vec<String>,
     #[serde(default)]
     pub model_aliases: Vec<ModelAliasConfig>,
-    #[serde(default = "default_upstream_request_quota_5h")]
-    pub request_quota_5h: u32,
+    #[serde(default = "default_upstream_request_quota_window_hours")]
+    pub request_quota_window_hours: u32,
+    #[serde(default = "default_upstream_request_quota_requests", alias = "request_quota_5h")]
+    pub request_quota_requests: u32,
     #[serde(default = "default_upstream_requests_per_minute")]
     pub requests_per_minute: u32,
     #[serde(default = "default_upstream_max_concurrency")]
     pub max_concurrency: u32,
     #[serde(default)]
     pub model_request_costs: Vec<ModelRequestCostConfig>,
+    #[serde(default)]
+    pub priority: u32,
+    #[serde(default)]
+    pub premium_models: Vec<String>,
+    #[serde(default)]
+    pub premium_only: bool,
+    #[serde(default)]
+    pub protect_premium_quota: bool,
+    #[serde(default)]
     pub active: bool,
+    #[serde(default)]
     pub failure_count: u32,
 }
 
@@ -85,10 +99,15 @@ impl Default for UpstreamConfig {
             protocol: UpstreamProtocol::ChatCompletions,
             supported_models: Vec::new(),
             model_aliases: Vec::new(),
-            request_quota_5h: default_upstream_request_quota_5h(),
+            request_quota_window_hours: default_upstream_request_quota_window_hours(),
+            request_quota_requests: default_upstream_request_quota_requests(),
             requests_per_minute: default_upstream_requests_per_minute(),
             max_concurrency: default_upstream_max_concurrency(),
             model_request_costs: Vec::new(),
+            priority: 0,
+            premium_models: Vec::new(),
+            premium_only: false,
+            protect_premium_quota: false,
             active: false,
             failure_count: 0,
         }
@@ -101,10 +120,10 @@ pub struct ModelAliasConfig {
     pub upstream_model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequestCostConfig {
     pub slug: String,
-    pub cost: u32,
+    pub cost: f64,
 }
 
 impl UpstreamConfig {
@@ -138,43 +157,78 @@ impl UpstreamConfig {
             .or_else(|| Some(model.to_string()))
     }
 
-    pub fn request_cost_for_model(&self, model: &str) -> u32 {
+    pub fn request_cost_for_model(&self, model: &str) -> f64 {
         self.model_request_costs
             .iter()
             .find(|rule| rule.slug == model)
-            .map(|rule| rule.cost.max(1))
-            .unwrap_or(1)
+            .map(|rule| rule.cost.max(1.0))
+            .unwrap_or(1.0)
+    }
+
+    pub fn request_quota_window_seconds(&self) -> u64 {
+        u64::from(self.request_quota_window_hours.max(1)).saturating_mul(60 * 60)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownstreamConfig {
+    #[serde(default)]
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub hash: String,
     #[serde(default)]
     pub plaintext_key: Option<String>,
+    #[serde(default)]
     pub model_allowlist: Vec<String>,
+    #[serde(default = "default_downstream_rate_limit_enabled")]
+    pub rate_limit_enabled: bool,
+    #[serde(default = "default_downstream_per_minute_limit")]
     pub per_minute_limit: u32,
+    #[serde(default = "default_downstream_max_concurrency")]
+    pub max_concurrency: u32,
+    #[serde(default)]
     pub daily_token_limit: Option<u64>,
+    #[serde(default)]
     pub monthly_token_limit: Option<u64>,
     #[serde(default)]
     pub request_quota_window_hours: Option<u32>,
     #[serde(default)]
     pub request_quota_requests: Option<u32>,
+    #[serde(default)]
     pub ip_allowlist: Vec<String>,
+    #[serde(default)]
     pub expires_at: Option<u64>,
+    #[serde(default = "default_true")]
     pub active: bool,
 }
 
 impl DownstreamConfig {
     pub fn uses_request_quota(&self) -> bool {
-        self.request_quota_window_hours.is_some() && self.request_quota_requests.is_some()
+        self.rate_limit_enabled
+            && self.request_quota_window_hours.is_some()
+            && self.request_quota_requests.is_some()
     }
 
     pub fn uses_token_quota(&self) -> bool {
         self.daily_token_limit.is_some() || self.monthly_token_limit.is_some()
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_downstream_per_minute_limit() -> u32 {
+    60
+}
+
+fn default_downstream_max_concurrency() -> u32 {
+    10
+}
+
+fn default_downstream_rate_limit_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +263,7 @@ pub struct AppState {
     upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
+    downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
     pub store_path: PathBuf,
     pub config: AppConfig,
@@ -245,6 +300,7 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
             ))),
+            downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: store_path.into(),
             config,
@@ -271,6 +327,7 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
             ))),
+            downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: PathBuf::new(),
             config,
@@ -522,6 +579,8 @@ impl AppState {
                     upstream.protocol,
                 )
                 .with_models(upstream.route_models())
+                .with_priority(upstream.priority)
+                .with_premium_models(upstream.premium_models.clone())
                 .with_failure_count(upstream.failure_count)
             })
             .collect()
@@ -533,7 +592,7 @@ impl AppState {
         model: &str,
     ) -> Result<(), UpstreamAdmissionError> {
         let request_cost = upstream.request_cost_for_model(model);
-        if request_cost == 0 {
+        if request_cost <= 0.0 {
             return Err(UpstreamAdmissionError::new(
                 "invalid upstream model request cost".into(),
                 1,
@@ -546,7 +605,11 @@ impl AppState {
             .or_insert_with(UpstreamRuntimeState::default);
         let now = unix_seconds();
         prune_quota_events(&mut state.minute_events, now, 60);
-        prune_quota_events(&mut state.five_hour_events, now, 5 * 60 * 60);
+        prune_quota_events(
+            &mut state.five_hour_events,
+            now,
+            upstream.request_quota_window_seconds(),
+        );
 
         state.in_flight = state.in_flight.saturating_add(1);
         state.minute_events.push_back(QuotaEvent {
@@ -561,13 +624,30 @@ impl AppState {
     }
 
     pub async fn upstream_runtime_snapshots(&self) -> HashMap<String, UpstreamRuntimeSnapshot> {
+        let upstream_windows = {
+            let state = self.inner.lock().await;
+            state
+                .upstreams
+                .iter()
+                .map(|upstream| (upstream.id.clone(), upstream.request_quota_window_seconds()))
+                .collect::<HashMap<String, u64>>()
+        };
+
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         let now = unix_seconds();
         runtime_state
             .iter_mut()
             .map(|(upstream_id, state)| {
+                let request_quota_window_seconds = upstream_windows
+                    .get(upstream_id)
+                    .copied()
+                    .unwrap_or(5 * 60 * 60);
                 prune_quota_events(&mut state.minute_events, now, 60);
-                prune_quota_events(&mut state.five_hour_events, now, 5 * 60 * 60);
+                prune_quota_events(
+                    &mut state.five_hour_events,
+                    now,
+                    request_quota_window_seconds,
+                );
                 (
                     upstream_id.clone(),
                     UpstreamRuntimeSnapshot {
@@ -786,6 +866,10 @@ impl AppState {
         &self,
         downstream: &DownstreamConfig,
     ) -> Result<(), u64> {
+        if !downstream.rate_limit_enabled {
+            return Ok(());
+        }
+
         let mut windows = self.downstream_request_windows.lock().await;
         let window = windows
             .entry(downstream.id.clone())
@@ -917,6 +1001,40 @@ impl AppState {
         Ok(())
     }
 
+    pub fn try_reserve_downstream_concurrency(
+        &self,
+        downstream: &DownstreamConfig,
+    ) -> Result<(), u64> {
+        if !downstream.rate_limit_enabled {
+            return Ok(());
+        }
+
+        let mut in_flight = self
+            .downstream_in_flight
+            .lock()
+            .expect("downstream in_flight lock poisoned");
+        let current = in_flight.entry(downstream.id.clone()).or_insert(0);
+        if *current >= downstream.max_concurrency.max(1) {
+            return Err(1);
+        }
+
+        *current = current.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn release_downstream_concurrency(&self, downstream_id: &str) {
+        let mut in_flight = self
+            .downstream_in_flight
+            .lock()
+            .expect("downstream in_flight lock poisoned");
+        if let Some(count) = in_flight.get_mut(downstream_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                in_flight.remove(downstream_id);
+            }
+        }
+    }
+
     pub async fn insert_upstream(&self, upstream: UpstreamConfig) -> io::Result<()> {
         let mut state = self.inner.lock().await;
         state.upstreams.push(upstream);
@@ -995,6 +1113,7 @@ impl AppState {
         if state.downstreams.len() == original_len {
             return Ok(false);
         }
+        self.release_downstream_concurrency(downstream_id);
         self.persist_state(&state).await?;
         Ok(true)
     }
@@ -1230,8 +1349,16 @@ async fn load_usage_log_archive(path: &Path) -> io::Result<Vec<UsageLog>> {
     Ok(serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
-pub fn default_upstream_request_quota_5h() -> u32 {
+pub fn default_upstream_request_quota_window_hours() -> u32 {
+    5
+}
+
+pub fn default_upstream_request_quota_requests() -> u32 {
     600
+}
+
+pub fn default_upstream_request_quota_5h() -> u32 {
+    default_upstream_request_quota_requests()
 }
 
 pub fn default_upstream_requests_per_minute() -> u32 {
@@ -1253,8 +1380,8 @@ struct UpstreamRuntimeState {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UpstreamRuntimeSnapshot {
     pub in_flight: u32,
-    pub minute_cost: u32,
-    pub five_hour_cost: u32,
+    pub minute_cost: f64,
+    pub five_hour_cost: f64,
     pub cooldown_until: u64,
 }
 
@@ -1277,7 +1404,7 @@ struct DownstreamTokenEvent {
 #[derive(Debug, Clone, Copy)]
 struct QuotaEvent {
     created_at: u64,
-    cost: u32,
+    cost: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1295,7 +1422,7 @@ impl UpstreamAdmissionError {
     }
 }
 
-fn quota_event_cost(events: &VecDeque<QuotaEvent>) -> u32 {
+fn quota_event_cost(events: &VecDeque<QuotaEvent>) -> f64 {
     events.iter().map(|event| event.cost).sum()
 }
 
@@ -1432,4 +1559,562 @@ pub fn join_upstream_url(base_url: &str, endpoint_path: &str) -> String {
     }
 
     format!("{base}/{}", path)
+}
+
+// ============================================================================
+// Portal Helper Functions
+// ============================================================================
+
+/// Per-minute usage statistics
+#[derive(Debug, Clone, Serialize)]
+pub struct PerMinuteUsage {
+    pub used: u32,
+    pub limit: u32,
+    pub percentage: f64,
+}
+
+/// Request quota usage statistics (sliding window)
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestQuotaUsage {
+    pub used: u32,
+    pub limit: u32,
+    pub window_hours: u32,
+    pub percentage: f64,
+}
+
+/// Token usage statistics
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenUsage {
+    pub daily: Option<TokenQuota>,
+    pub monthly: Option<TokenQuota>,
+}
+
+/// Token quota details
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenQuota {
+    pub used: u64,
+    pub limit: u64,
+    pub percentage: f64,
+}
+
+/// Daily statistics
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyStats {
+    pub date: String,
+    pub requests: u32,
+    pub tokens: u64,
+    pub success_rate: f64,
+}
+
+/// Model statistics
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelStats {
+    pub model: String,
+    pub today_requests: u32,
+    pub monthly_requests: u32,
+    pub avg_latency_ms: u64,
+    pub success_rate: f64,
+}
+
+impl AppState {
+    /// Compute per-minute usage for a downstream
+    pub async fn compute_per_minute_usage(&self, downstream_id: &str) -> PerMinuteUsage {
+        let now = unix_seconds();
+        let one_minute_ago = now.saturating_sub(60);
+        
+        let snapshot = self.snapshot().await;
+        
+        // Find the downstream to get the limit
+        let downstream = snapshot.downstreams.iter().find(|d| d.id == downstream_id);
+        let limit = downstream
+            .map(|d| {
+                if d.rate_limit_enabled {
+                    d.per_minute_limit
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+        
+        // Count requests in the last 60 seconds
+        let used = snapshot
+            .usage_logs
+            .iter()
+            .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= one_minute_ago)
+            .count() as u32;
+        
+        let percentage = if limit > 0 {
+            (used as f64 / limit as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        PerMinuteUsage {
+            used,
+            limit,
+            percentage,
+        }
+    }
+    
+    /// Compute request quota usage for a downstream (sliding window)
+    pub async fn compute_request_quota_usage(&self, downstream: &DownstreamConfig) -> Option<RequestQuotaUsage> {
+        if !downstream.rate_limit_enabled || !downstream.uses_request_quota() {
+            return None;
+        }
+        
+        let window_hours = downstream.request_quota_window_hours.unwrap();
+        let limit = downstream.request_quota_requests.unwrap();
+        
+        let now = unix_seconds();
+        let window_start = now.saturating_sub((window_hours as u64) * 3600);
+        
+        let snapshot = self.snapshot().await;
+        
+        // Count requests in the sliding window
+        let used = snapshot
+            .usage_logs
+            .iter()
+            .filter(|log| log.downstream_key_id == downstream.id && log.created_at >= window_start)
+            .count() as u32;
+        
+        let percentage = if limit > 0 {
+            (used as f64 / limit as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        Some(RequestQuotaUsage {
+            used,
+            limit,
+            window_hours,
+            percentage,
+        })
+    }
+    
+    /// Compute token usage for a downstream
+    pub async fn compute_token_usage(&self, downstream_id: &str, now: u64) -> TokenUsage {
+        let snapshot = self.snapshot().await;
+        
+        // Find the downstream to get limits
+        let downstream = snapshot.downstreams.iter().find(|d| d.id == downstream_id);
+        
+        let daily_limit = downstream.and_then(|d| d.daily_token_limit);
+        let monthly_limit = downstream.and_then(|d| d.monthly_token_limit);
+        
+        // Calculate start of today (UTC)
+        let today_start = (now / 86400) * 86400;
+        
+        // Calculate start of this month (UTC)
+        let month_start = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
+            let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
+            let first_of_month = datetime.date_naive().with_day(1).unwrap();
+            first_of_month.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64
+        };
+        
+        // Calculate daily usage
+        let daily = if let Some(limit) = daily_limit {
+            let used: u64 = snapshot
+                .usage_logs
+                .iter()
+                .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= today_start)
+                .map(|log| log.total_tokens)
+                .sum();
+            
+            let percentage = if limit > 0 {
+                (used as f64 / limit as f64) * 100.0
+            } else {
+                0.0
+            };
+            
+            Some(TokenQuota {
+                used,
+                limit,
+                percentage,
+            })
+        } else {
+            None
+        };
+        
+        // Calculate monthly usage
+        let monthly = if let Some(limit) = monthly_limit {
+            let used: u64 = snapshot
+                .usage_logs
+                .iter()
+                .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= month_start)
+                .map(|log| log.total_tokens)
+                .sum();
+            
+            let percentage = if limit > 0 {
+                (used as f64 / limit as f64) * 100.0
+            } else {
+                0.0
+            };
+            
+            Some(TokenQuota {
+                used,
+                limit,
+                percentage,
+            })
+        } else {
+            None
+        };
+        
+        TokenUsage { daily, monthly }
+    }
+    
+    /// Compute daily statistics for a downstream
+    pub async fn compute_daily_stats(&self, downstream_id: &str, days: usize) -> Vec<DailyStats> {
+        let snapshot = self.snapshot().await;
+        let now = unix_seconds();
+        
+        let mut stats = Vec::new();
+        
+        for day_offset in 0..days {
+            let day_start = now.saturating_sub((day_offset as u64) * 86400);
+            let day_start = (day_start / 86400) * 86400;
+            let day_end = day_start + 86400;
+            
+            // Filter logs for this day
+            let day_logs: Vec<_> = snapshot
+                .usage_logs
+                .iter()
+                .filter(|log| {
+                    log.downstream_key_id == downstream_id
+                        && log.created_at >= day_start
+                        && log.created_at < day_end
+                })
+                .collect();
+            
+            let requests = day_logs.len() as u32;
+            let tokens: u64 = day_logs.iter().map(|log| log.total_tokens).sum();
+            
+            let successful = day_logs.iter().filter(|log| log.status_code == 200).count();
+            let success_rate = if requests > 0 {
+                successful as f64 / requests as f64
+            } else {
+                0.0
+            };
+            
+            // Format date as YYYY-MM-DD
+            let date = {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let dt = UNIX_EPOCH + std::time::Duration::from_secs(day_start);
+                let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
+                datetime.format("%Y-%m-%d").to_string()
+            };
+            
+            stats.push(DailyStats {
+                date,
+                requests,
+                tokens,
+                success_rate,
+            });
+        }
+        
+        stats
+    }
+    
+    /// Compute model statistics for a downstream
+    pub async fn compute_model_stats(&self, downstream: &DownstreamConfig) -> Vec<ModelStats> {
+        let snapshot = self.snapshot().await;
+        let now = unix_seconds();
+        
+        // Calculate start of today and this month
+        let today_start = (now / 86400) * 86400;
+        let month_start = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
+            let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
+            let first_of_month = datetime.date_naive().with_day(1).unwrap();
+            first_of_month.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64
+        };
+        
+        // Group logs by model
+        let mut model_logs: std::collections::HashMap<String, Vec<&UsageLog>> = std::collections::HashMap::new();
+        
+        for log in &snapshot.usage_logs {
+            if log.downstream_key_id == downstream.id {
+                model_logs.entry(log.model.clone()).or_insert_with(Vec::new).push(log);
+            }
+        }
+        
+        // Calculate stats for each model
+        let mut stats = Vec::new();
+        
+        for (model, logs) in model_logs {
+            let today_requests = logs.iter().filter(|log| log.created_at >= today_start).count() as u32;
+            let monthly_requests = logs.iter().filter(|log| log.created_at >= month_start).count() as u32;
+            
+            let total_latency: u64 = logs.iter().map(|log| log.latency_ms).sum();
+            let avg_latency_ms = if !logs.is_empty() {
+                total_latency / logs.len() as u64
+            } else {
+                0
+            };
+            
+            let successful = logs.iter().filter(|log| log.status_code == 200).count();
+            let success_rate = if !logs.is_empty() {
+                successful as f64 / logs.len() as f64
+            } else {
+                0.0
+            };
+            
+            stats.push(ModelStats {
+                model,
+                today_requests,
+                monthly_requests,
+                avg_latency_ms,
+                success_rate,
+            });
+        }
+        
+        stats
+    }
+}
+
+// ============================================================================
+// Public methods for managing upstreams and downstreams
+// ============================================================================
+
+impl AppState {
+    /// Add a new upstream
+    pub async fn add_upstream(&self, upstream: UpstreamConfig) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        if inner.upstreams.iter().any(|u| u.id == upstream.id) {
+            return Err(format!("Upstream with ID '{}' already exists", upstream.id));
+        }
+        inner.upstreams.push(upstream);
+        Ok(())
+    }
+    
+    /// Update an existing upstream
+    pub async fn update_upstream_by_id(&self, id: &str, updates: serde_json::Value) -> Result<UpstreamConfig, String> {
+        let mut inner = self.inner.lock().await;
+        let upstream = inner.upstreams.iter_mut().find(|u| u.id == id)
+            .ok_or_else(|| format!("Upstream '{}' not found", id))?;
+        
+        // Apply updates
+        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+            upstream.name = name.to_string();
+        }
+        if let Some(base_url) = updates.get("base_url").and_then(|v| v.as_str()) {
+            upstream.base_url = base_url.to_string();
+        }
+        if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
+            upstream.api_key = api_key.to_string();
+        }
+        if let Some(supported_models) = updates.get("supported_models").and_then(|v| v.as_array()) {
+            upstream.supported_models = supported_models
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(protocol) = updates.get("protocol").and_then(|v| v.as_str()) {
+            upstream.protocol = match protocol {
+                "Responses" | "responses" => UpstreamProtocol::Responses,
+                _ => UpstreamProtocol::ChatCompletions,
+            };
+        }
+        if let Some(model_aliases) = updates.get("model_aliases").and_then(|v| v.as_array()) {
+            upstream.model_aliases = model_aliases
+                .iter()
+                .filter_map(|value| {
+                    let slug = value.get("slug").and_then(|v| v.as_str())?;
+                    let upstream_model = value.get("upstream_model").and_then(|v| v.as_str())?;
+                    Some(ModelAliasConfig {
+                        slug: slug.to_string(),
+                        upstream_model: upstream_model.to_string(),
+                    })
+                })
+                .collect();
+        }
+        if let Some(request_quota_window_hours) = updates
+            .get("request_quota_window_hours")
+            .and_then(|v| v.as_u64())
+        {
+            upstream.request_quota_window_hours = request_quota_window_hours as u32;
+        }
+        if let Some(request_quota_requests) = updates
+            .get("request_quota_requests")
+            .and_then(|v| v.as_u64())
+        {
+            upstream.request_quota_requests = request_quota_requests as u32;
+        }
+        if let Some(request_quota_5h) = updates.get("request_quota_5h").and_then(|v| v.as_u64()) {
+            upstream.request_quota_requests = request_quota_5h as u32;
+        }
+        if let Some(requests_per_minute) = updates
+            .get("requests_per_minute")
+            .and_then(|v| v.as_u64())
+        {
+            upstream.requests_per_minute = requests_per_minute as u32;
+        }
+        if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
+            upstream.max_concurrency = max_concurrency as u32;
+        }
+        if let Some(model_request_costs) = updates
+            .get("model_request_costs")
+            .and_then(|v| v.as_array())
+        {
+            upstream.model_request_costs = model_request_costs
+                .iter()
+                .filter_map(|value| {
+                    let slug = value.get("slug").and_then(|v| v.as_str())?;
+                    let cost = value.get("cost").and_then(|v| v.as_f64())?;
+                    Some(ModelRequestCostConfig {
+                        slug: slug.to_string(),
+                        cost,
+                    })
+                })
+                .collect();
+        }
+        if let Some(priority) = updates.get("priority").and_then(|v| v.as_u64()) {
+            upstream.priority = priority as u32;
+        }
+        if let Some(premium_models) = updates.get("premium_models").and_then(|v| v.as_array()) {
+            upstream.premium_models = premium_models
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(premium_only) = updates.get("premium_only").and_then(|v| v.as_bool()) {
+            upstream.premium_only = premium_only;
+        }
+        if let Some(protect_premium_quota) = updates
+            .get("protect_premium_quota")
+            .and_then(|v| v.as_bool())
+        {
+            upstream.protect_premium_quota = protect_premium_quota;
+        }
+        if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
+            upstream.active = active;
+        }
+        
+        Ok(upstream.clone())
+    }
+    
+    /// Delete an upstream
+    pub async fn delete_upstream_by_id(&self, id: &str) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        let initial_len = inner.upstreams.len();
+        inner.upstreams.retain(|u| u.id != id);
+        if inner.upstreams.len() < initial_len {
+            Ok(())
+        } else {
+            Err(format!("Upstream '{}' not found", id))
+        }
+    }
+    
+    /// Toggle upstream active status
+    pub async fn toggle_upstream_by_id(&self, id: &str) -> Result<bool, String> {
+        let mut inner = self.inner.lock().await;
+        let upstream = inner.upstreams.iter_mut().find(|u| u.id == id)
+            .ok_or_else(|| format!("Upstream '{}' not found", id))?;
+        upstream.active = !upstream.active;
+        Ok(upstream.active)
+    }
+    
+    /// Add a new downstream
+    pub async fn add_downstream(&self, downstream: DownstreamConfig) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        if inner.downstreams.iter().any(|d| d.id == downstream.id) {
+            return Err(format!("Downstream with ID '{}' already exists", downstream.id));
+        }
+        inner.downstreams.push(downstream);
+        Ok(())
+    }
+    
+    /// Update an existing downstream
+    pub async fn update_downstream_by_id(&self, id: &str, updates: serde_json::Value) -> Result<DownstreamConfig, String> {
+        let mut inner = self.inner.lock().await;
+        let downstream = inner.downstreams.iter_mut().find(|d| d.id == id)
+            .ok_or_else(|| format!("Downstream '{}' not found", id))?;
+        
+        // Apply updates (preserve hash)
+        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+            downstream.name = name.to_string();
+        }
+        if let Some(per_minute_limit) = updates.get("per_minute_limit").and_then(|v| v.as_u64()) {
+            downstream.per_minute_limit = per_minute_limit as u32;
+        }
+        if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
+            downstream.max_concurrency = max_concurrency as u32;
+        }
+        if let Some(rate_limit_enabled) = updates.get("rate_limit_enabled").and_then(|v| v.as_bool()) {
+            downstream.rate_limit_enabled = rate_limit_enabled;
+        }
+        if let Some(request_quota_window_hours) = updates
+            .get("request_quota_window_hours")
+            .and_then(|v| v.as_u64())
+        {
+            downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
+        }
+        if updates
+            .get("request_quota_window_hours")
+            .is_some_and(serde_json::Value::is_null)
+        {
+            downstream.request_quota_window_hours = None;
+        }
+        if let Some(request_quota_requests) = updates
+            .get("request_quota_requests")
+            .and_then(|v| v.as_u64())
+        {
+            downstream.request_quota_requests = Some(request_quota_requests as u32);
+        }
+        if updates
+            .get("request_quota_requests")
+            .is_some_and(serde_json::Value::is_null)
+        {
+            downstream.request_quota_requests = None;
+        }
+        if let Some(model_allowlist) = updates.get("model_allowlist").and_then(|v| v.as_array()) {
+            downstream.model_allowlist = model_allowlist
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
+            downstream.ip_allowlist = ip_allowlist
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
+            downstream.active = active;
+        }
+        
+        Ok(downstream.clone())
+    }
+    
+    /// Delete a downstream
+    pub async fn delete_downstream_by_id(&self, id: &str) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        let initial_len = inner.downstreams.len();
+        inner.downstreams.retain(|d| d.id != id);
+        if inner.downstreams.len() < initial_len {
+            Ok(())
+        } else {
+            Err(format!("Downstream '{}' not found", id))
+        }
+    }
+    
+    /// Toggle downstream active status
+    pub async fn toggle_downstream_by_id(&self, id: &str) -> Result<bool, String> {
+        let mut inner = self.inner.lock().await;
+        let downstream = inner.downstreams.iter_mut().find(|d| d.id == id)
+            .ok_or_else(|| format!("Downstream '{}' not found", id))?;
+        downstream.active = !downstream.active;
+        Ok(downstream.active)
+    }
+    
+    /// Update downstream hash (for key rotation)
+    pub async fn update_downstream_hash(&self, id: &str, new_hash: String) -> Result<(), String> {
+        let mut inner = self.inner.lock().await;
+        let downstream = inner.downstreams.iter_mut().find(|d| d.id == id)
+            .ok_or_else(|| format!("Downstream '{}' not found", id))?;
+        downstream.hash = new_hash;
+        Ok(())
+    }
 }

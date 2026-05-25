@@ -1,8 +1,8 @@
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    default_upstream_max_concurrency, default_upstream_request_quota_5h,
-    default_upstream_requests_per_minute, DownstreamConfig, ModelAliasConfig,
-    ModelRequestCostConfig, UpstreamConfig,
+    default_upstream_max_concurrency, default_upstream_request_quota_requests,
+    default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
+    DownstreamConfig, ModelAliasConfig, ModelRequestCostConfig, UpstreamConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +15,8 @@ pub struct UpstreamForm {
     pub protocol: String,
     pub models: String,
     pub model_aliases: Option<String>,
-    pub request_quota_5h: Option<u32>,
+    pub request_quota_window_hours: Option<u32>,
+    pub request_quota_requests: Option<u32>,
     pub requests_per_minute: Option<u32>,
     pub max_concurrency: Option<u32>,
     pub model_request_costs: Option<String>,
@@ -96,7 +97,8 @@ pub struct UpstreamFormView {
     pub protocol: UpstreamProtocol,
     pub models: String,
     pub model_aliases: String,
-    pub request_quota_5h: String,
+    pub request_quota_window_hours: String,
+    pub request_quota_requests: String,
     pub requests_per_minute: String,
     pub max_concurrency: String,
     pub model_request_costs: String,
@@ -370,7 +372,8 @@ impl UpstreamFormView {
             protocol: UpstreamProtocol::ChatCompletions,
             models: String::new(),
             model_aliases: String::new(),
-            request_quota_5h: default_upstream_request_quota_5h().to_string(),
+            request_quota_window_hours: default_upstream_request_quota_window_hours().to_string(),
+            request_quota_requests: default_upstream_request_quota_requests().to_string(),
             requests_per_minute: default_upstream_requests_per_minute().to_string(),
             max_concurrency: default_upstream_max_concurrency().to_string(),
             model_request_costs: String::new(),
@@ -389,7 +392,8 @@ impl UpstreamFormView {
             protocol: upstream.protocol,
             models: upstream.route_models().join(","),
             model_aliases: format_model_aliases(&upstream.model_aliases),
-            request_quota_5h: upstream.request_quota_5h.to_string(),
+            request_quota_window_hours: upstream.request_quota_window_hours.to_string(),
+            request_quota_requests: upstream.request_quota_requests.to_string(),
             requests_per_minute: upstream.requests_per_minute.to_string(),
             max_concurrency: upstream.max_concurrency.to_string(),
             model_request_costs: format_model_request_costs(&upstream.model_request_costs),
@@ -403,7 +407,9 @@ impl UpstreamFormView {
         existing: Option<&UpstreamConfig>,
     ) -> Self {
         let is_editing = action != "/admin/upstreams";
-        let existing_request_quota_5h = existing.map(|upstream| upstream.request_quota_5h);
+        let existing_request_quota_window_hours =
+            existing.map(|upstream| upstream.request_quota_window_hours);
+        let existing_request_quota_requests = existing.map(|upstream| upstream.request_quota_requests);
         let existing_requests_per_minute = existing.map(|upstream| upstream.requests_per_minute);
         let existing_max_concurrency = existing.map(|upstream| upstream.max_concurrency);
         Self {
@@ -424,10 +430,15 @@ impl UpstreamFormView {
             protocol: parse_upstream_protocol(&form.protocol),
             models: form.models.clone(),
             model_aliases: form.model_aliases.clone().unwrap_or_default(),
-            request_quota_5h: upstream_form_u32_string(
-                form.request_quota_5h,
-                existing_request_quota_5h,
-                default_upstream_request_quota_5h(),
+            request_quota_window_hours: upstream_form_u32_string(
+                form.request_quota_window_hours,
+                existing_request_quota_window_hours,
+                default_upstream_request_quota_window_hours(),
+            ),
+            request_quota_requests: upstream_form_u32_string(
+                form.request_quota_requests,
+                existing_request_quota_requests,
+                default_upstream_request_quota_requests(),
             ),
             requests_per_minute: upstream_form_u32_string(
                 form.requests_per_minute,
@@ -576,7 +587,8 @@ mod tests {
                 slug: "glm-5".into(),
                 upstream_model: "GLM-5".into(),
             }],
-            request_quota_5h: 11,
+            request_quota_window_hours: 5,
+            request_quota_requests: 11,
             requests_per_minute: 22,
             max_concurrency: 33,
             model_request_costs: vec![ModelRequestCostConfig {
@@ -596,6 +608,8 @@ mod tests {
             plaintext_key: Some("secret-key".into()),
             model_allowlist: vec!["glm-5".into(), "glm-5.1".into()],
             per_minute_limit: 120,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
             daily_token_limit: Some(1_000),
             monthly_token_limit: None,
             request_quota_window_hours: None,
@@ -642,7 +656,8 @@ mod tests {
             protocol: "responses".into(),
             models: "glm-5".into(),
             model_aliases: Some("legacy=LEGACY".into()),
-            request_quota_5h: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
             requests_per_minute: Some(88),
             max_concurrency: None,
             model_request_costs: None,
@@ -656,7 +671,8 @@ mod tests {
         );
         assert_eq!(view.heading, "编辑上游");
         assert_eq!(view.protocol, UpstreamProtocol::Responses);
-        assert_eq!(view.request_quota_5h, "11");
+        assert_eq!(view.request_quota_window_hours, "5");
+        assert_eq!(view.request_quota_requests, "11");
         assert_eq!(view.requests_per_minute, "88");
         assert_eq!(view.max_concurrency, "33");
         assert_eq!(view.model_request_costs, "glm-5=2");
