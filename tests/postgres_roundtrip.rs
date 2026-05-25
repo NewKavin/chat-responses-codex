@@ -45,11 +45,11 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         model_request_costs: vec![
             ModelRequestCostConfig {
                 slug: "glm-5".into(),
-                cost: 2,
+                cost: 2.0,
             },
             ModelRequestCostConfig {
                 slug: "glm-5.1".into(),
-                cost: 3,
+                cost: 3.0,
             },
         ],
         priority: 0,
