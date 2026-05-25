@@ -77,10 +77,16 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 supported_models: vec!["gpt-4.1-mini".into()],
                 model_aliases: vec![],
-                request_quota_5h: 10_000,
+                request_quota_window_hours: 5,
+
+                request_quota_requests: 10_000,
                 requests_per_minute: 10_000,
                 max_concurrency: 20,
                 model_request_costs: vec![],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
             }],
@@ -91,6 +97,10 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 10_000,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,

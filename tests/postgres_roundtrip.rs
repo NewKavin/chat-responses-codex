@@ -37,7 +37,9 @@ async fn postgres_roundtrip_preserves_normalized_state() {
             slug: "glm-5".into(),
             upstream_model: "GLM-5".into(),
         }],
-        request_quota_5h: 888,
+        request_quota_window_hours: 5,
+
+        request_quota_requests: 888,
         requests_per_minute: 33,
         max_concurrency: 7,
         model_request_costs: vec![
@@ -50,6 +52,10 @@ async fn postgres_roundtrip_preserves_normalized_state() {
                 cost: 3,
             },
         ],
+        priority: 0,
+        premium_models: vec![],
+        premium_only: false,
+        protect_premium_quota: false,
         active: true,
         failure_count: 2,
     };
@@ -60,6 +66,10 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         plaintext_key: Some(downstream_key.plaintext.clone()),
         model_allowlist: vec!["glm-5".into()],
         per_minute_limit: 42,
+
+        rate_limit_enabled: true,
+
+        max_concurrency: 10,
         daily_token_limit: Some(1_000),
         monthly_token_limit: Some(2_000),
         request_quota_window_hours: Some(5),

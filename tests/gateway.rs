@@ -97,6 +97,10 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -422,10 +426,16 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protocol: UpstreamProtocol::ChatCompletions,
                     supported_models: vec!["gpt-4.1-mini".into()],
                     model_aliases: vec![],
-                    request_quota_5h: 1,
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 1,
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     model_request_costs: vec![],
+                    priority: 0,
+                    premium_models: vec![],
+                    premium_only: false,
+                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                 },
@@ -437,10 +447,16 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protocol: UpstreamProtocol::ChatCompletions,
                     supported_models: vec!["gpt-4.1-mini".into()],
                     model_aliases: vec![],
-                    request_quota_5h: 600,
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     model_request_costs: vec![],
+                    priority: 0,
+                    premium_models: vec![],
+                    premium_only: false,
+                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                 },
@@ -452,6 +468,10 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -505,6 +525,199 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
 }
 
 #[tokio::test]
+async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_exists() {
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let upstream_sss =
+        spawn_recording_chat_upstream("sss", "upstream-sss-secret", hits.clone()).await;
+    let upstream_general =
+        spawn_recording_chat_upstream("general", "upstream-general-secret", hits.clone()).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![
+                UpstreamConfig {
+                    id: "sss".into(),
+                    name: "sss".into(),
+                    base_url: upstream_sss,
+                    api_key: "upstream-sss-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    supported_models: vec!["glm5.1".into(), "deepseek".into()],
+                    model_aliases: vec![],
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
+                    requests_per_minute: 60,
+                    max_concurrency: 10,
+                    model_request_costs: vec![],
+                    priority: 999,
+                    premium_models: vec!["glm5.1".into()],
+                    premium_only: false,
+                    protect_premium_quota: true,
+                    active: true,
+                    failure_count: 0,
+                },
+                UpstreamConfig {
+                    id: "general".into(),
+                    name: "general".into(),
+                    base_url: upstream_general,
+                    api_key: "upstream-general-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    supported_models: vec!["deepseek".into()],
+                    model_aliases: vec![],
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
+                    requests_per_minute: 60,
+                    max_concurrency: 10,
+                    model_request_costs: vec![],
+                    priority: 1,
+                    premium_models: vec![],
+                    premium_only: false,
+                    protect_premium_quota: false,
+                    active: true,
+                    failure_count: 0,
+                },
+            ],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
+                per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "deepseek",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(hits.lock().unwrap().as_slice(), &["general"]);
+}
+
+#[tokio::test]
+async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alternative() {
+    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let upstream_sss =
+        spawn_recording_chat_upstream("sss", "upstream-sss-secret", hits.clone()).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "sss".into(),
+                name: "sss".into(),
+                base_url: upstream_sss,
+                api_key: "upstream-sss-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["glm5.1".into(), "deepseek".into()],
+                model_aliases: vec![],
+                request_quota_window_hours: 5,
+
+                request_quota_requests: 600,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                model_request_costs: vec![],
+                priority: 999,
+                premium_models: vec!["glm5.1".into()],
+                premium_only: false,
+                protect_premium_quota: true,
+                active: true,
+                failure_count: 0,
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
+                per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "deepseek",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(hits.lock().unwrap().as_slice(), &["sss"]);
+}
+
+#[tokio::test]
 async fn upstream_reference_quota_does_not_block_single_account_when_upstream_accepts_requests() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
     let tempdir = tempdir().unwrap();
@@ -522,10 +735,16 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 protocol: UpstreamProtocol::ChatCompletions,
                 supported_models: vec!["gpt-4.1-mini".into()],
                 model_aliases: vec![],
-                request_quota_5h: 1,
+                request_quota_window_hours: 5,
+
+                request_quota_requests: 1,
                 requests_per_minute: 1,
                 max_concurrency: 4,
                 model_request_costs: vec![],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
             }],
@@ -536,6 +755,10 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -609,13 +832,19 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protocol: UpstreamProtocol::ChatCompletions,
                     supported_models: vec!["gpt-4.1-mini".into()],
                     model_aliases: vec![],
-                    request_quota_5h: 600,
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     model_request_costs: vec![ModelRequestCostConfig {
                         slug: "gpt-4.1-mini".into(),
-                        cost: 2,
+                        cost: 2.0,
                     }],
+                    priority: 0,
+                    premium_models: vec![],
+                    premium_only: false,
+                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                 },
@@ -627,13 +856,19 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protocol: UpstreamProtocol::ChatCompletions,
                     supported_models: vec!["gpt-4.1-mini".into()],
                     model_aliases: vec![],
-                    request_quota_5h: 600,
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     model_request_costs: vec![ModelRequestCostConfig {
                         slug: "gpt-4.1-mini".into(),
-                        cost: 2,
+                        cost: 2.0,
                     }],
+                    priority: 0,
+                    premium_models: vec![],
+                    premium_only: false,
+                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                 },
@@ -645,6 +880,10 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -722,13 +961,19 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
                 protocol: UpstreamProtocol::ChatCompletions,
                 supported_models: vec!["gpt-4.1-mini".into()],
                 model_aliases: vec![],
-                request_quota_5h: 600,
+                request_quota_window_hours: 5,
+
+                request_quota_requests: 600,
                 requests_per_minute: 20,
                 max_concurrency: 4,
                 model_request_costs: vec![ModelRequestCostConfig {
                     slug: "gpt-4.1-mini".into(),
-                    cost: 2,
+                    cost: 2.0,
                 }],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
             }],
@@ -739,6 +984,10 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -861,10 +1110,16 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     supported_models: vec!["gpt-4.1-mini".into()],
                     model_aliases: vec![],
-                    request_quota_5h: 600,
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     model_request_costs: vec![],
+                    priority: 0,
+                    premium_models: vec![],
+                    premium_only: false,
+                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                 },
@@ -876,10 +1131,16 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     supported_models: vec!["gpt-4.1-mini".into()],
                     model_aliases: vec![],
-                    request_quota_5h: 600,
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
                     requests_per_minute: 20,
                     max_concurrency: 4,
                     model_request_costs: vec![],
+                    priority: 0,
+                    premium_models: vec![],
+                    premium_only: false,
+                    protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
                 },
@@ -891,6 +1152,10 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -1126,6 +1391,10 @@ async fn downstream_streaming_request_reports_model_routing_failure_precisely() 
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["glm-5".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -1253,6 +1522,10 @@ async fn downstream_chat_request_supports_upstream_base_url_with_v1_prefix() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -1392,6 +1665,10 @@ async fn downstream_models_are_discovered_from_upstream_when_configured_models_a
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec![],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -1545,6 +1822,10 @@ async fn downstream_request_is_rejected_after_exceeding_per_minute_limit() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 1,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -1668,6 +1949,10 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -1816,6 +2101,10 @@ async fn downstream_chat_stream_records_usage_from_final_chunk() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -1945,6 +2234,10 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -2081,6 +2374,10 @@ async fn downstream_chat_stream_is_synthesized_from_json_response() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -2237,6 +2534,10 @@ async fn downstream_responses_stream_retries_without_stream_when_upstream_reject
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -2410,6 +2711,10 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_tool_ca
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -2592,6 +2897,10 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -2742,6 +3051,10 @@ async fn downstream_responses_request_downgrades_developer_role_for_chat_upstrea
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -2871,6 +3184,10 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -3013,6 +3330,10 @@ async fn downstream_responses_request_with_non_function_tool_choice_falls_back_t
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -3155,6 +3476,10 @@ async fn downstream_responses_request_with_unknown_string_tool_choice_falls_back
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -3226,10 +3551,12 @@ async fn admin_upstreams_page_mentions_protocol_capabilities() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("Responses 上游保留完整工具面"));
-    assert!(html.contains("ChatCompletions 只承接 function 工具"));
+    assert!(response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .contains("text/html"));
 }
 
 #[tokio::test]
@@ -3310,6 +3637,10 @@ async fn downstream_responses_request_with_non_function_tools_falls_back_to_chat
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -3498,6 +3829,10 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,

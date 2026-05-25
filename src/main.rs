@@ -22,6 +22,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
+        jwt_secret: env_or("JWT_SECRET", "change_me_in_production"),
         app_name: env_or("APP_NAME", "chat-responses-codex"),
         usage_log_rotation_max_bytes: env_usize("USAGE_LOG_ROTATION_MAX_BYTES", 1_048_576).max(1),
         usage_log_archive_max_files: env_usize("USAGE_LOG_ARCHIVE_MAX_FILES", 10).max(1),

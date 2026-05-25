@@ -5,6 +5,7 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
+chrono = "0.4"
 axum = "=0.8.9"
 base64 = "=0.22.1"
 bytes = "=1.11.1"
