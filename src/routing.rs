@@ -115,7 +115,7 @@ pub fn select_upstream(
     candidates: &[UpstreamCandidate],
 ) -> Result<UpstreamCandidate, RouteError> {
     // Step 1: Filter by protocol and model support
-    let mut supported = candidates
+    let supported = candidates
         .iter()
         .filter(|candidate| {
             candidate.protocol == request.protocol

@@ -351,6 +351,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/quota", get(portal_quota))
         .route("/api/portal/usage-history", get(portal_usage_history))
         .route("/api/portal/models", get(portal_models))
+        .route("/api/portal/key", get(portal_get_key))
+        .route("/api/portal/key/rotate", post(portal_rotate_key))
 
         // Frontend assets and SPA fallback
         .fallback(serve_frontend)
@@ -2322,11 +2324,10 @@ async fn portal_login(
 ) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
 
-    // Find downstream with matching key
     let downstream = snapshot
         .downstreams
         .iter()
-        .find(|d| d.active && crate::keys::verify_downstream_key(&body.key, &d.hash));
+        .find(|d| d.active && d.id == body.employee_id && crate::keys::verify_downstream_key(&body.key, &d.hash));
 
     if downstream.is_none() {
         return (
@@ -2700,12 +2701,18 @@ async fn admin_create_downstream(
     State(state): State<AppState>,
     Json(mut downstream): Json<DownstreamConfig>,
 ) -> impl IntoResponse {
-    // Generate ID if not provided
+    // Validate required fields
     if downstream.id.is_empty() {
-        downstream.id = Uuid::new_v4().to_string();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "Downstream ID is required"
+                }
+            })),
+        ).into_response();
     }
 
-    // Validate required fields
     if downstream.name.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2731,11 +2738,19 @@ async fn admin_create_downstream(
     }
 
     // Generate key and hash
-    let generated = generate_downstream_key("sk");
+let generated = generate_downstream_key("key");
     let plaintext_key = generated.plaintext;
     let hash = generated.hash;
-    downstream.hash = hash;
+    downstream.hash = hash.clone();
     downstream.plaintext_key = Some(plaintext_key.clone());
+    
+    let prefix_len = plaintext_key.len().min(16);
+    downstream.plaintext_key_prefix = Some(format!(
+        "{}...{}",
+        &plaintext_key[..prefix_len.min(plaintext_key.len())],
+        &plaintext_key[plaintext_key.len().saturating_sub(8)..]
+    ));
+    
 
     // Add the downstream
     if let Err(e) = state.insert_downstream(downstream.clone()).await {
@@ -2948,11 +2963,18 @@ async fn admin_rotate_downstream(
     let snapshot = state.snapshot().await;
 
     if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == id).cloned() {
-        // Generate new key and hash
-        let generated = generate_downstream_key("sk");
+        let generated = generate_downstream_key("key");
         let plaintext_key = generated.plaintext;
         let hash = generated.hash;
         downstream.hash = hash;
+        downstream.plaintext_key = Some(plaintext_key.clone());
+        
+        let prefix_len = plaintext_key.len().min(16);
+        downstream.plaintext_key_prefix = Some(format!(
+            "{}...{}",
+            &plaintext_key[..prefix_len.min(plaintext_key.len())],
+            &plaintext_key[plaintext_key.len().saturating_sub(8)..]
+        ));
 
         match state.update_downstream(&id, downstream).await {
             Ok(true) => Json(json!({ "plaintext_key": plaintext_key })).into_response(),
@@ -3167,12 +3189,10 @@ async fn portal_overview(
     let now = unix_seconds();
     
     // Compute quota summary
-    let per_minute = state.compute_per_minute_usage(&downstream_id).await;
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let token_usage = state.compute_token_usage(&downstream_id, now).await;
     
     let quota_summary = json!({
-        "per_minute": per_minute,
         "request_quota": request_quota,
         "token_daily": token_usage.daily,
         "token_monthly": token_usage.monthly,
@@ -3188,7 +3208,7 @@ async fn portal_overview(
     let model_stats = state.compute_model_stats(downstream).await;
     let model_summary = json!({
         "total_models": model_stats.len(),
-        "active_models": model_stats.iter().filter(|m| m.today_requests > 0).count(),
+        "active_models": model_stats.iter().filter(|m| m.today_count > 0).count(),
     });
     
     Json(json!({
@@ -3222,7 +3242,7 @@ async fn portal_quota(
     Json(json!({
         "per_minute_limit": per_minute_limit,
         "request_quota": request_quota,
-        "token_limits": {
+        "token_quota": {
             "daily": token_usage.daily,
             "monthly": token_usage.monthly,
         },
@@ -3288,6 +3308,82 @@ async fn portal_models(
     Json(model_stats).into_response()
 }
 
+/// Portal get key - returns plaintext_key_prefix for the authenticated downstream
+async fn portal_get_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    
+    let snapshot = state.snapshot().await;
+    let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
+        Some(d) => d,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+    };
+    
+    Json(json!({
+        "plaintext_key_prefix": downstream.plaintext_key_prefix,
+    })).into_response()
+}
+
+/// Portal rotate key - generates new key for authenticated downstream
+async fn portal_rotate_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    
+    let snapshot = state.snapshot().await;
+    
+    if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == downstream_id).cloned() {
+        let generated = generate_downstream_key("key");
+        let plaintext_key = generated.plaintext;
+        downstream.hash = generated.hash;
+        
+        let prefix_len = plaintext_key.len().min(16);
+        downstream.plaintext_key_prefix = Some(format!(
+            "{}...{}",
+            &plaintext_key[..prefix_len.min(plaintext_key.len())],
+            &plaintext_key[plaintext_key.len().saturating_sub(8)..]
+        ));
+        
+        match state.update_downstream(&downstream_id, downstream).await {
+            Ok(true) => Json(json!({ "plaintext_key": plaintext_key })).into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": {
+                        "message": format!("Downstream '{}' not found", downstream_id)
+                    }
+                })),
+            ).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": format!("Failed to rotate key: {}", e)
+                    }
+                })),
+            ).into_response(),
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Downstream '{}' not found", downstream_id)
+                }
+            })),
+        ).into_response()
+    }
+}
+
 /// Helper function to extract downstream ID from Bearer token
 async fn extract_downstream_id_from_bearer(
     state: &AppState,
@@ -3312,7 +3408,18 @@ async fn extract_downstream_id_from_bearer(
             ).into_response()
         })?;
     
-    // Verify the token and get downstream ID
+    if token.starts_with("eyJ") {
+        match crate::auth::verify_admin_token(token, &state.config.jwt_secret) {
+            Ok(claims) => return Ok(claims.sub),
+            Err(_) => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": {"message": "Invalid JWT token"}})),
+                ).into_response())
+            }
+        }
+    }
+    
     let snapshot = state.snapshot().await;
     for downstream in &snapshot.downstreams {
         if verify_downstream_key(token, &downstream.hash) {

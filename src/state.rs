@@ -180,6 +180,8 @@ pub struct DownstreamConfig {
     #[serde(default)]
     pub plaintext_key: Option<String>,
     #[serde(default)]
+    pub plaintext_key_prefix: Option<String>,
+    #[serde(default)]
     pub model_allowlist: Vec<String>,
     #[serde(default = "default_downstream_rate_limit_enabled")]
     pub rate_limit_enabled: bool,
@@ -1578,6 +1580,7 @@ pub struct PerMinuteUsage {
 pub struct RequestQuotaUsage {
     pub used: u32,
     pub limit: u32,
+    pub remaining: u32,
     pub window_hours: u32,
     pub percentage: f64,
 }
@@ -1594,15 +1597,16 @@ pub struct TokenUsage {
 pub struct TokenQuota {
     pub used: u64,
     pub limit: u64,
+    pub remaining: u64,
     pub percentage: f64,
 }
 
 /// Daily statistics
 #[derive(Debug, Clone, Serialize)]
 pub struct DailyStats {
-    pub date: String,
-    pub requests: u32,
-    pub tokens: u64,
+    pub date: u64,
+    pub total_requests: u32,
+    pub total_tokens: u64,
     pub success_rate: f64,
 }
 
@@ -1610,8 +1614,10 @@ pub struct DailyStats {
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelStats {
     pub model: String,
-    pub today_requests: u32,
-    pub monthly_requests: u32,
+    pub today_count: u32,
+    pub month_count: u32,
+    pub today_tokens: u64,
+    pub month_tokens: u64,
     pub avg_latency_ms: u64,
     pub success_rate: f64,
 }
@@ -1683,9 +1689,12 @@ impl AppState {
             0.0
         };
         
+        let remaining = limit.saturating_sub(used);
+        
         Some(RequestQuotaUsage {
             used,
             limit,
+            remaining,
             window_hours,
             percentage,
         })
@@ -1706,7 +1715,7 @@ impl AppState {
         
         // Calculate start of this month (UTC)
         let month_start = {
-            use std::time::{SystemTime, UNIX_EPOCH};
+            use std::time::UNIX_EPOCH;
             let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
             let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
             let first_of_month = datetime.date_naive().with_day(1).unwrap();
@@ -1721,16 +1730,19 @@ impl AppState {
                 .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= today_start)
                 .map(|log| log.total_tokens)
                 .sum();
-            
+
             let percentage = if limit > 0 {
                 (used as f64 / limit as f64) * 100.0
             } else {
                 0.0
             };
-            
+
+            let remaining = limit.saturating_sub(used);
+
             Some(TokenQuota {
                 used,
                 limit,
+                remaining,
                 percentage,
             })
         } else {
@@ -1745,16 +1757,19 @@ impl AppState {
                 .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= month_start)
                 .map(|log| log.total_tokens)
                 .sum();
-            
+
             let percentage = if limit > 0 {
                 (used as f64 / limit as f64) * 100.0
             } else {
                 0.0
             };
-            
+
+            let remaining = limit.saturating_sub(used);
+
             Some(TokenQuota {
                 used,
                 limit,
+                remaining,
                 percentage,
             })
         } else {
@@ -1797,18 +1812,10 @@ impl AppState {
                 0.0
             };
             
-            // Format date as YYYY-MM-DD
-            let date = {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let dt = UNIX_EPOCH + std::time::Duration::from_secs(day_start);
-                let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
-                datetime.format("%Y-%m-%d").to_string()
-            };
-            
             stats.push(DailyStats {
-                date,
-                requests,
-                tokens,
+                date: day_start,
+                total_requests: requests,
+                total_tokens: tokens,
                 success_rate,
             });
         }
@@ -1824,7 +1831,7 @@ impl AppState {
         // Calculate start of today and this month
         let today_start = (now / 86400) * 86400;
         let month_start = {
-            use std::time::{SystemTime, UNIX_EPOCH};
+            use std::time::UNIX_EPOCH;
             let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
             let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
             let first_of_month = datetime.date_naive().with_day(1).unwrap();
@@ -1836,7 +1843,9 @@ impl AppState {
         
         for log in &snapshot.usage_logs {
             if log.downstream_key_id == downstream.id {
-                model_logs.entry(log.model.clone()).or_insert_with(Vec::new).push(log);
+                if downstream.model_allowlist.is_empty() || downstream.model_allowlist.contains(&log.model) {
+                    model_logs.entry(log.model.clone()).or_insert_with(Vec::new).push(log);
+                }
             }
         }
         
@@ -1844,8 +1853,13 @@ impl AppState {
         let mut stats = Vec::new();
         
         for (model, logs) in model_logs {
-            let today_requests = logs.iter().filter(|log| log.created_at >= today_start).count() as u32;
-            let monthly_requests = logs.iter().filter(|log| log.created_at >= month_start).count() as u32;
+            let today_logs: Vec<&&UsageLog> = logs.iter().filter(|log| log.created_at >= today_start).collect();
+            let month_logs: Vec<&&UsageLog> = logs.iter().filter(|log| log.created_at >= month_start).collect();
+            
+            let today_count = today_logs.len() as u32;
+            let month_count = month_logs.len() as u32;
+            let today_tokens: u64 = today_logs.iter().map(|log| log.total_tokens).sum();
+            let month_tokens: u64 = month_logs.iter().map(|log| log.total_tokens).sum();
             
             let total_latency: u64 = logs.iter().map(|log| log.latency_ms).sum();
             let avg_latency_ms = if !logs.is_empty() {
@@ -1856,15 +1870,18 @@ impl AppState {
             
             let successful = logs.iter().filter(|log| log.status_code == 200).count();
             let success_rate = if !logs.is_empty() {
-                successful as f64 / logs.len() as f64
+                let raw_rate = successful as f64 / logs.len() as f64;
+                (raw_rate * 100.0).round() / 100.0
             } else {
                 0.0
             };
             
             stats.push(ModelStats {
                 model,
-                today_requests,
-                monthly_requests,
+                today_count,
+                month_count,
+                today_tokens,
+                month_tokens,
                 avg_latency_ms,
                 success_rate,
             });

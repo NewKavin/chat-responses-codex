@@ -47,9 +47,24 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="Token" width="120">
+            <el-table-column label="Token" width="180">
               <template #default="{ row }">
-                {{ row.total_tokens }}
+                <div class="token-cell">
+                  <div class="token-pair">
+                    <div class="token-line token-line--prompt">
+                      <el-icon><Top /></el-icon>
+                      <span>{{ row.prompt_tokens }}</span>
+                    </div>
+                    <div class="token-line token-line--completion">
+                      <el-icon><Bottom /></el-icon>
+                      <span>{{ row.completion_tokens }}</span>
+                    </div>
+                  </div>
+                  <div class="token-line token-line--total">
+                    <el-icon><PieChart /></el-icon>
+                    <strong>{{ row.total_tokens }}</strong>
+                  </div>
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="耗时" width="100">
@@ -67,7 +82,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, Top, Bottom, PieChart } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { portalApi } from '@/api/portal'
 import type { PortalUsageHistory } from '@/types'
@@ -78,6 +93,8 @@ const dailyChartRef = ref<HTMLElement>()
 const tokenChartRef = ref<HTMLElement>()
 let dailyChart: echarts.ECharts | null = null
 let tokenChart: echarts.ECharts | null = null
+let dailyResizeObserver: ResizeObserver | null = null
+let tokenResizeObserver: ResizeObserver | null = null
 
 const data = ref<PortalUsageHistory>({
   daily_stats: [],
@@ -105,10 +122,9 @@ const formatTime = (timestamp: number) => {
 
 const formatDate = (timestamp: number) => {
   const date = new Date(timestamp * 1000)
-  return date.toLocaleDateString('zh-CN', {
-    month: 'numeric',
-    day: 'numeric'
-  })
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${month}/${day}`
 }
 
 const initCharts = () => {
@@ -120,21 +136,38 @@ const initCharts = () => {
   }
 }
 
-const updateCharts = () => {
-  if (!dailyChart || !tokenChart) return
+/**
+ * 使用 ResizeObserver 监听容器尺寸变化（tab 隐藏→显示时生效）
+ */
+const setupResizeObservers = () => {
+  if (dailyChartRef.value && !dailyResizeObserver) {
+    dailyResizeObserver = new ResizeObserver(() => {
+      dailyChart?.resize()
+    })
+    dailyResizeObserver.observe(dailyChartRef.value)
+  }
+  if (tokenChartRef.value && !tokenResizeObserver) {
+    tokenResizeObserver = new ResizeObserver(() => {
+      tokenChart?.resize()
+    })
+    tokenResizeObserver.observe(tokenChartRef.value)
+  }
+}
 
+const updateDailyChart = () => {
+  if (!dailyChart) return
   const dates = data.value.daily_stats.map(s => formatDate(s.date))
   const requests = data.value.daily_stats.map(s => s.total_requests)
-  const tokens = data.value.daily_stats.map(s => s.total_tokens)
 
-  // 每日请求数图表
+  dailyChart.clear()
+  dailyChart.resize()
   dailyChart.setOption({
-    tooltip: {
-      trigger: 'axis'
-    },
+    tooltip: { trigger: 'axis' },
+    grid: { left: 40, right: 20, top: 30, bottom: 30 },
     xAxis: {
       type: 'category',
-      data: dates
+      data: dates,
+      boundaryGap: false
     },
     yAxis: {
       type: 'value',
@@ -143,22 +176,24 @@ const updateCharts = () => {
     series: [{
       name: '请求数',
       type: 'line',
-      data: requests,
       smooth: true,
-      areaStyle: {
-        color: 'rgba(64, 158, 255, 0.2)'
-      },
-      itemStyle: {
-        color: '#409EFF'
-      }
+      data: requests,
+      areaStyle: { color: 'rgba(64, 158, 255, 0.12)' },
+      itemStyle: { color: '#409EFF' }
     }]
   })
+}
 
-  // Token 使用量图表
+const updateTokenChart = () => {
+  if (!tokenChart) return
+  const dates = data.value.daily_stats.map(s => formatDate(s.date))
+  const tokens = data.value.daily_stats.map(s => s.total_tokens)
+
+  tokenChart.clear()
+  tokenChart.resize()
   tokenChart.setOption({
-    tooltip: {
-      trigger: 'axis'
-    },
+    tooltip: { trigger: 'axis' },
+    grid: { left: 40, right: 20, top: 30, bottom: 30 },
     xAxis: {
       type: 'category',
       data: dates
@@ -171,11 +206,14 @@ const updateCharts = () => {
       name: 'Token 数',
       type: 'bar',
       data: tokens,
-      itemStyle: {
-        color: '#67C23A'
-      }
+      itemStyle: { color: '#67C23A' }
     }]
   })
+}
+
+const updateCharts = () => {
+  updateDailyChart()
+  updateTokenChart()
 }
 
 const loadData = async () => {
@@ -199,13 +237,19 @@ const handleResize = () => {
   tokenChart?.resize()
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await nextTick()
   initCharts()
+  setupResizeObservers()
+  dailyChart?.resize()
+  tokenChart?.resize()
   loadData()
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
+  dailyResizeObserver?.disconnect()
+  tokenResizeObserver?.disconnect()
   dailyChart?.dispose()
   tokenChart?.dispose()
   window.removeEventListener('resize', handleResize)
@@ -249,6 +293,44 @@ onUnmounted(() => {
 
 .chart {
   width: 100%;
-  height: 300px;
+  height: 320px;
+  min-height: 320px;
+  background-color: #f5f7fa;
+  border-radius: 4px;
+}
+
+.token-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.2;
+}
+
+.token-pair {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.token-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.token-line--prompt {
+  color: #409eff;
+}
+
+.token-line--completion {
+  color: #67c23a;
+}
+
+.token-line--total {
+  color: #303133;
+}
+
+.token-line--total strong {
+  color: #303133;
 }
 </style>
