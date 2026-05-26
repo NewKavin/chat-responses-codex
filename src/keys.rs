@@ -13,7 +13,7 @@ pub struct GeneratedDownstreamKey {
 pub fn generate_downstream_key(prefix: &str) -> GeneratedDownstreamKey {
     let secret_bytes: [u8; 24] = random();
     let salt_bytes: [u8; 16] = random();
-    let secret = format!("{}_{}", prefix, URL_SAFE_NO_PAD.encode(secret_bytes));
+    let secret = format!("{}-{}", prefix, URL_SAFE_NO_PAD.encode(secret_bytes));
     let salt = URL_SAFE_NO_PAD.encode(salt_bytes);
     let hash = format!("{}:{}", salt, digest(&secret, &salt));
 

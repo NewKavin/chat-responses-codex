@@ -2,8 +2,7 @@ import axios from 'axios'
 import type {
   PortalOverview,
   PortalQuota,
-  PortalUsageHistory,
-  ModelStats
+  PortalUsageHistory
 } from '@/types'
 
 const api = axios.create({
@@ -48,6 +47,7 @@ export const portalApi = {
   getUsageHistory: (params?: { time_range?: string }) =>
     api.get<PortalUsageHistory>('/portal/usage-history', { params }),
 
-  // Models
-  getModels: () => api.get<ModelStats[]>('/portal/models')
+  // Key Management
+  getKey: () => api.get<{ plaintext_key: string | null }>('/portal/key'),
+  rotateKey: () => api.post<{ plaintext_key: string }>('/portal/key/rotate')
 }

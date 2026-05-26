@@ -3308,7 +3308,7 @@ async fn portal_models(
     Json(model_stats).into_response()
 }
 
-/// Portal get key - returns plaintext_key_prefix for the authenticated downstream
+/// Portal get key - returns plaintext_key for the authenticated downstream
 async fn portal_get_key(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3325,7 +3325,7 @@ async fn portal_get_key(
     };
     
     Json(json!({
-        "plaintext_key_prefix": downstream.plaintext_key_prefix,
+        "plaintext_key": downstream.plaintext_key,
     })).into_response()
 }
 

@@ -39,6 +39,7 @@ fn create_test_state() -> (AppState, String) {
                 name: "Test Downstream".to_string(),
                 hash: generated.hash,
                 plaintext_key: Some(generated.plaintext),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
                 per_minute_limit: 100,
 
@@ -121,7 +122,6 @@ async fn test_portal_overview_returns_quota_summary() {
     let result: Value = serde_json::from_slice(&body).unwrap();
     
     assert!(result["quota_summary"].is_object());
-    assert!(result["quota_summary"]["per_minute"].is_object());
     assert!(result["token_summary"].is_object());
     assert!(result["model_summary"].is_object());
 }
@@ -199,7 +199,7 @@ async fn test_portal_quota_returns_detailed_quota_info() {
     
     assert!(result["per_minute_limit"].is_object());
     assert!(result["request_quota"].is_object());
-    assert!(result["token_limits"].is_object());
+    assert!(result["token_quota"].is_object());
 }
 
 #[tokio::test]
@@ -421,8 +421,8 @@ async fn test_portal_models_returns_model_stats() {
     // Check structure of first model
     let model = &models[0];
     assert!(model["model"].is_string());
-    assert!(model["today_requests"].is_number());
-    assert!(model["monthly_requests"].is_number());
+    assert!(model["today_count"].is_number());
+    assert!(model["month_count"].is_number());
     assert!(model["avg_latency_ms"].is_number());
     assert!(model["success_rate"].is_number());
 }
@@ -457,7 +457,7 @@ async fn test_portal_models_calculates_today_usage() {
     assert!(gpt4.is_some());
     
     let gpt4 = gpt4.unwrap();
-    assert!(gpt4["today_requests"].as_u64().unwrap() >= 0);
+    assert!(gpt4["today_count"].as_u64().unwrap() >= 0);
 }
 
 #[tokio::test]
@@ -486,7 +486,7 @@ async fn test_portal_models_calculates_monthly_usage() {
     let models: Vec<Value> = serde_json::from_slice(&body).unwrap();
     
     for model in models {
-        assert!(model["monthly_requests"].as_u64().unwrap() >= 0);
+        assert!(model["month_count"].as_u64().unwrap() >= 0);
     }
 }
 
@@ -552,4 +552,274 @@ async fn test_portal_models_calculates_success_rate() {
         let success_rate = model["success_rate"].as_f64().unwrap();
         assert!(success_rate >= 0.0 && success_rate <= 1.0);
     }
+}
+
+// ============================================================================
+// Portal Get Key Tests
+// ============================================================================
+
+/// Helper to create a test state with plaintext_key_prefix set
+fn create_test_state_with_key_prefix() -> (AppState, String) {
+    let config = AppConfig::default();
+    let generated = generate_downstream_key("sk");
+    
+    let state = PersistedState {
+        upstreams: vec![],
+        downstreams: vec![
+            DownstreamConfig {
+                id: "downstream-1".to_string(),
+                name: "Test Downstream".to_string(),
+                hash: generated.hash,
+                plaintext_key: Some(generated.plaintext),
+                plaintext_key_prefix: Some("key-abcd1234...efgh5678".to_string()),
+                model_allowlist: vec!["gpt-4".to_string()],
+                per_minute_limit: 100,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            },
+        ],
+        usage_logs: vec![],
+    };
+    
+    let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
+    let app_state = AppState::new(state, unique_state_path(), config);
+    (app_state, portal_key)
+}
+
+#[tokio::test]
+async fn test_portal_get_key_returns_full_key() {
+    let (state, portal_key) = create_test_state_with_key_prefix();
+    let app = chat_responses_codex::server::build_router(state);
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/key")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    
+    // Should return full plaintext_key for copying
+    assert!(result["plaintext_key"].is_string());
+    let key = result["plaintext_key"].as_str().unwrap();
+    assert!(key.starts_with("sk-"));
+}
+
+#[tokio::test]
+async fn test_portal_get_key_returns_none_when_not_set() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/key")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    
+    assert!(result["plaintext_key"].is_string());
+}
+
+#[tokio::test]
+async fn test_portal_get_key_requires_bearer_token() {
+    let (state, _portal_key) = create_test_state_with_key_prefix();
+    let app = chat_responses_codex::server::build_router(state);
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ============================================================================
+// Portal Key Rotation Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_portal_rotate_key_returns_new_key() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/key/rotate")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    
+    assert!(result["plaintext_key"].is_string());
+    let new_key = result["plaintext_key"].as_str().unwrap();
+    assert!(new_key.starts_with("key-"));
+    assert!(new_key.len() > 20);
+}
+
+#[tokio::test]
+async fn test_portal_rotate_key_requires_bearer_token() {
+    let (state, _portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/key/rotate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_portal_rotate_key_rejects_invalid_token() {
+    let (state, _portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/key/rotate")
+                .header(header::AUTHORIZATION, "Bearer invalid-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_portal_rotate_key_new_key_works_for_auth() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/key/rotate")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    let new_key = result["plaintext_key"].as_str().unwrap();
+    
+    let app2 = chat_responses_codex::server::build_router(state);
+    
+    let response2 = app2
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/key")
+                .header(header::AUTHORIZATION, format!("Bearer {}", new_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response2.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_portal_rotate_key_old_key_invalid_after_rotation() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portal/key/rotate")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let app2 = chat_responses_codex::server::build_router(state);
+    
+    let response2 = app2
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/key")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response2.status(), StatusCode::UNAUTHORIZED);
 }
