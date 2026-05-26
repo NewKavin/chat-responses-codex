@@ -22,6 +22,7 @@ These are the key settings for a production-like run:
 - `LOG_PATH=/logs/runtime.log`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=<strong-secret>`
+- `JWT_SECRET=<strong-secret-at-least-32-characters>`
 - `APP_NAME=chat-responses-codex`
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
@@ -125,7 +126,10 @@ If you use a `.env` file, copy [`.env.example`](.env.example) and set:
 ```bash
 POSTGRES_PASSWORD=replace-this-with-a-strong-password
 ADMIN_PASSWORD=replace-this-with-a-strong-password
+JWT_SECRET=replace-this-with-a-strong-secret
 ```
+
+Generate a secure JWT_SECRET with: `openssl rand -base64 32`
 
 ## Reverse Proxy Notes
 
