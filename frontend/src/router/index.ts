@@ -5,7 +5,30 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/admin/login'
+      redirect: '/portal/login'
+    },
+    {
+      path: '/portal/login',
+      name: 'PortalLogin',
+      component: () => import('@/views/portal/PortalLogin.vue')
+    },
+    {
+      path: '/portal',
+      name: 'Portal',
+      component: () => import('@/views/portal/Portal.vue'),
+      meta: { requiresPortalAuth: true }
+    },
+    {
+      path: '/portal/integration',
+      name: 'PortalIntegration',
+      component: () => import('@/views/portal/Integration.vue'),
+      meta: { requiresPortalAuth: true }
+    },
+    {
+      path: '/portal/key',
+      name: 'PortalKeyManagement',
+      component: () => import('@/views/portal/KeyManagement.vue'),
+      meta: { requiresPortalAuth: true }
     },
     {
       path: '/admin/login',
@@ -39,17 +62,6 @@ const router = createRouter({
       name: 'AdminLogs',
       component: () => import('@/views/admin/Logs.vue'),
       meta: { requiresAuth: true }
-    },
-    {
-      path: '/portal/login',
-      name: 'PortalLogin',
-      component: () => import('@/views/portal/PortalLogin.vue')
-    },
-    {
-      path: '/portal',
-      name: 'Portal',
-      component: () => import('@/views/portal/Portal.vue'),
-      meta: { requiresPortalAuth: true }
     }
   ]
 })

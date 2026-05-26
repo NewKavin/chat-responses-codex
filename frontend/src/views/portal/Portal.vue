@@ -22,8 +22,11 @@
           <el-tab-pane label="使用历史" name="history">
             <UsageHistory />
           </el-tab-pane>
-          <el-tab-pane label="模型目录" name="models">
-            <ModelCatalog />
+          <el-tab-pane label="集成示例" name="integration">
+            <Integration />
+          </el-tab-pane>
+          <el-tab-pane label="秘钥管理" name="key">
+            <KeyManagement />
           </el-tab-pane>
         </el-tabs>
       </el-main>
@@ -37,7 +40,8 @@ import { useRouter } from 'vue-router'
 import Overview from './Overview.vue'
 import QuotaDetails from './QuotaDetails.vue'
 import UsageHistory from './UsageHistory.vue'
-import ModelCatalog from './ModelCatalog.vue'
+import Integration from './Integration.vue'
+import KeyManagement from './KeyManagement.vue'
 
 const router = useRouter()
 const activeTab = ref('overview')
