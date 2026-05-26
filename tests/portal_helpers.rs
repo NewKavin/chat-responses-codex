@@ -33,6 +33,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
                 name: "Test Downstream".to_string(),
                 hash: generated.hash,
                 plaintext_key: Some(generated.plaintext),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
                 per_minute_limit: 100,
 
@@ -207,6 +208,7 @@ async fn test_compute_request_quota_usage_returns_none_if_no_quota() {
         name: "No Quota Downstream".to_string(),
         hash: "hash2".to_string(),
         plaintext_key: None,
+        plaintext_key_prefix: None,
         model_allowlist: vec![],
         per_minute_limit: 100,
 
@@ -274,6 +276,7 @@ async fn test_compute_token_usage_calculates_daily_usage() {
     let daily = usage.daily.unwrap();
     assert_eq!(daily.used, 225); // 150 + 75
     assert_eq!(daily.limit, 10000);
+    assert_eq!(daily.remaining, 9775);
     assert_eq!(daily.percentage, 2.25);
 }
 
@@ -320,7 +323,90 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
     let monthly = usage.monthly.unwrap();
     assert_eq!(monthly.used, 2250); // 1500 + 750
     assert_eq!(monthly.limit, 100000);
+    assert_eq!(monthly.remaining, 97750);
     assert_eq!(monthly.percentage, 2.25);
+}
+
+#[tokio::test]
+async fn test_compute_token_usage_remaining_calculation() {
+    let now = chat_responses_codex::state::unix_seconds();
+
+    let logs = vec![
+        UsageLog {
+            id: "log-1".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            request_id: "req-1".to_string(),
+            status_code: 200,
+            prompt_tokens: 800,
+            completion_tokens: 150,
+            total_tokens: 950,
+            latency_ms: 500,
+            created_at: now - 3600,
+        },
+        UsageLog {
+            id: "log-2".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            request_id: "req-2".to_string(),
+            status_code: 200,
+            prompt_tokens: 400,
+            completion_tokens: 50,
+            total_tokens: 450,
+            latency_ms: 300,
+            created_at: now - 7200,
+        },
+    ];
+
+    let state = create_test_state_with_logs(logs);
+
+    let usage = state.compute_token_usage("downstream-1", now).await;
+
+    let daily = usage.daily.unwrap();
+    assert_eq!(daily.used, 1400);
+    assert_eq!(daily.limit, 10000);
+    assert_eq!(daily.remaining, 8600);
+
+    let monthly = usage.monthly.unwrap();
+    assert_eq!(monthly.used, 1400);
+    assert_eq!(monthly.limit, 100000);
+    assert_eq!(monthly.remaining, 98600);
+}
+
+#[tokio::test]
+async fn test_compute_token_usage_remaining_saturates_at_zero() {
+    let now = chat_responses_codex::state::unix_seconds();
+
+    let logs = vec![
+        UsageLog {
+            id: "log-1".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            request_id: "req-1".to_string(),
+            status_code: 200,
+            prompt_tokens: 5000,
+            completion_tokens: 6000,
+            total_tokens: 11000,
+            latency_ms: 500,
+            created_at: now - 3600,
+        },
+    ];
+
+    let state = create_test_state_with_logs(logs);
+
+    let usage = state.compute_token_usage("downstream-1", now).await;
+
+    let daily = usage.daily.unwrap();
+    assert_eq!(daily.used, 11000);
+    assert_eq!(daily.limit, 10000);
+    assert_eq!(daily.remaining, 0);
+    assert!((daily.percentage - 110.0).abs() < 0.01);
 }
 
 // ============================================================================
@@ -384,14 +470,14 @@ async fn test_compute_daily_stats_aggregates_by_day() {
     
     // Check today's stats
     let today = &stats[0];
-    assert_eq!(today.requests, 2);
-    assert_eq!(today.tokens, 225); // 150 + 75
+    assert_eq!(today.total_requests, 2);
+    assert_eq!(today.total_tokens, 225); // 150 + 75
     assert_eq!(today.success_rate, 1.0); // All successful
     
     // Check yesterday's stats
     let yesterday = &stats[1];
-    assert_eq!(yesterday.requests, 1);
-    assert_eq!(yesterday.tokens, 300);
+    assert_eq!(yesterday.total_requests, 1);
+    assert_eq!(yesterday.total_tokens, 300);
     assert_eq!(yesterday.success_rate, 1.0);
 }
 
@@ -421,7 +507,7 @@ async fn test_compute_daily_stats_includes_token_counts() {
     let stats = state.compute_daily_stats("downstream-1", 1).await;
     
     assert_eq!(stats.len(), 1);
-    assert_eq!(stats[0].tokens, 1500);
+    assert_eq!(stats[0].total_tokens, 1500);
 }
 
 // ============================================================================
@@ -487,11 +573,11 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
     
     // Find gpt-4 stats
     let gpt4_stats = stats.iter().find(|s| s.model == "gpt-4").unwrap();
-    assert_eq!(gpt4_stats.today_requests, 2);
+    assert_eq!(gpt4_stats.today_count, 2);
     
     // Find gpt-3.5-turbo stats
     let gpt35_stats = stats.iter().find(|s| s.model == "gpt-3.5-turbo").unwrap();
-    assert_eq!(gpt35_stats.today_requests, 1);
+    assert_eq!(gpt35_stats.today_count, 1);
 }
 
 #[tokio::test]
@@ -582,4 +668,220 @@ async fn test_compute_model_stats_calculates_avg_latency() {
     
     let gpt4_stats = stats.iter().find(|s| s.model == "gpt-4").unwrap();
     assert_eq!(gpt4_stats.avg_latency_ms, 400); // (500 + 300) / 2
+}
+
+#[tokio::test]
+async fn test_compute_model_stats_token_sums() {
+    let now = chat_responses_codex::state::unix_seconds();
+    
+    let logs = vec![
+        UsageLog {
+            id: "log-1".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            request_id: "req-1".to_string(),
+            status_code: 200,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            latency_ms: 500,
+            created_at: now - 3600,
+        },
+        UsageLog {
+            id: "log-2".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            request_id: "req-2".to_string(),
+            status_code: 200,
+            prompt_tokens: 50,
+            completion_tokens: 25,
+            total_tokens: 75,
+            latency_ms: 300,
+            created_at: now - 7200,
+        },
+        UsageLog {
+            id: "log-3".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-3.5-turbo".to_string(),
+            request_id: "req-3".to_string(),
+            status_code: 200,
+            prompt_tokens: 200,
+            completion_tokens: 100,
+            total_tokens: 300,
+            latency_ms: 200,
+            created_at: now - 10800,
+        },
+    ];
+    
+    let state = create_test_state_with_logs(logs);
+    let snapshot = state.snapshot().await;
+    let downstream = &snapshot.downstreams[0];
+    
+    let stats = state.compute_model_stats(downstream).await;
+    
+    let gpt4_stats = stats.iter().find(|s| s.model == "gpt-4").unwrap();
+    assert_eq!(gpt4_stats.today_tokens, 225); // 150 + 75
+    assert_eq!(gpt4_stats.month_tokens, 225);
+    
+    let gpt35_stats = stats.iter().find(|s| s.model == "gpt-3.5-turbo").unwrap();
+    assert_eq!(gpt35_stats.today_tokens, 300);
+    assert_eq!(gpt35_stats.month_tokens, 300);
+}
+
+#[tokio::test]
+async fn test_compute_model_stats_allowlist_filtering() {
+    let now = chat_responses_codex::state::unix_seconds();
+    
+    let logs = vec![
+        UsageLog {
+            id: "log-1".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            request_id: "req-1".to_string(),
+            status_code: 200,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            latency_ms: 500,
+            created_at: now - 3600,
+        },
+        UsageLog {
+            id: "log-2".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-3.5-turbo".to_string(),
+            request_id: "req-2".to_string(),
+            status_code: 200,
+            prompt_tokens: 50,
+            completion_tokens: 25,
+            total_tokens: 75,
+            latency_ms: 300,
+            created_at: now - 7200,
+        },
+        UsageLog {
+            id: "log-3".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "claude-3".to_string(), // NOT in allowlist
+            request_id: "req-3".to_string(),
+            status_code: 200,
+            prompt_tokens: 200,
+            completion_tokens: 100,
+            total_tokens: 300,
+            latency_ms: 200,
+            created_at: now - 10800,
+        },
+    ];
+    
+    let state = create_test_state_with_logs(logs);
+    let snapshot = state.snapshot().await;
+    let downstream = &snapshot.downstreams[0];
+    
+    let stats = state.compute_model_stats(downstream).await;
+    
+    // Should only have gpt-4 and gpt-3.5-turbo (in allowlist), not claude-3
+    assert_eq!(stats.len(), 2);
+    assert!(stats.iter().any(|s| s.model == "gpt-4"));
+    assert!(stats.iter().any(|s| s.model == "gpt-3.5-turbo"));
+    assert!(!stats.iter().any(|s| s.model == "claude-3"));
+}
+
+#[tokio::test]
+async fn test_compute_model_stats_empty_allowlist() {
+    let now = chat_responses_codex::state::unix_seconds();
+    
+    let logs = vec![
+        UsageLog {
+            id: "log-1".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            request_id: "req-1".to_string(),
+            status_code: 200,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            latency_ms: 500,
+            created_at: now - 3600,
+        },
+        UsageLog {
+            id: "log-2".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "claude-3".to_string(),
+            request_id: "req-2".to_string(),
+            status_code: 200,
+            prompt_tokens: 50,
+            completion_tokens: 25,
+            total_tokens: 75,
+            latency_ms: 300,
+            created_at: now - 7200,
+        },
+        UsageLog {
+            id: "log-3".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "llama-2".to_string(),
+            request_id: "req-3".to_string(),
+            status_code: 200,
+            prompt_tokens: 200,
+            completion_tokens: 100,
+            total_tokens: 300,
+            latency_ms: 200,
+            created_at: now - 10800,
+        },
+    ];
+    
+    let config = chat_responses_codex::state::AppConfig::default();
+    let generated = chat_responses_codex::keys::generate_downstream_key("sk");
+    
+    let state = chat_responses_codex::state::PersistedState {
+        upstreams: vec![],
+        downstreams: vec![
+            chat_responses_codex::state::DownstreamConfig {
+                id: "downstream-1".to_string(),
+                name: "Test Downstream".to_string(),
+                hash: generated.hash,
+                plaintext_key: Some(generated.plaintext),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![], // Empty allowlist
+                per_minute_limit: 100,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: Some(10000),
+                monthly_token_limit: Some(100000),
+                request_quota_window_hours: Some(24),
+                request_quota_requests: Some(1000),
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            },
+        ],
+        usage_logs: logs,
+    };
+    
+    let app_state = chat_responses_codex::state::AppState::new(state, unique_state_path(), config);
+    let snapshot = app_state.snapshot().await;
+    let downstream = &snapshot.downstreams[0];
+    
+    let stats = app_state.compute_model_stats(downstream).await;
+    
+    // Empty allowlist should show all models
+    assert_eq!(stats.len(), 3);
+    assert!(stats.iter().any(|s| s.model == "gpt-4"));
+    assert!(stats.iter().any(|s| s.model == "claude-3"));
+    assert!(stats.iter().any(|s| s.model == "llama-2"));
 }

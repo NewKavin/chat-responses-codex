@@ -95,6 +95,7 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -466,6 +467,7 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -586,6 +588,7 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
                 per_minute_limit: 60,
 
@@ -670,6 +673,7 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
                 per_minute_limit: 60,
 
@@ -753,6 +757,7 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -878,6 +883,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -982,6 +988,7 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -1150,6 +1157,7 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -1389,6 +1397,7 @@ async fn downstream_streaming_request_reports_model_routing_failure_precisely() 
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["glm-5".into()],
                 per_minute_limit: 60,
 
@@ -1520,6 +1529,7 @@ async fn downstream_chat_request_supports_upstream_base_url_with_v1_prefix() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -1663,6 +1673,7 @@ async fn downstream_models_are_discovered_from_upstream_when_configured_models_a
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec![],
                 per_minute_limit: 60,
 
@@ -1820,6 +1831,7 @@ async fn downstream_request_is_rejected_after_exceeding_per_minute_limit() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 1,
 
@@ -1947,6 +1959,7 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -2099,6 +2112,7 @@ async fn downstream_chat_stream_records_usage_from_final_chunk() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -2232,6 +2246,7 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -2372,6 +2387,7 @@ async fn downstream_chat_stream_is_synthesized_from_json_response() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -2532,6 +2548,7 @@ async fn downstream_responses_stream_retries_without_stream_when_upstream_reject
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -2709,6 +2726,7 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_tool_ca
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -2895,6 +2913,7 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -3049,6 +3068,7 @@ async fn downstream_responses_request_downgrades_developer_role_for_chat_upstrea
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -3182,6 +3202,7 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -3328,6 +3349,7 @@ async fn downstream_responses_request_with_non_function_tool_choice_falls_back_t
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -3474,6 +3496,7 @@ async fn downstream_responses_request_with_unknown_string_tool_choice_falls_back
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -3635,6 +3658,7 @@ async fn downstream_responses_request_with_non_function_tools_falls_back_to_chat
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
@@ -3827,6 +3851,7 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 60,
 
