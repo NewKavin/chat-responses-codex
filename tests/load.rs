@@ -95,6 +95,7 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4.1-mini".into()],
                 per_minute_limit: 10_000,
 

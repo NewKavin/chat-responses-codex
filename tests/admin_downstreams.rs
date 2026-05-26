@@ -7,6 +7,7 @@
 //! - Downstream key rotation
 //! - Filtering (by status, lifecycle, search)
 //! - Input validation and error handling
+//! - ID must be manually provided (no auto-generation)
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -41,6 +42,7 @@ fn create_test_state() -> AppState {
                 name: "Test Downstream 1".to_string(),
                 hash: "hash1".to_string(),
                 plaintext_key: None,
+                plaintext_key_prefix: None,
                 model_allowlist: vec!["gpt-4".to_string()],
                 per_minute_limit: 100,
 
@@ -60,6 +62,7 @@ fn create_test_state() -> AppState {
                 name: "Test Downstream 2".to_string(),
                 hash: "hash2".to_string(),
                 plaintext_key: None,
+                plaintext_key_prefix: None,
                 model_allowlist: vec![],
                 per_minute_limit: 50,
 
@@ -328,6 +331,44 @@ async fn test_downstreams_create_generates_key_hash() {
 }
 
 #[tokio::test]
+async fn test_downstreams_create_requires_id() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+    
+    let token = get_admin_token(&app, "admin", "admin").await;
+    
+    let new_downstream = json!({
+        "id": "",
+        "name": "Missing ID Downstream",
+        "model_allowlist": [],
+        "per_minute_limit": 100,
+        "active": true
+    });
+    
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&new_downstream).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert!(result["error"]["message"].as_str().unwrap().contains("ID"));
+}
+
+#[tokio::test]
 async fn test_downstreams_create_returns_plaintext_key_once() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
@@ -366,7 +407,7 @@ async fn test_downstreams_create_returns_plaintext_key_once() {
     // Should return plaintext_key on creation
     assert!(result["plaintext_key"].is_string());
     let plaintext_key = result["plaintext_key"].as_str().unwrap();
-    assert!(plaintext_key.starts_with("sk_"));
+    assert!(plaintext_key.starts_with("key-"));
 }
 
 // ============================================================================
@@ -558,7 +599,7 @@ async fn test_downstreams_rotate_generates_new_key() {
     // Should return new plaintext_key
     assert!(result["plaintext_key"].is_string());
     let new_key = result["plaintext_key"].as_str().unwrap();
-    assert!(new_key.starts_with("sk_"));
+    assert!(new_key.starts_with("key-"));
     
     // Verify the hash was changed
     let snapshot = state.snapshot().await;

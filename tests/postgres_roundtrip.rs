@@ -59,11 +59,12 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         active: true,
         failure_count: 2,
     };
-    let downstream = DownstreamConfig {
+let downstream = DownstreamConfig {
         id: "down-1".into(),
         name: "team-a".into(),
         hash: downstream_key.hash.clone(),
         plaintext_key: Some(downstream_key.plaintext.clone()),
+        plaintext_key_prefix: None,
         model_allowlist: vec!["glm-5".into()],
         per_minute_limit: 42,
 
