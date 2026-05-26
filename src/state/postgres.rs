@@ -519,6 +519,7 @@ impl PgConnection {
                 name: required_text(&row, 1, "downstreams.name")?,
                 hash: required_text(&row, 2, "downstreams.hash")?,
                 plaintext_key: optional_text(&row, 3),
+                plaintext_key_prefix: None,
                 model_allowlist: Vec::new(),
                 rate_limit_enabled: parse_bool(required_text(&row, 4, "downstreams.rate_limit_enabled")?)?,
                 per_minute_limit: required_text(&row, 5, "downstreams.per_minute_limit")?

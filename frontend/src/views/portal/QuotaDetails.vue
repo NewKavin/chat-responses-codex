@@ -134,10 +134,7 @@ const loadData = async () => {
     const responseData = response.data as any
     data.value = {
       request_quota: responseData.request_quota,
-      token_quota: {
-        daily: responseData.token_limits?.daily,
-        monthly: responseData.token_limits?.monthly
-      },
+      token_quota: responseData.token_quota,
       model_allowlist: responseData.model_allowlist || [],
       ip_allowlist: responseData.ip_allowlist || []
     }

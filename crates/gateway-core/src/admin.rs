@@ -83,6 +83,7 @@ pub struct DownstreamFormView {
     pub never_expires: bool,
     pub active: bool,
     pub plaintext_key: Option<String>,
+    pub plaintext_key_prefix: Option<String>,
     pub legacy_secret: bool,
 }
 
@@ -212,8 +213,8 @@ impl DownstreamListQuery {
 }
 
 impl DownstreamFormView {
-    pub fn blank() -> Self {
-        Self {
+pub fn blank() -> Self {
+Self {
             action: "/admin/downstreams".to_string(),
             heading: "创建下游密钥".to_string(),
             submit_label: "创建密钥".to_string(),
@@ -233,6 +234,7 @@ impl DownstreamFormView {
             never_expires: true,
             active: true,
             plaintext_key: None,
+plaintext_key_prefix: None,
             legacy_secret: false,
         }
     }
@@ -277,6 +279,7 @@ impl DownstreamFormView {
             never_expires: downstream.expires_at.is_none(),
             active: downstream.active,
             plaintext_key: downstream.plaintext_key.clone(),
+            plaintext_key_prefix: downstream.plaintext_key_prefix.clone(),
             legacy_secret: downstream.plaintext_key.is_none(),
         }
     }
@@ -355,6 +358,7 @@ impl DownstreamFormView {
                     .is_empty(),
             active: form_toggle_enabled(&form.active),
             plaintext_key: secret.clone(),
+            plaintext_key_prefix: None,
             legacy_secret: secret.is_none(),
         }
     }
