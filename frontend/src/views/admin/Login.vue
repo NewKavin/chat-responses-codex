@@ -48,7 +48,7 @@ import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { User, Lock } from '@element-plus/icons-vue'
-import { adminApi } from '@/api/admin'
+import { adminApi, hasUsableAdminToken } from '@/api/admin'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -71,7 +71,13 @@ const handleLogin = async () => {
     await formRef.value.validate()
     loading.value = true
     
-    const { data } = await adminApi.login(form)
+    const response = await adminApi.login(form)
+    const { data } = response
+
+    if (response.status !== 200 || !hasUsableAdminToken(data.token)) {
+      throw new Error('INVALID_LOGIN_RESPONSE')
+    }
+
     authStore.setToken(data.token)
     
     ElMessage.success('登录成功')

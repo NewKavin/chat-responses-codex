@@ -32,16 +32,16 @@
       <el-table :data="downstreams" v-loading="loading" stripe>
         <el-table-column prop="id" label="ID" width="150" />
         <el-table-column prop="name" label="名称" width="200" />
-        <el-table-column label="密钥" width="200">
+        <el-table-column label="秘钥" width="220">
           <template #default="{ row }">
             <div class="key-cell">
-              <code v-if="!expandedKeys.includes(row.id)">{{ maskKey(row.hash) }}</code>
-              <code v-else class="full-key">{{ row.hash }}</code>
+              <code v-if="!expandedKeys.includes(row.id)">{{ maskKey(row.plaintext_key || row.plaintext_key_prefix || row.hash) }}</code>
+              <code v-else class="full-key">{{ row.plaintext_key || row.plaintext_key_prefix || row.hash }}</code>
               <el-button-group>
                 <el-button size="small" @click="toggleKeyView(row.id)">
                   {{ expandedKeys.includes(row.id) ? '隐藏' : '查看' }}
                 </el-button>
-                <el-button size="small" @click="copyKey(row.hash)">复制</el-button>
+                <el-button size="small" @click="copyKey(row.plaintext_key || row.plaintext_key_prefix || row.hash)">复制秘钥</el-button>
               </el-button-group>
             </div>
           </template>
@@ -81,12 +81,12 @@
       </el-table>
 
       <el-alert
-        title="提示"
-        type="info"
+        title="重要提示"
+        type="warning"
         :closable="false"
         class="helper-text"
       >
-        密钥默认折叠显示，支持查看、复制、轮换和删除。轮换密钥会立即生效，旧密钥失效。
+        表格中显示的是密钥标识（哈希值），不是真正的秘钥。如需获取真正的秘钥，请点击"轮换密钥"生成新秘钥。轮换后旧秘钥立即失效，新秘钥仅显示一次。
       </el-alert>
     </el-card>
     
@@ -97,8 +97,21 @@
       width="600px"
     >
       <el-form :model="form" :rules="rules" ref="formRef" label-width="150px">
-        <el-form-item v-if="dialogMode === 'edit'" label="ID">
-          <el-input v-model="form.id" disabled />
+        <el-form-item label="ID" prop="id">
+          <el-input 
+            v-model="form.id" 
+            :disabled="dialogMode === 'edit'"
+            :placeholder="dialogMode === 'create' ? '请输入下游ID（必填，用于门户登录）' : ''"
+          />
+          <el-alert
+            v-if="dialogMode === 'create'"
+            title="说明"
+            type="info"
+            :closable="false"
+            class="helper-text"
+          >
+            下游ID必须手动填写，用于门户登录时的工号。建议使用有意义标识（如 team-a）。
+          </el-alert>
         </el-form-item>
         <el-form-item label="名称" prop="name">
           <el-input v-model="form.name" placeholder="例如: 研发团队 A" />
@@ -176,17 +189,17 @@
       <div class="new-key-container">
         <el-input v-model="newPlaintextKey" readonly>
           <template #append>
-            <el-button @click="copyKey(newPlaintextKey)">复制</el-button>
+            <el-button type="primary" @click="copyKey(newPlaintextKey)">复制秘钥</el-button>
           </template>
         </el-input>
       </div>
       <el-alert
-        title="提示"
-        type="info"
+        title="重要提示"
+        type="warning"
         :closable="false"
         class="helper-text"
       >
-        这个值默认只在这里显示一次。请立即复制并妥善保存，后续无法再次查看。
+        这是真正的秘钥，可用于门户登录。请立即复制并妥善保存，关闭后无法再次查看。
       </el-alert>
       <template #footer>
         <el-button type="primary" @click="rotateDialogVisible = false">我已保存</el-button>
@@ -240,6 +253,10 @@ const ipAllowlistText = computed({
 })
 
 const rules = {
+  id: [
+    { required: true, message: '请输入下游ID', trigger: 'blur' },
+    { min: 1, message: 'ID不能为空', trigger: 'blur' }
+  ],
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }]
 }
 
@@ -257,9 +274,26 @@ const toggleKeyView = (id: string) => {
   }
 }
 
-const copyKey = (key: string) => {
-  navigator.clipboard.writeText(key)
-  ElMessage.success('已复制到剪贴板')
+const copyKey = async (key: string) => {
+  try {
+    await navigator.clipboard.writeText(key)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    const textArea = document.createElement('textarea')
+    textArea.value = key
+    textArea.style.position = 'fixed'
+    textArea.style.left = '-9999px'
+    document.body.appendChild(textArea)
+    textArea.focus()
+    textArea.select()
+    try {
+      document.execCommand('copy')
+      ElMessage.success('已复制到剪贴板')
+    } catch {
+      ElMessage.error('复制失败，请手动复制')
+    }
+    document.body.removeChild(textArea)
+  }
 }
 
 const loadData = async () => {
@@ -325,6 +359,12 @@ const handleEdit = (row: DownstreamConfig) => {
 const handleSubmit = async () => {
   try {
     await formRef.value.validate()
+    
+    if (dialogMode.value === 'create' && !form.value.id?.trim()) {
+      ElMessage.error('请输入下游ID')
+      return
+    }
+    
     if (form.value.rate_limit_enabled) {
       if (!form.value.per_minute_limit || form.value.per_minute_limit < 1) {
         ElMessage.error('请填写有效的每分钟限制')
@@ -348,7 +388,6 @@ const handleSubmit = async () => {
     }
 
     if (dialogMode.value === 'create') {
-      delete submitData.id
       const { data } = await adminApi.createDownstream(submitData)
       if (data.plaintext_key) {
         newPlaintextKey.value = data.plaintext_key

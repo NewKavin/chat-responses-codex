@@ -144,8 +144,7 @@
         <el-divider>模型配置</el-divider>
         <el-form-item label="支持的模型">
           <div class="model-input-group">
-            <el-select v-model="form.supported_models" multiple filterable allow-create>
-              <el-option v-for="model in commonModels" :key="model" :label="model" :value="model" />
+            <el-select v-model="form.supported_models" multiple filterable allow-create placeholder="手动输入或点击获取模型">
             </el-select>
             <el-button
               v-if="form.base_url && form.api_key"
@@ -296,8 +295,7 @@ const modelAliasesText = computed({
 
 const availableModelsForCost = computed(() => {
   const supported = form.value.supported_models || []
-  const combined = new Set([...supported, ...commonModels])
-  return Array.from(combined).sort()
+  return Array.from(new Set(supported)).sort()
 })
 
 const addModelCost = () => {
@@ -313,8 +311,6 @@ const removeModelCost = (row: any) => {
     form.value.model_request_costs?.splice(index, 1)
   }
 }
-
-const commonModels = ['gpt-4', 'gpt-3.5-turbo', 'gpt-4o', 'claude-3', 'claude-2', 'glm-5.1', 'deepseek-chat', 'minimax-2.7']
 
 const rules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
