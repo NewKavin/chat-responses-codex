@@ -8,16 +8,21 @@ import type {
   LogsResponse
 } from '@/types'
 
-const api = axios.create({
-  baseURL: '/api',
-  timeout: 10000,
-  validateStatus: (status) => status < 500
-})
+export const createAdminApiClient = () =>
+  axios.create({
+    baseURL: '/api',
+    timeout: 10000
+  })
+
+export const hasUsableAdminToken = (token: unknown): token is string =>
+  typeof token === 'string' && token.trim().length > 0
+
+const api = createAdminApiClient()
 
 // 请求拦截器：添加 JWT token
 api.interceptors.request.use(config => {
   const token = localStorage.getItem('admin_token')
-  if (token) {
+  if (hasUsableAdminToken(token)) {
     config.headers.Authorization = `Bearer ${token}`
   }
   return config

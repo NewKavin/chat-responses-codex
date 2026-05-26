@@ -83,6 +83,7 @@ export interface DownstreamConfig {
   name: string
   hash: string
   plaintext_key?: string
+  plaintext_key_prefix?: string
   model_allowlist: string[]
   rate_limit_enabled: boolean
   per_minute_limit: number
@@ -157,16 +158,6 @@ export interface DailyStats {
   date: number
   total_requests: number
   total_tokens: number
-  success_rate: number
-}
-
-export interface ModelStats {
-  model: string
-  today_count: number
-  today_tokens: number
-  month_count: number
-  month_tokens: number
-  avg_latency_ms: number
   success_rate: number
 }
 
