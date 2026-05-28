@@ -1,5 +1,6 @@
 use super::{
-    DownstreamConfig, ModelAliasConfig, PersistedState, UpstreamConfig, UpstreamProtocol, UsageLog,
+    DownstreamConfig, ModelAliasConfig, ModelContextConfig, PersistedState, UpstreamConfig,
+    UpstreamProtocol, UsageLog,
 };
 #[path = "postgres_scram.rs"]
 mod scram;
@@ -133,6 +134,10 @@ impl PostgresStateStore {
                 ADD COLUMN IF NOT EXISTS premium_only BOOLEAN NOT NULL DEFAULT FALSE;
             ALTER TABLE upstreams
                 ADD COLUMN IF NOT EXISTS protect_premium_quota BOOLEAN NOT NULL DEFAULT FALSE;
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS protocols TEXT NULL;
+            ALTER TABLE upstreams
+                ADD COLUMN IF NOT EXISTS model_contexts TEXT NULL;
 
             CREATE TABLE IF NOT EXISTS downstreams (
                 id TEXT PRIMARY KEY,
@@ -404,7 +409,8 @@ impl PgConnection {
         let mut upstreams = Vec::new();
         for row in self
             .query(
-                "SELECT id, name, base_url, api_key, protocol, \
+                "SELECT id, name, base_url, api_key, protocol, protocols, \
+                 model_contexts, \
                  COALESCE(request_quota_window_hours, 5), \
                  COALESCE(request_quota_requests, request_quota_5h, 600), \
                  requests_per_minute, max_concurrency, priority, premium_only, \
@@ -413,43 +419,46 @@ impl PgConnection {
             )
             .await?
         {
+            let protocol = decode_protocol(required_text(&row, 4, "upstreams.protocol")?)?;
             upstreams.push(UpstreamConfig {
                 id: required_text(&row, 0, "upstreams.id")?,
                 name: required_text(&row, 1, "upstreams.name")?,
                 base_url: required_text(&row, 2, "upstreams.base_url")?,
                 api_key: required_text(&row, 3, "upstreams.api_key")?,
-                protocol: decode_protocol(required_text(&row, 4, "upstreams.protocol")?)?,
+                protocol,
+                protocols: decode_protocols(optional_text(&row, 5), protocol)?,
+                model_contexts: decode_model_contexts(optional_text(&row, 6))?,
                 supported_models: Vec::new(),
                 model_aliases: Vec::new(),
-                model_request_costs: Vec::new(),
                 request_quota_window_hours: required_text(
                     &row,
-                    5,
+                    7,
                     "upstreams.request_quota_window_hours",
                 )?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                request_quota_requests: required_text(&row, 6, "upstreams.request_quota_requests")?
+                request_quota_requests: required_text(&row, 8, "upstreams.request_quota_requests")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                requests_per_minute: required_text(&row, 7, "upstreams.requests_per_minute")?
+                requests_per_minute: required_text(&row, 9, "upstreams.requests_per_minute")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                max_concurrency: required_text(&row, 8, "upstreams.max_concurrency")?
+                max_concurrency: required_text(&row, 10, "upstreams.max_concurrency")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                priority: required_text(&row, 9, "upstreams.priority")?
+                priority: required_text(&row, 11, "upstreams.priority")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                model_request_costs: Vec::new(),
                 premium_models: Vec::new(),
-                premium_only: parse_bool(required_text(&row, 10, "upstreams.premium_only")?)?,
+                premium_only: parse_bool(required_text(&row, 12, "upstreams.premium_only")?)?,
                 protect_premium_quota: parse_bool(required_text(
                     &row,
-                    11,
+                    13,
                     "upstreams.protect_premium_quota",
                 )?)?,
-                active: parse_bool(required_text(&row, 12, "upstreams.active")?)?,
-                failure_count: required_text(&row, 13, "upstreams.failure_count")?
+                active: parse_bool(required_text(&row, 14, "upstreams.active")?)?,
+                failure_count: required_text(&row, 15, "upstreams.failure_count")?
                     .parse::<u32>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
             });
@@ -679,14 +688,21 @@ impl PgConnection {
             self.batch_execute("DELETE FROM usage_logs").await?;
 
             for upstream in &state.upstreams {
+                let protocols = upstream.supported_protocols();
+                let primary_protocol = protocols
+                    .first()
+                    .copied()
+                    .unwrap_or(UpstreamProtocol::ChatCompletions);
                 self.batch_execute(&format!(
-                    "INSERT INTO upstreams (id, name, base_url, api_key, protocol, request_quota_5h, request_quota_window_hours, request_quota_requests, requests_per_minute, max_concurrency, priority, premium_only, protect_premium_quota, active, failure_count) \
-                     VALUES ({id}, {name}, {base_url}, {api_key}, {protocol}, {request_quota_5h}, {request_quota_window_hours}, {request_quota_requests}, {requests_per_minute}, {max_concurrency}, {priority}, {premium_only}, {protect_premium_quota}, {active}, {failure_count})",
+                    "INSERT INTO upstreams (id, name, base_url, api_key, protocol, protocols, model_contexts, request_quota_5h, request_quota_window_hours, request_quota_requests, requests_per_minute, max_concurrency, priority, premium_only, protect_premium_quota, active, failure_count) \
+                     VALUES ({id}, {name}, {base_url}, {api_key}, {protocol}, {protocols}, {model_contexts}, {request_quota_5h}, {request_quota_window_hours}, {request_quota_requests}, {requests_per_minute}, {max_concurrency}, {priority}, {premium_only}, {protect_premium_quota}, {active}, {failure_count})",
                     id = sql_string(&upstream.id),
                     name = sql_string(&upstream.name),
                     base_url = sql_string(&upstream.base_url),
                     api_key = sql_string(&upstream.api_key),
-                    protocol = sql_string(&format!("{:?}", upstream.protocol)),
+                    protocol = sql_string(&format!("{:?}", primary_protocol)),
+                    protocols = sql_string(&encode_protocols(&protocols)),
+                    model_contexts = sql_string(&encode_model_contexts(&upstream.model_contexts)),
                     request_quota_5h = upstream.request_quota_requests,
                     request_quota_window_hours = upstream.request_quota_window_hours,
                     request_quota_requests = upstream.request_quota_requests,
@@ -1213,6 +1229,40 @@ fn parse_bool(value: String) -> io::Result<bool> {
 fn decode_protocol(value: String) -> io::Result<UpstreamProtocol> {
     serde_json::from_value(serde_json::Value::String(value))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn decode_protocols(
+    value: Option<String>,
+    fallback: UpstreamProtocol,
+) -> io::Result<Vec<UpstreamProtocol>> {
+    let Some(value) = value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    else {
+        return Ok(vec![fallback]);
+    };
+
+    if let Ok(protocols) = serde_json::from_str::<Vec<UpstreamProtocol>>(&value) {
+        return Ok(protocols);
+    }
+
+    decode_protocol(value).map(|protocol| vec![protocol])
+}
+
+fn encode_protocols(protocols: &[UpstreamProtocol]) -> String {
+    serde_json::to_string(protocols).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn decode_model_contexts(value: Option<String>) -> io::Result<Vec<ModelContextConfig>> {
+    let Some(value) = value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+
+    serde_json::from_str::<Vec<ModelContextConfig>>(&value)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn encode_model_contexts(values: &[ModelContextConfig]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn sql_string(value: &str) -> String {

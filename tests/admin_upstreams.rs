@@ -523,6 +523,49 @@ async fn test_upstreams_update_auto_fills_alias_for_uppercase_supported_models()
 }
 
 #[tokio::test]
+async fn test_upstreams_update_protocols_take_precedence_over_protocol() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let updated_upstream = json!({
+        "protocol": "Responses",
+        "protocols": ["ChatCompletions", "Responses"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/upstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&updated_upstream).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
+    assert_eq!(upstream.protocol, UpstreamProtocol::ChatCompletions);
+    assert_eq!(
+        upstream.protocols,
+        vec![UpstreamProtocol::ChatCompletions, UpstreamProtocol::Responses]
+    );
+}
+
+#[tokio::test]
 async fn test_upstreams_update_rejects_nonexistent_id() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);

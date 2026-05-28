@@ -75,8 +75,10 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 base_url: format!("http://{}", upstream_addr),
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
                 model_aliases: vec![],
+                model_contexts: vec![],
                 request_quota_window_hours: 5,
 
                 request_quota_requests: 10_000,

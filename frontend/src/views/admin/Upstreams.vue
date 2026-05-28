@@ -11,7 +11,19 @@
       <el-table :data="upstreams" v-loading="loading" stripe style="width: 100%">
         <el-table-column prop="id" label="ID" width="150" />
         <el-table-column prop="name" label="名称" width="200" />
-        <el-table-column prop="protocol" label="协议" width="120" />
+        <el-table-column label="协议" width="220">
+          <template #default="{ row }">
+            <el-space wrap>
+              <el-tag
+                v-for="protocol in displayProtocols(row)"
+                :key="`${row.id}-${protocol}`"
+                size="small"
+              >
+                {{ protocol }}
+              </el-tag>
+            </el-space>
+          </template>
+        </el-table-column>
         <el-table-column label="模型数量" width="100">
           <template #default="{ row }">
             {{ row.supported_models.length }}
@@ -114,8 +126,8 @@
         <el-form-item label="API Key" prop="api_key">
           <el-input v-model="form.api_key" type="password" show-password placeholder="sk-..." />
         </el-form-item>
-        <el-form-item label="协议" prop="protocol">
-          <el-select v-model="form.protocol">
+        <el-form-item label="协议" prop="protocols">
+          <el-select v-model="form.protocols" multiple>
             <el-option label="ChatCompletions" value="ChatCompletions" />
             <el-option label="Responses" value="Responses" />
           </el-select>
@@ -264,6 +276,7 @@ const form = ref<Partial<UpstreamConfig>>({
   base_url: '',
   api_key: '',
   protocol: 'ChatCompletions',
+  protocols: ['ChatCompletions'],
   supported_models: [],
   active: true,
   model_aliases: [],
@@ -316,7 +329,7 @@ const rules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
   base_url: [{ required: true, message: '请输入Base URL', trigger: 'blur' }],
   api_key: [{ required: true, message: '请输入API Key', trigger: 'blur' }],
-  protocol: [{ required: true, message: '请选择协议', trigger: 'change' }]
+  protocols: [{ required: true, message: '请选择协议', trigger: 'change' }]
 }
 
 const getProgressColor = (percentage: number) => {
@@ -351,6 +364,18 @@ const stopAutoRefresh = () => {
   }
 }
 
+const resolveProtocols = (value: Partial<UpstreamConfig>): UpstreamConfig['protocol'][] => {
+  const fromProtocols = Array.isArray(value.protocols)
+    ? value.protocols.filter(Boolean) as UpstreamConfig['protocol'][]
+    : []
+  const fallback: UpstreamConfig['protocol'][] = value.protocol
+    ? [value.protocol]
+    : ['ChatCompletions']
+  return Array.from(new Set((fromProtocols.length > 0 ? fromProtocols : fallback)))
+}
+
+const displayProtocols = (value: UpstreamConfig) => resolveProtocols(value)
+
 const handleCreate = () => {
   dialogMode.value = 'create'
   form.value = {
@@ -359,6 +384,7 @@ const handleCreate = () => {
     base_url: '',
     api_key: '',
     protocol: 'ChatCompletions',
+    protocols: ['ChatCompletions'],
     supported_models: [],
     active: true,
     model_aliases: [],
@@ -377,7 +403,12 @@ const handleCreate = () => {
 
 const handleEdit = (row: UpstreamConfig) => {
   dialogMode.value = 'edit'
-  form.value = { ...row }
+  const protocols = resolveProtocols(row)
+  form.value = {
+    ...row,
+    protocol: protocols[0] as UpstreamConfig['protocol'],
+    protocols
+  }
   dialogVisible.value = true
 }
 
@@ -389,6 +420,9 @@ const handleSubmit = async () => {
     const submitData: Partial<UpstreamConfig> = {
       ...form.value
     }
+    const protocols = resolveProtocols(submitData)
+    submitData.protocols = protocols
+    submitData.protocol = protocols[0] as UpstreamConfig['protocol']
     
     if (dialogMode.value === 'create') {
       submitData.id = ''

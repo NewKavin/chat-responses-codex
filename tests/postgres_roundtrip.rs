@@ -33,11 +33,13 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         base_url: "https://upstream.example".into(),
         api_key: "upstream-secret".into(),
         protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
         supported_models: vec!["gpt-4.1-mini".into()],
         model_aliases: vec![ModelAliasConfig {
             slug: "glm-5".into(),
             upstream_model: "GLM-5".into(),
         }],
+        model_contexts: vec![],
         request_quota_window_hours: 5,
 
         request_quota_requests: 888,

@@ -21,8 +21,7 @@ use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tower_http::classify::ServerErrorsFailureClass;
@@ -526,6 +525,7 @@ async fn claude_messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    let claude_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let chat_payload = match claude_messages_to_chat_payload(&body) {
         Ok(payload) => payload,
         Err(message) => return GatewayError::BadRequest(message).into_response(),
@@ -533,7 +533,7 @@ async fn claude_messages(
 
     match process_gateway_request(state, headers, chat_payload, EndpointKind::ChatCompletions).await
     {
-        Ok(result) => dispatch_claude_success(result),
+        Ok(result) => dispatch_claude_success(result, claude_stream),
         Err(error) => error.into_response(),
     }
 }
@@ -746,7 +746,7 @@ async fn process_gateway_request(
     let fallback_to_chat = requires_responses_tooling
         && !routing_snapshot.upstreams.iter().any(|upstream| {
             upstream.active
-                && upstream.protocol == UpstreamProtocol::Responses
+                && upstream.supports_protocol(UpstreamProtocol::Responses)
                 && upstream.supports_model(model)
         });
     if requires_responses_tooling {
@@ -798,7 +798,7 @@ async fn process_gateway_request(
             .upstreams
             .iter()
             .filter(|upstream| upstream.active)
-            .filter(|upstream| upstream.protocol == protocol)
+            .filter(|upstream| upstream.supports_protocol(protocol))
             .filter(|upstream| upstream.supports_model(model))
             .cloned()
             .collect::<Vec<_>>();
@@ -850,7 +850,7 @@ async fn process_gateway_request(
                     "{}|{}|{:?}|in_flight={}|cooldown_remaining={}|minute_cost={}/{}|five_hour_cost={}/{}|failure_count={}|request_cost={}|protect_premium_quota={}|premium_match={}",
                     upstream.id,
                     upstream.name,
-                    upstream.protocol,
+                    protocol,
                     runtime.in_flight,
                     runtime.cooldown_remaining(now),
                     minute_cost,
@@ -892,7 +892,7 @@ async fn process_gateway_request(
                 normalized_model = %normalized_model,
                 selected_upstream_id = %upstream.id,
                 selected_upstream_name = %upstream.name,
-                selected_upstream_protocol = ?upstream.protocol,
+                selected_upstream_protocol = ?protocol,
                 stream = request_stream,
                 in_flight = runtime.in_flight,
                 cooldown_remaining = runtime.cooldown_remaining(now),
@@ -916,7 +916,7 @@ async fn process_gateway_request(
                     original_model = %model,
                     normalized_model = %normalized_model,
                     selected_upstream_id = %upstream.id,
-                    selected_upstream_protocol = ?upstream.protocol,
+                    selected_upstream_protocol = ?protocol,
                     attempt_stream,
                     request_cost,
                     "reserved upstream capacity"
@@ -925,6 +925,7 @@ async fn process_gateway_request(
                 let result = send_to_upstream(
                     &state,
                     &upstream,
+                    protocol,
                     &body,
                     endpoint,
                     request_stream,
@@ -954,7 +955,7 @@ async fn process_gateway_request(
                             original_model = %model,
                             normalized_model = %normalized_model,
                             selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?upstream.protocol,
+                            selected_upstream_protocol = ?protocol,
                             status = result.status.as_u16(),
                             latency_ms = started.elapsed().as_millis() as u64,
                             attempt_stream,
@@ -995,7 +996,7 @@ async fn process_gateway_request(
                                     original_model = %model,
                                     normalized_model = %normalized_model,
                                     selected_upstream_id = %upstream.id,
-                                    selected_upstream_protocol = ?upstream.protocol,
+                                    selected_upstream_protocol = ?protocol,
                                     error = %error,
                                     "failed to save usage log"
                                 );
@@ -1021,7 +1022,7 @@ async fn process_gateway_request(
                             normalized_model = %normalized_model,
                             selected_upstream_id = %upstream.id,
                             selected_upstream_name = %upstream.name,
-                            selected_upstream_protocol = ?upstream.protocol,
+                            selected_upstream_protocol = ?protocol,
                             error = %message,
                             retry_after_seconds,
                             "upstream rate limited"
@@ -1057,7 +1058,7 @@ async fn process_gateway_request(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
-                                selected_upstream_protocol = ?upstream.protocol,
+                                selected_upstream_protocol = ?protocol,
                                 retry_after_seconds,
                                 "waiting for upstream rate limit cooldown before retrying"
                             );
@@ -1075,7 +1076,7 @@ async fn process_gateway_request(
                             original_model = %model,
                             normalized_model = %normalized_model,
                             selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?upstream.protocol,
+                            selected_upstream_protocol = ?protocol,
                             error = %error,
                             "upstream rejected request payload"
                         );
@@ -1090,7 +1091,7 @@ async fn process_gateway_request(
                             original_model = %model,
                             normalized_model = %normalized_model,
                             selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?upstream.protocol,
+                            selected_upstream_protocol = ?protocol,
                             attempt_stream,
                             error = %error,
                             "streaming upstream attempt failed; retrying without stream"
@@ -1106,7 +1107,7 @@ async fn process_gateway_request(
                             original_model = %model,
                             normalized_model = %normalized_model,
                             selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?upstream.protocol,
+                            selected_upstream_protocol = ?protocol,
                             error = %error,
                             "upstream request failed"
                         );
@@ -1332,6 +1333,364 @@ fn responses_tool_choice_requires_chat_fallback(
     }
 }
 
+const CONTEXT_KEEP_RECENT_ITEMS: usize = 8;
+const CONTEXT_TOOL_RESULT_TRUNCATE_CHARS: usize = 1200;
+const CONTEXT_MESSAGE_TRUNCATE_CHARS: usize = 800;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ContextTrimStats {
+    truncated_blocks: u32,
+    compacted_entries: u32,
+    tool_result_blocks: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ContextBudgetReport {
+    estimated_input_tokens: u64,
+    estimated_input_tokens_after_trim: u64,
+    requested_output_tokens: u64,
+    allowed_input_tokens: u64,
+    context_limit: u32,
+    output_reserve: u32,
+    trim_stats: ContextTrimStats,
+    fallback_model: Option<String>,
+}
+
+fn requested_output_tokens_from_payload(payload: &Value) -> u64 {
+    payload
+        .get("max_output_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| payload.get("max_tokens").and_then(Value::as_u64))
+        .or_else(|| payload.get("max_completion_tokens").and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+fn estimate_tokens_from_text(text: &str) -> u64 {
+    let chars = text.chars().count() as u64;
+    if chars == 0 {
+        0
+    } else {
+        chars.div_ceil(4)
+    }
+}
+
+fn estimate_tokens_from_value(value: &Value) -> u64 {
+    match value {
+        Value::String(text) => estimate_tokens_from_text(text),
+        _ => estimate_tokens_from_text(&serde_json::to_string(value).unwrap_or_default()),
+    }
+}
+
+fn estimate_context_entry_tokens(payload: &Value) -> u64 {
+    if let Some(messages) = payload.get("messages").and_then(Value::as_array) {
+        return messages.iter().map(estimate_tokens_from_value).sum();
+    }
+
+    if let Some(input) = payload.get("input").and_then(Value::as_array) {
+        return input.iter().map(estimate_tokens_from_value).sum();
+    }
+
+    0
+}
+
+fn estimate_payload_baseline_tokens(payload: &Value) -> u64 {
+    let mut base = payload.clone();
+    if let Some(object) = base.as_object_mut() {
+        object.remove("messages");
+        object.remove("input");
+    }
+    estimate_tokens_from_value(&base)
+}
+
+fn allowed_input_tokens(context_limit: u32, requested_output_tokens: u64, output_reserve: u32) -> u64 {
+    let limit = u64::from(context_limit.max(2));
+    let reserved = requested_output_tokens
+        .max(u64::from(output_reserve))
+        .min(limit.saturating_sub(1));
+    limit.saturating_sub(reserved)
+}
+
+fn entry_role(entry: &Value) -> Option<&str> {
+    entry.get("role").and_then(Value::as_str)
+}
+
+fn entry_type(entry: &Value) -> Option<&str> {
+    entry.get("type").and_then(Value::as_str)
+}
+
+fn entry_is_system(entry: &Value) -> bool {
+    matches!(entry_role(entry), Some("system" | "developer"))
+}
+
+fn entry_is_tool_result(entry: &Value) -> bool {
+    matches!(entry_role(entry), Some("tool" | "function"))
+        || matches!(entry_type(entry), Some("function_call_output" | "tool_result"))
+}
+
+fn summarize_text(text: &str, max_chars: usize, label: &str) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    let clip = max_chars.max(16);
+    let head_size = clip / 2;
+    let tail_size = clip.saturating_sub(head_size);
+    let head = chars
+        .iter()
+        .take(head_size)
+        .collect::<String>()
+        .replace('\n', " ");
+    let tail = chars
+        .iter()
+        .skip(chars.len().saturating_sub(tail_size))
+        .collect::<String>()
+        .replace('\n', " ");
+    format!(
+        "[gateway-summary {label} original_chars={} head=\"{}\" tail=\"{}\"]",
+        chars.len(),
+        head.trim(),
+        tail.trim()
+    )
+}
+
+fn value_to_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn truncate_value_field(value: &mut Value, max_chars: usize, label: &str) -> bool {
+    let text = value_to_text(value);
+    if text.chars().count() <= max_chars {
+        return false;
+    }
+    *value = Value::String(summarize_text(&text, max_chars, label));
+    true
+}
+
+fn truncate_entry_content(entry: &mut Value, max_chars: usize, label: &str) -> bool {
+    let Some(object) = entry.as_object_mut() else {
+        return truncate_value_field(entry, max_chars, label);
+    };
+
+    if let Some(content) = object.get_mut("content") {
+        if truncate_value_field(content, max_chars, label) {
+            return true;
+        }
+    }
+    if let Some(output) = object.get_mut("output") {
+        if truncate_value_field(output, max_chars, label) {
+            return true;
+        }
+    }
+    if let Some(arguments) = object.get_mut("arguments") {
+        if truncate_value_field(arguments, max_chars, label) {
+            return true;
+        }
+    }
+    false
+}
+
+fn compact_entry(entry: &mut Value, tool_result: bool) -> bool {
+    let label = if tool_result {
+        "tool_result"
+    } else {
+        "history_message"
+    };
+    let summary = format!("[gateway-summary {label} omitted]");
+
+    let Some(object) = entry.as_object_mut() else {
+        *entry = Value::String(summary);
+        return true;
+    };
+
+    if tool_result {
+        if let Some(output) = object.get_mut("output") {
+            *output = Value::String(summary);
+            return true;
+        }
+    }
+    if let Some(content) = object.get_mut("content") {
+        *content = Value::String(summary);
+        return true;
+    }
+    if let Some(output) = object.get_mut("output") {
+        *output = Value::String(summary);
+        return true;
+    }
+
+    object.insert("content".into(), Value::String(summary));
+    true
+}
+
+fn estimate_entries_tokens(entries: &[Value]) -> u64 {
+    entries.iter().map(estimate_tokens_from_value).sum()
+}
+
+fn trim_entries_to_budget(entries: &mut [Value], target_tokens: u64) -> ContextTrimStats {
+    let mut stats = ContextTrimStats::default();
+    if entries.is_empty() {
+        return stats;
+    }
+
+    let keep_recent_start = entries.len().saturating_sub(CONTEXT_KEEP_RECENT_ITEMS);
+    let mut protected = HashSet::new();
+    for index in keep_recent_start..entries.len() {
+        protected.insert(index);
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        if entry_is_system(entry) {
+            protected.insert(index);
+        }
+    }
+
+    let mut candidates = (0..entries.len())
+        .filter(|index| !protected.contains(index))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|index| (!entry_is_tool_result(&entries[*index]), *index));
+
+    let mut current_tokens = estimate_entries_tokens(entries);
+
+    for index in &candidates {
+        if current_tokens <= target_tokens {
+            break;
+        }
+        let tool_result = entry_is_tool_result(&entries[*index]);
+        let max_chars = if tool_result {
+            CONTEXT_TOOL_RESULT_TRUNCATE_CHARS
+        } else {
+            CONTEXT_MESSAGE_TRUNCATE_CHARS
+        };
+        let label = if tool_result {
+            "tool_result"
+        } else {
+            "message"
+        };
+        if truncate_entry_content(&mut entries[*index], max_chars, label) {
+            stats.truncated_blocks = stats.truncated_blocks.saturating_add(1);
+            if tool_result {
+                stats.tool_result_blocks = stats.tool_result_blocks.saturating_add(1);
+            }
+            current_tokens = estimate_entries_tokens(entries);
+        }
+    }
+
+    for index in &candidates {
+        if current_tokens <= target_tokens {
+            break;
+        }
+        let tool_result = entry_is_tool_result(&entries[*index]);
+        if compact_entry(&mut entries[*index], tool_result) {
+            stats.compacted_entries = stats.compacted_entries.saturating_add(1);
+            if tool_result {
+                stats.tool_result_blocks = stats.tool_result_blocks.saturating_add(1);
+            }
+            current_tokens = estimate_entries_tokens(entries);
+        }
+    }
+
+    stats
+}
+
+fn trim_context_entries(payload: &mut Value, target_tokens: u64) -> ContextTrimStats {
+    if let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) {
+        return trim_entries_to_budget(messages, target_tokens);
+    }
+
+    if let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) {
+        return trim_entries_to_budget(input, target_tokens);
+    }
+
+    ContextTrimStats::default()
+}
+
+fn apply_context_budget_controls(
+    upstream: &UpstreamConfig,
+    payload: &mut Value,
+    model: &str,
+) -> Option<ContextBudgetReport> {
+    let mut config = upstream.context_config_for_model(model)?;
+    let requested_output_tokens = requested_output_tokens_from_payload(payload);
+    let mut baseline_tokens = estimate_payload_baseline_tokens(payload);
+    let mut entry_tokens = estimate_context_entry_tokens(payload);
+    let mut context_limit = config.context_limit;
+    let mut output_reserve = config.output_reserve;
+    let mut allowed = allowed_input_tokens(context_limit, requested_output_tokens, output_reserve);
+    let estimated_input_tokens = baseline_tokens.saturating_add(entry_tokens);
+    let mut trim_stats = ContextTrimStats::default();
+    let mut fallback_model = None;
+
+    if estimated_input_tokens > allowed {
+        let target_entry_tokens = allowed.saturating_sub(baseline_tokens);
+        let stats = trim_context_entries(payload, target_entry_tokens);
+        trim_stats.truncated_blocks = trim_stats
+            .truncated_blocks
+            .saturating_add(stats.truncated_blocks);
+        trim_stats.compacted_entries = trim_stats
+            .compacted_entries
+            .saturating_add(stats.compacted_entries);
+        trim_stats.tool_result_blocks = trim_stats
+            .tool_result_blocks
+            .saturating_add(stats.tool_result_blocks);
+
+        baseline_tokens = estimate_payload_baseline_tokens(payload);
+        entry_tokens = estimate_context_entry_tokens(payload);
+    }
+
+    let mut estimated_after_trim = baseline_tokens.saturating_add(entry_tokens);
+    if estimated_after_trim > allowed {
+        let required_limit = estimated_after_trim
+            .saturating_add(requested_output_tokens.max(u64::from(output_reserve)))
+            .min(u64::from(u32::MAX)) as u32;
+
+        if let Some(switched_model) = upstream.context_fallback_model_for(model, required_limit) {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("model".into(), Value::String(switched_model.clone()));
+            }
+            fallback_model = Some(switched_model.clone());
+
+            if let Some(next_config) = upstream.context_config_for_model(&switched_model) {
+                config = next_config;
+                context_limit = config.context_limit;
+                output_reserve = config.output_reserve;
+                allowed =
+                    allowed_input_tokens(context_limit, requested_output_tokens, output_reserve);
+            }
+
+            if estimated_after_trim > allowed {
+                let target_entry_tokens = allowed.saturating_sub(baseline_tokens);
+                let stats = trim_context_entries(payload, target_entry_tokens);
+                trim_stats.truncated_blocks = trim_stats
+                    .truncated_blocks
+                    .saturating_add(stats.truncated_blocks);
+                trim_stats.compacted_entries = trim_stats
+                    .compacted_entries
+                    .saturating_add(stats.compacted_entries);
+                trim_stats.tool_result_blocks = trim_stats
+                    .tool_result_blocks
+                    .saturating_add(stats.tool_result_blocks);
+
+                baseline_tokens = estimate_payload_baseline_tokens(payload);
+                entry_tokens = estimate_context_entry_tokens(payload);
+                estimated_after_trim = baseline_tokens.saturating_add(entry_tokens);
+            }
+        }
+    }
+
+    Some(ContextBudgetReport {
+        estimated_input_tokens,
+        estimated_input_tokens_after_trim: estimated_after_trim,
+        requested_output_tokens,
+        allowed_input_tokens: allowed,
+        context_limit,
+        output_reserve,
+        trim_stats,
+        fallback_model,
+    })
+}
+
 fn parse_retry_after_seconds(
     headers: &reqwest::header::HeaderMap,
     default_retry_seconds: u64,
@@ -1353,10 +1712,27 @@ fn is_context_limit_error(error_text: &str) -> bool {
         || normalized.contains("token limit")
 }
 
+fn halve_generation_cap_for_context_retry(payload: &mut Value) -> Option<(&'static str, u64, u64)> {
+    let object = payload.as_object_mut()?;
+    for key in ["max_output_tokens", "max_tokens", "max_completion_tokens"] {
+        let Some(current) = object.get(key).and_then(Value::as_u64) else {
+            continue;
+        };
+        if current <= 1 {
+            continue;
+        }
+        let reduced = (current / 2).max(1);
+        object.insert(key.to_string(), Value::Number(reduced.into()));
+        return Some((key, current, reduced));
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_to_upstream(
     state: &AppState,
     upstream: &UpstreamConfig,
+    upstream_protocol: UpstreamProtocol,
     body: &Value,
     endpoint: EndpointKind,
     request_stream: bool,
@@ -1371,7 +1747,7 @@ async fn send_to_upstream(
     user_agent: Option<&str>,
     chat_fallback_requested: bool,
 ) -> Result<DispatchResult, GatewayError> {
-    let upstream_body = match (endpoint, upstream.protocol) {
+    let upstream_body = match (endpoint, upstream_protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => body.clone(),
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
             chat_request_to_responses_payload(body).map_err(protocol_error_to_gateway)?
@@ -1409,18 +1785,39 @@ async fn send_to_upstream(
         }
     };
     let mut upstream_body = upstream_body;
-    if let Some(request_model) = body.get("model").and_then(Value::as_str) {
-        let resolved_model = upstream.resolved_model_name(request_model).ok_or_else(|| {
-            GatewayError::BadRequest(format!(
-                "model \"{request_model}\" is not configured for upstream \"{}\"",
-                upstream.name
-            ))
-        })?;
-        let model_rewritten = resolved_model != request_model;
-        let protocol_path = protocol_transition_label(endpoint, upstream.protocol);
-        if let Some(object) = upstream_body.as_object_mut() {
-            object.insert("model".into(), Value::String(resolved_model.clone()));
-        }
+    let request_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
+    let mut final_upstream_model = upstream.resolved_model_name(request_model).ok_or_else(|| {
+        GatewayError::BadRequest(format!(
+            "model \"{request_model}\" is not configured for upstream \"{}\"",
+            upstream.name
+        ))
+    })?;
+    let model_rewritten = final_upstream_model != request_model;
+    let protocol_path = protocol_transition_label(endpoint, upstream_protocol);
+    if let Some(object) = upstream_body.as_object_mut() {
+        object.insert("model".into(), Value::String(final_upstream_model.clone()));
+    }
+    tracing::info!(
+        request_id = %request_id,
+        downstream_key_id = %downstream_key_id,
+        path = %endpoint.path(),
+        original_model = %model,
+        normalized_model = %normalized_model,
+        selected_upstream_id = %upstream.id,
+        selected_upstream_name = %upstream.name,
+        selected_upstream_protocol = ?upstream_protocol,
+        upstream_model = %request_model,
+        final_upstream_model = %final_upstream_model,
+        model_rewritten = model_rewritten,
+        protocol_transition = %protocol_path,
+        request_stream,
+        try_upstream_stream,
+        "prepared upstream request body"
+    );
+    if model_rewritten {
         tracing::info!(
             request_id = %request_id,
             downstream_key_id = %downstream_key_id,
@@ -1429,36 +1826,17 @@ async fn send_to_upstream(
             normalized_model = %normalized_model,
             selected_upstream_id = %upstream.id,
             selected_upstream_name = %upstream.name,
-            selected_upstream_protocol = ?upstream.protocol,
+            selected_upstream_protocol = ?upstream_protocol,
             upstream_model = %request_model,
-            final_upstream_model = %resolved_model,
-            model_rewritten = model_rewritten,
-            protocol_transition = %protocol_path,
-            request_stream,
-            try_upstream_stream,
-            "prepared upstream request body"
+            final_upstream_model = %final_upstream_model,
+            "upstream model alias rewrote request model"
         );
-        if model_rewritten {
-            tracing::info!(
-                request_id = %request_id,
-                downstream_key_id = %downstream_key_id,
-                path = %endpoint.path(),
-                original_model = %model,
-                normalized_model = %normalized_model,
-                selected_upstream_id = %upstream.id,
-                selected_upstream_name = %upstream.name,
-                selected_upstream_protocol = ?upstream.protocol,
-                upstream_model = %request_model,
-                final_upstream_model = %resolved_model,
-                "upstream model alias rewrote request model"
-            );
-        }
     }
     if !try_upstream_stream {
         if let Some(object) = upstream_body.as_object_mut() {
             object.insert("stream".into(), Value::Bool(false));
         }
-    } else if upstream.protocol == UpstreamProtocol::ChatCompletions {
+    } else if upstream_protocol == UpstreamProtocol::ChatCompletions {
         if let Some(object) = upstream_body.as_object_mut() {
             object.insert(
                 "stream_options".into(),
@@ -1469,7 +1847,37 @@ async fn send_to_upstream(
         }
     }
 
-    let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream.protocol));
+    let context_budget_report =
+        apply_context_budget_controls(upstream, &mut upstream_body, &final_upstream_model);
+    if let Some(report) = context_budget_report.as_ref() {
+        if let Some(switched_model) = report.fallback_model.as_ref() {
+            final_upstream_model = switched_model.clone();
+        }
+        tracing::info!(
+            request_id = %request_id,
+            downstream_key_id = %downstream_key_id,
+            path = %endpoint.path(),
+            original_model = %model,
+            normalized_model = %normalized_model,
+            selected_upstream_id = %upstream.id,
+            selected_upstream_name = %upstream.name,
+            selected_upstream_protocol = ?upstream_protocol,
+            final_upstream_model = %final_upstream_model,
+            context_limit = report.context_limit,
+            output_reserve = report.output_reserve,
+            estimated_input_tokens = report.estimated_input_tokens,
+            estimated_input_tokens_after_trim = report.estimated_input_tokens_after_trim,
+            requested_output_tokens = report.requested_output_tokens,
+            allowed_input_tokens = report.allowed_input_tokens,
+            trimmed_blocks = report.trim_stats.truncated_blocks,
+            compacted_entries = report.trim_stats.compacted_entries,
+            tool_result_blocks = report.trim_stats.tool_result_blocks,
+            fallback_model = ?report.fallback_model,
+            "applied upstream context budgeting"
+        );
+    }
+
+    let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream_protocol));
     tracing::info!(
         request_id = %request_id,
         downstream_key_id = %downstream_key_id,
@@ -1478,42 +1886,47 @@ async fn send_to_upstream(
         normalized_model = %normalized_model,
         selected_upstream_id = %upstream.id,
         selected_upstream_name = %upstream.name,
-        selected_upstream_protocol = ?upstream.protocol,
+        selected_upstream_protocol = ?upstream_protocol,
+        final_upstream_model = %final_upstream_model,
         url = %url,
         request_stream,
         try_upstream_stream,
         "dispatching request to upstream service"
     );
-    let response = state
-        .client_for_url(&url)
-        .post(url.clone())
-        .header(
-            header::AUTHORIZATION,
-            format!("Bearer {}", upstream.api_key),
-        )
-        .json(&upstream_body)
-        .send()
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                request_id = %request_id,
-                downstream_key_id = %downstream_key_id,
-                path = %endpoint.path(),
-                original_model = %model,
-                normalized_model = %normalized_model,
-                selected_upstream_id = %upstream.id,
-                selected_upstream_name = %upstream.name,
-                selected_upstream_protocol = ?upstream.protocol,
-                url = %url,
-                error = %error,
-                "upstream request failed"
-            );
-            GatewayError::Upstream(format!("upstream request failed: {error}"))
-        })?;
+    let mut context_retry_attempted = false;
+    let response = loop {
+        let response = state
+            .client_for_url(&url)
+            .post(url.clone())
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", upstream.api_key),
+            )
+            .json(&upstream_body)
+            .send()
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream_key_id,
+                    path = %endpoint.path(),
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    selected_upstream_id = %upstream.id,
+                    selected_upstream_name = %upstream.name,
+                    selected_upstream_protocol = ?upstream_protocol,
+                    url = %url,
+                    error = %error,
+                    "upstream request failed"
+                );
+                GatewayError::Upstream(format!("upstream request failed: {error}"))
+            })?;
 
-    let status = response.status();
+        let status = response.status();
+        if status.is_success() {
+            break response;
+        }
 
-    if !status.is_success() {
         let retry_after_seconds = if status == StatusCode::TOO_MANY_REQUESTS {
             Some(parse_retry_after_seconds(
                 response.headers(),
@@ -1532,10 +1945,17 @@ async fn send_to_upstream(
             normalized_model = %normalized_model,
             selected_upstream_id = %upstream.id,
             selected_upstream_name = %upstream.name,
-            selected_upstream_protocol = ?upstream.protocol,
+            selected_upstream_protocol = ?upstream_protocol,
             url = %url,
             status = status.as_u16(),
             error_excerpt = %error_excerpt,
+            context_retry_attempted,
+            estimated_input_tokens = ?context_budget_report
+                .as_ref()
+                .map(|report| report.estimated_input_tokens_after_trim),
+            requested_output_tokens = ?context_budget_report
+                .as_ref()
+                .map(|report| report.requested_output_tokens),
             "upstream responded with a non-success status"
         );
         if status == StatusCode::TOO_MANY_REQUESTS {
@@ -1549,10 +1969,34 @@ async fn send_to_upstream(
             });
         }
         if is_context_limit_error(&error_text) {
-            return Err(GatewayError::BadRequest(
-                "upstream request exceeded the model context window; reduce prompt size or use a model with a larger context window"
-                    .into(),
-            ));
+            if !context_retry_attempted {
+                if let Some((cap_field, current_cap, reduced_cap)) =
+                    halve_generation_cap_for_context_retry(&mut upstream_body)
+                {
+                    context_retry_attempted = true;
+                    tracing::warn!(
+                        request_id = %request_id,
+                        downstream_key_id = %downstream_key_id,
+                        path = %endpoint.path(),
+                        original_model = %model,
+                        normalized_model = %normalized_model,
+                        selected_upstream_id = %upstream.id,
+                        selected_upstream_name = %upstream.name,
+                        selected_upstream_protocol = ?upstream_protocol,
+                        cap_field,
+                        current_cap,
+                        reduced_cap,
+                        "context limit hit; retrying once with reduced output token cap"
+                    );
+                    continue;
+                }
+            }
+            return Err(GatewayError::BadRequest(format!(
+                "upstream request exceeded the model context window; reduce prompt size or use a model with a larger context window (model={final_upstream_model}, upstream={}, status={}, detail={})",
+                upstream.name,
+                status.as_u16(),
+                error_excerpt
+            )));
         }
         return Err(GatewayError::Upstream(format!(
             "upstream responded with status {}{}",
@@ -1563,7 +2007,9 @@ async fn send_to_upstream(
                 format!(": {error_text}")
             }
         )));
-    }
+    };
+
+    let status = response.status();
 
     if request_stream {
         let content_type = response
@@ -1582,7 +2028,7 @@ async fn send_to_upstream(
                 downstream_name: Some(downstream_name.to_string()),
                 upstream_key_id: upstream.id.clone(),
                 upstream_name: Some(upstream.name.clone()),
-                upstream_protocol: upstream.protocol,
+                upstream_protocol,
                 endpoint: endpoint.path().to_string(),
                 model: model.to_string(),
                 inference_strength: inference_strength.map(str::to_string),
@@ -1591,12 +2037,12 @@ async fn send_to_upstream(
                 status,
                 started,
             };
-            if upstream.protocol == endpoint.native_protocol() {
+            if upstream_protocol == endpoint.native_protocol() {
                 proxied_stream_body(response, stream_log_context)?
             } else {
                 translated_stream_body(
                     response,
-                    upstream.protocol,
+                    upstream_protocol,
                     endpoint.native_protocol(),
                     stream_log_context,
                 )?
@@ -1609,7 +2055,7 @@ async fn send_to_upstream(
                 GatewayError::Upstream(format!("upstream returned invalid json: {error}"))
             })?;
 
-            let final_body = match (endpoint, upstream.protocol) {
+            let final_body = match (endpoint, upstream_protocol) {
                 (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
                 (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
                     responses_response_to_chat_payload(&upstream_json)
@@ -1649,7 +2095,7 @@ async fn send_to_upstream(
         GatewayError::Upstream(format!("upstream returned invalid json: {error}"))
     })?;
 
-    let body = match (endpoint, upstream.protocol) {
+    let body = match (endpoint, upstream_protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
             responses_response_to_chat_payload(&upstream_json).map_err(protocol_error_to_gateway)?
@@ -2018,31 +2464,217 @@ fn usage_from_body(body: &Value) -> (u64, u64, u64) {
     (prompt_tokens, completion_tokens, total_tokens)
 }
 
-fn dispatch_claude_success(result: DispatchResult) -> Response {
+fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
     let request_id = HeaderValue::from_str(&result.request_id)
         .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
 
-    match result.body {
+    let claude_body = match result.body {
         DispatchBody::Json(body) => match chat_completion_to_claude_message(&body) {
-            Ok(claude_body) => {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                );
-                headers.insert(
-                    header::HeaderName::from_static("x-gateway-request-id"),
-                    request_id,
-                );
-                (result.status, headers, Json(claude_body)).into_response()
-            }
-            Err(error) => error.into_response(),
+            Ok(claude_body) => claude_body,
+            Err(error) => return error.into_response(),
         },
-        DispatchBody::Stream(_) => GatewayError::BadRequest(
-            "claude streaming compatibility is not implemented yet; set stream=false".into(),
-        )
-        .into_response(),
+        DispatchBody::Stream(_) => {
+            return GatewayError::BadRequest(
+                "claude streaming compatibility is not implemented for translated upstream streams yet".into(),
+            )
+            .into_response();
+        }
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::HeaderName::from_static("x-gateway-request-id"),
+        request_id,
+    );
+
+    if stream {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        match claude_message_to_sse_body(&claude_body) {
+            Ok(body) => (result.status, headers, body).into_response(),
+            Err(error) => error.into_response(),
+        }
+    } else {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        (result.status, headers, Json(claude_body)).into_response()
     }
+}
+
+fn claude_message_to_sse_body(message: &Value) -> Result<Body, GatewayError> {
+    let message_id = message.get("id").and_then(Value::as_str).unwrap_or("msg");
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("assistant");
+    let model = message.get("model").and_then(Value::as_str).unwrap_or_default();
+    let stop_reason = message.get("stop_reason").cloned().unwrap_or(Value::Null);
+    let stop_sequence = message.get("stop_sequence").cloned().unwrap_or(Value::Null);
+    let input_tokens = message
+        .get("usage")
+        .and_then(Value::as_object)
+        .and_then(|usage| usage.get("input_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let output_tokens = message
+        .get("usage")
+        .and_then(Value::as_object)
+        .and_then(|usage| usage.get("output_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let content_blocks = message
+        .get("content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut chunks = Vec::new();
+    chunks.push(claude_sse_event(
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": role,
+                "model": model,
+                "content": [],
+                "stop_reason": Value::Null,
+                "stop_sequence": Value::Null,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": 0
+                }
+            }
+        }),
+    ));
+
+    for (index, block) in content_blocks.iter().enumerate() {
+        let block_type = block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("text")
+            .to_string();
+
+        match block_type.as_str() {
+            "tool_use" => {
+                let id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| GatewayError::Upstream("claude tool_use block missing id".into()))?;
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| GatewayError::Upstream("claude tool_use block missing name".into()))?;
+                let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                chunks.push(claude_sse_event(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": {}
+                        }
+                    }),
+                ));
+                let partial_json = serde_json::to_string(&input)
+                    .map_err(|error| GatewayError::Upstream(format!("failed to encode tool input json: {error}")))?;
+                if !partial_json.is_empty() && partial_json != "{}" {
+                    chunks.push(claude_sse_event(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": partial_json
+                            }
+                        }),
+                    ));
+                }
+                chunks.push(claude_sse_event(
+                    "content_block_stop",
+                    json!({
+                        "type": "content_block_stop",
+                        "index": index
+                    }),
+                ));
+            }
+            _ => {
+                let text = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                chunks.push(claude_sse_event(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {
+                            "type": "text",
+                            "text": ""
+                        }
+                    }),
+                ));
+                if !text.is_empty() {
+                    chunks.push(claude_sse_event(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {
+                                "type": "text_delta",
+                                "text": text
+                            }
+                        }),
+                    ));
+                }
+                chunks.push(claude_sse_event(
+                    "content_block_stop",
+                    json!({
+                        "type": "content_block_stop",
+                        "index": index
+                    }),
+                ));
+            }
+        }
+    }
+
+    chunks.push(claude_sse_event(
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": stop_reason,
+                "stop_sequence": stop_sequence
+            },
+            "usage": {
+                "output_tokens": output_tokens
+            }
+        }),
+    ));
+    chunks.push(claude_sse_event(
+        "message_stop",
+        json!({
+            "type": "message_stop"
+        }),
+    ));
+
+    let stream = stream::iter(
+        chunks
+            .into_iter()
+            .map(|chunk| Ok::<Bytes, std::io::Error>(chunk)),
+    );
+    Ok(Body::from_stream(stream))
+}
+
+fn claude_sse_event(event: &str, payload: Value) -> Bytes {
+    Bytes::from(format!("event: {event}\ndata: {payload}\n\n"))
 }
 
 fn chat_completion_to_claude_message(body: &Value) -> Result<Value, GatewayError> {
@@ -2056,6 +2688,24 @@ fn chat_completion_to_claude_message(body: &Value) -> Result<Value, GatewayError
         .or_else(|| choice.get("delta"))
         .ok_or_else(|| GatewayError::Upstream("missing chat message".into()))?;
     let text = extract_plain_text_from_content(message.get("content"));
+    let mut content_blocks = Vec::new();
+    if !text.is_empty() {
+        content_blocks.push(json!({
+            "type": "text",
+            "text": text,
+        }));
+    }
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for tool_call in tool_calls {
+            content_blocks.push(chat_tool_call_to_claude_tool_use_block(tool_call)?);
+        }
+    }
+    if content_blocks.is_empty() {
+        content_blocks.push(json!({
+            "type": "text",
+            "text": "",
+        }));
+    }
 
     let finish_reason = choice
         .get("finish_reason")
@@ -2084,10 +2734,7 @@ fn chat_completion_to_claude_message(body: &Value) -> Result<Value, GatewayError
         "type": "message",
         "role": "assistant",
         "model": body.get("model").and_then(Value::as_str).unwrap_or_default(),
-        "content": [{
-            "type": "text",
-            "text": text,
-        }],
+        "content": content_blocks,
         "stop_reason": finish_reason,
         "stop_sequence": Value::Null,
         "usage": {
@@ -2119,8 +2766,7 @@ fn claude_messages_to_chat_payload(body: &Value) -> Result<Value, String> {
     }
 
     for message in messages {
-        let chat_message = claude_message_to_chat_message(message)?;
-        chat_messages.push(chat_message);
+        chat_messages.extend(claude_message_to_chat_messages(message)?);
     }
 
     let mut output = serde_json::Map::new();
@@ -2136,6 +2782,23 @@ fn claude_messages_to_chat_payload(body: &Value) -> Result<Value, String> {
     if let Some(top_p) = body.get("top_p") {
         output.insert("top_p".into(), top_p.clone());
     }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        output.insert(
+            "tools".into(),
+            Value::Array(
+                tools
+                    .iter()
+                    .map(claude_tool_definition_to_chat_tool)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        );
+    }
+    if let Some(tool_choice) = body.get("tool_choice") {
+        output.insert(
+            "tool_choice".into(),
+            claude_tool_choice_to_chat_tool_choice(tool_choice)?,
+        );
+    }
     // Claude streaming transport is not yet mapped to /v1/messages SSE output.
     // Force non-stream behavior by not forwarding the stream flag downstream.
     if let Some(inference_strength) = body.get("inference_strength").and_then(Value::as_str) {
@@ -2148,16 +2811,103 @@ fn claude_messages_to_chat_payload(body: &Value) -> Result<Value, String> {
     Ok(Value::Object(output))
 }
 
-fn claude_message_to_chat_message(message: &Value) -> Result<Value, String> {
+fn claude_message_to_chat_messages(message: &Value) -> Result<Vec<Value>, String> {
     let role = message
         .get("role")
         .and_then(Value::as_str)
         .ok_or_else(|| "claude message missing role".to_string())?;
-    let content = extract_claude_content_text(message);
-    Ok(json!({
-        "role": role,
-        "content": content,
-    }))
+    let content = message.get("content");
+
+    match content {
+        Some(Value::Array(parts)) if role == "assistant" => {
+            let mut text_parts = Vec::new();
+            let mut tool_calls = Vec::new();
+            for part in parts {
+                let part_type = part
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match part_type {
+                    "tool_use" => tool_calls.push(claude_tool_use_to_chat_tool_call(part)?),
+                    "text" => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text_parts.push(text.to_string());
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text_parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let content = if text_parts.is_empty() {
+                Value::Null
+            } else {
+                Value::String(text_parts.join("\n"))
+            };
+            let mut message = serde_json::Map::new();
+            message.insert("role".into(), Value::String("assistant".into()));
+            message.insert("content".into(), content);
+            if !tool_calls.is_empty() {
+                message.insert("tool_calls".into(), Value::Array(tool_calls));
+            }
+            Ok(vec![Value::Object(message)])
+        }
+        Some(Value::Array(parts)) if role == "user" => {
+            let mut messages = Vec::new();
+            let mut text_parts = Vec::new();
+            for part in parts {
+                let part_type = part
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match part_type {
+                    "tool_result" => messages.push(claude_tool_result_to_chat_tool_message(part)?),
+                    "text" => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text_parts.push(text.to_string());
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text_parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let text = text_parts.join("\n");
+            if !text.is_empty() {
+                messages.push(json!({
+                    "role": "user",
+                    "content": text,
+                }));
+            } else if messages.is_empty() {
+                messages.push(json!({
+                    "role": "user",
+                    "content": "",
+                }));
+            }
+            Ok(messages)
+        }
+        _ => {
+            let content = extract_claude_content_text(message);
+            Ok(vec![json!({
+                "role": role,
+                "content": content,
+            })])
+        }
+    }
 }
 
 fn extract_claude_content_text(message: &Value) -> String {
@@ -2187,6 +2937,159 @@ fn extract_claude_content_text(message: &Value) -> String {
             .unwrap_or_default()
             .to_string(),
         _ => String::new(),
+    }
+}
+
+fn claude_tool_definition_to_chat_tool(tool: &Value) -> Result<Value, String> {
+    let object = tool
+        .as_object()
+        .ok_or_else(|| format!("invalid claude tool definition: {tool}"))?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "claude tool missing name".to_string())?;
+    let mut function = serde_json::Map::new();
+    function.insert("name".into(), Value::String(name.to_string()));
+    if let Some(description) = object.get("description").and_then(Value::as_str) {
+        function.insert("description".into(), Value::String(description.to_string()));
+    }
+    if let Some(input_schema) = object.get("input_schema") {
+        function.insert("parameters".into(), input_schema.clone());
+    } else {
+        function.insert("parameters".into(), json!({"type": "object"}));
+    }
+    Ok(json!({
+        "type": "function",
+        "function": Value::Object(function),
+    }))
+}
+
+fn claude_tool_choice_to_chat_tool_choice(tool_choice: &Value) -> Result<Value, String> {
+    match tool_choice {
+        Value::String(choice) => match choice.as_str() {
+            "auto" => Ok(Value::String("auto".into())),
+            "any" => Ok(Value::String("required".into())),
+            "none" => Ok(Value::String("none".into())),
+            other => Err(format!("unsupported claude tool_choice string: {other}")),
+        },
+        Value::Object(object) => {
+            let choice_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "claude tool_choice missing type".to_string())?;
+            match choice_type {
+                "auto" => Ok(Value::String("auto".into())),
+                "any" => Ok(Value::String("required".into())),
+                "none" => Ok(Value::String("none".into())),
+                "tool" => {
+                    let name = object
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "claude tool_choice type=tool missing name".to_string())?;
+                    Ok(json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                        }
+                    }))
+                }
+                other => Err(format!("unsupported claude tool_choice type: {other}")),
+            }
+        }
+        other => Err(format!("unsupported claude tool_choice: {other}")),
+    }
+}
+
+fn claude_tool_use_to_chat_tool_call(block: &Value) -> Result<Value, String> {
+    let object = block
+        .as_object()
+        .ok_or_else(|| format!("invalid claude tool_use block: {block}"))?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "claude tool_use missing id".to_string())?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "claude tool_use missing name".to_string())?;
+    let arguments = object
+        .get("input")
+        .map(|input| match input {
+            Value::String(text) => text.clone(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+        })
+        .unwrap_or_else(|| "{}".to_string());
+    Ok(json!({
+        "id": id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
+    }))
+}
+
+fn claude_tool_result_to_chat_tool_message(block: &Value) -> Result<Value, String> {
+    let object = block
+        .as_object()
+        .ok_or_else(|| format!("invalid claude tool_result block: {block}"))?;
+    let tool_call_id = object
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "claude tool_result missing tool_use_id".to_string())?;
+    let content = claude_tool_result_content_to_text(object.get("content"));
+    Ok(json!({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+    }))
+}
+
+fn chat_tool_call_to_claude_tool_use_block(tool_call: &Value) -> Result<Value, GatewayError> {
+    let object = tool_call
+        .as_object()
+        .ok_or_else(|| GatewayError::Upstream(format!("unsupported tool call: {tool_call}")))?;
+    let call_id = object
+        .get("id")
+        .or_else(|| object.get("call_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::Upstream("tool call missing id".into()))?;
+    let function = object
+        .get("function")
+        .and_then(Value::as_object)
+        .ok_or_else(|| GatewayError::Upstream("tool call missing function".into()))?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::Upstream("tool call missing function name".into()))?;
+    let input = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .map(|arguments| serde_json::from_str(arguments).unwrap_or_else(|_| json!(arguments)))
+        .unwrap_or_else(|| json!({}));
+
+    Ok(json!({
+        "type": "tool_use",
+        "id": call_id,
+        "name": name,
+        "input": input,
+    }))
+}
+
+fn claude_tool_result_content_to_text(content: Option<&Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+    let text = extract_plain_text_from_content(Some(content));
+    if !text.is_empty() {
+        return text;
+    }
+    if content.is_null() {
+        String::new()
+    } else if let Some(value) = content.as_str() {
+        value.to_string()
+    } else {
+        serde_json::to_string(content).unwrap_or_default()
     }
 }
 
@@ -2626,7 +3529,7 @@ async fn admin_dashboard(State(state): State<AppState>) -> impl IntoResponse {
             .collect::<std::collections::HashSet<_>>()
             .len(),
         "responses_upstreams": snapshot.upstreams.iter()
-            .filter(|u| u.active && u.protocol == UpstreamProtocol::Responses)
+            .filter(|u| u.active && u.supports_protocol(UpstreamProtocol::Responses))
             .count(),
         "admin_username": state.config.admin_username.clone(),
         "app_name": state.config.app_name.clone(),

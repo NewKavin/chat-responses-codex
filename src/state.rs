@@ -63,9 +63,13 @@ pub struct UpstreamConfig {
     pub base_url: String,
     pub api_key: String,
     pub protocol: UpstreamProtocol,
+    #[serde(default)]
+    pub protocols: Vec<UpstreamProtocol>,
     pub supported_models: Vec<String>,
     #[serde(default)]
     pub model_aliases: Vec<ModelAliasConfig>,
+    #[serde(default)]
+    pub model_contexts: Vec<ModelContextConfig>,
     #[serde(default = "default_upstream_request_quota_window_hours")]
     pub request_quota_window_hours: u32,
     #[serde(default = "default_upstream_request_quota_requests", alias = "request_quota_5h")]
@@ -98,8 +102,10 @@ impl Default for UpstreamConfig {
             base_url: String::new(),
             api_key: String::new(),
             protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
             supported_models: Vec::new(),
             model_aliases: Vec::new(),
+            model_contexts: Vec::new(),
             request_quota_window_hours: default_upstream_request_quota_window_hours(),
             request_quota_requests: default_upstream_request_quota_requests(),
             requests_per_minute: default_upstream_requests_per_minute(),
@@ -127,6 +133,16 @@ pub struct ModelRequestCostConfig {
     pub cost: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelContextConfig {
+    pub slug: String,
+    pub context_limit: u32,
+    #[serde(default = "default_model_context_output_reserve")]
+    pub output_reserve: u32,
+    #[serde(default)]
+    pub context_group: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpstreamMutationError {
     NotFound(String),
@@ -145,6 +161,18 @@ impl std::fmt::Display for UpstreamMutationError {
 }
 
 impl UpstreamConfig {
+    pub fn supported_protocols(&self) -> Vec<UpstreamProtocol> {
+        let mut protocols = self.protocols.clone();
+        if protocols.is_empty() {
+            protocols.push(self.protocol);
+        }
+        dedup_protocols(protocols)
+    }
+
+    pub fn supports_protocol(&self, protocol: UpstreamProtocol) -> bool {
+        self.supported_protocols().contains(&protocol)
+    }
+
     pub fn route_models(&self) -> Vec<String> {
         let mut models = Vec::new();
         let mut seen = HashSet::new();
@@ -239,12 +267,24 @@ impl UpstreamConfig {
     }
 
     pub fn normalize_for_storage(&mut self) {
+        let normalized_protocols = dedup_protocols(std::mem::take(&mut self.protocols));
+        self.protocols = if normalized_protocols.is_empty() {
+            vec![self.protocol]
+        } else {
+            normalized_protocols
+        };
+        self.protocol = self
+            .protocols
+            .first()
+            .copied()
+            .unwrap_or(UpstreamProtocol::ChatCompletions);
         self.supported_models = normalized_string_list(std::mem::take(&mut self.supported_models));
         self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
         self.model_request_costs =
             normalized_model_request_costs(std::mem::take(&mut self.model_request_costs));
         self.model_aliases = normalized_model_aliases(std::mem::take(&mut self.model_aliases));
         self.model_aliases = self.effective_model_aliases();
+        self.model_contexts = normalized_model_contexts(std::mem::take(&mut self.model_contexts));
     }
 
     pub fn validate_configuration(&self) -> Result<(), String> {
@@ -365,6 +405,91 @@ impl UpstreamConfig {
 
         aliases
     }
+
+    pub fn context_config_for_model(&self, model: &str) -> Option<ModelContextConfig> {
+        let mut candidates = self.model_equivalents(model);
+        if let Some(resolved) = self.resolved_model_name(model) {
+            candidates.push(resolved);
+        }
+
+        for candidate in candidates {
+            if let Some(config) = self
+                .model_contexts
+                .iter()
+                .find(|config| model_name_eq(&config.slug, &candidate))
+            {
+                return Some(config.clone());
+            }
+        }
+        None
+    }
+
+    pub fn context_fallback_model_for(
+        &self,
+        model: &str,
+        minimum_context_limit: u32,
+    ) -> Option<String> {
+        let current = self.context_config_for_model(model)?;
+        let group = current.context_group.trim();
+        if group.is_empty() {
+            return None;
+        }
+        let current_resolved = self
+            .resolved_model_name(model)
+            .unwrap_or_else(|| model.to_string());
+
+        let mut candidates = self
+            .model_contexts
+            .iter()
+            .filter(|config| config.context_group == group && config.context_limit > current.context_limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|config| config.context_limit);
+
+        for candidate in &candidates {
+            if candidate.context_limit >= minimum_context_limit {
+                if let Some(resolved) = self.resolved_model_name(&candidate.slug) {
+                    if !model_name_eq(&resolved, &current_resolved) {
+                        return Some(resolved);
+                    }
+                }
+            }
+        }
+
+        for candidate in candidates {
+            if let Some(resolved) = self.resolved_model_name(&candidate.slug) {
+                if !model_name_eq(&resolved, &current_resolved) {
+                    return Some(resolved);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn parse_upstream_protocol(value: &str) -> UpstreamProtocol {
+    match value {
+        "Responses" | "responses" => UpstreamProtocol::Responses,
+        _ => UpstreamProtocol::ChatCompletions,
+    }
+}
+
+fn parse_upstream_protocols(values: &[Value]) -> Vec<UpstreamProtocol> {
+    values
+        .iter()
+        .filter_map(Value::as_str)
+        .map(parse_upstream_protocol)
+        .collect()
+}
+
+fn dedup_protocols(values: Vec<UpstreamProtocol>) -> Vec<UpstreamProtocol> {
+    let mut normalized = Vec::new();
+    for protocol in values {
+        if !normalized.contains(&protocol) {
+            normalized.push(protocol);
+        }
+    }
+    normalized
 }
 
 fn normalized_string_list(values: Vec<String>) -> Vec<String> {
@@ -409,6 +534,31 @@ fn normalized_model_request_costs(values: Vec<ModelRequestCostConfig>) -> Vec<Mo
         normalized.push(ModelRequestCostConfig {
             slug,
             cost: rule.cost,
+        });
+    }
+    normalized
+}
+
+fn normalized_model_contexts(values: Vec<ModelContextConfig>) -> Vec<ModelContextConfig> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for config in values {
+        let slug = config.slug.trim().to_ascii_lowercase();
+        if slug.is_empty() || !seen.insert(slug.clone()) {
+            continue;
+        }
+        let context_limit = config.context_limit.max(2);
+        let mut output_reserve = if config.output_reserve == 0 {
+            default_model_context_output_reserve()
+        } else {
+            config.output_reserve
+        };
+        output_reserve = output_reserve.min(context_limit.saturating_sub(1).max(1));
+        normalized.push(ModelContextConfig {
+            slug,
+            context_limit,
+            output_reserve,
+            context_group: config.context_group.trim().to_ascii_lowercase(),
         });
     }
     normalized
@@ -853,16 +1003,22 @@ impl AppState {
             .upstreams
             .iter()
             .filter(|upstream| upstream.active)
-            .map(|upstream| {
-                UpstreamCandidate::new(
-                    upstream.id.clone(),
-                    upstream.name.clone(),
-                    upstream.protocol,
-                )
-                .with_models(upstream.route_models())
-                .with_priority(upstream.priority)
-                .with_premium_models(upstream.premium_route_models())
-                .with_failure_count(upstream.failure_count)
+            .flat_map(|upstream| {
+                upstream
+                    .supported_protocols()
+                    .into_iter()
+                    .map(|protocol| {
+                        UpstreamCandidate::new(
+                            upstream.id.clone(),
+                            upstream.name.clone(),
+                            protocol,
+                        )
+                        .with_models(upstream.route_models())
+                        .with_priority(upstream.priority)
+                        .with_premium_models(upstream.premium_route_models())
+                        .with_failure_count(upstream.failure_count)
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -1674,6 +1830,10 @@ pub fn default_upstream_max_concurrency() -> u32 {
     4
 }
 
+pub fn default_model_context_output_reserve() -> u32 {
+    2048
+}
+
 #[derive(Debug, Clone, Default)]
 struct UpstreamRuntimeState {
     in_flight: u32,
@@ -2272,11 +2432,10 @@ impl AppState {
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
         }
-        if let Some(protocol) = updates.get("protocol").and_then(|v| v.as_str()) {
-            upstream.protocol = match protocol {
-                "Responses" | "responses" => UpstreamProtocol::Responses,
-                _ => UpstreamProtocol::ChatCompletions,
-            };
+        if let Some(protocols) = updates.get("protocols").and_then(Value::as_array) {
+            upstream.protocols = parse_upstream_protocols(protocols);
+        } else if let Some(protocol) = updates.get("protocol").and_then(Value::as_str) {
+            upstream.protocol = parse_upstream_protocol(protocol);
         }
         if let Some(model_aliases) = updates.get("model_aliases").and_then(|v| v.as_array()) {
             upstream.model_aliases = model_aliases
@@ -2287,6 +2446,29 @@ impl AppState {
                     Some(ModelAliasConfig {
                         slug: slug.to_string(),
                         upstream_model: upstream_model.to_string(),
+                    })
+                })
+                .collect();
+        }
+        if let Some(model_contexts) = updates.get("model_contexts").and_then(|v| v.as_array()) {
+            upstream.model_contexts = model_contexts
+                .iter()
+                .filter_map(|value| {
+                    let slug = value.get("slug").and_then(|v| v.as_str())?;
+                    let context_limit = value.get("context_limit").and_then(|v| v.as_u64())?;
+                    let output_reserve = value
+                        .get("output_reserve")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(default_model_context_output_reserve() as u64);
+                    let context_group = value
+                        .get("context_group")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    Some(ModelContextConfig {
+                        slug: slug.to_string(),
+                        context_limit: context_limit as u32,
+                        output_reserve: output_reserve as u32,
+                        context_group: context_group.to_string(),
                     })
                 })
                 .collect();
@@ -2500,6 +2682,7 @@ impl AppState {
 mod tests {
     use super::{
         should_bypass_proxy_for_host, should_bypass_proxy_for_url, ModelAliasConfig,
+        ModelContextConfig,
         ModelRequestCostConfig, UpstreamConfig,
     };
 
@@ -2597,5 +2780,108 @@ mod tests {
         );
         assert!(upstream.is_premium_model_request("MINIMAX2.7"));
         assert_eq!(upstream.request_cost_for_model("minimax2.7"), 1.0);
+    }
+
+    #[test]
+    fn normalize_for_storage_backfills_and_dedups_protocols() {
+        let mut upstream = UpstreamConfig {
+            protocol: crate::routing::UpstreamProtocol::Responses,
+            protocols: vec![
+                crate::routing::UpstreamProtocol::Responses,
+                crate::routing::UpstreamProtocol::ChatCompletions,
+                crate::routing::UpstreamProtocol::Responses,
+            ],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+        assert_eq!(
+            upstream.protocols,
+            vec![
+                crate::routing::UpstreamProtocol::Responses,
+                crate::routing::UpstreamProtocol::ChatCompletions,
+            ]
+        );
+        assert_eq!(upstream.protocol, crate::routing::UpstreamProtocol::Responses);
+
+        let mut legacy_only = UpstreamConfig {
+            protocol: crate::routing::UpstreamProtocol::ChatCompletions,
+            protocols: vec![],
+            ..Default::default()
+        };
+        legacy_only.normalize_for_storage();
+        assert_eq!(
+            legacy_only.protocols,
+            vec![crate::routing::UpstreamProtocol::ChatCompletions]
+        );
+        assert_eq!(
+            legacy_only.supported_protocols(),
+            vec![crate::routing::UpstreamProtocol::ChatCompletions]
+        );
+    }
+
+    #[test]
+    fn normalize_for_storage_normalizes_model_contexts() {
+        let mut upstream = UpstreamConfig {
+            model_contexts: vec![
+                ModelContextConfig {
+                    slug: " GPT-4.1 ".into(),
+                    context_limit: 0,
+                    output_reserve: 0,
+                    context_group: " High-End ".into(),
+                },
+                ModelContextConfig {
+                    slug: "gpt-4.1".into(),
+                    context_limit: 200_000,
+                    output_reserve: 16_000,
+                    context_group: "high-end".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+
+        assert_eq!(
+            upstream.model_contexts,
+            vec![ModelContextConfig {
+                slug: "gpt-4.1".into(),
+                context_limit: 2,
+                output_reserve: 1,
+                context_group: "high-end".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn context_fallback_model_prefers_same_group_larger_window_model() {
+        let mut upstream = UpstreamConfig {
+            supported_models: vec!["MiniMax2.7".into(), "MiniMax2.7-Long".into()],
+            model_contexts: vec![
+                ModelContextConfig {
+                    slug: "minimax2.7".into(),
+                    context_limit: 128_000,
+                    output_reserve: 8_000,
+                    context_group: "minimax".into(),
+                },
+                ModelContextConfig {
+                    slug: "minimax2.7-long".into(),
+                    context_limit: 256_000,
+                    output_reserve: 8_000,
+                    context_group: "minimax".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+
+        assert_eq!(
+            upstream
+                .context_config_for_model("minimax2.7")
+                .map(|config| config.context_limit),
+            Some(128_000)
+        );
+        assert_eq!(
+            upstream.context_fallback_model_for("minimax2.7", 150_000),
+            Some("MiniMax2.7-Long".into())
+        );
     }
 }
