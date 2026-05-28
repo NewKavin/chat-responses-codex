@@ -4,15 +4,12 @@ use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{AppConfig, AppState, DownstreamConfig, PersistedState};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from(format!("/tmp/test_state_portal_flow_{nanos}.json"))
+    let unique = Uuid::new_v4();
+    PathBuf::from(format!("/tmp/test_state_portal_flow_{unique}.json"))
 }
 
 fn create_test_state_with_downstream() -> (AppState, String, String) {

@@ -24,7 +24,8 @@
             </el-descriptions-item>
             <el-descriptions-item label="使用率" :span="2">
               <el-progress
-                :percentage="data.request_quota.percentage"
+                :percentage="formatPercentageTwoDecimals(data.request_quota.percentage)"
+                :format="formatPercentageLabel"
                 :color="getQuotaColor(data.request_quota.percentage)"
               />
             </el-descriptions-item>
@@ -46,7 +47,8 @@
             </el-descriptions-item>
             <el-descriptions-item label="使用率">
               <el-progress
-                :percentage="data.token_quota.daily.percentage"
+                :percentage="formatPercentageTwoDecimals(data.token_quota.daily.percentage)"
+                :format="formatPercentageLabel"
                 :color="getQuotaColor(data.token_quota.daily.percentage)"
               />
             </el-descriptions-item>
@@ -68,7 +70,8 @@
             </el-descriptions-item>
             <el-descriptions-item label="使用率">
               <el-progress
-                :percentage="data.token_quota.monthly.percentage"
+                :percentage="formatPercentageTwoDecimals(data.token_quota.monthly.percentage)"
+                :format="formatPercentageLabel"
                 :color="getQuotaColor(data.token_quota.monthly.percentage)"
               />
             </el-descriptions-item>
@@ -111,6 +114,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { portalApi } from '@/api/portal'
 import type { PortalQuota } from '@/types'
+import { formatPercentageLabel, formatPercentageTwoDecimals } from '@/utils/percentage'
 
 const data = ref<PortalQuota>({
   request_quota: undefined,

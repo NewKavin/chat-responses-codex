@@ -105,6 +105,8 @@ export interface UsageLog {
   id: string
   downstream_key_id: string
   upstream_key_id: string
+  downstream_name?: string
+  upstream_name?: string
   endpoint: string
   model: string
   api_name?: string
@@ -190,4 +192,8 @@ export interface PortalQuota {
 export interface PortalUsageHistory {
   daily_stats: DailyStats[]
   recent_logs: UsageLog[]
+  recent_logs_total: number
+  recent_logs_page: number
+  recent_logs_page_size: number
+  recent_logs_total_pages: number
 }

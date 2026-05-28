@@ -36,8 +36,14 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
                 id: "log-1".into(),
                 downstream_key_id: "down-1".into(),
                 upstream_key_id: "up-1".into(),
+                downstream_name: None,
+                upstream_name: None,
                 endpoint: "/v1/chat/completions".into(),
                 model: "gpt-4.1-mini".into(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
                 request_id: "REQ-1".into(),
                 status_code: 200,
                 prompt_tokens: 4,
@@ -92,8 +98,14 @@ async fn request_quota_usage_remaining_calculation() {
                     id: format!("log-{}", i),
                     downstream_key_id: "down-1".into(),
                     upstream_key_id: "up-1".into(),
+                    downstream_name: None,
+                    upstream_name: None,
                     endpoint: "/v1/chat/completions".into(),
                     model: "gpt-4.1-mini".into(),
+                    inference_strength: None,
+                    billing_mode: None,
+                    request_count: None,
+                    user_agent: None,
                     request_id: format!("REQ-{}", i),
                     status_code: 200,
                     prompt_tokens: 10,
@@ -114,7 +126,7 @@ async fn request_quota_usage_remaining_calculation() {
 
     assert!(quota_usage.is_some(), "quota usage should be returned");
     let usage = quota_usage.unwrap();
-    
+
     assert_eq!(usage.limit, 100, "limit should be 100");
     assert_eq!(usage.used, 30, "used should be 30");
     assert_eq!(usage.remaining, 70, "remaining should be 70 (100 - 30)");
@@ -151,8 +163,14 @@ async fn request_quota_usage_remaining_when_exhausted() {
                     id: format!("log-{}", i),
                     downstream_key_id: "down-1".into(),
                     upstream_key_id: "up-1".into(),
+                    downstream_name: None,
+                    upstream_name: None,
                     endpoint: "/v1/chat/completions".into(),
                     model: "gpt-4.1-mini".into(),
+                    inference_strength: None,
+                    billing_mode: None,
+                    request_count: None,
+                    user_agent: None,
                     request_id: format!("REQ-{}", i),
                     status_code: 200,
                     prompt_tokens: 10,
@@ -172,8 +190,11 @@ async fn request_quota_usage_remaining_when_exhausted() {
     let quota_usage = state.compute_request_quota_usage(&downstream).await;
 
     let usage = quota_usage.unwrap();
-    
+
     assert_eq!(usage.limit, 10);
     assert_eq!(usage.used, 15);
-    assert_eq!(usage.remaining, 0, "remaining should be 0 when used exceeds limit (saturating_sub)");
+    assert_eq!(
+        usage.remaining, 0,
+        "remaining should be 0 when used exceeds limit (saturating_sub)"
+    );
 }

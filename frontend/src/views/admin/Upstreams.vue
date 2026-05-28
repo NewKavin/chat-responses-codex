@@ -457,14 +457,40 @@ const fetchModels = async () => {
     }
 
     const data = await response.json()
-    const models = data.data?.map((m: any) => m.id) || []
+    const models: string[] = (data.data || [])
+      .map((m: any) => (typeof m?.id === 'string' ? m.id : ''))
+      .filter((id: string) => id.length > 0)
 
     if (models.length === 0) {
       ElMessage.warning('未获取到模型列表')
       return
     }
 
-    form.value.supported_models = models.map((m: string) => m.toLowerCase())
+    const normalizedModels: string[] = Array.from(
+      new Set(
+        models
+          .map((m: string) => (typeof m === 'string' ? m.trim() : ''))
+          .filter(Boolean)
+      )
+    )
+    form.value.supported_models = normalizedModels
+
+    const existingAliases = form.value.model_aliases || []
+    const aliasSlugs = new Set(
+      existingAliases
+        .map(alias => (alias.slug || '').trim().toLowerCase())
+        .filter(Boolean)
+    )
+    for (const upstreamModel of normalizedModels) {
+      const slug = upstreamModel.toLowerCase()
+      if (slug === upstreamModel || aliasSlugs.has(slug)) {
+        continue
+      }
+      existingAliases.push({ slug, upstream_model: upstreamModel })
+      aliasSlugs.add(slug)
+    }
+    form.value.model_aliases = existingAliases
+
     ElMessage.success(`成功获取 ${models.length} 个模型`)
   } catch (error: any) {
     ElMessage.error(`获取模型失败: ${error.message}`)

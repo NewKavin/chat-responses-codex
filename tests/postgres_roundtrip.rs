@@ -5,11 +5,12 @@ use chat_responses_codex::state::{
     UpstreamConfig, UsageLog,
 };
 use std::env;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn postgres_roundtrip_preserves_normalized_state() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
         eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
         return;
@@ -59,7 +60,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         active: true,
         failure_count: 2,
     };
-let downstream = DownstreamConfig {
+    let downstream = DownstreamConfig {
         id: "down-1".into(),
         name: "team-a".into(),
         hash: downstream_key.hash.clone(),
@@ -83,8 +84,14 @@ let downstream = DownstreamConfig {
         id: "log-1".into(),
         downstream_key_id: downstream.id.clone(),
         upstream_key_id: upstream.id.clone(),
+        downstream_name: None,
+        upstream_name: None,
         endpoint: "/v1/responses".into(),
         model: "glm-5".into(),
+        inference_strength: None,
+        billing_mode: None,
+        request_count: None,
+        user_agent: None,
         request_id: "req-1".into(),
         status_code: 200,
         prompt_tokens: 11,

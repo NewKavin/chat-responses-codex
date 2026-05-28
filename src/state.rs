@@ -8,12 +8,13 @@ use base64::Engine;
 #[path = "state/postgres.rs"]
 mod postgres;
 
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -126,48 +127,291 @@ pub struct ModelRequestCostConfig {
     pub cost: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpstreamMutationError {
+    NotFound(String),
+    InvalidInput(String),
+    Persist(String),
+}
+
+impl std::fmt::Display for UpstreamMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpstreamMutationError::NotFound(message)
+            | UpstreamMutationError::InvalidInput(message)
+            | UpstreamMutationError::Persist(message) => f.write_str(message),
+        }
+    }
+}
+
 impl UpstreamConfig {
     pub fn route_models(&self) -> Vec<String> {
-        if !self.supported_models.is_empty() {
-            return self.supported_models.clone();
+        let mut models = Vec::new();
+        let mut seen = HashSet::new();
+        let aliases = self.effective_model_aliases();
+
+        for model in self
+            .supported_models
+            .iter()
+            .chain(self.premium_models.iter())
+            .chain(aliases.iter().map(|alias| &alias.slug))
+        {
+            if seen.insert(model.clone()) {
+                models.push(model.clone());
+            }
         }
 
-        self.model_aliases
-            .iter()
-            .map(|alias| alias.slug.clone())
-            .collect()
+        models
     }
 
     pub fn supports_model(&self, model: &str) -> bool {
-        let route_models = self.route_models();
-        route_models.is_empty()
-            || route_models.iter().any(|candidate| candidate == model)
-            || self.model_aliases.iter().any(|alias| alias.slug == model)
+        self.canonical_route_model(model).is_some()
     }
 
     pub fn resolved_model_name(&self, model: &str) -> Option<String> {
-        if !self.supports_model(model) {
+        let request_model = model.trim();
+        if request_model.is_empty() {
             return None;
         }
+        let canonical_model = self.canonical_route_model(request_model)?;
 
-        self.model_aliases
+        self.effective_model_aliases()
             .iter()
-            .find(|alias| alias.slug == model)
+            .find(|alias| model_name_eq(&alias.slug, request_model))
             .map(|alias| alias.upstream_model.clone())
-            .or_else(|| Some(model.to_string()))
+            .or_else(|| {
+                self.effective_model_aliases()
+                    .iter()
+                    .find(|alias| model_name_eq(&alias.slug, &canonical_model))
+                    .map(|alias| alias.upstream_model.clone())
+            })
+            .or_else(|| {
+                self.effective_model_aliases()
+                    .iter()
+                    .find(|alias| model_name_eq(&alias.upstream_model, request_model))
+                    .map(|alias| alias.upstream_model.clone())
+            })
+            .or_else(|| Some(canonical_model))
+    }
+
+    pub fn is_premium_model_request(&self, model: &str) -> bool {
+        if self.premium_models.is_empty() {
+            return false;
+        }
+
+        let request_candidates = self.model_equivalents(model);
+        !request_candidates.is_empty()
+            && self
+                .premium_models
+                .iter()
+                .any(|premium| request_candidates.iter().any(|candidate| candidate == premium))
     }
 
     pub fn request_cost_for_model(&self, model: &str) -> f64 {
-        self.model_request_costs
-            .iter()
-            .find(|rule| rule.slug == model)
-            .map(|rule| rule.cost.max(1.0))
-            .unwrap_or(1.0)
+        for candidate in self.model_equivalents(model) {
+            if let Some(rule) = self
+                .model_request_costs
+                .iter()
+                .find(|rule| rule.slug == candidate)
+            {
+                return rule.cost.max(1.0);
+            }
+        }
+
+        1.0
     }
 
     pub fn request_quota_window_seconds(&self) -> u64 {
         u64::from(self.request_quota_window_hours.max(1)).saturating_mul(60 * 60)
     }
+
+    pub fn premium_route_models(&self) -> Vec<String> {
+        let mut models = Vec::new();
+        let mut seen = HashSet::new();
+        for premium in &self.premium_models {
+            for equivalent in self.model_equivalents(premium) {
+                if seen.insert(equivalent.clone()) {
+                    models.push(equivalent);
+                }
+            }
+        }
+        models
+    }
+
+    pub fn normalize_for_storage(&mut self) {
+        self.supported_models = normalized_string_list(std::mem::take(&mut self.supported_models));
+        self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
+        self.model_request_costs =
+            normalized_model_request_costs(std::mem::take(&mut self.model_request_costs));
+        self.model_aliases = normalized_model_aliases(std::mem::take(&mut self.model_aliases));
+        self.model_aliases = self.effective_model_aliases();
+    }
+
+    pub fn validate_configuration(&self) -> Result<(), String> {
+        if self.premium_models.is_empty() {
+            return Ok(());
+        }
+
+        let mut routable = self.supported_models.iter().cloned().collect::<HashSet<_>>();
+        for alias in self.effective_model_aliases() {
+            routable.insert(alias.slug);
+        }
+
+        let invalid = self
+            .premium_models
+            .iter()
+            .filter(|model| !routable.contains(*model))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if invalid.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "invalid premium_models: {}; each premium model must exist in supported_models or model_aliases.slug",
+                invalid.join(", ")
+            ))
+        }
+    }
+
+    fn model_equivalents(&self, model: &str) -> Vec<String> {
+        let mut equivalents = Vec::new();
+        let mut seen = HashSet::new();
+        let mut push_unique = |value: String| {
+            let key = value.to_ascii_lowercase();
+            if seen.insert(key) {
+                equivalents.push(value);
+            }
+        };
+
+        let model = model.trim();
+        if model.is_empty() {
+            return equivalents;
+        }
+        let canonical_model = match self.canonical_route_model(model) {
+            Some(model) => model,
+            None => return equivalents,
+        };
+
+        let aliases = self.effective_model_aliases();
+        let resolved = aliases
+            .iter()
+            .find(|alias| model_name_eq(&alias.slug, model))
+            .map(|alias| alias.upstream_model.clone())
+            .or_else(|| {
+                aliases
+                    .iter()
+                    .find(|alias| model_name_eq(&alias.slug, &canonical_model))
+                    .map(|alias| alias.upstream_model.clone())
+            })
+            .unwrap_or_else(|| canonical_model.clone());
+
+        push_unique(model.to_string());
+        push_unique(canonical_model.clone());
+        push_unique(resolved.clone());
+        for alias in &aliases {
+            if model_name_eq(&alias.upstream_model, &resolved) {
+                push_unique(alias.slug.clone());
+            }
+        }
+
+        equivalents
+    }
+
+    fn canonical_route_model(&self, model: &str) -> Option<String> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+
+        let route_models = self.route_models();
+        if route_models.is_empty() {
+            return Some(model.to_string());
+        }
+
+        if route_models.iter().any(|candidate| candidate == model) {
+            return Some(model.to_string());
+        }
+
+        route_models
+            .into_iter()
+            .find(|candidate| model_name_eq(candidate, model))
+    }
+
+    fn effective_model_aliases(&self) -> Vec<ModelAliasConfig> {
+        let mut aliases = normalized_model_aliases(self.model_aliases.clone());
+        let mut seen = aliases
+            .iter()
+            .map(|alias| alias.slug.clone())
+            .collect::<HashSet<_>>();
+
+        for model in &self.supported_models {
+            let upstream_model = model.trim().to_string();
+            let slug = upstream_model.to_ascii_lowercase();
+            if upstream_model.is_empty()
+                || slug.is_empty()
+                || slug == upstream_model
+                || seen.contains(&slug)
+            {
+                continue;
+            }
+
+            aliases.push(ModelAliasConfig {
+                slug: slug.clone(),
+                upstream_model,
+            });
+            seen.insert(slug);
+        }
+
+        aliases
+    }
+}
+
+fn normalized_string_list(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim().to_string();
+        if value.is_empty() || !seen.insert(value.clone()) {
+            continue;
+        }
+        normalized.push(value);
+    }
+    normalized
+}
+
+fn model_name_eq(lhs: &str, rhs: &str) -> bool {
+    lhs.trim().eq_ignore_ascii_case(rhs.trim())
+}
+
+fn normalized_model_aliases(values: Vec<ModelAliasConfig>) -> Vec<ModelAliasConfig> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for alias in values {
+        let slug = alias.slug.trim().to_ascii_lowercase();
+        let upstream_model = alias.upstream_model.trim().to_string();
+        if slug.is_empty() || upstream_model.is_empty() || !seen.insert(slug.clone()) {
+            continue;
+        }
+        normalized.push(ModelAliasConfig { slug, upstream_model });
+    }
+    normalized
+}
+
+fn normalized_model_request_costs(values: Vec<ModelRequestCostConfig>) -> Vec<ModelRequestCostConfig> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for rule in values {
+        let slug = rule.slug.trim().to_string();
+        if slug.is_empty() || !seen.insert(slug.clone()) {
+            continue;
+        }
+        normalized.push(ModelRequestCostConfig {
+            slug,
+            cost: rule.cost,
+        });
+    }
+    normalized
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,8 +482,20 @@ pub struct UsageLog {
     pub id: String,
     pub downstream_key_id: String,
     pub upstream_key_id: String,
+    #[serde(default)]
+    pub downstream_name: Option<String>,
+    #[serde(default)]
+    pub upstream_name: Option<String>,
     pub endpoint: String,
     pub model: String,
+    #[serde(default)]
+    pub inference_strength: Option<String>,
+    #[serde(default)]
+    pub billing_mode: Option<String>,
+    #[serde(default)]
+    pub request_count: Option<u64>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
     pub request_id: String,
     pub status_code: u16,
     pub prompt_tokens: u64,
@@ -270,6 +526,7 @@ pub struct AppState {
     pub store_path: PathBuf,
     pub config: AppConfig,
     client: Client,
+    direct_client: Client,
     postgres: Option<Arc<PostgresStateStore>>,
 }
 
@@ -279,11 +536,14 @@ impl AppState {
     }
 
     fn new_with_archived(
-        state: PersistedState,
+        mut state: PersistedState,
         archived_usage_logs: Vec<UsageLog>,
         store_path: impl Into<PathBuf>,
         config: AppConfig,
     ) -> Self {
+        for upstream in &mut state.upstreams {
+            upstream.normalize_for_storage();
+        }
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -307,15 +567,22 @@ impl AppState {
             store_path: store_path.into(),
             config,
             client: Client::new(),
+            direct_client: Client::builder().no_proxy().build().unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to build direct HTTP client, falling back");
+                Client::new()
+            }),
             postgres: None,
         }
     }
 
     async fn new_with_postgres(
-        state: PersistedState,
+        mut state: PersistedState,
         config: AppConfig,
         postgres: PostgresStateStore,
     ) -> Self {
+        for upstream in &mut state.upstreams {
+            upstream.normalize_for_storage();
+        }
         let downstream_usage_logs = state.usage_logs.clone();
         Self {
             inner: Arc::new(Mutex::new(state)),
@@ -334,12 +601,24 @@ impl AppState {
             store_path: PathBuf::new(),
             config,
             client: Client::new(),
+            direct_client: Client::builder().no_proxy().build().unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to build direct HTTP client, falling back");
+                Client::new()
+            }),
             postgres: Some(Arc::new(postgres)),
         }
     }
 
     pub fn client(&self) -> Client {
         self.client.clone()
+    }
+
+    pub fn client_for_url(&self, url: &str) -> Client {
+        if should_bypass_proxy_for_url(url) {
+            self.direct_client.clone()
+        } else {
+            self.client.clone()
+        }
     }
 
     pub fn create_admin_session(&self) -> String {
@@ -501,7 +780,7 @@ impl AppState {
     ) -> Result<Vec<String>, String> {
         let url = join_upstream_url(base_url, "/v1/models");
         let response = self
-            .client()
+            .client_for_url(&url)
             .get(url)
             .header(
                 reqwest::header::AUTHORIZATION,
@@ -582,7 +861,7 @@ impl AppState {
                 )
                 .with_models(upstream.route_models())
                 .with_priority(upstream.priority)
-                .with_premium_models(upstream.premium_models.clone())
+                .with_premium_models(upstream.premium_route_models())
                 .with_failure_count(upstream.failure_count)
             })
             .collect()
@@ -1037,10 +1316,18 @@ impl AppState {
         }
     }
 
-    pub async fn insert_upstream(&self, upstream: UpstreamConfig) -> io::Result<()> {
+    pub async fn insert_upstream(&self, mut upstream: UpstreamConfig) -> io::Result<()> {
+        upstream.normalize_for_storage();
+        if let Err(error) = upstream.validate_configuration() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+        }
+
         let mut state = self.inner.lock().await;
-        state.upstreams.push(upstream);
-        self.persist_state(&state).await
+        let mut candidate_state = state.clone();
+        candidate_state.upstreams.push(upstream);
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
+        Ok(())
     }
 
     pub async fn update_upstream(
@@ -1049,7 +1336,8 @@ impl AppState {
         upstream: UpstreamConfig,
     ) -> io::Result<bool> {
         let mut state = self.inner.lock().await;
-        let Some(existing) = state
+        let mut candidate_state = state.clone();
+        let Some(existing) = candidate_state
             .upstreams
             .iter_mut()
             .find(|upstream| upstream.id == upstream_id)
@@ -1059,30 +1347,37 @@ impl AppState {
 
         let mut upstream = upstream;
         upstream.id = upstream_id.to_string();
+        upstream.normalize_for_storage();
         let failure_count = existing.failure_count;
         *existing = upstream;
         existing.failure_count = failure_count;
-        self.persist_state(&state).await?;
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
         Ok(true)
     }
 
     pub async fn remove_upstream(&self, upstream_id: &str) -> io::Result<bool> {
         let mut state = self.inner.lock().await;
-        let original_len = state.upstreams.len();
-        state
+        let mut candidate_state = state.clone();
+        let original_len = candidate_state.upstreams.len();
+        candidate_state
             .upstreams
             .retain(|upstream| upstream.id != upstream_id);
-        if state.upstreams.len() == original_len {
+        if candidate_state.upstreams.len() == original_len {
             return Ok(false);
         }
-        self.persist_state(&state).await?;
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
         Ok(true)
     }
 
     pub async fn insert_downstream(&self, downstream: DownstreamConfig) -> io::Result<()> {
         let mut state = self.inner.lock().await;
-        state.downstreams.push(downstream);
-        self.persist_state(&state).await
+        let mut candidate_state = state.clone();
+        candidate_state.downstreams.push(downstream);
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
+        Ok(())
     }
 
     pub async fn update_downstream(
@@ -1091,7 +1386,8 @@ impl AppState {
         downstream: DownstreamConfig,
     ) -> io::Result<bool> {
         let mut state = self.inner.lock().await;
-        let Some(existing) = state
+        let mut candidate_state = state.clone();
+        let Some(existing) = candidate_state
             .downstreams
             .iter_mut()
             .find(|downstream| downstream.id == downstream_id)
@@ -1102,21 +1398,24 @@ impl AppState {
         let mut downstream = downstream;
         downstream.id = downstream_id.to_string();
         *existing = downstream;
-        self.persist_state(&state).await?;
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
         Ok(true)
     }
 
     pub async fn remove_downstream(&self, downstream_id: &str) -> io::Result<bool> {
         let mut state = self.inner.lock().await;
-        let original_len = state.downstreams.len();
-        state
+        let mut candidate_state = state.clone();
+        let original_len = candidate_state.downstreams.len();
+        candidate_state
             .downstreams
             .retain(|downstream| downstream.id != downstream_id);
-        if state.downstreams.len() == original_len {
+        if candidate_state.downstreams.len() == original_len {
             return Ok(false);
         }
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
         self.release_downstream_concurrency(downstream_id);
-        self.persist_state(&state).await?;
         Ok(true)
     }
 
@@ -1126,7 +1425,8 @@ impl AppState {
         active: bool,
     ) -> io::Result<bool> {
         let mut state = self.inner.lock().await;
-        let Some(downstream) = state
+        let mut candidate_state = state.clone();
+        let Some(downstream) = candidate_state
             .downstreams
             .iter_mut()
             .find(|downstream| downstream.id == downstream_id)
@@ -1134,13 +1434,15 @@ impl AppState {
             return Ok(false);
         };
         downstream.active = active;
-        self.persist_state(&state).await?;
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
         Ok(true)
     }
 
     pub async fn set_upstream_active(&self, upstream_id: &str, active: bool) -> io::Result<bool> {
         let mut state = self.inner.lock().await;
-        let Some(upstream) = state
+        let mut candidate_state = state.clone();
+        let Some(upstream) = candidate_state
             .upstreams
             .iter_mut()
             .find(|upstream| upstream.id == upstream_id)
@@ -1148,7 +1450,8 @@ impl AppState {
             return Ok(false);
         };
         upstream.active = active;
-        self.persist_state(&state).await?;
+        self.persist_state(&candidate_state).await?;
+        *state = candidate_state;
         Ok(true)
     }
 
@@ -1563,6 +1866,21 @@ pub fn join_upstream_url(base_url: &str, endpoint_path: &str) -> String {
     format!("{base}/{}", path)
 }
 
+fn should_bypass_proxy_for_url(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(should_bypass_proxy_for_host))
+        .unwrap_or(false)
+}
+
+fn should_bypass_proxy_for_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
 // ============================================================================
 // Portal Helper Functions
 // ============================================================================
@@ -1673,15 +1991,32 @@ impl AppState {
         
         let now = unix_seconds();
         let window_start = now.saturating_sub((window_hours as u64) * 3600);
-        
-        let snapshot = self.snapshot().await;
-        
-        // Count requests in the sliding window
-        let used = snapshot
-            .usage_logs
-            .iter()
-            .filter(|log| log.downstream_key_id == downstream.id && log.created_at >= window_start)
-            .count() as u32;
+
+        let used_from_windows = {
+            let windows = self.downstream_request_windows.lock().await;
+            windows
+                .get(&downstream.id)
+                .map(|window| {
+                    window
+                        .iter()
+                        .filter(|&&timestamp| timestamp >= window_start)
+                        .count() as u32
+                })
+                .unwrap_or(0)
+        };
+        let used_from_logs = {
+            let snapshot = self.snapshot().await;
+            snapshot
+                .usage_logs
+                .iter()
+                .filter(|log| {
+                    log.downstream_key_id == downstream.id && log.created_at >= window_start
+                })
+                .count() as u32
+        };
+        // Use the larger value so UI keeps reflecting runtime reservations and
+        // persisted successful requests consistently.
+        let used = used_from_windows.max(used_from_logs);
         
         let percentage = if limit > 0 {
             (used as f64 / limit as f64) * 100.0
@@ -1898,6 +2233,10 @@ impl AppState {
 impl AppState {
     /// Add a new upstream
     pub async fn add_upstream(&self, upstream: UpstreamConfig) -> Result<(), String> {
+        let mut upstream = upstream;
+        upstream.normalize_for_storage();
+        upstream.validate_configuration()?;
+
         let mut inner = self.inner.lock().await;
         if inner.upstreams.iter().any(|u| u.id == upstream.id) {
             return Err(format!("Upstream with ID '{}' already exists", upstream.id));
@@ -1907,10 +2246,15 @@ impl AppState {
     }
     
     /// Update an existing upstream
-    pub async fn update_upstream_by_id(&self, id: &str, updates: serde_json::Value) -> Result<UpstreamConfig, String> {
+    pub async fn update_upstream_by_id(
+        &self,
+        id: &str,
+        updates: serde_json::Value,
+    ) -> Result<UpstreamConfig, UpstreamMutationError> {
         let mut inner = self.inner.lock().await;
-        let upstream = inner.upstreams.iter_mut().find(|u| u.id == id)
-            .ok_or_else(|| format!("Upstream '{}' not found", id))?;
+        let mut candidate_state = inner.clone();
+        let upstream = candidate_state.upstreams.iter_mut().find(|u| u.id == id)
+            .ok_or_else(|| UpstreamMutationError::NotFound(format!("Upstream '{}' not found", id)))?;
         
         // Apply updates
         if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
@@ -2008,8 +2352,18 @@ impl AppState {
         if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
             upstream.active = active;
         }
-        
-        Ok(upstream.clone())
+
+        upstream.normalize_for_storage();
+        if let Err(error) = upstream.validate_configuration() {
+            return Err(UpstreamMutationError::InvalidInput(error));
+        }
+
+        let updated = upstream.clone();
+        self.persist_state(&candidate_state)
+            .await
+            .map_err(|e| UpstreamMutationError::Persist(format!("Failed to persist state: {e}")))?;
+        *inner = candidate_state;
+        Ok(updated)
     }
     
     /// Delete an upstream
@@ -2046,7 +2400,8 @@ impl AppState {
     /// Update an existing downstream
     pub async fn update_downstream_by_id(&self, id: &str, updates: serde_json::Value) -> Result<DownstreamConfig, String> {
         let mut inner = self.inner.lock().await;
-        let downstream = inner.downstreams.iter_mut().find(|d| d.id == id)
+        let mut candidate_state = inner.clone();
+        let downstream = candidate_state.downstreams.iter_mut().find(|d| d.id == id)
             .ok_or_else(|| format!("Downstream '{}' not found", id))?;
         
         // Apply updates (preserve hash)
@@ -2102,7 +2457,12 @@ impl AppState {
             downstream.active = active;
         }
         
-        Ok(downstream.clone())
+        let updated = downstream.clone();
+        self.persist_state(&candidate_state)
+            .await
+            .map_err(|e| format!("Failed to persist state: {e}"))?;
+        *inner = candidate_state;
+        Ok(updated)
     }
     
     /// Delete a downstream
@@ -2133,5 +2493,109 @@ impl AppState {
             .ok_or_else(|| format!("Downstream '{}' not found", id))?;
         downstream.hash = new_hash;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        should_bypass_proxy_for_host, should_bypass_proxy_for_url, ModelAliasConfig,
+        ModelRequestCostConfig, UpstreamConfig,
+    };
+
+    #[test]
+    fn normalize_for_storage_auto_fills_aliases_and_preserves_manual_conflicts() {
+        let mut upstream = UpstreamConfig {
+            supported_models: vec!["GLM-5".into(), "MiniMax2.7".into()],
+            model_aliases: vec![ModelAliasConfig {
+                slug: "glm-5".into(),
+                upstream_model: "GLM-5-MANUAL".into(),
+            }],
+            ..Default::default()
+        };
+
+        upstream.normalize_for_storage();
+
+        assert_eq!(
+            upstream.model_aliases,
+            vec![
+                ModelAliasConfig {
+                    slug: "glm-5".into(),
+                    upstream_model: "GLM-5-MANUAL".into(),
+                },
+                ModelAliasConfig {
+                    slug: "minimax2.7".into(),
+                    upstream_model: "MiniMax2.7".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_configuration_rejects_invalid_premium_models() {
+        let mut upstream = UpstreamConfig {
+            supported_models: vec!["GLM-5".into()],
+            premium_models: vec!["glm-5.1".into()],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+
+        let error = upstream.validate_configuration().unwrap_err();
+        assert!(error.contains("invalid premium_models"));
+        assert!(error.contains("glm-5.1"));
+    }
+
+    #[test]
+    fn alias_request_resolves_to_premium_model_and_cost_rule() {
+        let mut upstream = UpstreamConfig {
+            supported_models: vec!["GLM-5.1".into()],
+            premium_models: vec!["GLM-5.1".into()],
+            model_request_costs: vec![ModelRequestCostConfig {
+                slug: "GLM-5.1".into(),
+                cost: 2.0,
+            }],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+
+        assert!(upstream.supports_model("glm-5.1"));
+        assert_eq!(upstream.resolved_model_name("glm-5.1").as_deref(), Some("GLM-5.1"));
+        assert!(upstream.is_premium_model_request("glm-5.1"));
+        assert_eq!(upstream.request_cost_for_model("glm-5.1"), 2.0);
+    }
+
+    #[test]
+    fn bypasses_proxy_for_loopback_hosts_only() {
+        assert!(should_bypass_proxy_for_host("localhost"));
+        assert!(should_bypass_proxy_for_host("127.0.0.1"));
+        assert!(should_bypass_proxy_for_host("::1"));
+        assert!(!should_bypass_proxy_for_host("api.openai.com"));
+    }
+
+    #[test]
+    fn bypasses_proxy_for_loopback_urls_only() {
+        assert!(should_bypass_proxy_for_url("http://127.0.0.1:8080/v1/chat/completions"));
+        assert!(should_bypass_proxy_for_url("http://localhost:8080/v1/chat/completions"));
+        assert!(!should_bypass_proxy_for_url("https://api.openai.com/v1/chat/completions"));
+        assert!(!should_bypass_proxy_for_url("not-a-url"));
+    }
+
+    #[test]
+    fn model_resolution_is_case_insensitive_and_preserves_upstream_model_case() {
+        let mut upstream = UpstreamConfig {
+            supported_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
+            premium_models: vec!["MiniMax2.7".into()],
+            model_aliases: vec![],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+
+        assert!(upstream.supports_model("minimax2.7"));
+        assert_eq!(
+            upstream.resolved_model_name("minimax2.7").as_deref(),
+            Some("MiniMax2.7")
+        );
+        assert!(upstream.is_premium_model_request("MINIMAX2.7"));
+        assert_eq!(upstream.request_cost_for_model("minimax2.7"), 1.0);
     }
 }

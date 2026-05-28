@@ -35,13 +35,20 @@
         <el-table-column label="秘钥" width="220">
           <template #default="{ row }">
             <div class="key-cell">
-              <code v-if="!expandedKeys.includes(row.id)">{{ maskKey(row.plaintext_key || row.plaintext_key_prefix || row.hash) }}</code>
-              <code v-else class="full-key">{{ row.plaintext_key || row.plaintext_key_prefix || row.hash }}</code>
+              <code v-if="hasUsablePlaintextKey(row.plaintext_key) && !expandedKeys.includes(row.id)">
+                {{ maskPlaintextKey(row.plaintext_key) }}
+              </code>
+              <code v-else-if="hasUsablePlaintextKey(row.plaintext_key)" class="full-key">
+                {{ row.plaintext_key }}
+              </code>
+              <span v-else class="legacy-key-hint">未存储真实秘钥，请先轮换</span>
               <el-button-group>
-                <el-button size="small" @click="toggleKeyView(row.id)">
+                <el-button size="small" @click="toggleKeyView(row.id)" :disabled="!hasUsablePlaintextKey(row.plaintext_key)">
                   {{ expandedKeys.includes(row.id) ? '隐藏' : '查看' }}
                 </el-button>
-                <el-button size="small" @click="copyKey(row.plaintext_key || row.plaintext_key_prefix || row.hash)">复制秘钥</el-button>
+                <el-button size="small" @click="copyKey(row.plaintext_key)" :disabled="!hasUsablePlaintextKey(row.plaintext_key)">
+                  复制秘钥
+                </el-button>
               </el-button-group>
             </div>
           </template>
@@ -86,7 +93,7 @@
         :closable="false"
         class="helper-text"
       >
-        表格中显示的是密钥标识（哈希值），不是真正的秘钥。如需获取真正的秘钥，请点击"轮换密钥"生成新秘钥。轮换后旧秘钥立即失效，新秘钥仅显示一次。
+        仅可复制真实可用秘钥。若某行显示“未存储真实秘钥”，请先执行“轮换密钥”生成新秘钥后再复制。
       </el-alert>
     </el-card>
     
@@ -213,6 +220,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import type { DownstreamConfig } from '@/types'
+import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
 
 const loading = ref(false)
 const downstreams = ref<DownstreamConfig[]>([])
@@ -260,11 +268,6 @@ const rules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }]
 }
 
-const maskKey = (hash: string) => {
-  if (!hash || hash.length < 8) return hash
-  return `${hash.substring(0, 4)}...${hash.substring(hash.length - 4)}`
-}
-
 const toggleKeyView = (id: string) => {
   const index = expandedKeys.value.indexOf(id)
   if (index > -1) {
@@ -274,13 +277,19 @@ const toggleKeyView = (id: string) => {
   }
 }
 
-const copyKey = async (key: string) => {
+const copyKey = async (key: unknown) => {
+  const copyableKey = getCopyableKey(key)
+  if (!copyableKey) {
+    ElMessage.warning('当前没有可复制的真实秘钥，请先轮换密钥')
+    return
+  }
+
   try {
-    await navigator.clipboard.writeText(key)
+    await navigator.clipboard.writeText(copyableKey)
     ElMessage.success('已复制到剪贴板')
   } catch {
     const textArea = document.createElement('textarea')
-    textArea.value = key
+    textArea.value = copyableKey
     textArea.style.position = 'fixed'
     textArea.style.left = '-9999px'
     document.body.appendChild(textArea)
@@ -501,6 +510,10 @@ code {
   background: #f5f5f5;
   padding: 2px 6px;
   border-radius: 3px;
+}
+
+.legacy-key-hint {
+  color: #909399;
 }
 
 .helper-text {

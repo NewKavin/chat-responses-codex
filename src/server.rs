@@ -3,31 +3,31 @@ use crate::protocol::{
     responses_request_to_chat_payload, responses_response_to_chat_payload, ProtocolError,
     StreamTranslator,
 };
-use axum::extract::{Path, Query};
-use std::collections::HashMap;
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, unix_seconds,
-    AppState, UpstreamConfig, DownstreamConfig, UsageLog,
+    join_upstream_url, unix_seconds, AppState, DownstreamConfig, UpstreamConfig,
+    UpstreamMutationError, UsageLog,
 };
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Json, State};
+use axum::extract::{Path, Query};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::stream;
+use mime_guess::from_path;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
-use rust_embed::RustEmbed;
-use mime_guess::from_path;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
@@ -88,10 +88,14 @@ struct StreamUsageLogContext {
     state: AppState,
     request_id: String,
     downstream_key_id: String,
+    downstream_name: Option<String>,
     upstream_key_id: String,
+    upstream_name: Option<String>,
     upstream_protocol: UpstreamProtocol,
     endpoint: String,
     model: String,
+    inference_strength: Option<String>,
+    user_agent: Option<String>,
     normalized_model: String,
     status: StatusCode,
     started: Instant,
@@ -118,10 +122,14 @@ impl StreamUsageLogContext {
             state,
             request_id,
             downstream_key_id,
+            downstream_name,
             upstream_key_id,
+            upstream_name,
             upstream_protocol,
             endpoint,
             model,
+            inference_strength,
+            user_agent,
             normalized_model,
             status,
             started,
@@ -131,8 +139,18 @@ impl StreamUsageLogContext {
             id: request_id.clone(),
             downstream_key_id: downstream_key_id.clone(),
             upstream_key_id: upstream_key_id.clone(),
+            downstream_name,
+            upstream_name,
             endpoint: endpoint.clone(),
             model: model.clone(),
+            inference_strength,
+            billing_mode: Some(if usage.2 > 0 {
+                "Token 计费".to_string()
+            } else {
+                "请求计费".to_string()
+            }),
+            request_count: Some(1),
+            user_agent,
             request_id: request_id.clone(),
             status_code: status.as_u16(),
             prompt_tokens: usage.0,
@@ -186,6 +204,21 @@ fn usage_from_usage_value(usage: &Value) -> (u64, u64, u64) {
         .and_then(Value::as_u64)
         .unwrap_or(prompt_tokens + completion_tokens);
     (prompt_tokens, completion_tokens, total_tokens)
+}
+
+fn extract_inference_strength(body: &Value) -> Option<String> {
+    body.get("inference_strength")
+        .and_then(Value::as_str)
+        .or_else(|| body.get("reasoning_effort").and_then(Value::as_str))
+        .or_else(|| {
+            body.get("reasoning")
+                .and_then(Value::as_object)
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug)]
@@ -257,6 +290,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(responses))
+        .route("/v1/messages", post(claude_messages))
+        .route("/v1/messages/count_tokens", post(claude_count_tokens))
         .route("/api/admin/login", post(admin_login))
         .route(
             "/api/admin/dashboard",
@@ -265,7 +300,6 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
-        
         // Admin API - Upstreams
         .route(
             "/api/admin/upstreams",
@@ -300,7 +334,6 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
-
         // Admin API - Downstreams
         .route(
             "/api/admin/downstreams",
@@ -335,7 +368,6 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
-        
         // Admin API - Logs
         .route(
             "/api/admin/logs",
@@ -344,7 +376,6 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
-
         // Portal API
         .route("/api/portal/login", post(portal_login))
         .route("/api/portal/overview", get(portal_overview))
@@ -353,7 +384,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/models", get(portal_models))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
-
         // Frontend assets and SPA fallback
         .fallback(serve_frontend)
         .layer(
@@ -491,6 +521,79 @@ async fn responses(
     }
 }
 
+async fn claude_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let chat_payload = match claude_messages_to_chat_payload(&body) {
+        Ok(payload) => payload,
+        Err(message) => return GatewayError::BadRequest(message).into_response(),
+    };
+
+    match process_gateway_request(state, headers, chat_payload, EndpointKind::ChatCompletions).await
+    {
+        Ok(result) => dispatch_claude_success(result),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn claude_count_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Ok(secret) = downstream_secret_from_headers(&headers) else {
+        return GatewayError::Unauthorized("missing bearer token or x-api-key".into())
+            .into_response();
+    };
+    let routing_snapshot = state.routing_snapshot().await;
+    let Some(downstream) = routing_snapshot.downstreams.iter().find(|downstream| {
+        downstream.active && crate::keys::verify_downstream_key(&secret, &downstream.hash)
+    }) else {
+        return GatewayError::Unauthorized("invalid downstream key".into()).into_response();
+    };
+
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::BadRequest("missing model".into()));
+    let model = match model {
+        Ok(model) => model,
+        Err(error) => return error.into_response(),
+    };
+    if !downstream.model_allowlist.is_empty()
+        && !downstream_model_is_allowed(downstream.model_allowlist.as_slice(), model)
+    {
+        return GatewayError::Forbidden("model not allowed".into()).into_response();
+    }
+
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| GatewayError::BadRequest("missing messages".into()));
+    let messages = match messages {
+        Ok(messages) => messages,
+        Err(error) => return error.into_response(),
+    };
+
+    let mut character_count = 0u64;
+    for message in messages {
+        character_count = character_count
+            .saturating_add(extract_claude_content_text(message).chars().count() as u64);
+    }
+    if let Some(system) = body.get("system") {
+        character_count = character_count
+            .saturating_add(extract_claude_system_text(system).chars().count() as u64);
+    }
+    let input_tokens = (character_count / 4).max(1);
+
+    Json(json!({
+        "input_tokens": input_tokens
+    }))
+    .into_response()
+}
+
 struct DownstreamConcurrencyGuard {
     state: AppState,
     downstream_id: String,
@@ -498,7 +601,10 @@ struct DownstreamConcurrencyGuard {
 
 impl DownstreamConcurrencyGuard {
     fn new(state: AppState, downstream_id: String) -> Self {
-        Self { state, downstream_id }
+        Self {
+            state,
+            downstream_id,
+        }
     }
 }
 
@@ -533,6 +639,13 @@ async fn process_gateway_request(
         .and_then(Value::as_str)
         .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
     let normalized_model = model;
+    let inference_strength = extract_inference_strength(&body);
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     tracing::info!(
         request_id = %request_id,
@@ -580,10 +693,7 @@ async fn process_gateway_request(
     }
 
     if !downstream.model_allowlist.is_empty()
-        && !downstream
-            .model_allowlist
-            .iter()
-            .any(|allowed| allowed == model)
+        && !downstream_model_is_allowed(downstream.model_allowlist.as_slice(), model)
     {
         tracing::warn!(
             request_id = %request_id,
@@ -694,7 +804,7 @@ async fn process_gateway_request(
             .collect::<Vec<_>>();
         let mut deprioritized_upstreams = Vec::new();
         upstreams.retain(|upstream| {
-            let is_non_premium_request = !upstream.premium_models.iter().any(|m| m == model);
+            let is_non_premium_request = !upstream.is_premium_model_request(model);
             let should_deprioritize = upstream.protect_premium_quota
                 && !upstream.premium_models.is_empty()
                 && is_non_premium_request;
@@ -750,7 +860,7 @@ async fn process_gateway_request(
                     upstream.failure_count,
                     request_cost,
                     upstream.protect_premium_quota,
-                    upstream.premium_models.iter().any(|m| m == model)
+                    upstream.is_premium_model_request(model)
                 )
             })
             .collect::<Vec<_>>();
@@ -824,6 +934,9 @@ async fn process_gateway_request(
                     model,
                     normalized_model,
                     &downstream.id,
+                    &downstream.name,
+                    inference_strength.as_deref(),
+                    user_agent.as_deref(),
                     fallback_to_chat,
                 )
                 .await;
@@ -854,8 +967,18 @@ async fn process_gateway_request(
                                 id: request_id.clone(),
                                 downstream_key_id: downstream.id.clone(),
                                 upstream_key_id: upstream.id.clone(),
+                                downstream_name: Some(downstream.name.clone()),
+                                upstream_name: Some(upstream.name.clone()),
                                 endpoint: request_path.to_string(),
                                 model: model.to_string(),
+                                inference_strength: inference_strength.clone(),
+                                billing_mode: Some(if total_tokens > 0 {
+                                    "Token 计费".to_string()
+                                } else {
+                                    "请求计费".to_string()
+                                }),
+                                request_count: Some(1),
+                                user_agent: user_agent.clone(),
                                 request_id: request_id.clone(),
                                 status_code: result.status.as_u16(),
                                 prompt_tokens,
@@ -1101,14 +1224,6 @@ struct ResponsesChatFallbackReport {
     tool_choice_dropped: bool,
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone)]
-struct StreamRetryReport {
-    attempted_stream: bool,
-    retry_without_stream: bool,
-    responses_chat_fallback: Option<ResponsesChatFallbackReport>,
-}
-
 fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallbackReport {
     let mut report = ResponsesChatFallbackReport::default();
 
@@ -1132,29 +1247,6 @@ fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallback
     }
 
     report
-}
-
-#[cfg(test)]
-fn stream_retry_report(
-    body: &Value,
-    endpoint: EndpointKind,
-    upstream_protocol: UpstreamProtocol,
-    attempted_stream: bool,
-    retry_without_stream: bool,
-) -> StreamRetryReport {
-    let responses_chat_fallback = if endpoint == EndpointKind::Responses
-        && upstream_protocol == UpstreamProtocol::ChatCompletions
-    {
-        Some(responses_request_chat_fallback_report(body))
-    } else {
-        None
-    };
-
-    StreamRetryReport {
-        attempted_stream,
-        retry_without_stream,
-        responses_chat_fallback,
-    }
 }
 
 fn responses_tool_summary(tool: &Value) -> String {
@@ -1261,6 +1353,7 @@ fn is_context_limit_error(error_text: &str) -> bool {
         || normalized.contains("token limit")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_to_upstream(
     state: &AppState,
     upstream: &UpstreamConfig,
@@ -1273,6 +1366,9 @@ async fn send_to_upstream(
     model: &str,
     normalized_model: &str,
     downstream_key_id: &str,
+    downstream_name: &str,
+    inference_strength: Option<&str>,
+    user_agent: Option<&str>,
     chat_fallback_requested: bool,
 ) -> Result<DispatchResult, GatewayError> {
     let upstream_body = match (endpoint, upstream.protocol) {
@@ -1389,7 +1485,7 @@ async fn send_to_upstream(
         "dispatching request to upstream service"
     );
     let response = state
-        .client()
+        .client_for_url(&url)
         .post(url.clone())
         .header(
             header::AUTHORIZATION,
@@ -1483,10 +1579,14 @@ async fn send_to_upstream(
                 state: state.clone(),
                 request_id: request_id.to_string(),
                 downstream_key_id: downstream_key_id.to_string(),
+                downstream_name: Some(downstream_name.to_string()),
                 upstream_key_id: upstream.id.clone(),
+                upstream_name: Some(upstream.name.clone()),
                 upstream_protocol: upstream.protocol,
                 endpoint: endpoint.path().to_string(),
                 model: model.to_string(),
+                inference_strength: inference_strength.map(str::to_string),
+                user_agent: user_agent.map(str::to_string),
                 normalized_model: normalized_model.to_string(),
                 status,
                 started,
@@ -1591,6 +1691,12 @@ fn no_routable_model_error(snapshot: &crate::state::PersistedState, model: &str)
             visible_models.join(", ")
         ))
     }
+}
+
+fn downstream_model_is_allowed(allowlist: &[String], model: &str) -> bool {
+    allowlist
+        .iter()
+        .any(|allowed| allowed.trim().eq_ignore_ascii_case(model.trim()))
 }
 
 fn endpoint_for_upstream(protocol: UpstreamProtocol) -> &'static str {
@@ -1912,6 +2018,199 @@ fn usage_from_body(body: &Value) -> (u64, u64, u64) {
     (prompt_tokens, completion_tokens, total_tokens)
 }
 
+fn dispatch_claude_success(result: DispatchResult) -> Response {
+    let request_id = HeaderValue::from_str(&result.request_id)
+        .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
+
+    match result.body {
+        DispatchBody::Json(body) => match chat_completion_to_claude_message(&body) {
+            Ok(claude_body) => {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                headers.insert(
+                    header::HeaderName::from_static("x-gateway-request-id"),
+                    request_id,
+                );
+                (result.status, headers, Json(claude_body)).into_response()
+            }
+            Err(error) => error.into_response(),
+        },
+        DispatchBody::Stream(_) => GatewayError::BadRequest(
+            "claude streaming compatibility is not implemented yet; set stream=false".into(),
+        )
+        .into_response(),
+    }
+}
+
+fn chat_completion_to_claude_message(body: &Value) -> Result<Value, GatewayError> {
+    let choice = body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| GatewayError::Upstream("missing chat choices".into()))?;
+    let message = choice
+        .get("message")
+        .or_else(|| choice.get("delta"))
+        .ok_or_else(|| GatewayError::Upstream("missing chat message".into()))?;
+    let text = extract_plain_text_from_content(message.get("content"));
+
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .map(|reason| match reason {
+            "stop" => "end_turn",
+            "length" => "max_tokens",
+            "tool_calls" => "tool_use",
+            _ => "end_turn",
+        })
+        .unwrap_or("end_turn");
+    let usage = body.get("usage").unwrap_or(&Value::Null);
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    Ok(json!({
+        "id": body.get("id").and_then(Value::as_str).unwrap_or("msg"),
+        "type": "message",
+        "role": "assistant",
+        "model": body.get("model").and_then(Value::as_str).unwrap_or_default(),
+        "content": [{
+            "type": "text",
+            "text": text,
+        }],
+        "stop_reason": finish_reason,
+        "stop_sequence": Value::Null,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+    }))
+}
+
+fn claude_messages_to_chat_payload(body: &Value) -> Result<Value, String> {
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing model".to_string())?;
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing messages".to_string())?;
+    let mut chat_messages = Vec::new();
+
+    if let Some(system) = body.get("system") {
+        let system_text = extract_claude_system_text(system);
+        if !system_text.is_empty() {
+            chat_messages.push(json!({
+                "role": "system",
+                "content": system_text,
+            }));
+        }
+    }
+
+    for message in messages {
+        let chat_message = claude_message_to_chat_message(message)?;
+        chat_messages.push(chat_message);
+    }
+
+    let mut output = serde_json::Map::new();
+    output.insert("model".into(), Value::String(model.to_string()));
+    output.insert("messages".into(), Value::Array(chat_messages));
+
+    if let Some(max_tokens) = body.get("max_tokens").and_then(Value::as_u64) {
+        output.insert("max_tokens".into(), Value::Number(max_tokens.into()));
+    }
+    if let Some(temperature) = body.get("temperature") {
+        output.insert("temperature".into(), temperature.clone());
+    }
+    if let Some(top_p) = body.get("top_p") {
+        output.insert("top_p".into(), top_p.clone());
+    }
+    // Claude streaming transport is not yet mapped to /v1/messages SSE output.
+    // Force non-stream behavior by not forwarding the stream flag downstream.
+    if let Some(inference_strength) = body.get("inference_strength").and_then(Value::as_str) {
+        output.insert(
+            "inference_strength".into(),
+            Value::String(inference_strength.to_string()),
+        );
+    }
+
+    Ok(Value::Object(output))
+}
+
+fn claude_message_to_chat_message(message: &Value) -> Result<Value, String> {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "claude message missing role".to_string())?;
+    let content = extract_claude_content_text(message);
+    Ok(json!({
+        "role": role,
+        "content": content,
+    }))
+}
+
+fn extract_claude_content_text(message: &Value) -> String {
+    let Some(content) = message.get("content") else {
+        return String::new();
+    };
+
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                if let Some(text) = part.as_str() {
+                    return Some(text.to_string());
+                }
+                let part_type = part.get("type").and_then(Value::as_str);
+                if matches!(part_type, Some("text")) {
+                    return part.get("text").and_then(Value::as_str).map(str::to_string);
+                }
+                None
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn extract_claude_system_text(system: &Value) -> String {
+    match system {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                if let Some(text) = part.as_str() {
+                    return Some(text.to_string());
+                }
+                let part_type = part.get("type").and_then(Value::as_str);
+                if matches!(part_type, Some("text")) {
+                    return part.get("text").and_then(Value::as_str).map(str::to_string);
+                }
+                None
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 fn dispatch_success(result: DispatchResult) -> Response {
     let request_id = HeaderValue::from_str(&result.request_id)
         .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
@@ -1957,30 +2256,26 @@ fn proxied_stream_body(
         usage_log_flushed: false,
     };
     let stream = stream::try_unfold(state, |mut state| async move {
-        loop {
-            if state.finished {
-                state.flush_usage_log().await?;
-                return Ok(None);
-            }
+        if state.finished {
+            state.flush_usage_log().await?;
+            return Ok(None);
+        }
 
-            match state.response.chunk().await {
-                Ok(Some(chunk)) => {
-                    state.buffer.extend_from_slice(&chunk);
-                    state.drain_usage_from_buffer()?;
-                    if state.finished {
-                        state.flush_usage_log().await?;
-                    }
-                    return Ok(Some((chunk, state)));
-                }
-                Ok(None) => {
-                    state.finish_stream();
+        match state.response.chunk().await {
+            Ok(Some(chunk)) => {
+                state.buffer.extend_from_slice(&chunk);
+                state.drain_usage_from_buffer()?;
+                if state.finished {
                     state.flush_usage_log().await?;
-                    return Ok(None);
                 }
-                Err(error) => {
-                    return Err(std::io::Error::other(error.to_string()));
-                }
+                Ok(Some((chunk, state)))
             }
+            Ok(None) => {
+                state.finish_stream();
+                state.flush_usage_log().await?;
+                Ok(None)
+            }
+            Err(error) => Err(std::io::Error::other(error.to_string())),
         }
     });
 
@@ -2191,7 +2486,6 @@ fn sse_done_frame() -> Bytes {
     Bytes::from_static(b"data: [DONE]\n\n")
 }
 
-
 fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
     GatewayError::BadRequest(error.to_string())
 }
@@ -2208,8 +2502,8 @@ fn next_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
 }
 
 fn parse_sse_data_payload(frame: &[u8]) -> Result<Option<String>, std::io::Error> {
-    let frame_str = std::str::from_utf8(frame)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let frame_str =
+        std::str::from_utf8(frame).map_err(|error| std::io::Error::other(error.to_string()))?;
     for line in frame_str.lines() {
         if let Some(payload) = line.strip_prefix("data: ") {
             return Ok(Some(payload.to_string()));
@@ -2219,13 +2513,35 @@ fn parse_sse_data_payload(frame: &[u8]) -> Result<Option<String>, std::io::Error
 }
 
 fn downstream_secret_from_headers(headers: &HeaderMap) -> Result<String, GatewayError> {
+    if let Some(api_key) = headers
+        .get(header::HeaderName::from_static("x-api-key"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(api_key.to_string());
+    }
+
+    if let Some(api_key) = headers
+        .get(header::HeaderName::from_static("api-key"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(api_key.to_string());
+    }
+
     let auth_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| GatewayError::Unauthorized("missing authorization header".into()))?;
+        .ok_or_else(|| {
+            GatewayError::Unauthorized("missing authorization header or x-api-key".into())
+        })?;
 
     auth_header
         .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
         .ok_or_else(|| GatewayError::Unauthorized("invalid authorization header".into()))
 }
@@ -2245,7 +2561,6 @@ fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-
 // Admin API endpoints
 
 #[derive(Debug, serde::Deserialize)]
@@ -2264,7 +2579,8 @@ async fn admin_login(
     State(state): State<AppState>,
     Json(body): Json<AdminLoginRequest>,
 ) -> impl IntoResponse {
-    if body.username != state.config.admin_username || body.password != state.config.admin_password {
+    if body.username != state.config.admin_username || body.password != state.config.admin_password
+    {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({
@@ -2324,10 +2640,11 @@ async fn portal_login(
 ) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
 
-    let downstream = snapshot
-        .downstreams
-        .iter()
-        .find(|d| d.active && d.id == body.employee_id && crate::keys::verify_downstream_key(&body.key, &d.hash));
+    let downstream = snapshot.downstreams.iter().find(|d| {
+        d.active
+            && d.id == body.employee_id
+            && crate::keys::verify_downstream_key(&body.key, &d.hash)
+    });
 
     if downstream.is_none() {
         return (
@@ -2395,14 +2712,14 @@ async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoRespons
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
+
     #[derive(serde::Serialize)]
     struct UpstreamWithRuntime {
         #[serde(flatten)]
         config: UpstreamConfig,
         runtime_state: Option<UpstreamRuntimeStateResponse>,
     }
-    
+
     #[derive(serde::Serialize)]
     struct UpstreamRuntimeStateResponse {
         in_flight: u32,
@@ -2415,24 +2732,25 @@ async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoRespons
         cooldown_until: u64,
         cooldown_remaining: u64,
     }
-    
+
     let upstreams_with_runtime: Vec<UpstreamWithRuntime> = snapshot
         .upstreams
         .into_iter()
         .map(|config| {
             let runtime_state = runtime_snapshots.get(&config.id).map(|runtime| {
                 let minute_percentage = if config.requests_per_minute > 0 {
-                    (runtime.minute_cost as f64 / config.requests_per_minute as f64 * 100.0).min(100.0)
+                    (runtime.minute_cost / config.requests_per_minute as f64 * 100.0).min(100.0)
                 } else {
                     0.0
                 };
-                
+
                 let five_hour_percentage = if config.request_quota_requests > 0 {
-                    (runtime.five_hour_cost as f64 / config.request_quota_requests as f64 * 100.0).min(100.0)
+                    (runtime.five_hour_cost / config.request_quota_requests as f64 * 100.0)
+                        .min(100.0)
                 } else {
                     0.0
                 };
-                
+
                 UpstreamRuntimeStateResponse {
                     in_flight: runtime.in_flight,
                     minute_cost: runtime.minute_cost,
@@ -2445,14 +2763,14 @@ async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoRespons
                     cooldown_remaining: runtime.cooldown_remaining(now),
                 }
             });
-            
+
             UpstreamWithRuntime {
                 config,
                 runtime_state,
             }
         })
         .collect();
-    
+
     Json(upstreams_with_runtime).into_response()
 }
 
@@ -2464,11 +2782,8 @@ async fn admin_list_models(State(state): State<AppState>) -> impl IntoResponse {
 
     for upstream in &snapshot.upstreams {
         if upstream.active {
-            for model in &upstream.supported_models {
-                models.insert(model.clone());
-            }
-            for alias in &upstream.model_aliases {
-                models.insert(alias.slug.clone());
+            for model in upstream.route_models() {
+                models.insert(model);
             }
         }
     }
@@ -2478,9 +2793,9 @@ async fn admin_list_models(State(state): State<AppState>) -> impl IntoResponse {
 
     Json(json!({
         "models": models_list
-    })).into_response()
+    }))
+    .into_response()
 }
-
 
 /// Create a new upstream
 async fn admin_create_upstream(
@@ -2492,8 +2807,10 @@ async fn admin_create_upstream(
         upstream.id = Uuid::new_v4().to_string();
     }
 
+    upstream.normalize_for_storage();
+
     // Validate required fields
-    if upstream.name.is_empty() {
+    if upstream.name.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -2501,7 +2818,19 @@ async fn admin_create_upstream(
                     "message": "Upstream name is required"
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
+    }
+    if let Err(error) = upstream.validate_configuration() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": error
+                }
+            })),
+        )
+            .into_response();
     }
 
     // Check if upstream with this ID already exists
@@ -2514,11 +2843,23 @@ async fn admin_create_upstream(
                     "message": format!("Upstream with ID '{}' already exists", upstream.id)
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Add the upstream
     if let Err(e) = state.insert_upstream(upstream.clone()).await {
+        if e.kind() == std::io::ErrorKind::InvalidInput {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": e.to_string()
+                    }
+                })),
+            )
+                .into_response();
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -2526,7 +2867,8 @@ async fn admin_create_upstream(
                     "message": format!("Failed to create upstream: {}", e)
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     (StatusCode::CREATED, Json(upstream)).into_response()
@@ -2538,7 +2880,7 @@ async fn admin_get_upstream(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
-    
+
     if let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == id) {
         Json(upstream.clone()).into_response()
     } else {
@@ -2549,7 +2891,8 @@ async fn admin_get_upstream(
                     "message": format!("Upstream '{}' not found", id)
                 }
             })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -2560,27 +2903,34 @@ async fn admin_update_upstream(
     Json(updates): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     match state.update_upstream_by_id(&id, updates).await {
-        Ok(updated_upstream) => {
-            if let Err(e) = state.persist().await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": {
-                            "message": format!("Failed to persist state: {}", e)
-                        }
-                    })),
-                ).into_response();
-            }
-            Json(updated_upstream).into_response()
-        }
-        Err(e) => (
+        Ok(updated_upstream) => Json(updated_upstream).into_response(),
+        Err(UpstreamMutationError::NotFound(message)) => (
             StatusCode::NOT_FOUND,
             Json(json!({
                 "error": {
-                    "message": e
+                    "message": message
                 }
             })),
-        ).into_response()
+        )
+            .into_response(),
+        Err(UpstreamMutationError::InvalidInput(message)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": message
+                }
+            })),
+        )
+            .into_response(),
+        Err(UpstreamMutationError::Persist(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": message
+                }
+            })),
+        )
+            .into_response(),
     }
 }
 async fn admin_delete_upstream(
@@ -2596,7 +2946,8 @@ async fn admin_delete_upstream(
                     "message": format!("Upstream '{}' not found", id)
                 }
             })),
-        ).into_response(),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -2604,7 +2955,8 @@ async fn admin_delete_upstream(
                     "message": format!("Failed to delete upstream: {}", e)
                 }
             })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -2628,7 +2980,8 @@ async fn admin_toggle_upstream(
                         "message": format!("Upstream '{}' not found", id)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -2636,7 +2989,8 @@ async fn admin_toggle_upstream(
                         "message": format!("Failed to update upstream: {}", e)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
         }
     } else {
         (
@@ -2646,7 +3000,8 @@ async fn admin_toggle_upstream(
                     "message": format!("Upstream '{}' not found", id)
                 }
             })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -2663,9 +3018,9 @@ async fn admin_list_downstreams(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
-    
+
     let mut downstreams = snapshot.downstreams.clone();
-    
+
     // Filter by status
     if let Some(status) = params.get("status") {
         match status.as_str() {
@@ -2674,7 +3029,7 @@ async fn admin_list_downstreams(
             _ => {} // "all" or unknown - no filter
         }
     }
-    
+
     // Filter by lifecycle
     if let Some(lifecycle) = params.get("lifecycle") {
         match lifecycle.as_str() {
@@ -2683,15 +3038,16 @@ async fn admin_list_downstreams(
             _ => {} // "all" or unknown - no filter
         }
     }
-    
+
     // Filter by search (name or ID)
     if let Some(search) = params.get("search") {
         let search_lower = search.to_lowercase();
         downstreams.retain(|d| {
-            d.name.to_lowercase().contains(&search_lower) || d.id.to_lowercase().contains(&search_lower)
+            d.name.to_lowercase().contains(&search_lower)
+                || d.id.to_lowercase().contains(&search_lower)
         });
     }
-    
+
     Json(downstreams).into_response()
 }
 
@@ -2710,7 +3066,8 @@ async fn admin_create_downstream(
                     "message": "Downstream ID is required"
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     if downstream.name.is_empty() {
@@ -2721,7 +3078,8 @@ async fn admin_create_downstream(
                     "message": "Downstream name is required"
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Check if downstream with this ID already exists
@@ -2734,23 +3092,23 @@ async fn admin_create_downstream(
                     "message": format!("Downstream with ID '{}' already exists", downstream.id)
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Generate key and hash
-let generated = generate_downstream_key("key");
+    let generated = generate_downstream_key("key");
     let plaintext_key = generated.plaintext;
     let hash = generated.hash;
     downstream.hash = hash.clone();
     downstream.plaintext_key = Some(plaintext_key.clone());
-    
+
     let prefix_len = plaintext_key.len().min(16);
     downstream.plaintext_key_prefix = Some(format!(
         "{}...{}",
         &plaintext_key[..prefix_len.min(plaintext_key.len())],
         &plaintext_key[plaintext_key.len().saturating_sub(8)..]
     ));
-    
 
     // Add the downstream
     if let Err(e) = state.insert_downstream(downstream.clone()).await {
@@ -2761,7 +3119,8 @@ let generated = generate_downstream_key("key");
                     "message": format!("Failed to create downstream: {}", e)
                 }
             })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     (StatusCode::CREATED, Json(downstream)).into_response()
@@ -2773,7 +3132,7 @@ async fn admin_get_downstream(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
-    
+
     if let Some(downstream) = snapshot.downstreams.iter().find(|d| d.id == id) {
         Json(downstream.clone()).into_response()
     } else {
@@ -2784,7 +3143,8 @@ async fn admin_get_downstream(
                     "message": format!("Downstream '{}' not found", id)
                 }
             })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -2807,7 +3167,9 @@ async fn admin_update_downstream(
         if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
             downstream.max_concurrency = max_concurrency as u32;
         }
-        if let Some(rate_limit_enabled) = updates.get("rate_limit_enabled").and_then(|v| v.as_bool()) {
+        if let Some(rate_limit_enabled) =
+            updates.get("rate_limit_enabled").and_then(|v| v.as_bool())
+        {
             downstream.rate_limit_enabled = rate_limit_enabled;
         }
         if let Some(request_quota_window_hours) = updates
@@ -2816,7 +3178,11 @@ async fn admin_update_downstream(
         {
             downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
         }
-        if updates.get("request_quota_window_hours").is_some() && updates.get("request_quota_window_hours").is_some_and(Value::is_null) {
+        if updates.get("request_quota_window_hours").is_some()
+            && updates
+                .get("request_quota_window_hours")
+                .is_some_and(Value::is_null)
+        {
             downstream.request_quota_window_hours = None;
         }
         if let Some(request_quota_requests) = updates
@@ -2825,7 +3191,11 @@ async fn admin_update_downstream(
         {
             downstream.request_quota_requests = Some(request_quota_requests as u32);
         }
-        if updates.get("request_quota_requests").is_some() && updates.get("request_quota_requests").is_some_and(Value::is_null) {
+        if updates.get("request_quota_requests").is_some()
+            && updates
+                .get("request_quota_requests")
+                .is_some_and(Value::is_null)
+        {
             downstream.request_quota_requests = None;
         }
         if let Some(model_allowlist) = updates.get("model_allowlist").and_then(|v| v.as_array()) {
@@ -2843,13 +3213,21 @@ async fn admin_update_downstream(
         if let Some(daily_token_limit) = updates.get("daily_token_limit").and_then(|v| v.as_u64()) {
             downstream.daily_token_limit = Some(daily_token_limit);
         }
-        if updates.get("daily_token_limit").is_some() && updates.get("daily_token_limit").is_some_and(Value::is_null) {
+        if updates.get("daily_token_limit").is_some()
+            && updates.get("daily_token_limit").is_some_and(Value::is_null)
+        {
             downstream.daily_token_limit = None;
         }
-        if let Some(monthly_token_limit) = updates.get("monthly_token_limit").and_then(|v| v.as_u64()) {
+        if let Some(monthly_token_limit) =
+            updates.get("monthly_token_limit").and_then(|v| v.as_u64())
+        {
             downstream.monthly_token_limit = Some(monthly_token_limit);
         }
-        if updates.get("monthly_token_limit").is_some() && updates.get("monthly_token_limit").is_some_and(Value::is_null) {
+        if updates.get("monthly_token_limit").is_some()
+            && updates
+                .get("monthly_token_limit")
+                .is_some_and(Value::is_null)
+        {
             downstream.monthly_token_limit = None;
         }
         if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
@@ -2865,7 +3243,8 @@ async fn admin_update_downstream(
                         "message": format!("Downstream '{}' not found", id)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -2873,7 +3252,8 @@ async fn admin_update_downstream(
                         "message": format!("Failed to update downstream: {}", e)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
         }
     } else {
         (
@@ -2883,7 +3263,8 @@ async fn admin_update_downstream(
                     "message": format!("Downstream '{}' not found", id)
                 }
             })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -2901,7 +3282,8 @@ async fn admin_delete_downstream(
                     "message": format!("Downstream '{}' not found", id)
                 }
             })),
-        ).into_response(),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -2909,7 +3291,8 @@ async fn admin_delete_downstream(
                     "message": format!("Failed to delete downstream: {}", e)
                 }
             })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -2933,7 +3316,8 @@ async fn admin_toggle_downstream(
                         "message": format!("Downstream '{}' not found", id)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -2941,7 +3325,8 @@ async fn admin_toggle_downstream(
                         "message": format!("Failed to update downstream: {}", e)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
         }
     } else {
         (
@@ -2951,7 +3336,8 @@ async fn admin_toggle_downstream(
                     "message": format!("Downstream '{}' not found", id)
                 }
             })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -2968,7 +3354,7 @@ async fn admin_rotate_downstream(
         let hash = generated.hash;
         downstream.hash = hash;
         downstream.plaintext_key = Some(plaintext_key.clone());
-        
+
         let prefix_len = plaintext_key.len().min(16);
         downstream.plaintext_key_prefix = Some(format!(
             "{}...{}",
@@ -2985,7 +3371,8 @@ async fn admin_rotate_downstream(
                         "message": format!("Downstream '{}' not found", id)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -2993,7 +3380,8 @@ async fn admin_rotate_downstream(
                         "message": format!("Failed to rotate key: {}", e)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
         }
     } else {
         (
@@ -3003,7 +3391,8 @@ async fn admin_rotate_downstream(
                     "message": format!("Downstream '{}' not found", id)
                 }
             })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -3018,14 +3407,23 @@ struct LogsQuery {
     #[serde(default = "default_page_size")]
     page_size: usize,
     status_code: Option<u16>,
+    status_codes: Option<String>,
     model: Option<String>,
     #[serde(default = "default_time_range")]
     time_range: String,
+    start_time: Option<u64>,
+    end_time: Option<u64>,
 }
 
-fn default_page() -> usize { 1 }
-fn default_page_size() -> usize { 10 }
-fn default_time_range() -> String { "7d".to_string() }
+fn default_page() -> usize {
+    1
+}
+fn default_page_size() -> usize {
+    10
+}
+fn default_time_range() -> String {
+    "7d".to_string()
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct EnrichedUsageLog {
@@ -3037,21 +3435,6 @@ struct EnrichedUsageLog {
     billing_mode: String,
     request_count: u64,
     user_agent: String,
-}
-
-fn infer_inference_strength_by_model(model: &str) -> &'static str {
-    let name = model.to_ascii_lowercase();
-    if name.contains("o1") || name.contains("o3") || name.contains("o4") || name.contains("reason")
-    {
-        return "高";
-    }
-    if name.contains("gpt-4") || name.contains("claude-3") || name.contains("gemini") {
-        return "中";
-    }
-    if name.contains("mini") || name.contains("haiku") || name.contains("nano") {
-        return "低";
-    }
-    "标准"
 }
 
 fn resolve_api_name_and_type(endpoint: &str) -> (&'static str, &'static str) {
@@ -3076,18 +3459,42 @@ fn resolve_api_name_and_type(endpoint: &str) -> (&'static str, &'static str) {
 
 fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
     let (api_name, log_type) = resolve_api_name_and_type(&log.endpoint);
+    let inference_strength = log
+        .inference_strength
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("标准")
+        .to_string();
+    let billing_mode = log
+        .billing_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if log.total_tokens > 0 {
+                "Token 计费".to_string()
+            } else {
+                "请求计费".to_string()
+            }
+        });
+    let request_count = log.request_count.unwrap_or(1);
+    let user_agent = log
+        .user_agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("未采集")
+        .to_string();
     EnrichedUsageLog {
         log: log.clone(),
         api_name: api_name.to_string(),
-        inference_strength: infer_inference_strength_by_model(&log.model).to_string(),
+        inference_strength,
         log_type: log_type.to_string(),
-        billing_mode: if log.total_tokens > 0 {
-            "Token 计费".to_string()
-        } else {
-            "请求计费".to_string()
-        },
-        request_count: 1,
-        user_agent: "未采集".to_string(),
+        billing_mode,
+        request_count,
+        user_agent,
     }
 }
 
@@ -3101,68 +3508,102 @@ async fn admin_list_logs(
 
     let snapshot = state.snapshot().await;
     let now = unix_seconds();
-    
-    // Parse time range
-    let time_range_seconds = match query.time_range.as_str() {
-        "1d" => 86400,
-        "7d" => 7 * 86400,
-        "30d" => 30 * 86400,
-        _ => 7 * 86400, // default to 7 days
+
+    let (start_time, end_time) = if query.start_time.is_some() || query.end_time.is_some() {
+        let start = query.start_time.unwrap_or(0);
+        let end = query.end_time.unwrap_or(now);
+        if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        }
+    } else {
+        let time_range_seconds = match query.time_range.as_str() {
+            "1d" | "24h" => 86400,
+            "7d" => 7 * 86400,
+            "30d" => 30 * 86400,
+            _ => 7 * 86400,
+        };
+        (now.saturating_sub(time_range_seconds), now)
     };
-    
-    let cutoff_time = now.saturating_sub(time_range_seconds);
-    
+
+    let status_codes = query
+        .status_codes
+        .as_deref()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|part| part.trim().parse::<u16>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let model_filter = query
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+
     // Filter logs
     let mut logs: Vec<_> = snapshot
         .usage_logs
         .iter()
         .filter(|log| {
-            // Time range filter
-            if log.created_at < cutoff_time {
+            if log.created_at < start_time || log.created_at > end_time {
                 return false;
             }
-            
-            // Status code filter
+
             if let Some(status_code) = query.status_code {
                 if log.status_code != status_code {
                     return false;
                 }
             }
-            
-            // Model filter
-            if let Some(ref model) = query.model {
+
+            if !status_codes.is_empty() && !status_codes.contains(&log.status_code) {
+                return false;
+            }
+
+            if let Some(model) = &model_filter {
+                if !log.model.to_ascii_lowercase().contains(model) {
+                    return false;
+                }
+            } else if let Some(ref model) = query.model {
                 if &log.model != model {
                     return false;
                 }
             }
-            
+
             true
         })
         .collect();
-    
+
     // Sort by created_at descending
-    logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    
+    logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
+
     let total = logs.len();
     let page_size = query.page_size.min(200); // Max 200 per page
-    let total_pages = (total + page_size - 1) / page_size;
+    let total_pages = total.div_ceil(page_size);
     let page = query.page.max(1);
-    
+
     // Paginate
     let start = (page - 1) * page_size;
-    let end = (start + page_size).min(total);
-    let page_logs: Vec<_> = logs[start..end]
-        .iter()
-        .map(|log| enrich_usage_log(log))
-        .collect();
-    
+    let page_logs: Vec<_> = if start >= total {
+        Vec::new()
+    } else {
+        let end = (start + page_size).min(total);
+        logs[start..end]
+            .iter()
+            .map(|log| enrich_usage_log(log))
+            .collect()
+    };
+
     Json(json!({
         "logs": page_logs,
         "total": total,
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ============================================================================
@@ -3170,75 +3611,128 @@ async fn admin_list_logs(
 // ============================================================================
 
 /// Portal overview
-async fn portal_overview(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     // Extract downstream ID from Bearer token
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
-    
+
     let snapshot = state.snapshot().await;
     let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
         Some(d) => d,
-        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "Downstream not found"}})),
+            )
+                .into_response()
+        }
     };
-    
+
     let now = unix_seconds();
-    
+
     // Compute quota summary
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let token_usage = state.compute_token_usage(&downstream_id, now).await;
-    
+
     let quota_summary = json!({
         "request_quota": request_quota,
         "token_daily": token_usage.daily,
         "token_monthly": token_usage.monthly,
     });
-    
-    // Token summary
+
+    let today_start = (now / 86400) * 86400;
+    let month_start = {
+        use chrono::Datelike;
+        use std::time::UNIX_EPOCH;
+        let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
+        let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
+        let first_of_month = datetime.date_naive().with_day(1).unwrap();
+        first_of_month
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp() as u64
+    };
+    let downstream_logs = snapshot
+        .usage_logs
+        .iter()
+        .filter(|log| log.downstream_key_id == downstream_id)
+        .collect::<Vec<_>>();
+    let today_tokens = downstream_logs
+        .iter()
+        .filter(|log| log.created_at >= today_start)
+        .map(|log| log.total_tokens)
+        .sum::<u64>();
+    let month_tokens = downstream_logs
+        .iter()
+        .filter(|log| log.created_at >= month_start)
+        .map(|log| log.total_tokens)
+        .sum::<u64>();
+
     let token_summary = json!({
-        "today": token_usage.daily.as_ref().map(|t| t.used).unwrap_or(0),
-        "this_month": token_usage.monthly.as_ref().map(|t| t.used).unwrap_or(0),
+        "today": today_tokens,
+        "this_month": month_tokens,
     });
-    
-    // Model summary
-    let model_stats = state.compute_model_stats(downstream).await;
+
+    let total_models = if !downstream.model_allowlist.is_empty() {
+        downstream.model_allowlist.len()
+    } else {
+        snapshot
+            .upstreams
+            .iter()
+            .filter(|upstream| upstream.active)
+            .flat_map(|upstream| upstream.route_models())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    };
+    let active_models = downstream_logs
+        .iter()
+        .filter(|log| {
+            downstream.model_allowlist.is_empty() || downstream.model_allowlist.contains(&log.model)
+        })
+        .map(|log| log.model.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
     let model_summary = json!({
-        "total_models": model_stats.len(),
-        "active_models": model_stats.iter().filter(|m| m.today_count > 0).count(),
+        "total_models": total_models,
+        "active_models": active_models,
     });
-    
+
     Json(json!({
         "quota_summary": quota_summary,
         "token_summary": token_summary,
         "model_summary": model_summary,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// Portal quota details
-async fn portal_quota(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn portal_quota(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
-    
+
     let snapshot = state.snapshot().await;
     let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
         Some(d) => d,
-        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "Downstream not found"}})),
+            )
+                .into_response()
+        }
     };
-    
+
     let per_minute_limit = state.compute_per_minute_usage(&downstream_id).await;
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let now = unix_seconds();
     let token_usage = state.compute_token_usage(&downstream_id, now).await;
-    
+
     Json(json!({
         "per_minute_limit": per_minute_limit,
         "request_quota": request_quota,
@@ -3248,111 +3742,147 @@ async fn portal_quota(
         },
         "model_allowlist": downstream.model_allowlist,
         "ip_allowlist": downstream.ip_allowlist,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// Portal usage history
+#[derive(Debug, Deserialize)]
+struct PortalUsageHistoryQuery {
+    #[serde(default = "default_time_range")]
+    time_range: String,
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default = "default_page_size")]
+    page_size: usize,
+}
+
 async fn portal_usage_history(
     State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(query): Query<PortalUsageHistoryQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
-    
-    let time_range = params.get("time_range").map(|s| s.as_str()).unwrap_or("7d");
-    let days = match time_range {
+
+    let days = match query.time_range.as_str() {
         "1d" => 1,
         "7d" => 7,
         "30d" => 30,
         _ => 7,
     };
-    
+
     let daily_stats = state.compute_daily_stats(&downstream_id, days).await;
-    
+
     let snapshot = state.snapshot().await;
     let mut recent_logs: Vec<_> = snapshot
         .usage_logs
         .iter()
         .filter(|log| log.downstream_key_id == downstream_id)
+        .cloned()
         .collect();
-    recent_logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    let recent_logs: Vec<_> = recent_logs.into_iter().take(10).cloned().collect();
-    
+    recent_logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
+
+    let total = recent_logs.len();
+    let page_size = query.page_size.clamp(1, 200);
+    let total_pages = total.div_ceil(page_size);
+    let page = query.page.max(1);
+    let start = (page - 1) * page_size;
+    let recent_logs = if start >= total {
+        Vec::new()
+    } else {
+        let end = (start + page_size).min(total);
+        recent_logs[start..end].to_vec()
+    };
+
     Json(json!({
         "daily_stats": daily_stats,
         "recent_logs": recent_logs,
-    })).into_response()
+        "recent_logs_total": total,
+        "recent_logs_page": page,
+        "recent_logs_page_size": page_size,
+        "recent_logs_total_pages": total_pages,
+    }))
+    .into_response()
 }
 
 /// Portal models
-async fn portal_models(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn portal_models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
-    
+
     let snapshot = state.snapshot().await;
     let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
         Some(d) => d,
-        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "Downstream not found"}})),
+            )
+                .into_response()
+        }
     };
-    
+
     let model_stats = state.compute_model_stats(downstream).await;
-    
+
     Json(model_stats).into_response()
 }
 
 /// Portal get key - returns plaintext_key for the authenticated downstream
-async fn portal_get_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn portal_get_key(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
-    
+
     let snapshot = state.snapshot().await;
     let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
         Some(d) => d,
-        None => return (StatusCode::NOT_FOUND, Json(json!({"error": {"message": "Downstream not found"}}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "Downstream not found"}})),
+            )
+                .into_response()
+        }
     };
-    
+
     Json(json!({
         "plaintext_key": downstream.plaintext_key,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// Portal rotate key - generates new key for authenticated downstream
-async fn portal_rotate_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn portal_rotate_key(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
-    
+
     let snapshot = state.snapshot().await;
-    
-    if let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == downstream_id).cloned() {
+
+    if let Some(mut downstream) = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == downstream_id)
+        .cloned()
+    {
         let generated = generate_downstream_key("key");
         let plaintext_key = generated.plaintext;
         downstream.hash = generated.hash;
-        
+
         let prefix_len = plaintext_key.len().min(16);
         downstream.plaintext_key_prefix = Some(format!(
             "{}...{}",
             &plaintext_key[..prefix_len.min(plaintext_key.len())],
             &plaintext_key[plaintext_key.len().saturating_sub(8)..]
         ));
-        
+
         match state.update_downstream(&downstream_id, downstream).await {
             Ok(true) => Json(json!({ "plaintext_key": plaintext_key })).into_response(),
             Ok(false) => (
@@ -3362,7 +3892,8 @@ async fn portal_rotate_key(
                         "message": format!("Downstream '{}' not found", downstream_id)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -3370,7 +3901,8 @@ async fn portal_rotate_key(
                         "message": format!("Failed to rotate key: {}", e)
                     }
                 })),
-            ).into_response(),
+            )
+                .into_response(),
         }
     } else {
         (
@@ -3380,7 +3912,8 @@ async fn portal_rotate_key(
                     "message": format!("Downstream '{}' not found", downstream_id)
                 }
             })),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -3396,18 +3929,18 @@ async fn extract_downstream_id_from_bearer(
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": {"message": "Missing Authorization header"}})),
-            ).into_response()
+            )
+                .into_response()
         })?;
-    
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"message": "Invalid Authorization header format"}})),
-            ).into_response()
-        })?;
-    
+
+    let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "Invalid Authorization header format"}})),
+        )
+            .into_response()
+    })?;
+
     if token.starts_with("eyJ") {
         match crate::auth::verify_admin_token(token, &state.config.jwt_secret) {
             Ok(claims) => return Ok(claims.sub),
@@ -3415,20 +3948,22 @@ async fn extract_downstream_id_from_bearer(
                 return Err((
                     StatusCode::UNAUTHORIZED,
                     Json(json!({"error": {"message": "Invalid JWT token"}})),
-                ).into_response())
+                )
+                    .into_response())
             }
         }
     }
-    
+
     let snapshot = state.snapshot().await;
     for downstream in &snapshot.downstreams {
         if verify_downstream_key(token, &downstream.hash) {
             return Ok(downstream.id.clone());
         }
     }
-    
+
     Err((
         StatusCode::UNAUTHORIZED,
         Json(json!({"error": {"message": "Invalid Bearer token"}})),
-    ).into_response())
+    )
+        .into_response())
 }

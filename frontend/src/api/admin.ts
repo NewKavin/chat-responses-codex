@@ -70,8 +70,11 @@ export const adminApi = {
     page?: number
     page_size?: number
     status_code?: number
+    status_codes?: string
     model?: string
     time_range?: string
+    start_time?: number
+    end_time?: number
   }) => api.get<LogsResponse>('/admin/logs', { params }),
 
   // Models

@@ -12,7 +12,8 @@ fn test_upstream_model_costs_with_float_values() {
     });
 
     // After fix, these should be parsed correctly
-    let costs = updates.get("model_request_costs")
+    let costs = updates
+        .get("model_request_costs")
         .and_then(|v| v.as_array())
         .unwrap();
 
@@ -33,7 +34,7 @@ fn test_upstream_model_costs_persistence() {
     // retrieving it returns the same costs
 
     // Setup: Create upstream with model costs
-    let upstream_data = json!({
+    let _upstream_data = json!({
         "name": "Test Upstream",
         "base_url": "https://api.example.com",
         "api_key": "sk-test",

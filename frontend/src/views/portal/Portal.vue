@@ -16,16 +16,16 @@
           <el-tab-pane label="概览" name="overview">
             <Overview />
           </el-tab-pane>
-          <el-tab-pane label="限额详情" name="quota">
+          <el-tab-pane label="限额详情" name="quota" lazy>
             <QuotaDetails />
           </el-tab-pane>
-          <el-tab-pane label="使用历史" name="history">
+          <el-tab-pane label="使用历史" name="history" lazy>
             <UsageHistory />
           </el-tab-pane>
-          <el-tab-pane label="集成示例" name="integration">
+          <el-tab-pane label="集成示例" name="integration" lazy>
             <Integration />
           </el-tab-pane>
-          <el-tab-pane label="秘钥管理" name="key">
+          <el-tab-pane label="秘钥管理" name="key" lazy>
             <KeyManagement />
           </el-tab-pane>
         </el-tabs>

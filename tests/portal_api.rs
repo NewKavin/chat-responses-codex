@@ -10,58 +10,61 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
-use chat_responses_codex::state::{AppConfig, AppState, DownstreamConfig, PersistedState, UsageLog};
+use chat_responses_codex::state::{
+    AppConfig, AppState, DownstreamConfig, PersistedState, UsageLog,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from(format!("/tmp/test_state_portal_api_{nanos}.json"))
+    let unique = Uuid::new_v4();
+    PathBuf::from(format!("/tmp/test_state_portal_api_{unique}.json"))
 }
 
 /// Helper function to create a test AppState with downstream and logs
 fn create_test_state() -> (AppState, String) {
     let config = AppConfig::default();
     let generated = generate_downstream_key("sk");
-    
+
     let now = chat_responses_codex::state::unix_seconds();
-    
+
     let state = PersistedState {
         upstreams: vec![],
-        downstreams: vec![
-            DownstreamConfig {
-                id: "downstream-1".to_string(),
-                name: "Test Downstream".to_string(),
-                hash: generated.hash,
-                plaintext_key: Some(generated.plaintext),
-                plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
-                per_minute_limit: 100,
+        downstreams: vec![DownstreamConfig {
+            id: "downstream-1".to_string(),
+            name: "Test Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
+            per_minute_limit: 100,
 
-                rate_limit_enabled: true,
+            rate_limit_enabled: true,
 
-                max_concurrency: 10,
-                daily_token_limit: Some(10000),
-                monthly_token_limit: Some(100000),
-                request_quota_window_hours: Some(24),
-                request_quota_requests: Some(1000),
-                ip_allowlist: vec!["192.168.1.0/24".to_string()],
-                expires_at: None,
-                active: true,
-            },
-        ],
+            max_concurrency: 10,
+            daily_token_limit: Some(10000),
+            monthly_token_limit: Some(100000),
+            request_quota_window_hours: Some(24),
+            request_quota_requests: Some(1000),
+            ip_allowlist: vec!["192.168.1.0/24".to_string()],
+            expires_at: None,
+            active: true,
+        }],
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
                 downstream_key_id: "downstream-1".to_string(),
                 upstream_key_id: "upstream-1".to_string(),
+                downstream_name: None,
+                upstream_name: None,
                 endpoint: "/v1/chat/completions".to_string(),
                 model: "gpt-4".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
                 request_id: "req-1".to_string(),
                 status_code: 200,
                 prompt_tokens: 100,
@@ -74,8 +77,14 @@ fn create_test_state() -> (AppState, String) {
                 id: "log-2".to_string(),
                 downstream_key_id: "downstream-1".to_string(),
                 upstream_key_id: "upstream-1".to_string(),
+                downstream_name: None,
+                upstream_name: None,
                 endpoint: "/v1/chat/completions".to_string(),
                 model: "gpt-3.5-turbo".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
                 request_id: "req-2".to_string(),
                 status_code: 200,
                 prompt_tokens: 50,
@@ -86,7 +95,137 @@ fn create_test_state() -> (AppState, String) {
             },
         ],
     };
-    
+
+    let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
+    let app_state = AppState::new(state, unique_state_path(), config);
+    (app_state, portal_key)
+}
+
+fn create_test_state_without_token_limits() -> (AppState, String) {
+    let config = AppConfig::default();
+    let generated = generate_downstream_key("sk");
+    let now = chat_responses_codex::state::unix_seconds();
+
+    let state = PersistedState {
+        upstreams: vec![],
+        downstreams: vec![DownstreamConfig {
+            id: "downstream-2".to_string(),
+            name: "No Token Limit".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
+            per_minute_limit: 100,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: Some(24),
+            request_quota_requests: Some(1000),
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        usage_logs: vec![
+            UsageLog {
+                id: "log-a".to_string(),
+                downstream_key_id: "downstream-2".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("No Token Limit".to_string()),
+                upstream_name: Some("Primary Upstream".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "gpt-4".to_string(),
+                inference_strength: Some("xhigh".to_string()),
+                billing_mode: Some("Token 计费".to_string()),
+                request_count: Some(1),
+                user_agent: Some("Codex/1.0".to_string()),
+                request_id: "req-a".to_string(),
+                status_code: 200,
+                prompt_tokens: 80,
+                completion_tokens: 20,
+                total_tokens: 100,
+                latency_ms: 200,
+                created_at: now - 3600,
+            },
+            UsageLog {
+                id: "log-b".to_string(),
+                downstream_key_id: "downstream-2".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("No Token Limit".to_string()),
+                upstream_name: Some("Primary Upstream".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "gpt-4".to_string(),
+                inference_strength: Some("xhigh".to_string()),
+                billing_mode: Some("Token 计费".to_string()),
+                request_count: Some(1),
+                user_agent: Some("Codex/1.0".to_string()),
+                request_id: "req-b".to_string(),
+                status_code: 200,
+                prompt_tokens: 96,
+                completion_tokens: 24,
+                total_tokens: 120,
+                latency_ms: 210,
+                created_at: now - 7200,
+            },
+        ],
+    };
+
+    let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
+    let app_state = AppState::new(state, unique_state_path(), config);
+    (app_state, portal_key)
+}
+
+fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
+    let config = AppConfig::default();
+    let generated = generate_downstream_key("sk");
+    let now = chat_responses_codex::state::unix_seconds();
+
+    let usage_logs = (0..count)
+        .map(|index| UsageLog {
+            id: format!("log-{index}"),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            downstream_name: Some("Test Downstream".to_string()),
+            upstream_name: Some("Primary Upstream".to_string()),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            inference_strength: None,
+            billing_mode: Some("Token 计费".to_string()),
+            request_count: Some(1),
+            user_agent: Some("Portal-Test".to_string()),
+            request_id: format!("req-{index}"),
+            status_code: 200,
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            latency_ms: 120,
+            created_at: now.saturating_sub(index as u64),
+        })
+        .collect::<Vec<_>>();
+
+    let state = PersistedState {
+        upstreams: vec![],
+        downstreams: vec![DownstreamConfig {
+            id: "downstream-1".to_string(),
+            name: "Test Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string()],
+            per_minute_limit: 100,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: Some(10000),
+            monthly_token_limit: Some(100000),
+            request_quota_window_hours: Some(24),
+            request_quota_requests: Some(1000),
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        usage_logs,
+    };
+
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
     let app_state = AppState::new(state, unique_state_path(), config);
     (app_state, portal_key)
@@ -100,7 +239,7 @@ fn create_test_state() -> (AppState, String) {
 async fn test_portal_overview_returns_quota_summary() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -113,24 +252,55 @@ async fn test_portal_overview_returns_quota_summary() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(result["quota_summary"].is_object());
     assert!(result["token_summary"].is_object());
     assert!(result["model_summary"].is_object());
 }
 
 #[tokio::test]
-async fn test_portal_overview_requires_bearer_token() {
-    let (state, portal_key) = create_test_state();
+async fn test_portal_overview_uses_logs_for_token_and_model_summary_without_token_limits() {
+    let (state, portal_key) = create_test_state_without_token_limits();
     let app = chat_responses_codex::server::build_router(state);
-    
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["token_summary"]["today"], 220);
+    assert_eq!(result["token_summary"]["this_month"], 220);
+    assert_eq!(result["model_summary"]["total_models"], 2);
+    assert_eq!(result["model_summary"]["active_models"], 1);
+}
+
+#[tokio::test]
+async fn test_portal_overview_requires_bearer_token() {
+    let (state, _portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
     // Request without Authorization header should return 401
     let response = app
         .clone()
@@ -143,15 +313,15 @@ async fn test_portal_overview_requires_bearer_token() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn test_portal_overview_rejects_invalid_bearer_token() {
-    let (state, portal_key) = create_test_state();
+    let (state, _portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -164,7 +334,7 @@ async fn test_portal_overview_rejects_invalid_bearer_token() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -176,7 +346,7 @@ async fn test_portal_overview_rejects_invalid_bearer_token() {
 async fn test_portal_quota_returns_detailed_quota_info() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -189,14 +359,14 @@ async fn test_portal_quota_returns_detailed_quota_info() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(result["per_minute_limit"].is_object());
     assert!(result["request_quota"].is_object());
     assert!(result["token_quota"].is_object());
@@ -206,7 +376,7 @@ async fn test_portal_quota_returns_detailed_quota_info() {
 async fn test_portal_quota_includes_model_allowlist() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -219,14 +389,14 @@ async fn test_portal_quota_includes_model_allowlist() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(result["model_allowlist"].is_array());
     let allowlist = result["model_allowlist"].as_array().unwrap();
     assert_eq!(allowlist.len(), 2);
@@ -238,7 +408,7 @@ async fn test_portal_quota_includes_model_allowlist() {
 async fn test_portal_quota_includes_ip_allowlist() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -251,14 +421,14 @@ async fn test_portal_quota_includes_ip_allowlist() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(result["ip_allowlist"].is_array());
     let allowlist = result["ip_allowlist"].as_array().unwrap();
     assert_eq!(allowlist.len(), 1);
@@ -273,7 +443,7 @@ async fn test_portal_quota_includes_ip_allowlist() {
 async fn test_portal_usage_history_returns_daily_stats() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -286,14 +456,14 @@ async fn test_portal_usage_history_returns_daily_stats() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(result["daily_stats"].is_array());
     assert!(result["recent_logs"].is_array());
 }
@@ -302,7 +472,7 @@ async fn test_portal_usage_history_returns_daily_stats() {
 async fn test_portal_usage_history_returns_recent_logs() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -315,23 +485,23 @@ async fn test_portal_usage_history_returns_recent_logs() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     let recent_logs = result["recent_logs"].as_array().unwrap();
-    assert!(recent_logs.len() > 0);
+    assert!(!recent_logs.is_empty());
 }
 
 #[tokio::test]
 async fn test_portal_usage_history_supports_time_range() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // Test with time_range=7d
     let response = app
         .clone()
@@ -345,14 +515,14 @@ async fn test_portal_usage_history_supports_time_range() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     let daily_stats = result["daily_stats"].as_array().unwrap();
     assert_eq!(daily_stats.len(), 7);
 }
@@ -361,7 +531,7 @@ async fn test_portal_usage_history_supports_time_range() {
 async fn test_portal_usage_history_supports_30d_time_range() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // Test with time_range=30d
     let response = app
         .clone()
@@ -375,16 +545,48 @@ async fn test_portal_usage_history_supports_30d_time_range() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     let daily_stats = result["daily_stats"].as_array().unwrap();
     assert_eq!(daily_stats.len(), 30);
+}
+
+#[tokio::test]
+async fn test_portal_usage_history_supports_recent_logs_pagination() {
+    let (state, portal_key) = create_test_state_with_many_logs(25);
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-history?time_range=7d&page=2&page_size=10")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["recent_logs_total"], 25);
+    assert_eq!(result["recent_logs_page"], 2);
+    assert_eq!(result["recent_logs_page_size"], 10);
+    assert_eq!(result["recent_logs_total_pages"], 3);
+    assert_eq!(result["recent_logs"].as_array().unwrap().len(), 10);
 }
 
 // ============================================================================
@@ -395,7 +597,7 @@ async fn test_portal_usage_history_supports_30d_time_range() {
 async fn test_portal_models_returns_model_stats() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -408,16 +610,16 @@ async fn test_portal_models_returns_model_stats() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let models: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    
-    assert!(models.len() > 0);
-    
+
+    assert!(!models.is_empty());
+
     // Check structure of first model
     let model = &models[0];
     assert!(model["model"].is_string());
@@ -431,7 +633,7 @@ async fn test_portal_models_returns_model_stats() {
 async fn test_portal_models_calculates_today_usage() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -444,27 +646,27 @@ async fn test_portal_models_calculates_today_usage() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let models: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    
+
     // Find gpt-4 model
     let gpt4 = models.iter().find(|m| m["model"] == "gpt-4");
     assert!(gpt4.is_some());
-    
+
     let gpt4 = gpt4.unwrap();
-    assert!(gpt4["today_count"].as_u64().unwrap() >= 0);
+    assert!(gpt4["today_count"].is_number());
 }
 
 #[tokio::test]
 async fn test_portal_models_calculates_monthly_usage() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -477,16 +679,16 @@ async fn test_portal_models_calculates_monthly_usage() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let models: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    
+
     for model in models {
-        assert!(model["month_count"].as_u64().unwrap() >= 0);
+        assert!(model["month_count"].is_number());
     }
 }
 
@@ -494,7 +696,7 @@ async fn test_portal_models_calculates_monthly_usage() {
 async fn test_portal_models_calculates_avg_latency() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -507,18 +709,18 @@ async fn test_portal_models_calculates_avg_latency() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let models: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    
+
     // Find gpt-4 model
     let gpt4 = models.iter().find(|m| m["model"] == "gpt-4");
     assert!(gpt4.is_some());
-    
+
     let gpt4 = gpt4.unwrap();
     assert_eq!(gpt4["avg_latency_ms"], 500); // Only one log with 500ms latency
 }
@@ -527,7 +729,7 @@ async fn test_portal_models_calculates_avg_latency() {
 async fn test_portal_models_calculates_success_rate() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -540,17 +742,17 @@ async fn test_portal_models_calculates_success_rate() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let models: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    
+
     for model in models {
         let success_rate = model["success_rate"].as_f64().unwrap();
-        assert!(success_rate >= 0.0 && success_rate <= 1.0);
+        assert!((0.0..=1.0).contains(&success_rate));
     }
 }
 
@@ -562,32 +764,30 @@ async fn test_portal_models_calculates_success_rate() {
 fn create_test_state_with_key_prefix() -> (AppState, String) {
     let config = AppConfig::default();
     let generated = generate_downstream_key("sk");
-    
+
     let state = PersistedState {
         upstreams: vec![],
-        downstreams: vec![
-            DownstreamConfig {
-                id: "downstream-1".to_string(),
-                name: "Test Downstream".to_string(),
-                hash: generated.hash,
-                plaintext_key: Some(generated.plaintext),
-                plaintext_key_prefix: Some("key-abcd1234...efgh5678".to_string()),
-                model_allowlist: vec!["gpt-4".to_string()],
-                per_minute_limit: 100,
-                rate_limit_enabled: true,
-                max_concurrency: 10,
-                daily_token_limit: None,
-                monthly_token_limit: None,
-                request_quota_window_hours: None,
-                request_quota_requests: None,
-                ip_allowlist: vec![],
-                expires_at: None,
-                active: true,
-            },
-        ],
+        downstreams: vec![DownstreamConfig {
+            id: "downstream-1".to_string(),
+            name: "Test Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: Some("key-abcd1234...efgh5678".to_string()),
+            model_allowlist: vec!["gpt-4".to_string()],
+            per_minute_limit: 100,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
         usage_logs: vec![],
     };
-    
+
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
     let app_state = AppState::new(state, unique_state_path(), config);
     (app_state, portal_key)
@@ -597,7 +797,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
 async fn test_portal_get_key_returns_full_key() {
     let (state, portal_key) = create_test_state_with_key_prefix();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -610,14 +810,14 @@ async fn test_portal_get_key_returns_full_key() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     // Should return full plaintext_key for copying
     assert!(result["plaintext_key"].is_string());
     let key = result["plaintext_key"].as_str().unwrap();
@@ -628,7 +828,7 @@ async fn test_portal_get_key_returns_full_key() {
 async fn test_portal_get_key_returns_none_when_not_set() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -641,14 +841,14 @@ async fn test_portal_get_key_returns_none_when_not_set() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(result["plaintext_key"].is_string());
 }
 
@@ -656,7 +856,7 @@ async fn test_portal_get_key_returns_none_when_not_set() {
 async fn test_portal_get_key_requires_bearer_token() {
     let (state, _portal_key) = create_test_state_with_key_prefix();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -668,7 +868,7 @@ async fn test_portal_get_key_requires_bearer_token() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -680,7 +880,7 @@ async fn test_portal_get_key_requires_bearer_token() {
 async fn test_portal_rotate_key_returns_new_key() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -693,12 +893,14 @@ async fn test_portal_rotate_key_returns_new_key() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert!(result["plaintext_key"].is_string());
     let new_key = result["plaintext_key"].as_str().unwrap();
     assert!(new_key.starts_with("key-"));
@@ -709,7 +911,7 @@ async fn test_portal_rotate_key_returns_new_key() {
 async fn test_portal_rotate_key_requires_bearer_token() {
     let (state, _portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -721,7 +923,7 @@ async fn test_portal_rotate_key_requires_bearer_token() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -729,7 +931,7 @@ async fn test_portal_rotate_key_requires_bearer_token() {
 async fn test_portal_rotate_key_rejects_invalid_token() {
     let (state, _portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -742,7 +944,7 @@ async fn test_portal_rotate_key_rejects_invalid_token() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -750,7 +952,7 @@ async fn test_portal_rotate_key_rejects_invalid_token() {
 async fn test_portal_rotate_key_new_key_works_for_auth() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -763,15 +965,17 @@ async fn test_portal_rotate_key_new_key_works_for_auth() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
     let new_key = result["plaintext_key"].as_str().unwrap();
-    
+
     let app2 = chat_responses_codex::server::build_router(state);
-    
+
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -783,7 +987,7 @@ async fn test_portal_rotate_key_new_key_works_for_auth() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response2.status(), StatusCode::OK);
 }
 
@@ -791,7 +995,7 @@ async fn test_portal_rotate_key_new_key_works_for_auth() {
 async fn test_portal_rotate_key_old_key_invalid_after_rotation() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -804,11 +1008,11 @@ async fn test_portal_rotate_key_old_key_invalid_after_rotation() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let app2 = chat_responses_codex::server::build_router(state);
-    
+
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -820,6 +1024,6 @@ async fn test_portal_rotate_key_old_key_invalid_after_rotation() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response2.status(), StatusCode::UNAUTHORIZED);
 }

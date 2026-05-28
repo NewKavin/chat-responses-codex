@@ -28,10 +28,10 @@
         <el-col :span="12" v-if="data.quota_summary.token_daily">
           <el-card shadow="hover">
             <el-statistic title="每日 Token 配额">
-              <template #suffix>/ {{ data.quota_summary.token_daily.limit }}</template>
+              <template #suffix>/ {{ formatCompact(data.quota_summary.token_daily.limit) }}</template>
               <template #default>
                 <span :class="getQuotaClass(data.quota_summary.token_daily.percentage)">
-                  {{ data.quota_summary.token_daily.used }}
+                  {{ formatCompact(data.quota_summary.token_daily.used) }}
                 </span>
               </template>
             </el-statistic>
@@ -47,10 +47,10 @@
         <el-col :span="12" v-if="data.quota_summary.token_monthly">
           <el-card shadow="hover">
             <el-statistic title="每月 Token 配额">
-              <template #suffix>/ {{ data.quota_summary.token_monthly.limit }}</template>
+              <template #suffix>/ {{ formatCompact(data.quota_summary.token_monthly.limit) }}</template>
               <template #default>
                 <span :class="getQuotaClass(data.quota_summary.token_monthly.percentage)">
-                  {{ data.quota_summary.token_monthly.used }}
+                  {{ formatCompact(data.quota_summary.token_monthly.used) }}
                 </span>
               </template>
             </el-statistic>
@@ -73,10 +73,10 @@
           </template>
           <el-descriptions :column="1" border>
             <el-descriptions-item label="今日使用">
-              {{ data.token_summary.today.toLocaleString() }}
+              {{ formatCompact(data.token_summary.today) }}
             </el-descriptions-item>
             <el-descriptions-item label="本月使用">
-              {{ data.token_summary.this_month.toLocaleString() }}
+              {{ formatCompact(data.token_summary.this_month) }}
             </el-descriptions-item>
           </el-descriptions>
         </el-card>
@@ -106,6 +106,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { portalApi } from '@/api/portal'
 import type { PortalOverview } from '@/types'
+import { formatCompactNumber } from '@/utils/numberFormat'
 
 const data = ref<PortalOverview>({
   quota_summary: {
@@ -134,6 +135,8 @@ const getQuotaColor = (percentage: number) => {
   if (percentage >= 70) return '#e6a23c'
   return '#67c23a'
 }
+
+const formatCompact = (value: number) => formatCompactNumber(value)
 
 const loadData = async () => {
   try {

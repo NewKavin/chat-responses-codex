@@ -8,19 +8,18 @@
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
 use chat_responses_codex::routing::UpstreamProtocol;
+use chat_responses_codex::state::{
+    AppConfig, AppState, ModelAliasConfig, PersistedState, UpstreamConfig,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from(format!("/tmp/test_state_admin_upstreams_{nanos}.json"))
+    let unique = Uuid::new_v4();
+    PathBuf::from(format!("/tmp/test_state_admin_upstreams_{unique}.json"))
 }
 
 /// Helper function to create a test AppState
@@ -31,7 +30,7 @@ fn create_test_state() -> AppState {
         jwt_secret: "test_secret".to_string(),
         ..Default::default()
     };
-    
+
     let state = PersistedState {
         upstreams: vec![
             UpstreamConfig {
@@ -58,7 +57,7 @@ fn create_test_state() -> AppState {
         downstreams: vec![],
         usage_logs: vec![],
     };
-    
+
     AppState::new(state, unique_state_path(), config)
 }
 
@@ -68,7 +67,7 @@ async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> 
         "username": username,
         "password": password
     });
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -81,14 +80,14 @@ async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> 
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    
+
     json["token"].as_str().unwrap().to_string()
 }
 
@@ -100,7 +99,7 @@ async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> 
 async fn test_upstreams_requires_jwt_token() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // Request without Authorization header should return 401
     let response = app
         .clone()
@@ -113,7 +112,7 @@ async fn test_upstreams_requires_jwt_token() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -121,7 +120,7 @@ async fn test_upstreams_requires_jwt_token() {
 async fn test_upstreams_rejects_invalid_jwt() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // Request with invalid JWT token should return 401
     let response = app
         .clone()
@@ -135,7 +134,7 @@ async fn test_upstreams_rejects_invalid_jwt() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -147,10 +146,10 @@ async fn test_upstreams_rejects_invalid_jwt() {
 async fn test_upstreams_list_returns_all_upstreams() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // Get valid token
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     // Request upstream list
     let response = app
         .clone()
@@ -164,14 +163,14 @@ async fn test_upstreams_list_returns_all_upstreams() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let upstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    
+
     assert_eq!(upstreams.len(), 2);
     assert_eq!(upstreams[0]["id"], "upstream-1");
     assert_eq!(upstreams[0]["name"], "Test Upstream 1");
@@ -184,9 +183,9 @@ async fn test_upstreams_list_returns_all_upstreams() {
 async fn test_upstreams_list_includes_active_and_inactive() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -199,17 +198,17 @@ async fn test_upstreams_list_includes_active_and_inactive() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let upstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
-    
+
     let active_count = upstreams.iter().filter(|u| u["active"] == true).count();
     let inactive_count = upstreams.iter().filter(|u| u["active"] == false).count();
-    
+
     assert_eq!(active_count, 1);
     assert_eq!(inactive_count, 1);
 }
@@ -222,9 +221,9 @@ async fn test_upstreams_list_includes_active_and_inactive() {
 async fn test_upstreams_create_adds_new_upstream() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     let new_upstream = json!({
         "id": "upstream-3",
         "name": "New Upstream",
@@ -234,7 +233,7 @@ async fn test_upstreams_create_adds_new_upstream() {
         "supported_models": ["gpt-4"],
         "active": true
     });
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -248,9 +247,9 @@ async fn test_upstreams_create_adds_new_upstream() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::CREATED);
-    
+
     // Verify the upstream was added
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams.len(), 3);
@@ -258,20 +257,25 @@ async fn test_upstreams_create_adds_new_upstream() {
 }
 
 #[tokio::test]
-async fn test_upstreams_create_validates_required_fields() {
+async fn test_upstreams_create_auto_fills_lowercase_aliases_and_keeps_manual_aliases() {
     let state = create_test_state();
-    let app = chat_responses_codex::server::build_router(state);
-    
+    let app = chat_responses_codex::server::build_router(state.clone());
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
-    // Missing required field: name
-    let invalid_upstream = json!({
-        "id": "upstream-4",
-        "base_url": "https://api.test.com",
-        "api_key": "sk-test",
-        "protocol": "ChatCompletions"
+
+    let new_upstream = json!({
+        "id": "upstream-3",
+        "name": "Strict Upstream",
+        "base_url": "https://api.strict.com",
+        "api_key": "sk-strict-key",
+        "protocol": "ChatCompletions",
+        "supported_models": ["GLM-5", "MiniMax2.7"],
+        "model_aliases": [
+            {"slug": "glm-5", "upstream_model": "GLM-5-MANUAL"}
+        ],
+        "active": true
     });
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -280,12 +284,112 @@ async fn test_upstreams_create_validates_required_fields() {
                 .uri("/api/admin/upstreams")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_string(&invalid_upstream).unwrap()))
+                .body(Body::from(serde_json::to_string(&new_upstream).unwrap()))
                 .unwrap(),
         )
         .await
         .unwrap();
-    
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-3")
+        .unwrap();
+
+    assert_eq!(upstream.supported_models, vec!["GLM-5", "MiniMax2.7"]);
+    assert_eq!(
+        upstream.model_aliases,
+        vec![
+            ModelAliasConfig {
+                slug: "glm-5".to_string(),
+                upstream_model: "GLM-5-MANUAL".to_string(),
+            },
+            ModelAliasConfig {
+                slug: "minimax2.7".to_string(),
+                upstream_model: "MiniMax2.7".to_string(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_upstreams_create_rejects_invalid_premium_models() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let invalid_upstream = json!({
+        "id": "upstream-4",
+        "name": "Premium Upstream",
+        "base_url": "https://api.premium.com",
+        "api_key": "sk-premium-key",
+        "protocol": "ChatCompletions",
+        "supported_models": ["GLM-5"],
+        "premium_models": ["glm-5.1"],
+        "active": true
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&invalid_upstream).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let message = payload["error"]["message"].as_str().unwrap();
+    assert!(message.contains("invalid premium_models"));
+    assert!(message.contains("glm-5.1"));
+}
+
+#[tokio::test]
+async fn test_upstreams_create_validates_required_fields() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Missing required field: name
+    let invalid_upstream = json!({
+        "id": "upstream-4",
+        "base_url": "https://api.test.com",
+        "api_key": "sk-test",
+        "protocol": "ChatCompletions"
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&invalid_upstream).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -293,9 +397,9 @@ async fn test_upstreams_create_validates_required_fields() {
 async fn test_upstreams_create_rejects_duplicate_id() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     // Try to create upstream with existing ID
     let duplicate_upstream = json!({
         "id": "upstream-1",  // Already exists
@@ -306,7 +410,7 @@ async fn test_upstreams_create_rejects_duplicate_id() {
         "supported_models": ["gpt-4"],
         "active": true
     });
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -315,12 +419,14 @@ async fn test_upstreams_create_rejects_duplicate_id() {
                 .uri("/api/admin/upstreams")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_string(&duplicate_upstream).unwrap()))
+                .body(Body::from(
+                    serde_json::to_string(&duplicate_upstream).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
@@ -332,15 +438,15 @@ async fn test_upstreams_create_rejects_duplicate_id() {
 async fn test_upstreams_update_modifies_existing_upstream() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     let updated_upstream = json!({
         "name": "Updated Upstream 1",
         "base_url": "https://api.updated.com",
         "supported_models": ["gpt-4", "gpt-4-turbo"]
     });
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -349,33 +455,84 @@ async fn test_upstreams_update_modifies_existing_upstream() {
                 .uri("/api/admin/upstreams/upstream-1")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_string(&updated_upstream).unwrap()))
+                .body(Body::from(
+                    serde_json::to_string(&updated_upstream).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     // Verify the upstream was updated
     let snapshot = state.snapshot().await;
-    let upstream = snapshot.upstreams.iter().find(|u| u.id == "upstream-1").unwrap();
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
     assert_eq!(upstream.name, "Updated Upstream 1");
     assert_eq!(upstream.base_url, "https://api.updated.com");
     assert_eq!(upstream.supported_models.len(), 2);
 }
 
 #[tokio::test]
+async fn test_upstreams_update_auto_fills_alias_for_uppercase_supported_models() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let updated_upstream = json!({
+        "supported_models": ["GLM-5.1"],
+        "model_aliases": []
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/upstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&updated_upstream).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
+    assert_eq!(upstream.supported_models, vec!["GLM-5.1"]);
+    assert_eq!(
+        upstream.model_aliases,
+        vec![ModelAliasConfig {
+            slug: "glm-5.1".to_string(),
+            upstream_model: "GLM-5.1".to_string(),
+        }]
+    );
+}
+
+#[tokio::test]
 async fn test_upstreams_update_rejects_nonexistent_id() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     let updated_upstream = json!({
         "name": "Updated Upstream"
     });
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -384,12 +541,14 @@ async fn test_upstreams_update_rejects_nonexistent_id() {
                 .uri("/api/admin/upstreams/nonexistent-id")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_string(&updated_upstream).unwrap()))
+                .body(Body::from(
+                    serde_json::to_string(&updated_upstream).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
@@ -401,9 +560,9 @@ async fn test_upstreams_update_rejects_nonexistent_id() {
 async fn test_upstreams_delete_removes_upstream() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -416,9 +575,9 @@ async fn test_upstreams_delete_removes_upstream() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    
+
     // Verify the upstream was deleted
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams.len(), 1);
@@ -429,9 +588,9 @@ async fn test_upstreams_delete_removes_upstream() {
 async fn test_upstreams_delete_rejects_nonexistent_id() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -444,7 +603,7 @@ async fn test_upstreams_delete_rejects_nonexistent_id() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
@@ -456,9 +615,9 @@ async fn test_upstreams_delete_rejects_nonexistent_id() {
 async fn test_upstreams_toggle_changes_active_status() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
-    
+
     let token = get_admin_token(&app, "admin", "admin").await;
-    
+
     // Toggle upstream-1 (currently active)
     let response = app
         .clone()
@@ -472,18 +631,22 @@ async fn test_upstreams_toggle_changes_active_status() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert_eq!(result["active"], false);
-    
+
     // Verify the upstream was toggled
     let snapshot = state.snapshot().await;
-    let upstream = snapshot.upstreams.iter().find(|u| u.id == "upstream-1").unwrap();
-    assert_eq!(upstream.active, false);
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
+    assert!(!upstream.active);
 }

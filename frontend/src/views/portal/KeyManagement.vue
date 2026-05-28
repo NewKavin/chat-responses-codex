@@ -18,13 +18,13 @@
           <el-descriptions :column="1" border>
             <el-descriptions-item label="秘钥">
               <div class="key-cell">
-                <code v-if="keyPrefix">{{ keyPrefix }}</code>
+                <code v-if="keyPlaintext">{{ keyPlaintext }}</code>
                 <span v-else class="no-key">未设置秘钥</span>
                 <el-button-group>
-                  <el-button size="small" @click="copyKey(keyPrefix)" :disabled="!keyPrefix">
+                  <el-button size="small" @click="copyKey(keyPlaintext)" :disabled="!keyPlaintext">
                     复制秘钥
                   </el-button>
-                  <el-button size="small" type="warning" @click="handleRotate" :disabled="!keyPrefix">
+                  <el-button size="small" type="warning" @click="handleRotate">
                     轮换秘钥
                   </el-button>
                 </el-button-group>
@@ -74,9 +74,10 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { portalApi } from '@/api/portal'
+import { getCopyableKey } from '@/utils/keyUtils'
 
 const loading = ref(false)
-const keyPrefix = ref<string | null>(null)
+const keyPlaintext = ref<string | null>(null)
 const rotateDialogVisible = ref(false)
 const newKey = ref('')
 
@@ -84,7 +85,7 @@ const loadData = async () => {
   try {
     loading.value = true
     const { data } = await portalApi.getKey()
-    keyPrefix.value = data.plaintext_key
+    keyPlaintext.value = data.plaintext_key
   } catch (error) {
     ElMessage.error('加载秘钥信息失败')
   } finally {
@@ -92,14 +93,19 @@ const loadData = async () => {
   }
 }
 
-const copyKey = async (key: string | null) => {
-  if (!key) return
+const copyKey = async (key: unknown) => {
+  const copyableKey = getCopyableKey(key)
+  if (!copyableKey) {
+    ElMessage.warning('当前没有可复制的真实秘钥，请先轮换秘钥')
+    return
+  }
+
   try {
-    await navigator.clipboard.writeText(key)
+    await navigator.clipboard.writeText(copyableKey)
     ElMessage.success('已复制到剪贴板')
   } catch {
     const textArea = document.createElement('textarea')
-    textArea.value = key
+    textArea.value = copyableKey
     textArea.style.position = 'fixed'
     textArea.style.left = '-9999px'
     document.body.appendChild(textArea)
@@ -133,6 +139,7 @@ const handleRotate = async () => {
 
     const { data } = await portalApi.rotateKey()
     newKey.value = data.plaintext_key
+    keyPlaintext.value = data.plaintext_key
     rotateDialogVisible.value = true
     ElMessage.warning('请立即保存新秘钥，此秘钥只显示一次！')
 

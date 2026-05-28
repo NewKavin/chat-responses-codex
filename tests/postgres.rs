@@ -1,13 +1,14 @@
 use chat_responses_codex::state::{AppConfig, AppState};
 use std::env;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tempfile::tempdir;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 #[tokio::test]
 async fn load_from_path_prefers_postgres_when_database_url_is_set() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 

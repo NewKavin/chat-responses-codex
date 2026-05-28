@@ -13,11 +13,71 @@ use chat_responses_codex::state::{
     AppConfig, AppState, DownstreamConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
 };
 use futures_util::stream;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::env;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::tempdir;
 use tower::ServiceExt;
+
+const PROXY_ENV_VARS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+async fn with_proxy_env_cleared<F, T>(f: impl FnOnce() -> F) -> T
+where
+    F: Future<Output = T>,
+{
+    let _lock = proxy_env_lock().lock().unwrap();
+    let saved = ProxyEnvSnapshot::capture();
+    ProxyEnvSnapshot::clear();
+    let result = f().await;
+    saved.restore();
+    result
+}
+
+fn proxy_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct ProxyEnvSnapshot {
+    vars: Vec<(&'static str, Option<String>)>,
+}
+
+impl ProxyEnvSnapshot {
+    fn capture() -> Self {
+        Self {
+            vars: PROXY_ENV_VARS
+                .iter()
+                .map(|name| (*name, env::var(name).ok()))
+                .collect(),
+        }
+    }
+
+    fn clear() {
+        for name in PROXY_ENV_VARS {
+            env::remove_var(name);
+        }
+    }
+
+    fn restore(self) {
+        for (name, value) in self.vars {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+    }
+}
 
 #[tokio::test]
 async fn downstream_chat_request_is_forwarded_and_logged() {
@@ -124,10 +184,12 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
             "Authorization",
             format!("Bearer {}", downstream_key.plaintext),
         )
+        .header("User-Agent", "Claude-Code/1.2.3")
         .header("Content-Type", "application/json")
         .body(Body::from(
             json!({
                 "model": "gpt-4.1-mini",
+                "inference_strength": "xhigh",
                 "messages": [
                     {"role": "user", "content": "Hello"}
                 ]
@@ -137,9 +199,14 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected response body: {body_text}"
+    );
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
 
@@ -153,19 +220,466 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
 
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.downstream_name.as_deref(), Some("team-a"));
+    assert_eq!(log.upstream_name.as_deref(), Some("primary"));
+    assert_eq!(log.inference_strength.as_deref(), Some("xhigh"));
+    assert_eq!(log.user_agent.as_deref(), Some("Claude-Code/1.2.3"));
+    assert_eq!(log.request_count, Some(1));
 }
 
 #[tokio::test]
+async fn downstream_chat_request_accepts_x_api_key_header() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("x-api-key", downstream_key.plaintext)
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "messages": [{"role": "user", "content": "Hello"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.path, "/v1/chat/completions");
+    assert_eq!(
+        captured.authorization.as_deref(),
+        Some("Bearer upstream-secret")
+    );
+}
+
+#[tokio::test]
+async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 7,
+                                    "completion_tokens": 5,
+                                    "total_tokens": 12
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["gpt-4.1-mini".into()],
+                model_aliases: vec![],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-api-key", downstream_key.plaintext)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "Hello"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["type"], "message");
+    assert_eq!(payload["role"], "assistant");
+    assert_eq!(payload["content"][0]["type"], "text");
+    assert_eq!(payload["content"][0]["text"], "Hi");
+    assert_eq!(payload["usage"]["input_tokens"], 7);
+    assert_eq!(payload["usage"]["output_tokens"], 5);
+
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.path, "/v1/chat/completions");
+    assert_eq!(
+        captured.request_body.unwrap()["messages"][0]["content"],
+        "Hello"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claude_messages_stream_true_is_downgraded_to_non_stream_response() {
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 7,
+                                    "completion_tokens": 5,
+                                    "total_tokens": 12
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{}", address),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    model_aliases: vec![],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("x-api-key", downstream_key.plaintext)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "gpt-4.1-mini",
+                    "max_tokens": 128,
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "Hello"}]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["type"], "message");
+        assert_eq!(payload["role"], "assistant");
+        assert_eq!(payload["content"][0]["type"], "text");
+        assert_eq!(payload["content"][0]["text"], "Hi");
+
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured.path, "/v1/chat/completions");
+        let captured_body = captured.request_body.unwrap();
+        assert_eq!(captured_body["messages"][0]["content"], "Hello");
+        assert_ne!(
+            captured_body
+                .get("stream")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn claude_count_tokens_endpoint_accepts_x_api_key() {
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages/count_tokens")
+        .header("x-api-key", downstream_key.plaintext)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "messages": [{"role": "user", "content": "Count me"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["input_tokens"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn downstream_chat_request_uses_model_alias_for_upstream_request_body() {
-    let capture = Arc::new(Mutex::new(RequestCapture::default()));
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let capture_clone = capture.clone();
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
 
-    let upstream_app =
-        Router::new()
+        let upstream_app = Router::new()
             .route(
                 "/v1/chat/completions",
                 post(
@@ -207,91 +721,98 @@ async fn downstream_chat_request_uses_model_alias_for_upstream_request_body() {
             )
             .with_state(capture_clone);
 
-    tokio::spawn(async move {
-        axum::serve(listener, upstream_app).await.unwrap();
-    });
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
 
-    let downstream_key = generate_downstream_key("gw");
-    let state: PersistedState = serde_json::from_value(json!({
-        "upstreams": [{
-            "id": "up-1",
-            "name": "primary",
-            "base_url": format!("http://{}", address),
-            "api_key": "upstream-secret",
-            "protocol": "ChatCompletions",
-            "supported_models": [],
-            "model_aliases": [{
-                "slug": "glm-5",
-                "upstream_model": "GLM-5"
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": [],
+                "model_aliases": [{
+                    "slug": "glm-5",
+                    "upstream_model": "GLM-5"
+                }],
+                "active": true,
+                "failure_count": 0
             }],
-            "active": true,
-            "failure_count": 0
-        }],
-        "downstreams": [{
-            "id": "down-1",
-            "name": "team-a",
-            "hash": downstream_key.hash.clone(),
-            "plaintext_key": downstream_key.plaintext.clone(),
-            "model_allowlist": ["glm-5"],
-            "per_minute_limit": 60,
-            "daily_token_limit": null,
-            "monthly_token_limit": null,
-            "ip_allowlist": [],
-            "expires_at": null,
-            "active": true
-        }],
-        "usage_logs": []
-    }))
-    .unwrap();
-    let state = AppState::new(state, state_path, AppConfig::default());
-
-    let app = build_router(state.clone());
-    let request = Request::builder()
-        .method("POST")
-        .uri("/v1/chat/completions")
-        .header(
-            "Authorization",
-            format!("Bearer {}", downstream_key.plaintext),
-        )
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            json!({
-                "model": "glm-5",
-                "messages": [
-                    {"role": "user", "content": "Hello"}
-                ]
-            })
-            .to_string(),
-        ))
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["glm-5"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
         .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
 
-    let response = app.oneshot(request).await.unwrap();
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "glm-5",
+                    "messages": [
+                        {"role": "user", "content": "Hello"}
+                    ]
+                })
+                .to_string(),
+            ))
+            .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response body: {body_text}"
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
 
-    let captured = capture.lock().unwrap().clone();
-    assert_eq!(captured.path, "/v1/chat/completions");
-    assert_eq!(
-        captured.authorization.as_deref(),
-        Some("Bearer upstream-secret")
-    );
-    assert_eq!(captured.request_body.unwrap()["model"], "GLM-5");
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured.path, "/v1/chat/completions");
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer upstream-secret")
+        );
+        assert_eq!(captured.request_body.unwrap()["model"], "GLM-5");
+    })
+    .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn downstream_chat_request_routes_via_model_alias_even_when_supported_models_are_uppercase() {
-    let capture = Arc::new(Mutex::new(RequestCapture::default()));
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let capture_clone = capture.clone();
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
 
-    let upstream_app =
-        Router::new()
+        let upstream_app = Router::new()
             .route(
                 "/v1/chat/completions",
                 post(
@@ -333,78 +854,85 @@ async fn downstream_chat_request_routes_via_model_alias_even_when_supported_mode
             )
             .with_state(capture_clone);
 
-    tokio::spawn(async move {
-        axum::serve(listener, upstream_app).await.unwrap();
-    });
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
 
-    let downstream_key = generate_downstream_key("gw");
-    let state: PersistedState = serde_json::from_value(json!({
-        "upstreams": [{
-            "id": "up-1",
-            "name": "primary",
-            "base_url": format!("http://{}", address),
-            "api_key": "upstream-secret",
-            "protocol": "ChatCompletions",
-            "supported_models": ["GLM-5"],
-            "model_aliases": [{
-                "slug": "glm-5",
-                "upstream_model": "GLM-5"
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": ["GLM-5"],
+                "model_aliases": [{
+                    "slug": "glm-5",
+                    "upstream_model": "GLM-5"
+                }],
+                "active": true,
+                "failure_count": 0
             }],
-            "active": true,
-            "failure_count": 0
-        }],
-        "downstreams": [{
-            "id": "down-1",
-            "name": "team-a",
-            "hash": downstream_key.hash.clone(),
-            "plaintext_key": downstream_key.plaintext.clone(),
-            "model_allowlist": ["glm-5"],
-            "per_minute_limit": 60,
-            "daily_token_limit": null,
-            "monthly_token_limit": null,
-            "ip_allowlist": [],
-            "expires_at": null,
-            "active": true
-        }],
-        "usage_logs": []
-    }))
-    .unwrap();
-    let state = AppState::new(state, state_path, AppConfig::default());
-
-    let app = build_router(state.clone());
-    let request = Request::builder()
-        .method("POST")
-        .uri("/v1/chat/completions")
-        .header(
-            "Authorization",
-            format!("Bearer {}", downstream_key.plaintext),
-        )
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            json!({
-                "model": "glm-5",
-                "messages": [
-                    {"role": "user", "content": "Hello"}
-                ]
-            })
-            .to_string(),
-        ))
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["glm-5"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
         .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
 
-    let response = app.oneshot(request).await.unwrap();
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "glm-5",
+                    "messages": [
+                        {"role": "user", "content": "Hello"}
+                    ]
+                })
+                .to_string(),
+            ))
+            .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response body: {body_text}"
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
 
-    let captured = capture.lock().unwrap().clone();
-    assert_eq!(captured.path, "/v1/chat/completions");
-    assert_eq!(
-        captured.authorization.as_deref(),
-        Some("Bearer upstream-secret")
-    );
-    assert_eq!(captured.request_body.unwrap()["model"], "GLM-5");
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured.path, "/v1/chat/completions");
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer upstream-secret")
+        );
+        assert_eq!(captured.request_body.unwrap()["model"], "GLM-5");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -526,21 +1054,132 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
     assert_eq!(snapshot.usage_logs.len(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_exists() {
-    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let upstream_sss =
-        spawn_recording_chat_upstream("sss", "upstream-sss-secret", hits.clone()).await;
-    let upstream_general =
-        spawn_recording_chat_upstream("general", "upstream-general-secret", hits.clone()).await;
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let upstream_sss =
+            spawn_recording_chat_upstream("sss", "upstream-sss-secret", hits.clone()).await;
+        let upstream_general =
+            spawn_recording_chat_upstream("general", "upstream-general-secret", hits.clone()).await;
 
-    let downstream_key = generate_downstream_key("gw");
-    let state = AppState::new(
-        PersistedState {
-            upstreams: vec![
-                UpstreamConfig {
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![
+                    UpstreamConfig {
+                        id: "sss".into(),
+                        name: "sss".into(),
+                        base_url: upstream_sss,
+                        api_key: "upstream-sss-secret".into(),
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        supported_models: vec!["glm5.1".into(), "deepseek".into()],
+                        model_aliases: vec![],
+                        request_quota_window_hours: 5,
+
+                        request_quota_requests: 600,
+                        requests_per_minute: 60,
+                        max_concurrency: 10,
+                        model_request_costs: vec![],
+                        priority: 999,
+                        premium_models: vec!["glm5.1".into()],
+                        premium_only: false,
+                        protect_premium_quota: true,
+                        active: true,
+                        failure_count: 0,
+                    },
+                    UpstreamConfig {
+                        id: "general".into(),
+                        name: "general".into(),
+                        base_url: upstream_general,
+                        api_key: "upstream-general-secret".into(),
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        supported_models: vec!["deepseek".into()],
+                        model_aliases: vec![],
+                        request_quota_window_hours: 5,
+
+                        request_quota_requests: 600,
+                        requests_per_minute: 60,
+                        max_concurrency: 10,
+                        model_request_costs: vec![],
+                        priority: 1,
+                        premium_models: vec![],
+                        premium_only: false,
+                        protect_premium_quota: false,
+                        active: true,
+                        failure_count: 0,
+                    },
+                ],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
+                    per_minute_limit: 60,
+
+                    rate_limit_enabled: true,
+
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "deepseek",
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(hits.lock().unwrap().as_slice(), &["general"]);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alternative() {
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let upstream_sss =
+            spawn_recording_chat_upstream("sss", "upstream-sss-secret", hits.clone()).await;
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
                     id: "sss".into(),
                     name: "sss".into(),
                     base_url: upstream_sss,
@@ -560,165 +1199,331 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                     protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
-                },
-                UpstreamConfig {
-                    id: "general".into(),
-                    name: "general".into(),
-                    base_url: upstream_general,
-                    api_key: "upstream-general-secret".into(),
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
+                    per_minute_limit: 60,
+
+                    rate_limit_enabled: true,
+
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "deepseek",
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(hits.lock().unwrap().as_slice(), &["sss"]);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn premium_only_model_routes_to_protected_upstream() {
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let upstream =
+            spawn_recording_chat_upstream("premium", "upstream-premium-secret", hits.clone()).await;
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "premium".into(),
+                    name: "premium".into(),
+                    base_url: upstream,
+                    api_key: "upstream-premium-secret".into(),
                     protocol: UpstreamProtocol::ChatCompletions,
                     supported_models: vec!["deepseek".into()],
                     model_aliases: vec![],
                     request_quota_window_hours: 5,
-
                     request_quota_requests: 600,
                     requests_per_minute: 60,
                     max_concurrency: 10,
                     model_request_costs: vec![],
-                    priority: 1,
-                    premium_models: vec![],
+                    priority: 100,
+                    premium_models: vec!["glm-5.1".into()],
                     premium_only: false,
-                    protect_premium_quota: false,
+                    protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
-                },
-            ],
-            downstreams: vec![DownstreamConfig {
-                id: "down-1".into(),
-                name: "team-a".into(),
-                hash: downstream_key.hash.clone(),
-                plaintext_key: Some(downstream_key.plaintext.clone()),
-                plaintext_key_prefix: None,
-                model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
-                per_minute_limit: 60,
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["glm-5.1".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+            },
+            state_path,
+            AppConfig::default(),
+        );
 
-                rate_limit_enabled: true,
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "glm-5.1",
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-                max_concurrency: 10,
-                daily_token_limit: None,
-                monthly_token_limit: None,
-                request_quota_window_hours: None,
-                request_quota_requests: None,
-                ip_allowlist: vec![],
-                expires_at: None,
-                active: true,
-            }],
-            usage_logs: vec![],
-        },
-        state_path,
-        AppConfig::default(),
-    );
-
-    let app = build_router(state);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", downstream_key.plaintext),
-                )
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "deepseek",
-                        "messages": [{"role": "user", "content": "Hello"}]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(hits.lock().unwrap().as_slice(), &["general"]);
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response body: {body_text}"
+        );
+        assert_eq!(hits.lock().unwrap().as_slice(), &["premium"]);
+    })
+    .await;
 }
 
-#[tokio::test]
-async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alternative() {
-    let hits = Arc::new(Mutex::new(Vec::<String>::new()));
-    let tempdir = tempdir().unwrap();
-    let state_path = tempdir.path().join("state.json");
-    let upstream_sss =
-        spawn_recording_chat_upstream("sss", "upstream-sss-secret", hits.clone()).await;
+#[tokio::test(flavor = "current_thread")]
+async fn premium_model_alias_routes_with_case_insensitive_allowlist_and_upstream_rewrite() {
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let premium_model_seen = Arc::new(Mutex::new(String::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits_clone = hits.clone();
+        let premium_model_seen_clone = premium_model_seen.clone();
 
-    let downstream_key = generate_downstream_key("gw");
-    let state = AppState::new(
-        PersistedState {
-            upstreams: vec![UpstreamConfig {
-                id: "sss".into(),
-                name: "sss".into(),
-                base_url: upstream_sss,
-                api_key: "upstream-sss-secret".into(),
-                protocol: UpstreamProtocol::ChatCompletions,
-                supported_models: vec!["glm5.1".into(), "deepseek".into()],
-                model_aliases: vec![],
-                request_quota_window_hours: 5,
+        let premium_upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let hits_clone = hits_clone.clone();
+                let premium_model_seen = premium_model_seen_clone.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let authorization = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok());
+                    assert_eq!(authorization, Some("Bearer upstream-premium-secret"));
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let model = payload
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    *premium_model_seen.lock().unwrap() = model;
+                    hits_clone.lock().unwrap().push("premium".to_string());
 
-                request_quota_requests: 600,
-                requests_per_minute: 60,
-                max_concurrency: 10,
-                model_request_costs: vec![],
-                priority: 999,
-                premium_models: vec!["glm5.1".into()],
-                premium_only: false,
-                protect_premium_quota: true,
-                active: true,
-                failure_count: 0,
-            }],
-            downstreams: vec![DownstreamConfig {
-                id: "down-1".into(),
-                name: "team-a".into(),
-                hash: downstream_key.hash.clone(),
-                plaintext_key: Some(downstream_key.plaintext.clone()),
-                plaintext_key_prefix: None,
-                model_allowlist: vec!["deepseek".into(), "glm5.1".into()],
-                per_minute_limit: 60,
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "MiniMax2.7",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Hi"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
 
-                rate_limit_enabled: true,
+        tokio::spawn(async move {
+            axum::serve(listener, premium_upstream_app).await.unwrap();
+        });
 
-                max_concurrency: 10,
-                daily_token_limit: None,
-                monthly_token_limit: None,
-                request_quota_window_hours: None,
-                request_quota_requests: None,
-                ip_allowlist: vec![],
-                expires_at: None,
-                active: true,
-            }],
-            usage_logs: vec![],
-        },
-        state_path,
-        AppConfig::default(),
-    );
+        let upstream_normal =
+            spawn_recording_chat_upstream("normal", "upstream-normal-secret", hits.clone()).await;
+        let upstream_premium = format!("http://{}", address);
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![
+                    UpstreamConfig {
+                        id: "premium".into(),
+                        name: "premium".into(),
+                        base_url: upstream_premium,
+                        api_key: "upstream-premium-secret".into(),
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        supported_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
+                        model_aliases: vec![],
+                        request_quota_window_hours: 5,
+                        request_quota_requests: 600,
+                        requests_per_minute: 60,
+                        max_concurrency: 10,
+                        model_request_costs: vec![
+                            ModelRequestCostConfig {
+                                slug: "MiniMax2.7".into(),
+                                cost: 2.0,
+                            },
+                            ModelRequestCostConfig {
+                                slug: "DeepSeek-V3".into(),
+                                cost: 2.0,
+                            },
+                        ],
+                        priority: 100,
+                        premium_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
+                        premium_only: false,
+                        protect_premium_quota: true,
+                        active: true,
+                        failure_count: 0,
+                    },
+                    UpstreamConfig {
+                        id: "normal".into(),
+                        name: "normal".into(),
+                        base_url: upstream_normal,
+                        api_key: "upstream-normal-secret".into(),
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        supported_models: vec!["DeepSeek-V3".into()],
+                        model_aliases: vec![],
+                        request_quota_window_hours: 5,
+                        request_quota_requests: 600,
+                        requests_per_minute: 60,
+                        max_concurrency: 10,
+                        model_request_costs: vec![],
+                        priority: 0,
+                        premium_models: vec![],
+                        premium_only: false,
+                        protect_premium_quota: false,
+                        active: true,
+                        failure_count: 0,
+                    },
+                ],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["MiniMax2.7".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+            },
+            state_path,
+            AppConfig::default(),
+        );
 
-    let app = build_router(state);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", downstream_key.plaintext),
-                )
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "deepseek",
-                        "messages": [{"role": "user", "content": "Hello"}]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "minimax2.7",
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(hits.lock().unwrap().as_slice(), &["sss"]);
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response body: {body_text}"
+        );
+        assert_eq!(hits.lock().unwrap().as_slice(), &["premium"]);
+        assert_eq!(premium_model_seen.lock().unwrap().as_str(), "MiniMax2.7");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -2607,12 +3412,14 @@ async fn downstream_responses_stream_retries_without_stream_when_upstream_reject
     assert!(text.contains("response.completed"));
     assert!(text.contains("data: [DONE]"));
 
-    let captured = capture.lock().unwrap();
-    assert_eq!(captured.len(), 2);
-    assert_eq!(captured[0]["stream"], true);
-    assert_eq!(captured[1]["stream"], false);
-    assert_eq!(captured[0]["messages"][0]["content"], "Hello");
-    assert_eq!(captured[1]["messages"][0]["content"], "Hello");
+    {
+        let captured = capture.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0]["stream"], true);
+        assert_eq!(captured[1]["stream"], false);
+        assert_eq!(captured[0]["messages"][0]["content"], "Hello");
+        assert_eq!(captured[1]["messages"][0]["content"], "Hello");
+    }
 
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);

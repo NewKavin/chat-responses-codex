@@ -10,24 +10,53 @@
 
       <el-form :inline="true" class="filter-form">
         <el-form-item label="状态码">
-          <el-select v-model="filters.status_code" @change="loadData" placeholder="全部" clearable>
+          <el-select
+            v-model="filters.status_codes"
+            @change="handleFilterChange"
+            placeholder="全部"
+            clearable
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+          >
             <el-option label="200 (成功)" :value="200" />
             <el-option label="400 (错误请求)" :value="400" />
             <el-option label="401 (未授权)" :value="401" />
+            <el-option label="403 (拒绝访问)" :value="403" />
+            <el-option label="404 (未找到)" :value="404" />
+            <el-option label="429 (限流)" :value="429" />
             <el-option label="500 (服务器错误)" :value="500" />
           </el-select>
         </el-form-item>
         <el-form-item label="模型">
-          <el-select v-model="filters.model" @change="loadData" placeholder="全部" clearable filterable>
-            <el-option v-for="model in uniqueModels" :key="model" :label="model" :value="model" />
-          </el-select>
+          <el-input
+            v-model="filters.model"
+            clearable
+            placeholder="输入模型关键词"
+            @keyup.enter="handleFilterChange"
+            @clear="handleFilterChange"
+          />
         </el-form-item>
         <el-form-item label="时间范围">
-          <el-select v-model="filters.time_range" @change="loadData">
+          <el-select v-model="filters.time_range" @change="handleFilterChange">
             <el-option label="最近 1 天" value="1d" />
             <el-option label="最近 7 天" value="7d" />
             <el-option label="最近 30 天" value="30d" />
+            <el-option label="自定义范围" value="custom" />
           </el-select>
+        </el-form-item>
+        <el-form-item v-if="filters.time_range === 'custom'" label="自定义">
+          <el-date-picker
+            v-model="filters.custom_range"
+            type="datetimerange"
+            start-placeholder="开始时间"
+            end-placeholder="结束时间"
+            value-format="x"
+            @change="handleFilterChange"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="handleFilterChange">筛选</el-button>
         </el-form-item>
       </el-form>
 
@@ -37,7 +66,7 @@
         :closable="false"
         class="helper-text"
       >
-        日志按时间倒序展示。API 名称会根据端点自动识别并展示上传/下载等图标；推理强度、计费模式和 User-Agent 支持透传字段优先展示。
+        日志按时间倒序展示。推理强度按下游请求原值显示；下游调用/上游请求名称、计费模式与 User-Agent 均支持原始透传字段优先展示。
       </el-alert>
 
       <el-table :data="tableRows" v-loading="loading" stripe>
@@ -57,6 +86,16 @@
           </template>
         </el-table-column>
         <el-table-column prop="model" label="模型" min-width="140" />
+        <el-table-column label="下游调用" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.downstreamName }}
+          </template>
+        </el-table-column>
+        <el-table-column label="上游请求" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.upstreamName }}
+          </template>
+        </el-table-column>
         <el-table-column label="推理强度" width="100">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.inferenceStrength }}</el-tag>
@@ -151,12 +190,12 @@ import type { UsageLog } from '@/types'
 
 const loading = ref(false)
 const logs = ref<UsageLog[]>([])
-const uniqueModels = ref<string[]>([])
 
 const filters = ref({
-  status_code: undefined as number | undefined,
-  model: undefined as string | undefined,
-  time_range: '7d'
+  status_codes: [] as number[],
+  model: '',
+  time_range: '7d',
+  custom_range: [] as string[]
 })
 
 const pagination = ref({
@@ -180,6 +219,8 @@ interface DisplayLog extends UsageLog {
   billingMode: string
   requestCount: number
   userAgent: string
+  downstreamName: string
+  upstreamName: string
 }
 
 const tableRows = computed<DisplayLog[]>(() => logs.value.map(buildDisplayLog))
@@ -201,23 +242,6 @@ const formatTime = (timestamp: number) => {
     minute: '2-digit',
     second: '2-digit'
   })
-}
-
-const normalizeInferenceStrength = (value: string) => {
-  const normalized = value.trim().toLowerCase()
-  if (normalized === 'high' || normalized === '高') return '高'
-  if (normalized === 'medium' || normalized === '中') return '中'
-  if (normalized === 'low' || normalized === '低') return '低'
-  if (normalized.length === 0) return '标准'
-  return value
-}
-
-const inferInferenceStrengthByModel = (model: string) => {
-  const name = model.toLowerCase()
-  if (name.includes('o1') || name.includes('o3') || name.includes('o4') || name.includes('reason')) return '高'
-  if (name.includes('gpt-4') || name.includes('claude-3') || name.includes('gemini')) return '中'
-  if (name.includes('mini') || name.includes('haiku') || name.includes('nano')) return '低'
-  return '标准'
 }
 
 const resolveApiDescriptor = (log: UsageLog): ApiDescriptor => {
@@ -250,12 +274,12 @@ const resolveApiDescriptor = (log: UsageLog): ApiDescriptor => {
 
 const buildDisplayLog = (log: UsageLog): DisplayLog => {
   const api = resolveApiDescriptor(log)
-  const inferenceStrength = log.inference_strength
-    ? normalizeInferenceStrength(log.inference_strength)
-    : inferInferenceStrengthByModel(log.model)
+  const inferenceStrength = log.inference_strength?.trim() || '标准'
   const billingMode = log.billing_mode?.trim() || (log.total_tokens > 0 ? 'Token 计费' : '请求计费')
   const userAgent = log.user_agent?.trim() || '未采集'
   const requestCount = log.request_count ?? 1
+  const downstreamName = log.downstream_name?.trim() || log.downstream_key_id
+  const upstreamName = log.upstream_name?.trim() || log.upstream_key_id
 
   return {
     ...log,
@@ -265,8 +289,15 @@ const buildDisplayLog = (log: UsageLog): DisplayLog => {
     inferenceStrength,
     billingMode,
     requestCount,
-    userAgent
+    userAgent,
+    downstreamName,
+    upstreamName
   }
+}
+
+const handleFilterChange = () => {
+  pagination.value.page = 1
+  loadData()
 }
 
 const loadData = async () => {
@@ -276,25 +307,36 @@ const loadData = async () => {
       page: number
       page_size: number
       time_range: string
-      status_code?: number
+      status_codes?: string
       model?: string
+      start_time?: number
+      end_time?: number
     } = {
       page: pagination.value.page,
       page_size: pagination.value.page_size,
       time_range: filters.value.time_range
     }
 
-    if (filters.value.status_code) params.status_code = filters.value.status_code
-    if (filters.value.model) params.model = filters.value.model
+    if (filters.value.status_codes.length > 0) {
+      params.status_codes = filters.value.status_codes.join(',')
+    }
+    if (filters.value.model.trim().length > 0) {
+      params.model = filters.value.model.trim()
+    }
+    if (filters.value.time_range === 'custom') {
+      const [start, end] = filters.value.custom_range
+      if (start && end) {
+        params.start_time = Math.floor(Number(start) / 1000)
+        params.end_time = Math.floor(Number(end) / 1000)
+      } else {
+        params.time_range = '7d'
+      }
+    }
 
     const { data } = await adminApi.getLogs(params)
     logs.value = data.logs
     pagination.value.total = data.total
     pagination.value.total_pages = data.total_pages
-
-    const models = new Set<string>()
-    data.logs.forEach(log => models.add(log.model))
-    uniqueModels.value = Array.from(models).sort()
   } catch (error) {
     ElMessage.error('加载日志失败')
   } finally {

@@ -44,7 +44,7 @@ export const portalApi = {
   getQuota: () => api.get<PortalQuota>('/portal/quota'),
 
   // Usage History
-  getUsageHistory: (params?: { time_range?: string }) =>
+  getUsageHistory: (params?: { time_range?: string; page?: number; page_size?: number }) =>
     api.get<PortalUsageHistory>('/portal/usage-history', { params }),
 
   // Key Management

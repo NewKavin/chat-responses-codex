@@ -72,7 +72,7 @@
           <span>平均耗时</span>
         </div>
         <div class="summary-chip">
-          <strong>{{ chartSummary.totalTokens }}</strong>
+          <strong>{{ formatCompactToken(chartSummary.totalTokens) }}</strong>
           <span>Token 总量</span>
         </div>
       </div>
@@ -166,16 +166,18 @@
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
 import { adminApi } from '@/api/admin'
+import { loadEcharts } from '@/utils/echartsLoader'
 import type { DashboardData, UsageLog } from '@/types'
+import type { EChartsType } from 'echarts/core'
+import { formatCompactNumber } from '@/utils/numberFormat'
 
 type ChartRange = '1d' | '7d' | '30d'
 
 const loading = ref(false)
 const chartLoading = ref(false)
 const overviewChartRef = ref<HTMLElement>()
-let overviewChart: echarts.ECharts | null = null
+let overviewChart: EChartsType | null = null
 const chartRange = ref<ChartRange>('7d')
 
 const chartSummary = ref({
@@ -196,6 +198,8 @@ const data = ref<DashboardData>({
   admin_username: 'admin',
   app_name: 'chat-responses-codex'
 })
+
+const formatCompactToken = (value: number) => formatCompactNumber(value)
 
 const daysByRange: Record<ChartRange, number> = {
   '1d': 1,
@@ -329,8 +333,9 @@ const updateChart = (logs: UsageLog[]) => {
   })
 }
 
-const initChart = () => {
+const initChart = async () => {
   if (!overviewChartRef.value) return
+  const echarts = await loadEcharts()
   overviewChart = echarts.init(overviewChartRef.value)
 }
 
@@ -388,8 +393,8 @@ const handleResize = () => {
 
 onMounted(async () => {
   await nextTick()
-  initChart()
-  loadData()
+  await initChart()
+  await loadData()
   window.addEventListener('resize', handleResize)
 })
 

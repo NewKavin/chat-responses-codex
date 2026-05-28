@@ -180,8 +180,14 @@ impl PostgresStateStore {
                 id TEXT PRIMARY KEY,
                 downstream_key_id TEXT NOT NULL,
                 upstream_key_id TEXT NOT NULL,
+                downstream_name TEXT NULL,
+                upstream_name TEXT NULL,
                 endpoint TEXT NOT NULL,
                 model TEXT NOT NULL,
+                inference_strength TEXT NULL,
+                billing_mode TEXT NULL,
+                request_count BIGINT NULL,
+                user_agent TEXT NULL,
                 request_id TEXT NOT NULL,
                 status_code INTEGER NOT NULL,
                 prompt_tokens BIGINT NOT NULL,
@@ -190,6 +196,24 @@ impl PostgresStateStore {
                 latency_ms BIGINT NOT NULL,
                 created_at BIGINT NOT NULL
             );
+
+            ALTER TABLE usage_logs
+                ADD COLUMN IF NOT EXISTS downstream_name TEXT NULL;
+
+            ALTER TABLE usage_logs
+                ADD COLUMN IF NOT EXISTS upstream_name TEXT NULL;
+
+            ALTER TABLE usage_logs
+                ADD COLUMN IF NOT EXISTS inference_strength TEXT NULL;
+
+            ALTER TABLE usage_logs
+                ADD COLUMN IF NOT EXISTS billing_mode TEXT NULL;
+
+            ALTER TABLE usage_logs
+                ADD COLUMN IF NOT EXISTS request_count BIGINT NULL;
+
+            ALTER TABLE usage_logs
+                ADD COLUMN IF NOT EXISTS user_agent TEXT NULL;
 
             CREATE INDEX IF NOT EXISTS usage_logs_created_at_idx
                 ON usage_logs (created_at DESC, id);
@@ -589,7 +613,8 @@ impl PgConnection {
         let mut usage_logs = Vec::new();
         for row in self
             .query(
-                "SELECT id, downstream_key_id, upstream_key_id, endpoint, model, request_id, \
+                "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
+                 endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
                  status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at \
                  FROM usage_logs ORDER BY created_at, request_id, id",
             )
@@ -599,25 +624,34 @@ impl PgConnection {
                 id: required_text(&row, 0, "usage_logs.id")?,
                 downstream_key_id: required_text(&row, 1, "usage_logs.downstream_key_id")?,
                 upstream_key_id: required_text(&row, 2, "usage_logs.upstream_key_id")?,
-                endpoint: required_text(&row, 3, "usage_logs.endpoint")?,
-                model: required_text(&row, 4, "usage_logs.model")?,
-                request_id: required_text(&row, 5, "usage_logs.request_id")?,
-                status_code: required_text(&row, 6, "usage_logs.status_code")?
+                downstream_name: optional_text(&row, 3),
+                upstream_name: optional_text(&row, 4),
+                endpoint: required_text(&row, 5, "usage_logs.endpoint")?,
+                model: required_text(&row, 6, "usage_logs.model")?,
+                inference_strength: optional_text(&row, 7),
+                billing_mode: optional_text(&row, 8),
+                request_count: optional_text(&row, 9)
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                user_agent: optional_text(&row, 10),
+                request_id: required_text(&row, 11, "usage_logs.request_id")?,
+                status_code: required_text(&row, 12, "usage_logs.status_code")?
                     .parse::<u16>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                prompt_tokens: required_text(&row, 7, "usage_logs.prompt_tokens")?
+                prompt_tokens: required_text(&row, 13, "usage_logs.prompt_tokens")?
                     .parse::<u64>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                completion_tokens: required_text(&row, 8, "usage_logs.completion_tokens")?
+                completion_tokens: required_text(&row, 14, "usage_logs.completion_tokens")?
                     .parse::<u64>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                total_tokens: required_text(&row, 9, "usage_logs.total_tokens")?
+                total_tokens: required_text(&row, 15, "usage_logs.total_tokens")?
                     .parse::<u64>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                latency_ms: required_text(&row, 10, "usage_logs.latency_ms")?
+                latency_ms: required_text(&row, 16, "usage_logs.latency_ms")?
                     .parse::<u64>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-                created_at: required_text(&row, 11, "usage_logs.created_at")?
+                created_at: required_text(&row, 17, "usage_logs.created_at")?
                     .parse::<u64>()
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
             });
@@ -758,13 +792,19 @@ impl PgConnection {
 
             for log in &state.usage_logs {
                 self.batch_execute(&format!(
-                    "INSERT INTO usage_logs (id, downstream_key_id, upstream_key_id, endpoint, model, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at) \
-                     VALUES ({id}, {downstream_key_id}, {upstream_key_id}, {endpoint}, {model}, {request_id}, {status_code}, {prompt_tokens}, {completion_tokens}, {total_tokens}, {latency_ms}, {created_at})",
+                    "INSERT INTO usage_logs (id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at) \
+                     VALUES ({id}, {downstream_key_id}, {upstream_key_id}, {downstream_name}, {upstream_name}, {endpoint}, {model}, {inference_strength}, {billing_mode}, {request_count}, {user_agent}, {request_id}, {status_code}, {prompt_tokens}, {completion_tokens}, {total_tokens}, {latency_ms}, {created_at})",
                     id = sql_string(&log.id),
                     downstream_key_id = sql_string(&log.downstream_key_id),
                     upstream_key_id = sql_string(&log.upstream_key_id),
+                    downstream_name = sql_optional_string(log.downstream_name.as_deref()),
+                    upstream_name = sql_optional_string(log.upstream_name.as_deref()),
                     endpoint = sql_string(&log.endpoint),
                     model = sql_string(&log.model),
+                    inference_strength = sql_optional_string(log.inference_strength.as_deref()),
+                    billing_mode = sql_optional_string(log.billing_mode.as_deref()),
+                    request_count = sql_optional_u64(log.request_count),
+                    user_agent = sql_optional_string(log.user_agent.as_deref()),
                     request_id = sql_string(&log.request_id),
                     status_code = log.status_code as i64,
                     prompt_tokens = log.prompt_tokens as i64,
@@ -1180,7 +1220,7 @@ fn sql_string(value: &str) -> String {
 }
 
 fn usage_log_insert_sql(logs: &[UsageLog]) -> String {
-    const COLUMNS: &str = "id, downstream_key_id, upstream_key_id, endpoint, model, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at";
+    const COLUMNS: &str = "id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at";
     let values = logs
         .iter()
         .map(usage_log_values_sql)
@@ -1192,12 +1232,18 @@ fn usage_log_insert_sql(logs: &[UsageLog]) -> String {
 
 fn usage_log_values_sql(log: &UsageLog) -> String {
     format!(
-        "({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        "({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         sql_string(&log.id),
         sql_string(&log.downstream_key_id),
         sql_string(&log.upstream_key_id),
+        sql_optional_string(log.downstream_name.as_deref()),
+        sql_optional_string(log.upstream_name.as_deref()),
         sql_string(&log.endpoint),
         sql_string(&log.model),
+        sql_optional_string(log.inference_strength.as_deref()),
+        sql_optional_string(log.billing_mode.as_deref()),
+        sql_optional_u64(log.request_count),
+        sql_optional_string(log.user_agent.as_deref()),
         sql_string(&log.request_id),
         log.status_code as i64,
         log.prompt_tokens as i64,
@@ -1362,8 +1408,14 @@ mod tests {
                 id: "log-1".into(),
                 downstream_key_id: "down-1".into(),
                 upstream_key_id: "up-1".into(),
+                downstream_name: None,
+                upstream_name: None,
                 endpoint: "/v1/chat/completions".into(),
                 model: "gpt-4.1-mini".into(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
                 request_id: "req-1".into(),
                 status_code: 200,
                 prompt_tokens: 1,
@@ -1376,8 +1428,14 @@ mod tests {
                 id: "log-2".into(),
                 downstream_key_id: "down-2".into(),
                 upstream_key_id: "up-2".into(),
+                downstream_name: None,
+                upstream_name: None,
                 endpoint: "/v1/responses".into(),
                 model: "glm-5".into(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
                 request_id: "req-2".into(),
                 status_code: 201,
                 prompt_tokens: 4,
@@ -1389,11 +1447,11 @@ mod tests {
         ]);
 
         assert!(sql.starts_with(
-            "INSERT INTO usage_logs (id, downstream_key_id, upstream_key_id, endpoint, model, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at) VALUES "
+            "INSERT INTO usage_logs (id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, status_code, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at) VALUES "
         ));
-        assert!(sql.contains("('log-1', 'down-1', 'up-1', '/v1/chat/completions', 'gpt-4.1-mini', 'req-1', 200, 1, 2, 3, 40, 100)"));
+        assert!(sql.contains("('log-1', 'down-1', 'up-1', NULL, NULL, '/v1/chat/completions', 'gpt-4.1-mini', NULL, NULL, NULL, NULL, 'req-1', 200, 1, 2, 3, 40, 100)"));
         assert!(sql.contains(
-            "('log-2', 'down-2', 'up-2', '/v1/responses', 'glm-5', 'req-2', 201, 4, 5, 9, 55, 101)"
+            "('log-2', 'down-2', 'up-2', NULL, NULL, '/v1/responses', 'glm-5', NULL, NULL, NULL, NULL, 'req-2', 201, 4, 5, 9, 55, 101)"
         ));
         assert!(sql.ends_with("ON CONFLICT (id) DO NOTHING"));
     }

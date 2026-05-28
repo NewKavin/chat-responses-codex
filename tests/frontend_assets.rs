@@ -11,15 +11,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chat_responses_codex::state::{AppConfig, AppState, PersistedState};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from(format!("/tmp/test_state_frontend_assets_{nanos}.json"))
+    let unique = Uuid::new_v4();
+    PathBuf::from(format!("/tmp/test_state_frontend_assets_{unique}.json"))
 }
 
 /// Helper function to create a test AppState
