@@ -1543,6 +1543,16 @@ impl AppState {
         }
     }
 
+    pub async fn rollback_downstream_request_reservation(&self, downstream_id: &str) {
+        let mut windows = self.downstream_request_windows.lock().await;
+        if let Some(window) = windows.get_mut(downstream_id) {
+            window.pop_back();
+            if window.is_empty() {
+                windows.remove(downstream_id);
+            }
+        }
+    }
+
     fn routing_affinity_key(downstream_id: &str, normalized_model: &str) -> String {
         format!(
             "{}::{}",

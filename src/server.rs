@@ -231,6 +231,15 @@ fn metric_exceeds_ratio(value: f64, baseline: f64, ratio: f64) -> bool {
     }
 }
 
+fn should_rollback_downstream_reservation(error: &GatewayError) -> bool {
+    matches!(
+        error,
+        GatewayError::TooManyRequests { .. }
+            | GatewayError::Upstream(_)
+            | GatewayError::TemporaryUpstreamUnavailable(_)
+    )
+}
+
 #[derive(Debug)]
 enum GatewayError {
     Unauthorized(String),
@@ -761,6 +770,9 @@ async fn process_gateway_request(
     }
 
     if let Err(retry_after_seconds) = state.try_reserve_downstream_concurrency(&downstream) {
+        state
+            .rollback_downstream_request_reservation(&downstream.id)
+            .await;
         tracing::warn!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -1336,6 +1348,11 @@ async fn process_gateway_request(
     }
 
     if let Some(error) = last_error {
+        if should_rollback_downstream_reservation(&error) {
+            state
+                .rollback_downstream_request_reservation(&downstream.id)
+                .await;
+        }
         if request_stream {
             state.release_downstream_concurrency(&downstream.id);
         }
@@ -1364,6 +1381,9 @@ async fn process_gateway_request(
     if request_stream {
         state.release_downstream_concurrency(&downstream.id);
     }
+    state
+        .rollback_downstream_request_reservation(&downstream.id)
+        .await;
     Err(no_routable_model_error(&routing_snapshot, model))
 }
 

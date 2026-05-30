@@ -6437,6 +6437,141 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
 }
 
 #[tokio::test]
+async fn upstream_429_does_not_poison_downstream_per_minute_window() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|_body: String| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            headers.insert("retry-after", HeaderValue::from_static("1"));
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                headers,
+                axum::Json(json!({
+                    "error": {
+                        "message": "rate limit exceeded"
+                    }
+                })),
+            )
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                model_aliases: vec![],
+                model_contexts: vec![],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                model_request_costs: vec![ModelRequestCostConfig {
+                    slug: "gpt-4".into(),
+                    cost: 2.0,
+                }],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
+                active: true,
+                failure_count: 0,
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 1,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "gpt-4",
+                    "messages": [{"role": "user", "content": "Hello"}]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let first_error = first_payload["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(first_error.contains("upstream rate limited"));
+
+    let second = app.oneshot(request()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+    let second_payload: Value = serde_json::from_slice(&second_body).unwrap();
+    let second_error = second_payload["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        second_error.contains("upstream rate limited"),
+        "unexpected second error: {second_error}"
+    );
+    assert!(
+        !second_error.contains("downstream per-minute request limit exceeded"),
+        "downstream request window should not be poisoned by upstream 429"
+    );
+}
+
+#[tokio::test]
 async fn generic_400_is_not_treated_as_concurrency_full() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
