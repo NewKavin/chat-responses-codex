@@ -19,6 +19,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3001");
     let state_path = PathBuf::from(env_or("STATE_PATH", "data/state.json"));
     let log_path = env_or("LOG_PATH", "logs/runtime.log");
+    let context_retry_max_attempts_chat_default = env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 2).max(1);
+    let context_retry_max_attempts_responses_default =
+        env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 3).max(1);
+    let context_retry_min_output_tokens_default =
+        env_u64("CONTEXT_RETRY_MIN_OUTPUT_TOKENS", 128).max(1);
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -36,6 +41,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
             300,
         )
         .max(1),
+        upstream_rate_limit_retry_attempts: env_u32("UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS", 1)
+            .max(1),
+        upstream_concurrency_retry_attempts: env_u32(
+            "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
+            20,
+        )
+        .max(1),
+        upstream_concurrency_retry_backoff_ms: env_u64(
+            "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS",
+            50,
+        )
+        .max(1),
+        context_retry_max_attempts_chat: env_u32(
+            "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT",
+            context_retry_max_attempts_chat_default,
+        )
+        .max(1),
+        context_retry_min_output_tokens_chat: env_u64(
+            "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT",
+            context_retry_min_output_tokens_default,
+        )
+        .max(1),
+        context_retry_max_attempts_responses: env_u32(
+            "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES",
+            context_retry_max_attempts_responses_default,
+        )
+        .max(1),
+        context_retry_min_output_tokens_responses: env_u64(
+            "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_RESPONSES",
+            context_retry_min_output_tokens_default,
+        )
+        .max(1),
+        routing_affinity_enabled: env_bool("ROUTING_AFFINITY_ENABLED", true),
+        routing_affinity_ttl_seconds: env_u64("ROUTING_AFFINITY_TTL_SECONDS", 180).max(1),
+        routing_affinity_escape_pressure_ratio: env_f64(
+            "ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO",
+            1.5,
+        )
+        .max(1.0),
     };
 
     init_tracing(&log_path);
@@ -140,9 +184,34 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_u32(key: &str, default: u32) -> u32 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_f64(key: &str, default: f64) -> f64 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+                || (!matches!(normalized.as_str(), "0" | "false" | "no" | "off") && default)
+        })
+        .unwrap_or(default)
+}
+
 fn init_tracing(log_path: &str) {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=debug"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)

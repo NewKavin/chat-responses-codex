@@ -8,6 +8,7 @@ use crate::state::{
     join_upstream_url, unix_seconds, AppState, DownstreamConfig, UpstreamConfig,
     UpstreamMutationError, UsageLog,
 };
+use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Json, State};
 use axum::extract::{Path, Query};
@@ -152,6 +153,8 @@ impl StreamUsageLogContext {
             user_agent,
             request_id: request_id.clone(),
             status_code: status.as_u16(),
+            error_message: None,
+            error_category: None,
             prompt_tokens: usage.0,
             completion_tokens: usage.1,
             total_tokens: usage.2,
@@ -220,6 +223,14 @@ fn extract_inference_strength(body: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn metric_exceeds_ratio(value: f64, baseline: f64, ratio: f64) -> bool {
+    if baseline <= 0.0 {
+        value > 0.0
+    } else {
+        value > baseline * ratio
+    }
+}
+
 #[derive(Debug)]
 enum GatewayError {
     Unauthorized(String),
@@ -230,6 +241,7 @@ enum GatewayError {
         retry_after_seconds: Option<u64>,
     },
     Upstream(String),
+    TemporaryUpstreamUnavailable(String),
 }
 
 impl std::fmt::Display for GatewayError {
@@ -238,7 +250,8 @@ impl std::fmt::Display for GatewayError {
             GatewayError::Unauthorized(message)
             | GatewayError::Forbidden(message)
             | GatewayError::BadRequest(message)
-            | GatewayError::Upstream(message) => f.write_str(message),
+            | GatewayError::Upstream(message)
+            | GatewayError::TemporaryUpstreamUnavailable(message) => f.write_str(message),
             GatewayError::TooManyRequests { message, .. } => f.write_str(message),
         }
     }
@@ -251,6 +264,9 @@ impl GatewayError {
         let (status, message, retry_after_seconds) = match self {
             GatewayError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message, None),
             GatewayError::Forbidden(message) => (StatusCode::FORBIDDEN, message, None),
+            GatewayError::TemporaryUpstreamUnavailable(message) => {
+                (StatusCode::SERVICE_UNAVAILABLE, message, None)
+            }
             GatewayError::BadRequest(message) => (StatusCode::BAD_REQUEST, message, None),
             GatewayError::TooManyRequests {
                 message,
@@ -615,6 +631,28 @@ impl Drop for DownstreamConcurrencyGuard {
     }
 }
 
+#[derive(Clone)]
+struct StreamCompletionContext {
+    state: AppState,
+    upstream_id: String,
+    downstream_id: String,
+}
+
+impl StreamCompletionContext {
+    async fn release_all(&self) {
+        self.state.release_upstream_request(&self.upstream_id).await;
+        self.state.release_downstream_concurrency(&self.downstream_id);
+    }
+
+    async fn mark_success(&self) {
+        self.state.mark_upstream_success(&self.upstream_id).await.ok();
+    }
+
+    async fn mark_failure(&self) {
+        self.state.mark_upstream_failure(&self.upstream_id).await.ok();
+    }
+}
+
 async fn process_gateway_request(
     state: AppState,
     headers: HeaderMap,
@@ -738,8 +776,21 @@ async fn process_gateway_request(
             retry_after_seconds: Some(retry_after_seconds),
         });
     }
-    let _downstream_concurrency_guard =
-        DownstreamConcurrencyGuard::new(state.clone(), downstream.id.clone());
+    let _downstream_concurrency_guard = if !request_stream {
+        Some(DownstreamConcurrencyGuard::new(state.clone(), downstream.id.clone()))
+    } else {
+        None
+    };
+
+    let stream_completion_context = if request_stream {
+        Some(StreamCompletionContext {
+            state: state.clone(),
+            upstream_id: String::new(), // Will be set when upstream is selected
+            downstream_id: downstream.id.clone(),
+        })
+    } else {
+        None
+    };
 
     let requires_responses_tooling =
         endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
@@ -771,7 +822,7 @@ async fn process_gateway_request(
 
     let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
     let now = unix_seconds();
-    let mut rate_limit_retry_attempted = false;
+    let mut rate_limit_retry_attempts_used = 0u32;
     let candidate_protocols = if requires_responses_tooling {
         if fallback_to_chat {
             vec![UpstreamProtocol::ChatCompletions]
@@ -792,6 +843,24 @@ async fn process_gateway_request(
         "resolved candidate protocols"
     );
     let mut last_error = None;
+    let preferred_upstream_id = if state.config.routing_affinity_enabled {
+        match state.get_affinity_upstream(&downstream.id, normalized_model) {
+            Some(upstream_id)
+                if routing_snapshot.upstreams.iter().any(|upstream| {
+                    upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
+                }) =>
+            {
+                Some(upstream_id)
+            }
+            Some(_) => {
+                state.clear_affinity_upstream(&downstream.id, normalized_model);
+                None
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
 
     for protocol in candidate_protocols {
         let mut upstreams = routing_snapshot
@@ -815,7 +884,7 @@ async fn process_gateway_request(
                 true
             }
         });
-        let ranking_key = |upstream: &UpstreamConfig| {
+        let ranking_pressure = |upstream: &UpstreamConfig| {
             let runtime = upstream_runtime_snapshots
                 .get(&upstream.id)
                 .copied()
@@ -829,6 +898,17 @@ async fn process_gateway_request(
                 runtime.in_flight,
                 minute_pressure as u64 * 1_000 / upstream.requests_per_minute.max(1) as u64,
                 five_hour_pressure as u64 * 1_000 / upstream.request_quota_requests.max(1) as u64,
+            )
+        };
+        let ranking_key = |upstream: &UpstreamConfig| {
+            let (cooled, cooldown_remaining, in_flight, minute_pressure, five_hour_pressure) =
+                ranking_pressure(upstream);
+            (
+                cooled,
+                cooldown_remaining,
+                in_flight,
+                minute_pressure,
+                five_hour_pressure,
                 upstream.failure_count,
                 upstream.id.clone(),
             )
@@ -836,6 +916,89 @@ async fn process_gateway_request(
         upstreams.sort_by_key(&ranking_key);
         deprioritized_upstreams.sort_by_key(ranking_key);
         upstreams.extend(deprioritized_upstreams);
+        if let Some(preferred_upstream_id) = preferred_upstream_id.as_deref() {
+            if let Some(position) = upstreams
+                .iter()
+                .position(|upstream| upstream.id == preferred_upstream_id)
+            {
+                if position > 0 {
+                    let escape_ratio = state
+                        .config
+                        .routing_affinity_escape_pressure_ratio
+                        .max(1.0);
+                    let (
+                        preferred_cooled,
+                        preferred_cooldown,
+                        preferred_in_flight,
+                        preferred_minute_pressure,
+                        preferred_five_hour_pressure,
+                    ) = ranking_pressure(&upstreams[position]);
+                    let (
+                        best_cooled,
+                        best_cooldown,
+                        best_in_flight,
+                        best_minute_pressure,
+                        best_five_hour_pressure,
+                    ) = ranking_pressure(&upstreams[0]);
+                    let should_escape = (preferred_cooled && !best_cooled)
+                        || metric_exceeds_ratio(
+                            preferred_cooldown as f64,
+                            best_cooldown as f64,
+                            escape_ratio,
+                        )
+                        || metric_exceeds_ratio(
+                            preferred_in_flight as f64,
+                            best_in_flight as f64,
+                            escape_ratio,
+                        )
+                        || metric_exceeds_ratio(
+                            preferred_minute_pressure as f64,
+                            best_minute_pressure as f64,
+                            escape_ratio,
+                        )
+                        || metric_exceeds_ratio(
+                            preferred_five_hour_pressure as f64,
+                            best_five_hour_pressure as f64,
+                            escape_ratio,
+                        );
+                    if should_escape {
+                        tracing::debug!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            protocol = ?protocol,
+                            preferred_upstream_id = %preferred_upstream_id,
+                            escape_ratio,
+                            preferred_minute_pressure,
+                            best_minute_pressure,
+                            preferred_five_hour_pressure,
+                            best_five_hour_pressure,
+                            preferred_in_flight,
+                            best_in_flight,
+                            preferred_cooldown,
+                            best_cooldown,
+                            "routing affinity escaped due upstream pressure"
+                        );
+                    } else {
+                        let preferred = upstreams.remove(position);
+                        upstreams.insert(0, preferred);
+                        tracing::debug!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            protocol = ?protocol,
+                            preferred_upstream_id = %preferred_upstream_id,
+                            escape_ratio,
+                            "applied routing affinity to candidate order"
+                        );
+                    }
+                }
+            }
+        }
         let candidate_summary = upstreams
             .iter()
             .map(|upstream| {
@@ -922,6 +1085,11 @@ async fn process_gateway_request(
                     "reserved upstream capacity"
                 );
 
+                let mut stream_completion_context = stream_completion_context.clone();
+                if let Some(ref mut ctx) = stream_completion_context {
+                    ctx.upstream_id = upstream.id.clone();
+                }
+
                 let result = send_to_upstream(
                     &state,
                     &upstream,
@@ -939,15 +1107,39 @@ async fn process_gateway_request(
                     inference_strength.as_deref(),
                     user_agent.as_deref(),
                     fallback_to_chat,
+                    stream_completion_context.clone(),
                 )
                 .await;
-                state.release_upstream_request(&upstream.id).await;
+
+                // Non-streaming requests and failed streaming attempts should
+                // release upstream capacity immediately because no long-lived
+                // stream body is handed to the caller.
+                if !request_stream || result.is_err() {
+                    state.release_upstream_request(&upstream.id).await;
+                }
 
                 match result {
                     Ok(mut result) => {
+                        // stream=true but upstream returned a non-SSE response:
+                        // the gateway synthesizes a finite stream body locally,
+                        // so release runtime slots right away.
+                        if request_stream
+                            && matches!(result.usage_log_timing, UsageLogTiming::Immediate)
+                        {
+                            state.release_upstream_request(&upstream.id).await;
+                            state.release_downstream_concurrency(&downstream.id);
+                        }
+
                         result.request_id = request_id.clone();
                         let completed_after_stream_fallback = request_stream && !attempt_stream;
                         state.mark_upstream_success(&upstream.id).await.ok();
+                        if state.config.routing_affinity_enabled {
+                            state.set_affinity_upstream(
+                                &downstream.id,
+                                normalized_model,
+                                &upstream.id,
+                            );
+                        }
                         tracing::info!(
                             request_id = %request_id,
                             downstream_key_id = %downstream.id,
@@ -982,6 +1174,8 @@ async fn process_gateway_request(
                                 user_agent: user_agent.clone(),
                                 request_id: request_id.clone(),
                                 status_code: result.status.as_u16(),
+                                error_message: None,
+                                error_category: None,
                                 prompt_tokens,
                                 completion_tokens,
                                 total_tokens,
@@ -1045,11 +1239,13 @@ async fn process_gateway_request(
                             });
                         if request_cost >= 2.0
                             && !has_uncooled_alternative
-                            && !rate_limit_retry_attempted
+                            && rate_limit_retry_attempts_used
+                                < state.config.upstream_rate_limit_retry_attempts.max(1)
                             && retry_after_seconds
                                 <= state.config.upstream_rate_limit_retry_window_seconds.max(1)
                         {
-                            rate_limit_retry_attempted = true;
+                            rate_limit_retry_attempts_used =
+                                rate_limit_retry_attempts_used.saturating_add(1);
                             tracing::info!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
@@ -1060,6 +1256,10 @@ async fn process_gateway_request(
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
                                 retry_after_seconds,
+                                rate_limit_retry_attempts_used,
+                                rate_limit_retry_attempts_limit = state
+                                    .config
+                                    .upstream_rate_limit_retry_attempts,
                                 "waiting for upstream rate limit cooldown before retrying"
                             );
                             tokio::time::sleep(Duration::from_secs(retry_after_seconds)).await;
@@ -1099,6 +1299,21 @@ async fn process_gateway_request(
                         attempt_stream = false;
                         continue;
                     }
+                    Err(GatewayError::TemporaryUpstreamUnavailable(message)) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_protocol = ?protocol,
+                            error = %message,
+                            "upstream temporarily unavailable, trying next candidate"
+                        );
+                        last_error = Some(GatewayError::TemporaryUpstreamUnavailable(message));
+                        break;
+                    }
                     Err(error) => {
                         tracing::warn!(
                             request_id = %request_id,
@@ -1121,6 +1336,9 @@ async fn process_gateway_request(
     }
 
     if let Some(error) = last_error {
+        if request_stream {
+            state.release_downstream_concurrency(&downstream.id);
+        }
         tracing::error!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -1143,6 +1361,9 @@ async fn process_gateway_request(
         endpoint = %request_path,
         "no routable upstream found for request"
     );
+    if request_stream {
+        state.release_downstream_concurrency(&downstream.id);
+    }
     Err(no_routable_model_error(&routing_snapshot, model))
 }
 
@@ -1746,6 +1967,7 @@ async fn send_to_upstream(
     inference_strength: Option<&str>,
     user_agent: Option<&str>,
     chat_fallback_requested: bool,
+    stream_completion_context: Option<StreamCompletionContext>,
 ) -> Result<DispatchResult, GatewayError> {
     let upstream_body = match (endpoint, upstream_protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => body.clone(),
@@ -1927,16 +2149,18 @@ async fn send_to_upstream(
             break response;
         }
 
-        let retry_after_seconds = if status == StatusCode::TOO_MANY_REQUESTS {
-            Some(parse_retry_after_seconds(
-                response.headers(),
-                state.config.upstream_rate_limit_default_retry_seconds,
-            ))
-        } else {
-            None
-        };
+        // Get headers before consuming response with .text()
+        let headers = response.headers().clone();
         let error_text = response.text().await.unwrap_or_default();
         let error_excerpt = error_text.chars().take(512).collect::<String>();
+
+        // Classify the upstream response to determine how to handle it
+        let feedback = UpstreamFeedbackClassification::from_response(
+            status.as_u16(),
+            &headers,
+            Some(&error_text),
+        );
+
         tracing::warn!(
             request_id = %request_id,
             downstream_key_id = %downstream_key_id,
@@ -1949,6 +2173,7 @@ async fn send_to_upstream(
             url = %url,
             status = status.as_u16(),
             error_excerpt = %error_excerpt,
+            feedback_classification = ?feedback,
             context_retry_attempted,
             estimated_input_tokens = ?context_budget_report
                 .as_ref()
@@ -1958,16 +2183,8 @@ async fn send_to_upstream(
                 .map(|report| report.requested_output_tokens),
             "upstream responded with a non-success status"
         );
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(GatewayError::TooManyRequests {
-                message: if error_excerpt.is_empty() {
-                    "upstream rate limited".into()
-                } else {
-                    format!("upstream rate limited: {error_excerpt}")
-                },
-                retry_after_seconds,
-            });
-        }
+
+        // Handle context limit errors first (before feedback classification)
         if is_context_limit_error(&error_text) {
             if !context_retry_attempted {
                 if let Some((cap_field, current_cap, reduced_cap)) =
@@ -1998,15 +2215,64 @@ async fn send_to_upstream(
                 error_excerpt
             )));
         }
-        return Err(GatewayError::Upstream(format!(
-            "upstream responded with status {}{}",
-            status,
-            if error_text.is_empty() {
-                String::new()
-            } else {
-                format!(": {error_text}")
+
+        // Handle feedback-based decisions
+        match feedback {
+            UpstreamFeedbackClassification::RateLimited => {
+                let retry_after_seconds = parse_retry_after_seconds(
+                    &headers,
+                    state.config.upstream_rate_limit_default_retry_seconds,
+                );
+                return Err(GatewayError::TooManyRequests {
+                    message: if error_excerpt.is_empty() {
+                        "upstream rate limited".into()
+                    } else {
+                        format!("upstream rate limited: {error_excerpt}")
+                    },
+                    retry_after_seconds: Some(retry_after_seconds),
+                });
             }
-        )));
+            UpstreamFeedbackClassification::ProviderBusy
+            | UpstreamFeedbackClassification::ConcurrencyFull
+            | UpstreamFeedbackClassification::TemporaryUnavailable => {
+                // Return error to allow outer loop to try next upstream
+                return Err(GatewayError::TemporaryUpstreamUnavailable(
+                    if error_excerpt.is_empty() {
+                        format!("upstream temporarily unavailable (status {})", status.as_u16())
+                    } else {
+                        format!("upstream temporarily unavailable: {error_excerpt}")
+                    }
+                ));
+            }
+            UpstreamFeedbackClassification::ProtocolUnsupported => {
+                // Protocol not supported, return error to try next upstream
+                return Err(GatewayError::TemporaryUpstreamUnavailable(
+                    format!("protocol not supported by upstream (status {})", status.as_u16())
+                ));
+            }
+            UpstreamFeedbackClassification::Unknown => {
+                // Unknown error - pass through client errors (4xx) as BadRequest, server errors (5xx) as Upstream
+                if status.is_client_error() {
+                    return Err(GatewayError::BadRequest(
+                        if error_text.is_empty() {
+                            format!("upstream rejected request with status {}", status.as_u16())
+                        } else {
+                            error_text
+                        }
+                    ));
+                } else {
+                    return Err(GatewayError::Upstream(format!(
+                        "upstream responded with status {}{}",
+                        status,
+                        if error_text.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {error_text}")
+                        }
+                    )));
+                }
+            }
+        }
     };
 
     let status = response.status();
@@ -2038,13 +2304,14 @@ async fn send_to_upstream(
                 started,
             };
             if upstream_protocol == endpoint.native_protocol() {
-                proxied_stream_body(response, stream_log_context)?
+                proxied_stream_body(response, stream_log_context, stream_completion_context)?
             } else {
                 translated_stream_body(
                     response,
                     upstream_protocol,
                     endpoint.native_protocol(),
                     stream_log_context,
+                    stream_completion_context,
                 )?
             }
         } else {
@@ -3149,18 +3416,21 @@ fn dispatch_success(result: DispatchResult) -> Response {
 fn proxied_stream_body(
     response: reqwest::Response,
     log_context: StreamUsageLogContext,
+    stream_completion_context: Option<StreamCompletionContext>,
 ) -> Result<Body, GatewayError> {
     let state = ProxiedStreamState {
         response,
         buffer: Vec::new(),
         usage: None,
         log_context: Some(log_context),
+        completion_context: stream_completion_context,
         finished: false,
         usage_log_flushed: false,
     };
     let stream = stream::try_unfold(state, |mut state| async move {
         if state.finished {
             state.flush_usage_log().await?;
+            state.finalize_completion().await?;
             return Ok(None);
         }
 
@@ -3170,27 +3440,32 @@ fn proxied_stream_body(
                 state.drain_usage_from_buffer()?;
                 if state.finished {
                     state.flush_usage_log().await?;
+                    state.finalize_completion().await?;
                 }
                 Ok(Some((chunk, state)))
             }
             Ok(None) => {
                 state.finish_stream();
                 state.flush_usage_log().await?;
+                state.finalize_completion().await?;
                 Ok(None)
             }
-            Err(error) => Err(std::io::Error::other(error.to_string())),
+            Err(error) => {
+                state.mark_stream_interrupted().await;
+                Err(std::io::Error::other(error.to_string()))
+            }
         }
     });
 
     Ok(Body::from_stream(stream))
 }
 
-#[derive(Debug)]
 struct ProxiedStreamState {
     response: reqwest::Response,
     buffer: Vec<u8>,
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
+    completion_context: Option<StreamCompletionContext>,
     finished: bool,
     usage_log_flushed: bool,
 }
@@ -3244,6 +3519,23 @@ impl ProxiedStreamState {
 
         Ok(())
     }
+
+    async fn finalize_completion(&mut self) -> Result<(), std::io::Error> {
+        if let Some(context) = self.completion_context.take() {
+            if self.finished {
+                context.release_all().await;
+                context.mark_success().await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_stream_interrupted(&mut self) {
+        if let Some(context) = self.completion_context.take() {
+            context.release_all().await;
+            context.mark_failure().await;
+        }
+    }
 }
 
 fn translated_stream_body(
@@ -3251,6 +3543,7 @@ fn translated_stream_body(
     source_protocol: UpstreamProtocol,
     target_protocol: UpstreamProtocol,
     log_context: StreamUsageLogContext,
+    stream_completion_context: Option<StreamCompletionContext>,
 ) -> Result<Body, GatewayError> {
     let translator = StreamTranslator::new(source_protocol, target_protocol).ok_or_else(|| {
         GatewayError::BadRequest(
@@ -3265,6 +3558,7 @@ fn translated_stream_body(
         pending: VecDeque::new(),
         usage: None,
         log_context: Some(log_context),
+        completion_context: stream_completion_context,
         finished: false,
         usage_log_flushed: false,
     };
@@ -3276,6 +3570,7 @@ fn translated_stream_body(
 
             if state.finished {
                 state.flush_usage_log().await?;
+                state.finalize_completion().await?;
                 return Ok(None);
             }
 
@@ -3290,9 +3585,11 @@ fn translated_stream_body(
                         return Ok(Some((bytes, state)));
                     }
                     state.flush_usage_log().await?;
+                    state.finalize_completion().await?;
                     return Ok(None);
                 }
                 Err(error) => {
+                    state.mark_stream_interrupted().await;
                     return Err(std::io::Error::other(error.to_string()));
                 }
             }
@@ -3302,7 +3599,6 @@ fn translated_stream_body(
     Ok(Body::from_stream(stream))
 }
 
-#[derive(Debug)]
 struct TranslatedStreamState {
     response: reqwest::Response,
     translator: StreamTranslator,
@@ -3310,6 +3606,7 @@ struct TranslatedStreamState {
     pending: VecDeque<Bytes>,
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
+    completion_context: Option<StreamCompletionContext>,
     finished: bool,
     usage_log_flushed: bool,
 }
@@ -3378,6 +3675,23 @@ impl TranslatedStreamState {
         }
 
         Ok(())
+    }
+
+    async fn finalize_completion(&mut self) -> Result<(), std::io::Error> {
+        if let Some(context) = self.completion_context.take() {
+            if self.finished {
+                context.release_all().await;
+                context.mark_success().await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_stream_interrupted(&mut self) {
+        if let Some(context) = self.completion_context.take() {
+            context.release_all().await;
+            context.mark_failure().await;
+        }
     }
 }
 

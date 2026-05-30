@@ -38,6 +38,16 @@ pub struct AppConfig {
     pub usage_log_archive_max_files: usize,
     pub upstream_rate_limit_default_retry_seconds: u64,
     pub upstream_rate_limit_retry_window_seconds: u64,
+    pub upstream_rate_limit_retry_attempts: u32,
+    pub upstream_concurrency_retry_attempts: u32,
+    pub upstream_concurrency_retry_backoff_ms: u64,
+    pub context_retry_max_attempts_chat: u32,
+    pub context_retry_min_output_tokens_chat: u64,
+    pub context_retry_max_attempts_responses: u32,
+    pub context_retry_min_output_tokens_responses: u64,
+    pub routing_affinity_enabled: bool,
+    pub routing_affinity_ttl_seconds: u64,
+    pub routing_affinity_escape_pressure_ratio: f64,
 }
 
 impl Default for AppConfig {
@@ -51,6 +61,16 @@ impl Default for AppConfig {
             usage_log_archive_max_files: 10,
             upstream_rate_limit_default_retry_seconds: 30,
             upstream_rate_limit_retry_window_seconds: 300,
+            upstream_rate_limit_retry_attempts: 1,
+            upstream_concurrency_retry_attempts: 20,
+            upstream_concurrency_retry_backoff_ms: 50,
+            context_retry_max_attempts_chat: 2,
+            context_retry_min_output_tokens_chat: 128,
+            context_retry_max_attempts_responses: 3,
+            context_retry_min_output_tokens_responses: 128,
+            routing_affinity_enabled: true,
+            routing_affinity_ttl_seconds: 180,
+            routing_affinity_escape_pressure_ratio: 1.5,
         }
     }
 }
@@ -648,6 +668,10 @@ pub struct UsageLog {
     pub user_agent: Option<String>,
     pub request_id: String,
     pub status_code: u16,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    #[serde(default)]
+    pub error_category: Option<String>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
@@ -672,6 +696,7 @@ pub struct AppState {
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
+    routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
     pub store_path: PathBuf,
     pub config: AppConfig,
@@ -713,6 +738,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: store_path.into(),
             config,
@@ -747,6 +773,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: PathBuf::new(),
             config,
@@ -1040,6 +1067,7 @@ impl AppState {
         let state = runtime_state
             .entry(upstream.id.clone())
             .or_insert_with(UpstreamRuntimeState::default);
+
         let now = unix_seconds();
         prune_quota_events(&mut state.minute_events, now, 60);
         prune_quota_events(
@@ -1145,6 +1173,49 @@ impl AppState {
         let now = unix_seconds();
         let cooldown_until = now.saturating_add(retry_after_seconds.max(1));
         state.cooldown_until = state.cooldown_until.max(cooldown_until);
+        state.last_feedback_type = Some("rate_limited".to_string());
+        state.last_retry_after_seconds = Some(retry_after_seconds);
+    }
+
+    pub async fn upstream_runtime_snapshots_with_feedback(&self) -> HashMap<String, UpstreamRuntimeSnapshotWithFeedback> {
+        let upstream_windows = {
+            let state = self.inner.lock().await;
+            state
+                .upstreams
+                .iter()
+                .map(|upstream| (upstream.id.clone(), upstream.request_quota_window_seconds()))
+                .collect::<HashMap<String, u64>>()
+        };
+
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        let now = unix_seconds();
+
+        upstream_windows
+            .into_iter()
+            .map(|(upstream_id, window_seconds)| {
+                let state = runtime_state
+                    .entry(upstream_id.clone())
+                    .or_insert_with(UpstreamRuntimeState::default);
+
+                prune_quota_events(&mut state.minute_events, now, 60);
+                prune_quota_events(&mut state.five_hour_events, now, window_seconds);
+
+                let minute_cost = state.minute_events.iter().map(|event| event.cost).sum();
+                let five_hour_cost = state.five_hour_events.iter().map(|event| event.cost).sum();
+
+                let snapshot = UpstreamRuntimeSnapshotWithFeedback {
+                    in_flight: state.in_flight,
+                    minute_cost,
+                    five_hour_cost,
+                    cooldown_until: state.cooldown_until,
+                    cooldown_remaining: state.cooldown_until.saturating_sub(now),
+                    last_feedback_type: state.last_feedback_type.clone(),
+                    last_retry_after_seconds: state.last_retry_after_seconds,
+                };
+
+                (upstream_id, snapshot)
+            })
+            .collect()
     }
 
     pub async fn append_usage_log(&self, mut log: UsageLog) -> io::Result<()> {
@@ -1470,6 +1541,64 @@ impl AppState {
                 in_flight.remove(downstream_id);
             }
         }
+    }
+
+    fn routing_affinity_key(downstream_id: &str, normalized_model: &str) -> String {
+        format!(
+            "{}::{}",
+            downstream_id,
+            normalized_model.trim().to_ascii_lowercase()
+        )
+    }
+
+    pub fn get_affinity_upstream(
+        &self,
+        downstream_id: &str,
+        normalized_model: &str,
+    ) -> Option<String> {
+        let key = Self::routing_affinity_key(downstream_id, normalized_model);
+        let mut affinity = self
+            .routing_affinity
+            .lock()
+            .expect("routing affinity lock poisoned");
+        let now = unix_seconds();
+        let entry = affinity.get(&key)?.clone();
+        if entry.expires_at > now {
+            return Some(entry.upstream_id);
+        }
+        affinity.remove(&key);
+        None
+    }
+
+    pub fn set_affinity_upstream(
+        &self,
+        downstream_id: &str,
+        normalized_model: &str,
+        upstream_id: &str,
+    ) {
+        let key = Self::routing_affinity_key(downstream_id, normalized_model);
+        let ttl_seconds = self.config.routing_affinity_ttl_seconds.max(1);
+        let expires_at = unix_seconds().saturating_add(ttl_seconds);
+        let mut affinity = self
+            .routing_affinity
+            .lock()
+            .expect("routing affinity lock poisoned");
+        affinity.insert(
+            key,
+            RoutingAffinityEntry {
+                upstream_id: upstream_id.to_string(),
+                expires_at,
+            },
+        );
+    }
+
+    pub fn clear_affinity_upstream(&self, downstream_id: &str, normalized_model: &str) {
+        let key = Self::routing_affinity_key(downstream_id, normalized_model);
+        let mut affinity = self
+            .routing_affinity
+            .lock()
+            .expect("routing affinity lock poisoned");
+        affinity.remove(&key);
     }
 
     pub async fn insert_upstream(&self, mut upstream: UpstreamConfig) -> io::Result<()> {
@@ -1840,6 +1969,8 @@ struct UpstreamRuntimeState {
     minute_events: VecDeque<QuotaEvent>,
     five_hour_events: VecDeque<QuotaEvent>,
     cooldown_until: u64,
+    last_feedback_type: Option<String>,
+    last_retry_after_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1860,10 +1991,27 @@ impl UpstreamRuntimeSnapshot {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpstreamRuntimeSnapshotWithFeedback {
+    pub in_flight: u32,
+    pub minute_cost: f64,
+    pub five_hour_cost: f64,
+    pub cooldown_until: u64,
+    pub cooldown_remaining: u64,
+    pub last_feedback_type: Option<String>,
+    pub last_retry_after_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DownstreamTokenEvent {
     created_at: u64,
     tokens: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RoutingAffinityEntry {
+    upstream_id: String,
+    expires_at: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2681,9 +2829,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        should_bypass_proxy_for_host, should_bypass_proxy_for_url, ModelAliasConfig,
-        ModelContextConfig,
-        ModelRequestCostConfig, UpstreamConfig,
+        should_bypass_proxy_for_host, should_bypass_proxy_for_url, AppConfig, AppState,
+        ModelAliasConfig, ModelContextConfig, ModelRequestCostConfig, PersistedState,
+        UpstreamConfig,
     };
 
     #[test]
@@ -2882,6 +3030,35 @@ mod tests {
         assert_eq!(
             upstream.context_fallback_model_for("minimax2.7", 150_000),
             Some("MiniMax2.7-Long".into())
+        );
+    }
+
+    #[test]
+    fn routing_affinity_is_scoped_by_model_and_case_insensitive() {
+        let state = AppState::new(
+            PersistedState::default(),
+            "affinity-state-test.json",
+            AppConfig::default(),
+        );
+
+        state.set_affinity_upstream("down-1", "MiniMax2.7", "up-a");
+        state.set_affinity_upstream("down-1", "deepseek-v3", "up-b");
+
+        assert_eq!(
+            state.get_affinity_upstream("down-1", "minimax2.7").as_deref(),
+            Some("up-a")
+        );
+        assert_eq!(
+            state.get_affinity_upstream("down-1", "DEEPSEEK-V3").as_deref(),
+            Some("up-b")
+        );
+        assert_eq!(state.get_affinity_upstream("down-1", "glm-5.1"), None);
+
+        state.clear_affinity_upstream("down-1", "MINIMAX2.7");
+        assert_eq!(state.get_affinity_upstream("down-1", "minimax2.7"), None);
+        assert_eq!(
+            state.get_affinity_upstream("down-1", "deepseek-v3").as_deref(),
+            Some("up-b")
         );
     }
 }
