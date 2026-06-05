@@ -14,7 +14,7 @@ GitHub is the canonical repository and Gitee mirrors the same `main` branch.
 
 ## Required Environment
 
-These are the key settings for a production-like run:
+The checked-in [.env.example](.env.example) now contains the full recommended runtime template. These are the key settings to review for a production-like run:
 
 - `BIND_ADDR=0.0.0.0:3001`
 - `DATABASE_URL=postgres://chat_responses_codex@postgres/chat_responses_codex`
@@ -26,6 +26,9 @@ These are the key settings for a production-like run:
 - `APP_NAME=chat-responses-codex`
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
+- `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
+- `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
+- `UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800`
 
 Optional for file-backed compatibility mode:
 
@@ -35,13 +38,18 @@ Optional but useful:
 
 - `RUST_LOG=info`
 - `TZ=Asia/Shanghai`
+- `REDIS_URL=redis://redis:6379/0`
+- `DASHBOARD_CACHE_TTL_SECONDS=30`
+
+If Redis is configured, the admin dashboard response is cached in Redis and reused
+until the TTL expires. This reduces repeated log scans on refresh-heavy admin pages.
 
 ## Build The Image
 
-Build the Linux release binary first, then package it into the container image.
+Build the container image directly. The Dockerfile compiles both the frontend
+and the backend during the image build.
 
 ```bash
-cargo build --release
 docker build -t chat-responses-codex:latest .
 ```
 
@@ -60,6 +68,9 @@ docker run -d \
   -e APP_NAME=chat-responses-codex \
   -e USAGE_LOG_ROTATION_MAX_BYTES=1048576 \
   -e USAGE_LOG_ARCHIVE_MAX_FILES=10 \
+  -e UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3 \
+  -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
+  -e UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800 \
   -v ./data:/data \
   -v ./logs:/logs \
   chat-responses-codex:latest
@@ -70,7 +81,7 @@ For PostgreSQL-backed deployments, use Compose or another orchestrator and provi
 
 ## Docker Compose
 
-Use this if you want a repeatable local or VM deployment.
+Use this if you want a repeatable local or VM deployment. The checked-in `docker-compose.yml` is the source of truth for the full environment wiring and defaults.
 
 ```yaml
 services:
@@ -114,6 +125,7 @@ services:
       APP_NAME: chat-responses-codex
       USAGE_LOG_ROTATION_MAX_BYTES: "1048576"
       USAGE_LOG_ARCHIVE_MAX_FILES: "10"
+      UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: "1800"
     volumes:
       - ./logs:/logs
 
@@ -121,13 +133,7 @@ volumes:
   postgres-data:
 ```
 
-If you use a `.env` file, copy [`.env.example`](.env.example) and set:
-
-```bash
-POSTGRES_PASSWORD=replace-this-with-a-strong-password
-ADMIN_PASSWORD=replace-this-with-a-strong-password
-JWT_SECRET=replace-this-with-a-strong-secret
-```
+If you use a `.env` file, copy [`.env.example`](.env.example) to `.env`, keep the recommended defaults, and rotate the secrets before first launch.
 
 Generate a secure JWT_SECRET with: `openssl rand -base64 32`
 
@@ -191,6 +197,8 @@ curl -s \
 - In file-backed compatibility mode, usage logs rotate into archive files next to `STATE_PATH` once the current state file grows beyond `USAGE_LOG_ROTATION_MAX_BYTES`.
 - Archive files are capped at `USAGE_LOG_ARCHIVE_MAX_FILES`.
 - In PostgreSQL mode, usage logs stay in the database and do not rotate into local archive files.
+- Redis is optional, but when enabled it caches the admin dashboard response and
+  keeps repeated refreshes from rescanning the full usage log history.
 - Runtime logs are appended to `LOG_PATH` and can be mounted to the host with `./logs:/logs`.
 - The Docker image exposes a `HEALTHCHECK` that runs the binary's built-in healthcheck mode.
 - Per-minute request limiting is enforced at the gateway entry point.

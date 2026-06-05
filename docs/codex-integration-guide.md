@@ -46,8 +46,8 @@ cp templates/codex/model-catalog.json ~/.codex/model-catalog.json
 
 ```toml
 model_provider = "gateway"
-model = "glm-5"
-review_model = "glm-5"
+model = "ZhipuAI/GLM-5"
+review_model = "ZhipuAI/GLM-5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_catalog_json = "/home/<你的用户名>/.codex/model-catalog.json"
@@ -83,9 +83,9 @@ requires_openai_auth = true
 
 当前模板里按这三个模型先配：
 
-- `glm-5`
-- `minimax-m2.7`
-- `deepseek-r1`
+- `ZhipuAI/GLM-5`
+- `MiniMax/MiniMax-M2.7`
+- `deepseek-ai/DeepSeek-R1-0528`
 
 ### 4. 网关上配置下游
 
@@ -97,9 +97,9 @@ requires_openai_auth = true
 
 Codex 里选模型时，直接选你在目录里写的 slug，例如：
 
-- `glm-5`
-- `minimax-m2.7`
-- `deepseek-r1`
+- `ZhipuAI/GLM-5`
+- `MiniMax/MiniMax-M2.7`
+- `deepseek-ai/DeepSeek-R1-0528`
 
 ## 这三个地方分别在哪改
 
@@ -181,8 +181,6 @@ Codex 里填的是网关地址，不是上游厂商地址。
 - `api_key`：上游密钥
 - `protocol`：`ChatCompletions` 或 `Responses`
 - `supported_models`：这个上游对外暴露给 Codex 的模型 slug 列表
-- `model_aliases`：可选，slug 到上游真实模型名的映射
-
 例子：
 
 ```json
@@ -192,13 +190,7 @@ Codex 里填的是网关地址，不是上游厂商地址。
   "base_url": "https://glm.example.com/v1",
   "api_key": "sk-your-glm-key",
   "protocol": "ChatCompletions",
-  "supported_models": ["glm-5"],
-  "model_aliases": [
-    {
-      "slug": "glm-5",
-      "upstream_model": "GLM-5"
-    }
-  ],
+  "supported_models": ["ZhipuAI/GLM-5"],
   "active": true,
   "failure_count": 0
 }
@@ -206,16 +198,13 @@ Codex 里填的是网关地址，不是上游厂商地址。
 
 ### 2.4 这里最重要的点
 
-`supported_models` 里可以放上游返回的原始模型 ID，哪怕是大写。
+`supported_models` 里请直接写上游返回的原始模型 ID，哪怕带 vendor 前缀或大小写混合。
 
 例如：
 
-- Codex 里可以是 `glm-5`
-- 网关里 `supported_models` 里可以保留 `GLM-5`
-- `model_aliases` 写 `glm-5=GLM-5`
-- 不要直接把 `GLM-5` 当成 Codex 目录里的 slug，除非你也想让 Codex 直接选大写名字
-
-如果你的上游大小写敏感，就用 `model_aliases` 做映射。Codex 看到的是你想暴露的 slug，网关发给上游的是真实模型名。
+- Codex 目录、网关 `supported_models`、上游 `/v1/models` 返回的 `id` 必须完全一致
+- 不再使用 `model_aliases` 做大小写或别名映射
+- `supported_models` 请直接填写上游真实返回的模型名
 
 ### 2.5 什么时候用 `ChatCompletions`
 
@@ -227,7 +216,7 @@ Codex 里填的是网关地址，不是上游厂商地址。
 
 - `streaming requests require an upstream that supports the requested protocol`
 
-通常就是网关路由到的上游协议类型不对，或者模型没有在任何活跃上游的 `supported_models` / `model_aliases` 里出现。
+通常就是网关路由到的上游协议类型不对，或者模型没有在任何活跃上游的 `supported_models` 里出现。
 
 补充一点：如果上游是 `ChatCompletions`，网关只会把 `function` 工具转成 Chat 兼容格式；`web_search`、`file_search`、`computer_use` 这类 Responses 内置工具不会报错，但会被忽略，因为它们无法直接映射到传统 Chat 上游。
 
@@ -256,9 +245,9 @@ Codex 请求网关时，实际发送的是：
 
 如果你想让某个下游只能看到三个模型，就写：
 
-- `glm-5`
-- `minimax-m2.7`
-- `deepseek-r1`
+- `ZhipuAI/GLM-5`
+- `MiniMax/MiniMax-M2.7`
+- `deepseek-ai/DeepSeek-R1-0528`
 
 如果留空，一般表示不过滤模型，只要网关里可用就给。
 
@@ -280,8 +269,8 @@ Codex 请求网关时，实际发送的是：
 
 ```toml
 model_provider = "gateway"
-model = "glm-5"
-review_model = "glm-5"
+model = "ZhipuAI/GLM-5"
+review_model = "ZhipuAI/GLM-5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_catalog_json = "/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"
@@ -333,15 +322,15 @@ requires_openai_auth = true
 
 Codex 会根据这个目录决定模型是否存在。
 
-如果目录里写了 `glm-5`，但网关只认识 `GLM-5`，或者反过来，就会出问题。
+如果目录、网关 `supported_models` 和上游 `/v1/models` 返回的 `id` 不完全一致，就会出问题。
 
 ### 5.3 你要改什么
 
 如果你只想先跑通三个模型，就保留：
 
-- `glm-5`
-- `minimax-m2.7`
-- `deepseek-r1`
+- `ZhipuAI/GLM-5`
+- `MiniMax/MiniMax-M2.7`
+- `deepseek-ai/DeepSeek-R1-0528`
 
 然后按你真实上游支持情况，把 `display_name`、`priority` 和推理等级再微调。
 
@@ -388,7 +377,7 @@ curl -s \
 curl -s \
   -H "Authorization: Bearer <downstream-key>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"glm-5","messages":[{"role":"user","content":"hello"}]}' \
+  -d '{"model":"ZhipuAI/GLM-5","messages":[{"role":"user","content":"hello"}]}' \
   http://<网关地址>:3001/v1/chat/completions
 ```
 
@@ -396,9 +385,9 @@ curl -s \
 
 Codex 启动后选你在目录里写的模型，比如：
 
-- `glm-5`
-- `minimax-m2.7`
-- `deepseek-r1`
+- `ZhipuAI/GLM-5`
+- `MiniMax/MiniMax-M2.7`
+- `deepseek-ai/DeepSeek-R1-0528`
 
 如果 Codex 能正常发起请求，说明配置链路通了。
 

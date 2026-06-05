@@ -27,6 +27,35 @@ export interface DashboardData {
   app_name: string
 }
 
+export interface DashboardSummaryResponse extends DashboardData {
+  analytics: DashboardAnalyticsRange
+}
+
+export interface DashboardAnalyticsRange {
+  range: string
+  summary: {
+    total_requests: number
+    success_rate: number
+    average_latency_ms: number
+    total_tokens: number
+  }
+  daily_series: Array<{
+    date: number
+    requests: number
+    tokens: number
+    avg_latency_ms: number
+    success_rate: number
+  }>
+  failure_categories: Array<{
+    name: string
+    value: number
+  }>
+  user_agent_clusters: Array<{
+    name: string
+    value: number
+  }>
+}
+
 // ============================================================================
 // Upstream Types
 // ============================================================================
@@ -39,7 +68,6 @@ export interface UpstreamConfig {
   protocol: 'ChatCompletions' | 'Responses'
   protocols?: Array<'ChatCompletions' | 'Responses'>
   supported_models: string[]
-  model_aliases: ModelAlias[]
   model_contexts?: ModelContextConfig[]
   request_quota_window_hours: number
   request_quota_requests: number
@@ -64,11 +92,6 @@ export interface UpstreamRuntimeState {
   five_hour_percentage: number
   cooldown_until: number
   cooldown_remaining: number
-}
-
-export interface ModelAlias {
-  slug: string
-  upstream_model: string
 }
 
 export interface ModelRequestCost {
@@ -126,6 +149,7 @@ export interface UsageLog {
   user_agent?: string
   request_id: string
   status_code: number
+  error_message?: string
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number

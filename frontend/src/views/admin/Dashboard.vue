@@ -79,6 +79,61 @@
       <div ref="overviewChartRef" class="overview-chart" v-loading="chartLoading"></div>
     </el-card>
 
+    <el-row :gutter="20" class="analytics-grid">
+      <el-col :xs="24" :lg="12">
+        <el-card shadow="hover" class="analytics-card">
+          <template #header>
+            <div class="card-header">
+              <h2>失败分类分布</h2>
+            </div>
+          </template>
+          <div class="chart-summary mini-summary">
+            <div class="summary-chip">
+              <strong>{{ failureSummary.totalFailed }}</strong>
+              <span>失败总数</span>
+            </div>
+            <div class="summary-chip">
+              <strong>{{ failureSummary.contextErrors }}</strong>
+              <span>400 上下文</span>
+            </div>
+            <div class="summary-chip">
+              <strong>{{ failureSummary.quotaErrors }}</strong>
+              <span>429 配额/限流</span>
+            </div>
+            <div class="summary-chip">
+              <strong>{{ failureSummary.upstreamErrors }}</strong>
+              <span>5xx 上游异常</span>
+            </div>
+          </div>
+          <div ref="failureChartRef" class="detail-chart" v-loading="chartLoading"></div>
+        </el-card>
+      </el-col>
+      <el-col :xs="24" :lg="12">
+        <el-card shadow="hover" class="analytics-card">
+          <template #header>
+            <div class="card-header">
+              <h2>User-Agent 聚类</h2>
+            </div>
+          </template>
+          <div class="chart-summary mini-summary">
+            <div class="summary-chip">
+              <strong>{{ userAgentSummary.totalDownstreams }}</strong>
+              <span>累计下游数</span>
+            </div>
+            <div class="summary-chip">
+              <strong>{{ userAgentSummary.clusterCount }}</strong>
+              <span>聚类数量</span>
+            </div>
+            <div class="summary-chip">
+              <strong>{{ userAgentSummary.topCluster }}</strong>
+              <span>Top UA · {{ userAgentSummary.topClusterCount }} 个下游</span>
+            </div>
+          </div>
+          <div ref="userAgentChartRef" class="detail-chart" v-loading="chartLoading"></div>
+        </el-card>
+      </el-col>
+    </el-row>
+
     <el-row :gutter="20" class="capability-grid">
       <el-col :xs="24" :sm="12" :md="8">
         <el-card shadow="hover" class="capability-card">
@@ -97,8 +152,8 @@
       <el-col :xs="24" :sm="12" :md="8">
         <el-card shadow="hover" class="capability-card">
           <h3>模型映射</h3>
-          <strong>自动归一大小写与别名</strong>
-          <p>减少手工输入模型名，让上游模型和下游暴露名称保持一致。</p>
+          <strong>模型名保持原样</strong>
+          <p>上游返回什么模型名，管理页和 Codex 目录就保持什么名字，不再做大小写或别名归一。</p>
         </el-card>
       </el-col>
     </el-row>
@@ -127,7 +182,7 @@
             </div>
             <div class="context-item">
               <strong>路由说明</strong>
-              <span>常规 chat-completions 请求仍可复用同一套管理页配置，模型映射和大小写归一会自动处理。</span>
+              <span>常规 chat-completions 请求仍可复用同一套管理页配置，模型名会保持上游原样，不再做别名转换。</span>
             </div>
           </div>
         </el-card>
@@ -168,7 +223,8 @@ import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { adminApi } from '@/api/admin'
 import { loadEcharts } from '@/utils/echartsLoader'
-import type { DashboardData, UsageLog } from '@/types'
+import { buildUserAgentChartSummary } from '@/utils/userAgentChart'
+import type { DashboardAnalyticsRange, DashboardData } from '@/types'
 import type { EChartsType } from 'echarts/core'
 import { formatCompactNumber } from '@/utils/numberFormat'
 
@@ -177,7 +233,11 @@ type ChartRange = '1d' | '7d' | '30d'
 const loading = ref(false)
 const chartLoading = ref(false)
 const overviewChartRef = ref<HTMLElement>()
+const failureChartRef = ref<HTMLElement>()
+const userAgentChartRef = ref<HTMLElement>()
 let overviewChart: EChartsType | null = null
+let failureChart: EChartsType | null = null
+let userAgentChart: EChartsType | null = null
 const chartRange = ref<ChartRange>('7d')
 
 const chartSummary = ref({
@@ -185,6 +245,20 @@ const chartSummary = ref({
   successRate: 0,
   averageLatency: 0,
   totalTokens: 0
+})
+
+const failureSummary = ref({
+  totalFailed: 0,
+  contextErrors: 0,
+  quotaErrors: 0,
+  upstreamErrors: 0
+})
+
+const userAgentSummary = ref({
+  clusterCount: 0,
+  totalDownstreams: 0,
+  topCluster: '-',
+  topClusterCount: 0
 })
 
 const data = ref<DashboardData>({
@@ -201,92 +275,22 @@ const data = ref<DashboardData>({
 
 const formatCompactToken = (value: number) => formatCompactNumber(value)
 
-const daysByRange: Record<ChartRange, number> = {
-  '1d': 1,
-  '7d': 7,
-  '30d': 30
-}
-
-const toDayKey = (date: Date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
 const toDayLabel = (date: Date) => {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${month}/${day}`
 }
 
-interface DayBucket {
-  key: string
-  label: string
-  requests: number
-  tokens: number
-  latencyTotal: number
-}
-
-const buildBuckets = (range: ChartRange) => {
-  const days = daysByRange[range]
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-
-  const buckets: DayBucket[] = []
-  const bucketIndex = new Map<string, number>()
-
-  for (let offset = days - 1; offset >= 0; offset -= 1) {
-    const date = new Date(today)
-    date.setDate(today.getDate() - offset)
-    const key = toDayKey(date)
-    buckets.push({
-      key,
-      label: toDayLabel(date),
-      requests: 0,
-      tokens: 0,
-      latencyTotal: 0
-    })
-    bucketIndex.set(key, buckets.length - 1)
-  }
-
-  return { buckets, bucketIndex }
-}
-
-const updateChart = (logs: UsageLog[]) => {
+const updateOverviewChart = (series: DashboardAnalyticsRange['daily_series']) => {
   if (!overviewChart) return
 
-  const { buckets, bucketIndex } = buildBuckets(chartRange.value)
-  let successCount = 0
-  let totalLatency = 0
-  let totalTokens = 0
-
-  logs.forEach(log => {
-    if (log.status_code >= 200 && log.status_code < 300) successCount += 1
-    totalLatency += log.latency_ms
-    totalTokens += log.total_tokens
-
-    const date = new Date(log.created_at * 1000)
-    date.setHours(0, 0, 0, 0)
-    const index = bucketIndex.get(toDayKey(date))
-    if (index === undefined) return
-
-    buckets[index].requests += 1
-    buckets[index].tokens += log.total_tokens
-    buckets[index].latencyTotal += log.latency_ms
+  const requestSeries = series.map(item => item.requests)
+  const tokenSeries = series.map(item => item.tokens)
+  const latencySeries = series.map(item => item.avg_latency_ms)
+  const labels = series.map(item => {
+    const date = new Date(item.date * 1000)
+    return toDayLabel(date)
   })
-
-  const requestSeries = buckets.map(item => item.requests)
-  const tokenSeries = buckets.map(item => item.tokens)
-  const latencySeries = buckets.map(item => (item.requests > 0 ? Math.round(item.latencyTotal / item.requests) : 0))
-  const labels = buckets.map(item => item.label)
-
-  chartSummary.value = {
-    totalRequests: logs.length,
-    successRate: logs.length > 0 ? Number(((successCount / logs.length) * 100).toFixed(1)) : 0,
-    averageLatency: logs.length > 0 ? Math.round(totalLatency / logs.length) : 0,
-    totalTokens
-  }
 
   overviewChart.setOption({
     tooltip: { trigger: 'axis' },
@@ -333,39 +337,101 @@ const updateChart = (logs: UsageLog[]) => {
   })
 }
 
+const updateFailureChart = (items: DashboardAnalyticsRange['failure_categories']) => {
+  if (!failureChart) return
+
+  const totalFailed = items.reduce((sum, item) => sum + item.value, 0)
+  failureSummary.value = {
+    totalFailed,
+    contextErrors: items.find(item => item.name === '400-上下文超限')?.value ?? 0,
+    quotaErrors: items.find(item => item.name === '429-配额/限流')?.value ?? 0,
+    upstreamErrors: items.find(item => item.name === '5xx-上游异常')?.value ?? 0
+  }
+
+  failureChart.setOption({
+    tooltip: { trigger: 'item' },
+    legend: { orient: 'vertical', right: 10, top: 'center' },
+    series: [
+      {
+        name: '失败分类',
+        type: 'pie',
+        radius: ['44%', '72%'],
+        center: ['38%', '50%'],
+        label: { formatter: '{b}\n{c} ({d}%)' },
+        data: items
+      }
+    ],
+    graphic:
+      totalFailed === 0
+        ? [
+            {
+              type: 'text',
+              left: 'center',
+              top: 'middle',
+              style: {
+                text: '暂无失败请求',
+                fill: '#909399',
+                fontSize: 14
+              }
+            }
+          ]
+        : []
+  })
+}
+
+const updateUserAgentChart = (items: DashboardAnalyticsRange['user_agent_clusters']) => {
+  if (!userAgentChart) return
+
+  const sorted = [...items]
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 10)
+  const categories = sorted.map(item => item.name).reverse()
+  const counts = sorted.map(item => item.value).reverse()
+
+  userAgentSummary.value = buildUserAgentChartSummary(items)
+
+  userAgentChart.setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: 120, right: 24, top: 20, bottom: 30 },
+    xAxis: { type: 'value', name: '下游账号数' },
+    yAxis: { type: 'category', data: categories },
+    series: [
+      {
+        name: '下游账号数',
+        type: 'bar',
+        data: counts,
+        itemStyle: { color: '#6366f1' },
+        label: { show: true, position: 'right' }
+      }
+    ]
+  })
+}
+
+const updateCharts = (payload: DashboardAnalyticsRange) => {
+  updateOverviewChart(payload.daily_series)
+  updateFailureChart(payload.failure_categories)
+  updateUserAgentChart(payload.user_agent_clusters)
+}
+
 const initChart = async () => {
-  if (!overviewChartRef.value) return
   const echarts = await loadEcharts()
-  overviewChart = echarts.init(overviewChartRef.value)
+  if (overviewChartRef.value) {
+    overviewChart = echarts.init(overviewChartRef.value)
+  }
+  if (failureChartRef.value) {
+    failureChart = echarts.init(failureChartRef.value)
+  }
+  if (userAgentChartRef.value) {
+    userAgentChart = echarts.init(userAgentChartRef.value)
+  }
 }
 
 const loadOverviewChart = async () => {
   try {
     chartLoading.value = true
-    const { data: firstPage } = await adminApi.getLogs({
-      page: 1,
-      page_size: 200,
-      time_range: chartRange.value
-    })
-
-    const logs: UsageLog[] = [...firstPage.logs]
-    if (firstPage.total_pages > 1) {
-      const remainingPages = Array.from({ length: firstPage.total_pages - 1 }, (_, index) => index + 2)
-      const pageResponses = await Promise.all(
-        remainingPages.map(page =>
-          adminApi.getLogs({
-            page,
-            page_size: 200,
-            time_range: chartRange.value
-          })
-        )
-      )
-      pageResponses.forEach(response => {
-        logs.push(...response.data.logs)
-      })
-    }
-
-    updateChart(logs)
+    const response = await adminApi.getDashboard(chartRange.value)
+    data.value = response.data.dashboard
+    updateCharts(response.data.analytics)
   } catch (error) {
     ElMessage.error('加载统计图失败')
   } finally {
@@ -376,10 +442,10 @@ const loadOverviewChart = async () => {
 const loadData = async () => {
   try {
     loading.value = true
-    const response = await adminApi.getDashboard()
-    data.value = response.data
+    const response = await adminApi.getDashboard(chartRange.value)
+    data.value = response.data.dashboard
+    updateCharts(response.data.analytics)
     await nextTick()
-    await loadOverviewChart()
   } catch (error) {
     ElMessage.error('加载数据失败')
   } finally {
@@ -389,6 +455,8 @@ const loadData = async () => {
 
 const handleResize = () => {
   overviewChart?.resize()
+  failureChart?.resize()
+  userAgentChart?.resize()
 }
 
 onMounted(async () => {
@@ -400,6 +468,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   overviewChart?.dispose()
+  failureChart?.dispose()
+  userAgentChart?.dispose()
   window.removeEventListener('resize', handleResize)
 })
 </script>
@@ -482,6 +552,14 @@ onUnmounted(() => {
   margin-bottom: 30px;
 }
 
+.analytics-grid {
+  margin-bottom: 30px;
+}
+
+.analytics-card {
+  height: 100%;
+}
+
 .card-header {
   display: flex;
   justify-content: space-between;
@@ -530,6 +608,15 @@ onUnmounted(() => {
 .overview-chart {
   width: 100%;
   height: 320px;
+}
+
+.detail-chart {
+  width: 100%;
+  height: 320px;
+}
+
+.mini-summary {
+  margin-bottom: 12px;
 }
 
 .capability-grid {

@@ -9,9 +9,7 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::routing::UpstreamProtocol;
-use chat_responses_codex::state::{
-    AppConfig, AppState, ModelAliasConfig, PersistedState, UpstreamConfig,
-};
+use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tower::ServiceExt;
@@ -257,7 +255,7 @@ async fn test_upstreams_create_adds_new_upstream() {
 }
 
 #[tokio::test]
-async fn test_upstreams_create_auto_fills_lowercase_aliases_and_keeps_manual_aliases() {
+async fn test_upstreams_create_preserves_raw_model_names() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
 
@@ -270,9 +268,6 @@ async fn test_upstreams_create_auto_fills_lowercase_aliases_and_keeps_manual_ali
         "api_key": "sk-strict-key",
         "protocol": "ChatCompletions",
         "supported_models": ["GLM-5", "MiniMax2.7"],
-        "model_aliases": [
-            {"slug": "glm-5", "upstream_model": "GLM-5-MANUAL"}
-        ],
         "active": true
     });
 
@@ -300,19 +295,6 @@ async fn test_upstreams_create_auto_fills_lowercase_aliases_and_keeps_manual_ali
         .unwrap();
 
     assert_eq!(upstream.supported_models, vec!["GLM-5", "MiniMax2.7"]);
-    assert_eq!(
-        upstream.model_aliases,
-        vec![
-            ModelAliasConfig {
-                slug: "glm-5".to_string(),
-                upstream_model: "GLM-5-MANUAL".to_string(),
-            },
-            ModelAliasConfig {
-                slug: "minimax2.7".to_string(),
-                upstream_model: "MiniMax2.7".to_string(),
-            },
-        ]
-    );
 }
 
 #[tokio::test]
@@ -478,15 +460,14 @@ async fn test_upstreams_update_modifies_existing_upstream() {
 }
 
 #[tokio::test]
-async fn test_upstreams_update_auto_fills_alias_for_uppercase_supported_models() {
+async fn test_upstreams_update_preserves_raw_supported_model_case() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
 
     let token = get_admin_token(&app, "admin", "admin").await;
 
     let updated_upstream = json!({
-        "supported_models": ["GLM-5.1"],
-        "model_aliases": []
+        "supported_models": ["GLM-5.1"]
     });
 
     let response = app
@@ -513,13 +494,6 @@ async fn test_upstreams_update_auto_fills_alias_for_uppercase_supported_models()
         .find(|u| u.id == "upstream-1")
         .unwrap();
     assert_eq!(upstream.supported_models, vec!["GLM-5.1"]);
-    assert_eq!(
-        upstream.model_aliases,
-        vec![ModelAliasConfig {
-            slug: "glm-5.1".to_string(),
-            upstream_model: "GLM-5.1".to_string(),
-        }]
-    );
 }
 
 #[tokio::test]

@@ -67,6 +67,8 @@ fn create_test_state() -> (AppState, String) {
                 user_agent: None,
                 request_id: "req-1".to_string(),
                 status_code: 200,
+                error_message: None,
+                error_category: None,
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
@@ -87,6 +89,8 @@ fn create_test_state() -> (AppState, String) {
                 user_agent: None,
                 request_id: "req-2".to_string(),
                 status_code: 200,
+                error_message: None,
+                error_category: None,
                 prompt_tokens: 50,
                 completion_tokens: 25,
                 total_tokens: 75,
@@ -141,11 +145,13 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 user_agent: Some("Codex/1.0".to_string()),
                 request_id: "req-a".to_string(),
                 status_code: 200,
+                error_message: None,
+                error_category: None,
                 prompt_tokens: 80,
                 completion_tokens: 20,
                 total_tokens: 100,
                 latency_ms: 200,
-                created_at: now - 3600,
+                created_at: now - 600,
             },
             UsageLog {
                 id: "log-b".to_string(),
@@ -161,11 +167,13 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 user_agent: Some("Codex/1.0".to_string()),
                 request_id: "req-b".to_string(),
                 status_code: 200,
+                error_message: None,
+                error_category: None,
                 prompt_tokens: 96,
                 completion_tokens: 24,
                 total_tokens: 120,
                 latency_ms: 210,
-                created_at: now - 7200,
+                created_at: now - 300,
             },
         ],
     };
@@ -195,6 +203,8 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             user_agent: Some("Portal-Test".to_string()),
             request_id: format!("req-{index}"),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
@@ -294,6 +304,150 @@ async fn test_portal_overview_uses_logs_for_token_and_model_summary_without_toke
     assert_eq!(result["token_summary"]["this_month"], 220);
     assert_eq!(result["model_summary"]["total_models"], 2);
     assert_eq!(result["model_summary"]["active_models"], 1);
+}
+
+#[tokio::test]
+async fn test_portal_overview_request_quota_used_increments_after_gateway_request() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let before = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.status(), StatusCode::OK);
+    let before_body = axum::body::to_bytes(before.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let before_json: Value = serde_json::from_slice(&before_body).unwrap();
+    let before_used = before_json["quota_summary"]["request_quota"]["used"]
+        .as_u64()
+        .unwrap();
+
+    // No upstream is configured in this fixture, so the request fails with 400,
+    // but the downstream request quota window is still reserved.
+    let gateway_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gateway_response.status(), StatusCode::BAD_REQUEST);
+
+    let after = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+    let after_body = axum::body::to_bytes(after.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let after_json: Value = serde_json::from_slice(&after_body).unwrap();
+    let after_used = after_json["quota_summary"]["request_quota"]["used"]
+        .as_u64()
+        .unwrap();
+
+    assert_eq!(after_used, before_used + 1);
+}
+
+#[tokio::test]
+async fn test_portal_overview_request_quota_used_counts_no_routable_request_attempts() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let before = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.status(), StatusCode::OK);
+    let before_body = axum::body::to_bytes(before.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let before_json: Value = serde_json::from_slice(&before_body).unwrap();
+    let before_used = before_json["quota_summary"]["request_quota"]["used"]
+        .as_u64()
+        .unwrap();
+
+    let gateway_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gateway_response.status(), StatusCode::BAD_REQUEST);
+
+    let after = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+    let after_body = axum::body::to_bytes(after.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let after_json: Value = serde_json::from_slice(&after_body).unwrap();
+    let after_used = after_json["quota_summary"]["request_quota"]["used"]
+        .as_u64()
+        .unwrap();
+
+    assert_eq!(after_used, before_used + 1);
 }
 
 #[tokio::test]

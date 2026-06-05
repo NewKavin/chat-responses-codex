@@ -1,8 +1,7 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, ModelAliasConfig, ModelRequestCostConfig,
-    UpstreamConfig, UsageLog,
+    AppConfig, AppState, DownstreamConfig, ModelRequestCostConfig, UpstreamConfig, UsageLog,
 };
 use std::env;
 use std::sync::OnceLock;
@@ -34,11 +33,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         api_key: "upstream-secret".into(),
         protocol: UpstreamProtocol::Responses,
         protocols: vec![UpstreamProtocol::Responses],
-        supported_models: vec!["gpt-4.1-mini".into()],
-        model_aliases: vec![ModelAliasConfig {
-            slug: "glm-5".into(),
-            upstream_model: "GLM-5".into(),
-        }],
+        supported_models: vec!["GLM-4.1-mini".into()],
         model_contexts: vec![],
         request_quota_window_hours: 5,
 
@@ -47,11 +42,11 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         max_concurrency: 7,
         model_request_costs: vec![
             ModelRequestCostConfig {
-                slug: "glm-5".into(),
+                slug: "GLM-4.1-mini".into(),
                 cost: 2.0,
             },
             ModelRequestCostConfig {
-                slug: "glm-5.1".into(),
+                slug: "GLM-4.1-mini-Long".into(),
                 cost: 3.0,
             },
         ],
@@ -68,7 +63,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         hash: downstream_key.hash.clone(),
         plaintext_key: Some(downstream_key.plaintext.clone()),
         plaintext_key_prefix: None,
-        model_allowlist: vec!["glm-5".into()],
+        model_allowlist: vec!["GLM-4.1-mini".into()],
         per_minute_limit: 42,
 
         rate_limit_enabled: true,
@@ -89,13 +84,15 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         downstream_name: None,
         upstream_name: None,
         endpoint: "/v1/responses".into(),
-        model: "glm-5".into(),
+        model: "GLM-4.1-mini".into(),
         inference_strength: None,
         billing_mode: None,
         request_count: None,
         user_agent: None,
         request_id: "req-1".into(),
         status_code: 200,
+        error_message: None,
+        error_category: None,
         prompt_tokens: 11,
         completion_tokens: 13,
         total_tokens: 24,

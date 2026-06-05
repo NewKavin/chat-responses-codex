@@ -2,7 +2,7 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     default_upstream_max_concurrency, default_upstream_request_quota_requests,
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
-    DownstreamConfig, ModelAliasConfig, ModelRequestCostConfig, UpstreamConfig,
+    DownstreamConfig, ModelRequestCostConfig, UpstreamConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,6 @@ pub struct UpstreamForm {
     pub api_key: String,
     pub protocol: String,
     pub models: String,
-    pub model_aliases: Option<String>,
     pub request_quota_window_hours: Option<u32>,
     pub request_quota_requests: Option<u32>,
     pub requests_per_minute: Option<u32>,
@@ -97,7 +96,6 @@ pub struct UpstreamFormView {
     pub api_key: String,
     pub protocol: UpstreamProtocol,
     pub models: String,
-    pub model_aliases: String,
     pub request_quota_window_hours: String,
     pub request_quota_requests: String,
     pub requests_per_minute: String,
@@ -375,7 +373,6 @@ impl UpstreamFormView {
             api_key: String::new(),
             protocol: UpstreamProtocol::ChatCompletions,
             models: String::new(),
-            model_aliases: String::new(),
             request_quota_window_hours: default_upstream_request_quota_window_hours().to_string(),
             request_quota_requests: default_upstream_request_quota_requests().to_string(),
             requests_per_minute: default_upstream_requests_per_minute().to_string(),
@@ -395,7 +392,6 @@ impl UpstreamFormView {
             api_key: upstream.api_key.clone(),
             protocol: upstream.protocol,
             models: upstream.route_models().join(","),
-            model_aliases: format_model_aliases(&upstream.model_aliases),
             request_quota_window_hours: upstream.request_quota_window_hours.to_string(),
             request_quota_requests: upstream.request_quota_requests.to_string(),
             requests_per_minute: upstream.requests_per_minute.to_string(),
@@ -433,7 +429,6 @@ impl UpstreamFormView {
             api_key: form.api_key.clone(),
             protocol: parse_upstream_protocol(&form.protocol),
             models: form.models.clone(),
-            model_aliases: form.model_aliases.clone().unwrap_or_default(),
             request_quota_window_hours: upstream_form_u32_string(
                 form.request_quota_window_hours,
                 existing_request_quota_window_hours,
@@ -466,49 +461,28 @@ impl UpstreamFormView {
         }
     }
 
-    pub fn with_fetched_models(&self, models: String, model_aliases: String) -> Self {
+    pub fn with_fetched_models(&self, models: String) -> Self {
         let mut next = self.clone();
         next.models = models;
-        next.model_aliases = merge_csv_values(&self.model_aliases, &model_aliases);
         next
     }
 }
 
-pub fn normalize_fetched_models(models: Vec<String>) -> (String, String) {
-    let mut seen = std::collections::HashMap::<String, usize>::new();
+pub fn normalize_fetched_models(models: Vec<String>) -> String {
+    let mut seen = std::collections::HashSet::new();
     let mut normalized_models = Vec::new();
-    let mut alias_sources: Vec<Option<String>> = Vec::new();
 
     for model in models {
         let original = model.trim();
         if original.is_empty() {
             continue;
         }
-
-        let slug = original.to_lowercase();
-        match seen.get(&slug).copied() {
-            Some(index) => {
-                if alias_sources[index].is_none() && slug != original {
-                    alias_sources[index] = Some(original.to_string());
-                }
-            }
-            None => {
-                let index = normalized_models.len();
-                seen.insert(slug.clone(), index);
-                normalized_models.push(slug.clone());
-                alias_sources.push((slug != original).then(|| original.to_string()));
-            }
+        if seen.insert(original.to_string()) {
+            normalized_models.push(original.to_string());
         }
     }
 
-    let aliases = normalized_models
-        .iter()
-        .zip(alias_sources.into_iter())
-        .filter_map(|(slug, alias)| alias.map(|original| format!("{slug}={original}")))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    (normalized_models.join(","), aliases)
+    normalized_models.join(",")
 }
 
 fn parse_upstream_protocol(value: &str) -> UpstreamProtocol {
@@ -524,18 +498,6 @@ fn form_toggle_enabled(value: &Option<String>) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_some()
-}
-
-fn format_model_aliases(aliases: &[ModelAliasConfig]) -> String {
-    if aliases.is_empty() {
-        return String::new();
-    }
-
-    aliases
-        .iter()
-        .map(|alias| format!("{}={}", alias.slug, alias.upstream_model))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn format_model_request_costs(costs: &[ModelRequestCostConfig]) -> String {
@@ -554,30 +516,10 @@ fn upstream_form_u32_string(value: Option<u32>, existing: Option<u32>, default: 
     value.or(existing).unwrap_or(default).to_string()
 }
 
-fn merge_csv_values(existing: &str, generated: &str) -> String {
-    let mut seen = std::collections::HashSet::new();
-    let mut values = Vec::new();
-
-    for source in [existing, generated] {
-        for raw_item in source.split(',') {
-            let item = raw_item.trim();
-            if item.is_empty() {
-                continue;
-            }
-
-            if seen.insert(item.to_string()) {
-                values.push(item.to_string());
-            }
-        }
-    }
-
-    values.join(",")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ModelAliasConfig, ModelRequestCostConfig};
+    use crate::state::ModelRequestCostConfig;
 
     fn upstream_config() -> UpstreamConfig {
         UpstreamConfig {
@@ -587,10 +529,6 @@ mod tests {
             api_key: "up-key".into(),
             protocol: UpstreamProtocol::Responses,
             supported_models: vec!["glm-5".into()],
-            model_aliases: vec![ModelAliasConfig {
-                slug: "glm-5".into(),
-                upstream_model: "GLM-5".into(),
-            }],
             request_quota_window_hours: 5,
             request_quota_requests: 11,
             requests_per_minute: 22,
@@ -659,7 +597,6 @@ mod tests {
             api_key: "new-key".into(),
             protocol: "responses".into(),
             models: "glm-5".into(),
-            model_aliases: Some("legacy=LEGACY".into()),
             request_quota_window_hours: None,
             request_quota_requests: None,
             requests_per_minute: Some(88),
@@ -681,34 +618,19 @@ mod tests {
         assert_eq!(view.max_concurrency, "33");
         assert_eq!(view.model_request_costs, "glm-5=2");
 
-        let updated =
-            view.with_fetched_models("glm-5,glm-5.1".into(), "glm-5=GLM-5,glm-5.1=GLM-5.1".into());
+        let updated = view.with_fetched_models("GLM-5,GLM-5.1".into());
         assert_eq!(updated.models, "glm-5,glm-5.1");
-        assert_eq!(
-            updated.model_aliases,
-            "legacy=LEGACY,glm-5=GLM-5,glm-5.1=GLM-5.1"
-        );
     }
 
     #[test]
-    fn normalize_fetched_models_skips_self_mappings_for_lowercase_models() {
-        let (models, aliases) = normalize_fetched_models(vec!["glm-5".into(), "glm-5.1".into()]);
-
-        assert_eq!(models, "glm-5,glm-5.1");
-        assert_eq!(aliases, "");
-    }
-
-    #[test]
-    fn normalize_fetched_models_keeps_aliases_when_case_differs() {
-        let (models, aliases) = normalize_fetched_models(vec![
-            "glm-5".into(),
+    fn normalize_fetched_models_preserves_exact_model_names() {
+        let models = normalize_fetched_models(vec![
             "GLM-5".into(),
-            "glm-5.1".into(),
+            "GLM-5".into(),
             "GLM-5.1".into(),
         ]);
 
-        assert_eq!(models, "glm-5,glm-5.1");
-        assert_eq!(aliases, "glm-5=GLM-5,glm-5.1=GLM-5.1");
+        assert_eq!(models, "GLM-5,GLM-5.1");
     }
 
     #[test]

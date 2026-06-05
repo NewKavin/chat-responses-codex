@@ -11,12 +11,33 @@ use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
     AppConfig, AppState, DownstreamConfig, PersistedState, UsageLog,
 };
+use chrono::Datelike;
 use std::path::PathBuf;
+use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
     PathBuf::from(format!("/tmp/test_state_portal_helpers_{unique}.json"))
+}
+
+fn utc_day_start(timestamp: u64) -> u64 {
+    (timestamp / 86_400) * 86_400
+}
+
+fn utc_month_start(timestamp: u64) -> u64 {
+    let dt = UNIX_EPOCH + Duration::from_secs(timestamp);
+    let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
+    let first_of_month = datetime.date_naive().with_day(1).unwrap();
+    first_of_month.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64
+}
+
+fn stable_today_noon() -> u64 {
+    utc_day_start(chat_responses_codex::state::unix_seconds()) + 12 * 60 * 60
+}
+
+fn stable_month_noon() -> u64 {
+    utc_month_start(chat_responses_codex::state::unix_seconds()) + 5 * 86_400 + 12 * 60 * 60
 }
 
 /// Helper function to create a test AppState with usage logs
@@ -75,6 +96,8 @@ async fn test_compute_per_minute_usage_counts_recent_requests() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -95,6 +118,8 @@ async fn test_compute_per_minute_usage_counts_recent_requests() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
@@ -131,6 +156,8 @@ async fn test_compute_per_minute_usage_excludes_old_requests() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -151,6 +178,8 @@ async fn test_compute_per_minute_usage_excludes_old_requests() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
@@ -172,7 +201,7 @@ async fn test_compute_per_minute_usage_excludes_old_requests() {
 
 #[tokio::test]
 async fn test_compute_request_quota_usage_calculates_sliding_window() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -189,6 +218,8 @@ async fn test_compute_request_quota_usage_calculates_sliding_window() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -209,6 +240,8 @@ async fn test_compute_request_quota_usage_calculates_sliding_window() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
@@ -281,7 +314,7 @@ async fn test_compute_request_quota_usage_counts_reserved_requests() {
 
 #[tokio::test]
 async fn test_compute_token_usage_calculates_daily_usage() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -298,11 +331,13 @@ async fn test_compute_token_usage_calculates_daily_usage() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
             latency_ms: 500,
-            created_at: now - 3600, // 1 hour ago (today)
+            created_at: now - 600, // 10 minutes ago (today)
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -318,11 +353,13 @@ async fn test_compute_token_usage_calculates_daily_usage() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
             latency_ms: 300,
-            created_at: now - 7200, // 2 hours ago (today)
+            created_at: now - 300, // 5 minutes ago (today)
         },
     ];
 
@@ -340,7 +377,7 @@ async fn test_compute_token_usage_calculates_daily_usage() {
 
 #[tokio::test]
 async fn test_compute_token_usage_calculates_monthly_usage() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_month_noon();
 
     let logs = vec![
         UsageLog {
@@ -357,6 +394,8 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 1000,
             completion_tokens: 500,
             total_tokens: 1500,
@@ -377,6 +416,8 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 500,
             completion_tokens: 250,
             total_tokens: 750,
@@ -399,7 +440,7 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
 
 #[tokio::test]
 async fn test_compute_token_usage_remaining_calculation() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -416,11 +457,13 @@ async fn test_compute_token_usage_remaining_calculation() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 800,
             completion_tokens: 150,
             total_tokens: 950,
             latency_ms: 500,
-            created_at: now - 3600,
+            created_at: now - 600,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -436,11 +479,13 @@ async fn test_compute_token_usage_remaining_calculation() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 400,
             completion_tokens: 50,
             total_tokens: 450,
             latency_ms: 300,
-            created_at: now - 7200,
+            created_at: now - 300,
         },
     ];
 
@@ -461,7 +506,7 @@ async fn test_compute_token_usage_remaining_calculation() {
 
 #[tokio::test]
 async fn test_compute_token_usage_remaining_saturates_at_zero() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![UsageLog {
         id: "log-1".to_string(),
@@ -477,6 +522,8 @@ async fn test_compute_token_usage_remaining_saturates_at_zero() {
         model: "gpt-4".to_string(),
         request_id: "req-1".to_string(),
         status_code: 200,
+        error_message: None,
+        error_category: None,
         prompt_tokens: 5000,
         completion_tokens: 6000,
         total_tokens: 11000,
@@ -501,7 +548,7 @@ async fn test_compute_token_usage_remaining_saturates_at_zero() {
 
 #[tokio::test]
 async fn test_compute_daily_stats_aggregates_by_day() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -518,6 +565,8 @@ async fn test_compute_daily_stats_aggregates_by_day() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -538,6 +587,8 @@ async fn test_compute_daily_stats_aggregates_by_day() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
@@ -558,6 +609,8 @@ async fn test_compute_daily_stats_aggregates_by_day() {
             model: "gpt-4".to_string(),
             request_id: "req-3".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,
@@ -587,7 +640,7 @@ async fn test_compute_daily_stats_aggregates_by_day() {
 
 #[tokio::test]
 async fn test_compute_daily_stats_includes_token_counts() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![UsageLog {
         id: "log-1".to_string(),
@@ -603,6 +656,8 @@ async fn test_compute_daily_stats_includes_token_counts() {
         model: "gpt-4".to_string(),
         request_id: "req-1".to_string(),
         status_code: 200,
+        error_message: None,
+        error_category: None,
         prompt_tokens: 1000,
         completion_tokens: 500,
         total_tokens: 1500,
@@ -624,7 +679,7 @@ async fn test_compute_daily_stats_includes_token_counts() {
 
 #[tokio::test]
 async fn test_compute_model_stats_calculates_usage_by_model() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -641,6 +696,8 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -661,11 +718,13 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
             latency_ms: 300,
-            created_at: now - 7200, // Today
+            created_at: now - 300, // Today
         },
         UsageLog {
             id: "log-3".to_string(),
@@ -681,11 +740,13 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
             model: "gpt-3.5-turbo".to_string(),
             request_id: "req-3".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,
             latency_ms: 200,
-            created_at: now - 10800, // Today
+            created_at: now - 600, // Today
         },
     ];
 
@@ -708,7 +769,7 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
 
 #[tokio::test]
 async fn test_compute_model_stats_calculates_success_rate() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -725,6 +786,8 @@ async fn test_compute_model_stats_calculates_success_rate() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -745,6 +808,8 @@ async fn test_compute_model_stats_calculates_success_rate() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 500,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
@@ -765,7 +830,7 @@ async fn test_compute_model_stats_calculates_success_rate() {
 
 #[tokio::test]
 async fn test_compute_model_stats_calculates_avg_latency() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -782,6 +847,8 @@ async fn test_compute_model_stats_calculates_avg_latency() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -802,6 +869,8 @@ async fn test_compute_model_stats_calculates_avg_latency() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
@@ -822,7 +891,7 @@ async fn test_compute_model_stats_calculates_avg_latency() {
 
 #[tokio::test]
 async fn test_compute_model_stats_token_sums() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -839,6 +908,8 @@ async fn test_compute_model_stats_token_sums() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -859,11 +930,13 @@ async fn test_compute_model_stats_token_sums() {
             model: "gpt-4".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
             latency_ms: 300,
-            created_at: now - 7200,
+            created_at: now - 300,
         },
         UsageLog {
             id: "log-3".to_string(),
@@ -879,11 +952,13 @@ async fn test_compute_model_stats_token_sums() {
             model: "gpt-3.5-turbo".to_string(),
             request_id: "req-3".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,
             latency_ms: 200,
-            created_at: now - 10800,
+            created_at: now - 600,
         },
     ];
 
@@ -904,7 +979,7 @@ async fn test_compute_model_stats_token_sums() {
 
 #[tokio::test]
 async fn test_compute_model_stats_allowlist_filtering() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -921,6 +996,8 @@ async fn test_compute_model_stats_allowlist_filtering() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -941,6 +1018,8 @@ async fn test_compute_model_stats_allowlist_filtering() {
             model: "gpt-3.5-turbo".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
@@ -961,6 +1040,8 @@ async fn test_compute_model_stats_allowlist_filtering() {
             model: "claude-3".to_string(), // NOT in allowlist
             request_id: "req-3".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,
@@ -984,7 +1065,7 @@ async fn test_compute_model_stats_allowlist_filtering() {
 
 #[tokio::test]
 async fn test_compute_model_stats_empty_allowlist() {
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let logs = vec![
         UsageLog {
@@ -1001,6 +1082,8 @@ async fn test_compute_model_stats_empty_allowlist() {
             model: "gpt-4".to_string(),
             request_id: "req-1".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
@@ -1021,6 +1104,8 @@ async fn test_compute_model_stats_empty_allowlist() {
             model: "claude-3".to_string(),
             request_id: "req-2".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
@@ -1041,6 +1126,8 @@ async fn test_compute_model_stats_empty_allowlist() {
             model: "llama-2".to_string(),
             request_id: "req-3".to_string(),
             status_code: 200,
+            error_message: None,
+            error_category: None,
             prompt_tokens: 200,
             completion_tokens: 100,
             total_tokens: 300,

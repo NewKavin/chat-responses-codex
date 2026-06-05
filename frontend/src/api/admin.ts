@@ -1,8 +1,10 @@
-import axios from 'axios'
+import axios, { type AxiosResponse } from 'axios'
 import type {
   LoginRequest,
   LoginResponse,
   DashboardData,
+  DashboardAnalyticsRange,
+  DashboardSummaryResponse,
   UpstreamConfig,
   DownstreamConfig,
   LogsResponse
@@ -16,6 +18,21 @@ export const createAdminApiClient = () =>
 
 export const hasUsableAdminToken = (token: unknown): token is string =>
   typeof token === 'string' && token.trim().length > 0
+
+export interface DashboardViewResponse {
+  dashboard: DashboardData
+  analytics: DashboardAnalyticsRange
+}
+
+export const splitDashboardResponse = (
+  response: DashboardSummaryResponse
+): DashboardViewResponse => {
+  const { analytics, ...dashboard } = response
+  return {
+    dashboard,
+    analytics
+  }
+}
 
 const api = createAdminApiClient()
 
@@ -45,7 +62,15 @@ export const adminApi = {
   login: (data: LoginRequest) => api.post<LoginResponse>('/admin/login', data),
   
   // Dashboard
-  getDashboard: () => api.get<DashboardData>('/admin/dashboard'),
+  getDashboard: (range?: string): Promise<AxiosResponse<DashboardViewResponse>> =>
+    api
+      .get<DashboardSummaryResponse>('/admin/dashboard', {
+        params: range ? { range } : undefined
+      })
+      .then(response => ({
+        ...response,
+        data: splitDashboardResponse(response.data)
+      })),
   
   // Upstreams
   getUpstreams: () => api.get<UpstreamConfig[]>('/admin/upstreams'),

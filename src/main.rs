@@ -1,7 +1,10 @@
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{AppConfig, AppState};
+use chrono::{FixedOffset, Utc};
 use std::env;
 use std::error::Error;
+use std::fmt;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -41,8 +44,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             300,
         )
         .max(1),
-        upstream_rate_limit_retry_attempts: env_u32("UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS", 1)
+        upstream_rate_limit_retry_attempts: env_u32("UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS", 3)
             .max(1),
+        upstream_rate_limit_max_retry_after_seconds: env_u64(
+            "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS",
+            10,
+        )
+        .max(1),
         upstream_concurrency_retry_attempts: env_u32(
             "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
             20,
@@ -80,6 +88,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             1.5,
         )
         .max(1.0),
+        redis_url: env::var("REDIS_URL").ok().filter(|value| !value.trim().is_empty()),
+        dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
+        upstream_connect_timeout_seconds: env_u64("UPSTREAM_CONNECT_TIMEOUT_SECONDS", 30).max(1),
+        upstream_response_header_timeout_seconds: env_u64(
+            "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS",
+            30,
+        )
+        .max(1),
+        upstream_stream_idle_timeout_seconds: env_u64(
+            "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS",
+            1_800,
+        )
+        .max(1),
     };
 
     init_tracing(&log_path);
@@ -100,7 +121,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "starting gateway"
     );
 
-    let state = match AppState::load_from_path(&state_path, config).await {
+    let mut state = match AppState::load_from_path(&state_path, config).await {
         Ok(state) => state,
         Err(error) => {
             tracing::error!(
@@ -112,6 +133,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Err(error.into());
         }
     };
+    state.maybe_attach_redis().await;
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,
@@ -214,6 +236,7 @@ fn init_tracing(log_path: &str) {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
+        .with_timer(BeijingTime)
         .with_target(false)
         .with_thread_ids(false)
         .with_thread_names(false)
@@ -234,6 +257,19 @@ fn init_tracing(log_path: &str) {
         let _ = builder.with_writer(writer).try_init();
     } else {
         let _ = builder.try_init();
+    }
+}
+
+struct BeijingTime;
+
+impl tracing_subscriber::fmt::time::FormatTime for BeijingTime {
+    fn format_time(
+        &self,
+        writer: &mut tracing_subscriber::fmt::format::Writer<'_>,
+    ) -> fmt::Result {
+        let offset = FixedOffset::east_opt(8 * 3600).expect("valid Beijing offset");
+        let now = Utc::now().with_timezone(&offset);
+        write!(writer, "{}", now.format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
     }
 }
 

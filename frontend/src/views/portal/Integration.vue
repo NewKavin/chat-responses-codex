@@ -38,7 +38,7 @@ cp templates/codex/model-catalog.json ~/.codex/model-catalog.json</pre>
 
             <div class="steps">
               <h4>步骤 4: 启动 Codex 并选择模型</h4>
-              <p>配置完成后，启动 Codex 并选择你在 model-catalog.json 中定义的模型（如 glm-5, deepseek-r1）。</p>
+              <p>配置完成后，启动 Codex 并选择你在 model-catalog.json 中定义的模型（如 ZhipuAI/GLM-5, MiniMax/MiniMax-M2.7, deepseek-ai/DeepSeek-R1-0528）。</p>
             </div>
           </div>
         </el-tab-pane>
@@ -148,8 +148,8 @@ cp templates/codex/config.toml.example ~/.codex/config.toml
 cp templates/codex/model-catalog.json ~/.codex/model-catalog.json`
 
 const codexConfig = computed(() => `model_provider = "gateway"
-model = "glm-5"
-review_model = "glm-5"
+model = "ZhipuAI/GLM-5"
+review_model = "ZhipuAI/GLM-5"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_catalog_json = "/home/YOUR_USERNAME/.codex/model-catalog.json"
@@ -168,7 +168,7 @@ requires_openai_auth = true
 # Codex 请求时会自动使用 Bearer YOUR_API_KEY 鉴权`)
 
 const opencodeConfig = computed(() => `{
-  "model": "glm-5",
+  "model": "ZhipuAI/GLM-5",
   "base_url": "${gatewayUrl}",
   "api_key": "YOUR_API_KEY",
   "provider": "openai-compatible",
@@ -210,7 +210,7 @@ client = OpenAI(
 
 # 发送请求
 response = client.chat.completions.create(
-    model="glm-5",  # 使用网关支持的模型
+    model="ZhipuAI/GLM-5",  # 使用网关支持的模型
     messages=[
         {"role": "user", "content": "Hello, how are you?"}
     ],

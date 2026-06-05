@@ -1,8 +1,41 @@
+FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /app/frontend
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && curl -fsSLo /tmp/node.tar.xz https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+    && npm install -g npm@11.16.0 \
+    && rm -f /tmp/node.tar.xz \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY frontend/package*.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+FROM rust:1-bookworm AS backend-builder
+
+WORKDIR /app
+
+COPY .cargo .cargo
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY src ./src
+COPY templates ./templates
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+
+RUN cargo build --release --locked
+
 FROM debian:bookworm-slim
 
 WORKDIR /app
 
-COPY target/release/chat-responses-codex /usr/local/bin/chat-responses-codex
+COPY --from=backend-builder /app/target/release/chat-responses-codex /usr/local/bin/chat-responses-codex
 
 ENV BIND_ADDR=0.0.0.0:3001
 ENV STATE_PATH=/data/state.json

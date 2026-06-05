@@ -169,15 +169,6 @@
           </div>
         </el-form-item>
 
-        <el-form-item label="模型别名">
-          <el-input
-            v-model="modelAliasesText"
-            type="textarea"
-            :rows="3"
-            placeholder="格式: slug=upstream_model，每行一个&#10;例如: gpt-4=gpt-4-turbo"
-          />
-        </el-form-item>
-
         <el-form-item label="模型成本">
           <el-table :data="form.model_request_costs" style="width: 100%; margin-bottom: 10px">
             <el-table-column label="模型" width="200">
@@ -199,6 +190,39 @@
             </el-table-column>
           </el-table>
           <el-button @click="addModelCost" size="small">添加模型成本</el-button>
+        </el-form-item>
+
+        <el-form-item label="模型上下文">
+          <el-table :data="form.model_contexts" style="width: 100%; margin-bottom: 10px">
+            <el-table-column label="模型" width="220">
+              <template #default="{ row }">
+                <el-select v-model="row.slug" placeholder="选择模型" filterable allow-create>
+                  <el-option v-for="model in availableModelsForCost" :key="model" :label="model" :value="model" />
+                </el-select>
+              </template>
+            </el-table-column>
+            <el-table-column label="上下文上限" width="160">
+              <template #default="{ row }">
+                <el-input-number v-model="row.context_limit" :min="1" :max="2000000" />
+              </template>
+            </el-table-column>
+            <el-table-column label="输出预留" width="160">
+              <template #default="{ row }">
+                <el-input-number v-model="row.output_reserve" :min="0" :max="2000000" />
+              </template>
+            </el-table-column>
+            <el-table-column label="上下文分组" min-width="180">
+              <template #default="{ row }">
+                <el-input v-model="row.context_group" placeholder="可选: 同组可自动切换更大上下文模型" />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="100">
+              <template #default="{ row }">
+                <el-button size="small" type="danger" @click="removeModelContext(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-button @click="addModelContext" size="small">添加模型上下文</el-button>
         </el-form-item>
 
         <!-- 路由权重配置 -->
@@ -279,31 +303,16 @@ const form = ref<Partial<UpstreamConfig>>({
   protocols: ['ChatCompletions'],
   supported_models: [],
   active: true,
-  model_aliases: [],
   request_quota_window_hours: 5,
   request_quota_requests: 600,
   requests_per_minute: 100,
   max_concurrency: 10,
   model_request_costs: [],
+  model_contexts: [],
   priority: 0,
   premium_models: [],
   protect_premium_quota: false,
   failure_count: 0
-})
-
-const modelAliasesText = computed({
-  get: () => {
-    return form.value.model_aliases?.map(a => `${a.slug}=${a.upstream_model}`).join('\n') || ''
-  },
-  set: (value: string) => {
-    form.value.model_aliases = value
-      .split('\n')
-      .filter(line => line.trim())
-      .map(line => {
-        const [slug, upstream_model] = line.split('=').map(s => s.trim())
-        return { slug: slug.toLowerCase(), upstream_model }
-      })
-  }
 })
 
 const availableModelsForCost = computed(() => {
@@ -322,6 +331,25 @@ const removeModelCost = (row: any) => {
   const index = form.value.model_request_costs?.indexOf(row)
   if (index !== undefined && index > -1) {
     form.value.model_request_costs?.splice(index, 1)
+  }
+}
+
+const addModelContext = () => {
+  if (!form.value.model_contexts) {
+    form.value.model_contexts = []
+  }
+  form.value.model_contexts.push({
+    slug: '',
+    context_limit: 131072,
+    output_reserve: 2048,
+    context_group: ''
+  })
+}
+
+const removeModelContext = (row: any) => {
+  const index = form.value.model_contexts?.indexOf(row)
+  if (index !== undefined && index > -1) {
+    form.value.model_contexts?.splice(index, 1)
   }
 }
 
@@ -387,12 +415,12 @@ const handleCreate = () => {
     protocols: ['ChatCompletions'],
     supported_models: [],
     active: true,
-    model_aliases: [],
     request_quota_window_hours: 5,
     request_quota_requests: 600,
     requests_per_minute: 100,
     max_concurrency: 10,
     model_request_costs: [],
+    model_contexts: [],
     priority: 0,
     premium_models: [],
     protect_premium_quota: false,
@@ -407,7 +435,9 @@ const handleEdit = (row: UpstreamConfig) => {
   form.value = {
     ...row,
     protocol: protocols[0] as UpstreamConfig['protocol'],
-    protocols
+    protocols,
+    model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
+    model_contexts: row.model_contexts ? [...row.model_contexts] : []
   }
   dialogVisible.value = true
 }
@@ -420,6 +450,14 @@ const handleSubmit = async () => {
     const submitData: Partial<UpstreamConfig> = {
       ...form.value
     }
+    submitData.model_contexts = (submitData.model_contexts || [])
+      .map((item: any) => ({
+        slug: String(item.slug || '').trim(),
+        context_limit: Number(item.context_limit || 0),
+        output_reserve: Number(item.output_reserve || 0),
+        context_group: String(item.context_group || '').trim()
+      }))
+      .filter(item => item.slug.length > 0 && item.context_limit > 0)
     const protocols = resolveProtocols(submitData)
     submitData.protocols = protocols
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
@@ -508,22 +546,6 @@ const fetchModels = async () => {
       )
     )
     form.value.supported_models = normalizedModels
-
-    const existingAliases = form.value.model_aliases || []
-    const aliasSlugs = new Set(
-      existingAliases
-        .map(alias => (alias.slug || '').trim().toLowerCase())
-        .filter(Boolean)
-    )
-    for (const upstreamModel of normalizedModels) {
-      const slug = upstreamModel.toLowerCase()
-      if (slug === upstreamModel || aliasSlugs.has(slug)) {
-        continue
-      }
-      existingAliases.push({ slug, upstream_model: upstreamModel })
-      aliasSlugs.add(slug)
-    }
-    form.value.model_aliases = existingAliases
 
     ElMessage.success(`成功获取 ${models.length} 个模型`)
   } catch (error: any) {

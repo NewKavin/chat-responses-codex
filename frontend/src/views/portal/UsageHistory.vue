@@ -78,6 +78,11 @@
                 {{ row.latency_ms }}ms
               </template>
             </el-table-column>
+            <el-table-column label="错误信息" min-width="220" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ row.error_message?.trim() || '-' }}
+              </template>
+            </el-table-column>
           </el-table>
 
           <div class="pagination-wrap">

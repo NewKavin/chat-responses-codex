@@ -8,13 +8,12 @@
       <el-row :gutter="20">
         <el-col :span="12" v-if="data.quota_summary.request_quota">
           <el-card shadow="hover">
-            <el-statistic :title="`请求配额 (${data.quota_summary.request_quota.window_hours}小时)`">
+            <el-statistic
+              :title="`请求配额 (${data.quota_summary.request_quota.window_hours}小时)`"
+              :value="data.quota_summary.request_quota.used"
+              :value-style="{ color: getQuotaColor(data.quota_summary.request_quota.percentage) }"
+            >
               <template #suffix>/ {{ data.quota_summary.request_quota.limit }}</template>
-              <template #default>
-                <span :class="getQuotaClass(data.quota_summary.request_quota.percentage)">
-                  {{ data.quota_summary.request_quota.used }}
-                </span>
-              </template>
             </el-statistic>
             <el-progress
               :percentage="data.quota_summary.request_quota.percentage"
@@ -27,13 +26,12 @@
 
         <el-col :span="12" v-if="data.quota_summary.token_daily">
           <el-card shadow="hover">
-            <el-statistic title="每日 Token 配额">
+            <el-statistic
+              title="每日 Token 配额"
+              :value="data.quota_summary.token_daily.used"
+              :value-style="{ color: getQuotaColor(data.quota_summary.token_daily.percentage) }"
+            >
               <template #suffix>/ {{ formatCompact(data.quota_summary.token_daily.limit) }}</template>
-              <template #default>
-                <span :class="getQuotaClass(data.quota_summary.token_daily.percentage)">
-                  {{ formatCompact(data.quota_summary.token_daily.used) }}
-                </span>
-              </template>
             </el-statistic>
             <el-progress
               :percentage="data.quota_summary.token_daily.percentage"
@@ -46,13 +44,12 @@
 
         <el-col :span="12" v-if="data.quota_summary.token_monthly">
           <el-card shadow="hover">
-            <el-statistic title="每月 Token 配额">
+            <el-statistic
+              title="每月 Token 配额"
+              :value="data.quota_summary.token_monthly.used"
+              :value-style="{ color: getQuotaColor(data.quota_summary.token_monthly.percentage) }"
+            >
               <template #suffix>/ {{ formatCompact(data.quota_summary.token_monthly.limit) }}</template>
-              <template #default>
-                <span :class="getQuotaClass(data.quota_summary.token_monthly.percentage)">
-                  {{ formatCompact(data.quota_summary.token_monthly.used) }}
-                </span>
-              </template>
             </el-statistic>
             <el-progress
               :percentage="data.quota_summary.token_monthly.percentage"
@@ -102,7 +99,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { portalApi } from '@/api/portal'
 import type { PortalOverview } from '@/types'
@@ -124,12 +121,6 @@ const data = ref<PortalOverview>({
   }
 })
 
-const getQuotaClass = (percentage: number) => {
-  if (percentage >= 90) return 'quota-critical'
-  if (percentage >= 70) return 'quota-warning'
-  return 'quota-normal'
-}
-
 const getQuotaColor = (percentage: number) => {
   if (percentage >= 90) return '#f56c6c'
   if (percentage >= 70) return '#e6a23c'
@@ -137,6 +128,7 @@ const getQuotaColor = (percentage: number) => {
 }
 
 const formatCompact = (value: number) => formatCompactNumber(value)
+let refreshTimer: number | null = null
 
 const loadData = async () => {
   try {
@@ -149,6 +141,16 @@ const loadData = async () => {
 
 onMounted(() => {
   loadData()
+  refreshTimer = window.setInterval(() => {
+    loadData()
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (refreshTimer !== null) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
 })
 </script>
 

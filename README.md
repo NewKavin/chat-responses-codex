@@ -109,13 +109,12 @@ cargo run
 
 #### 方案 B: PostgreSQL + Docker Compose，适合远端或正式部署
 
-当前 Dockerfile 会直接打包 `target/release/chat-responses-codex`，所以在构建镜像前需要先生成 release 二进制。
+当前 Dockerfile 会在镜像构建时同时编译前端和后端，所以不需要在构建镜像前先手动生成 release 二进制。
 
 ```bash
 cp .env.example .env
 # 编辑 .env，至少设置 POSTGRES_PASSWORD 和 ADMIN_PASSWORD
 
-cargo build --release
 docker compose up -d --build
 ```
 
@@ -130,9 +129,8 @@ docker compose up -d --build
 1. 在服务器上拉取代码。
 2. 复制 `.env.example` 到 `.env`。
 3. 设置强密码，尤其是 `POSTGRES_PASSWORD` 和 `ADMIN_PASSWORD`。
-4. 先执行 `cargo build --release`。
-5. 再执行 `docker compose up -d --build`。
-6. 如需暴露到公网，前面再加一层反向代理和 TLS。
+4. 直接执行 `docker compose up -d --build`。
+5. 如需暴露到公网，前面再加一层反向代理和 TLS。
 
 反向代理建议：
 
@@ -317,13 +315,12 @@ This mode is enough if you only want to verify protocol conversion locally.
 
 #### Option B: PostgreSQL + Docker Compose for remote or production-like deployments
 
-The current Dockerfile packages the release binary directly from `target/release/chat-responses-codex`, so build the binary before building the image.
+The current Dockerfile builds both the frontend and backend inside the image, so you do not need to build the release binary first.
 
 ```bash
 cp .env.example .env
 # Edit .env and set at least POSTGRES_PASSWORD and ADMIN_PASSWORD
 
-cargo build --release
 docker compose up -d --build
 ```
 
@@ -338,9 +335,8 @@ For a remote host:
 1. Clone the repository on the server.
 2. Copy `.env.example` to `.env`.
 3. Set strong passwords, especially `POSTGRES_PASSWORD` and `ADMIN_PASSWORD`.
-4. Run `cargo build --release`.
-5. Run `docker compose up -d --build`.
-6. Put a reverse proxy and TLS in front if you expose the service publicly.
+4. Run `docker compose up -d --build`.
+5. Put a reverse proxy and TLS in front if you expose the service publicly.
 
 Reverse proxy guidance:
 

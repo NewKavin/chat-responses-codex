@@ -26,6 +26,7 @@
             <el-option label="404 (未找到)" :value="404" />
             <el-option label="429 (限流)" :value="429" />
             <el-option label="500 (服务器错误)" :value="500" />
+            <el-option label="502 (上游网关错误)" :value="502" />
           </el-select>
         </el-form-item>
         <el-form-item label="模型">
@@ -152,6 +153,11 @@
             <el-tag :type="getStatusType(row.status_code)">
               {{ row.status_code }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="错误信息" min-width="240" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.error_message?.trim() || '-' }}
           </template>
         </el-table-column>
       </el-table>

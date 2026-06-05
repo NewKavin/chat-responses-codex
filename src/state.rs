@@ -23,6 +23,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 
 use postgres::PostgresStateStore;
 
@@ -39,6 +41,7 @@ pub struct AppConfig {
     pub upstream_rate_limit_default_retry_seconds: u64,
     pub upstream_rate_limit_retry_window_seconds: u64,
     pub upstream_rate_limit_retry_attempts: u32,
+    pub upstream_rate_limit_max_retry_after_seconds: u64,
     pub upstream_concurrency_retry_attempts: u32,
     pub upstream_concurrency_retry_backoff_ms: u64,
     pub context_retry_max_attempts_chat: u32,
@@ -48,6 +51,11 @@ pub struct AppConfig {
     pub routing_affinity_enabled: bool,
     pub routing_affinity_ttl_seconds: u64,
     pub routing_affinity_escape_pressure_ratio: f64,
+    pub redis_url: Option<String>,
+    pub dashboard_cache_ttl_seconds: u64,
+    pub upstream_connect_timeout_seconds: u64,
+    pub upstream_response_header_timeout_seconds: u64,
+    pub upstream_stream_idle_timeout_seconds: u64,
 }
 
 impl Default for AppConfig {
@@ -61,7 +69,8 @@ impl Default for AppConfig {
             usage_log_archive_max_files: 10,
             upstream_rate_limit_default_retry_seconds: 30,
             upstream_rate_limit_retry_window_seconds: 300,
-            upstream_rate_limit_retry_attempts: 1,
+            upstream_rate_limit_retry_attempts: 3,
+            upstream_rate_limit_max_retry_after_seconds: 10,
             upstream_concurrency_retry_attempts: 20,
             upstream_concurrency_retry_backoff_ms: 50,
             context_retry_max_attempts_chat: 2,
@@ -71,6 +80,11 @@ impl Default for AppConfig {
             routing_affinity_enabled: true,
             routing_affinity_ttl_seconds: 180,
             routing_affinity_escape_pressure_ratio: 1.5,
+            redis_url: None,
+            dashboard_cache_ttl_seconds: 30,
+            upstream_connect_timeout_seconds: 30,
+            upstream_response_header_timeout_seconds: 30,
+            upstream_stream_idle_timeout_seconds: 1_800,
         }
     }
 }
@@ -86,8 +100,6 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub protocols: Vec<UpstreamProtocol>,
     pub supported_models: Vec<String>,
-    #[serde(default)]
-    pub model_aliases: Vec<ModelAliasConfig>,
     #[serde(default)]
     pub model_contexts: Vec<ModelContextConfig>,
     #[serde(default = "default_upstream_request_quota_window_hours")]
@@ -124,7 +136,6 @@ impl Default for UpstreamConfig {
             protocol: UpstreamProtocol::ChatCompletions,
             protocols: vec![UpstreamProtocol::ChatCompletions],
             supported_models: Vec::new(),
-            model_aliases: Vec::new(),
             model_contexts: Vec::new(),
             request_quota_window_hours: default_upstream_request_quota_window_hours(),
             request_quota_requests: default_upstream_request_quota_requests(),
@@ -139,12 +150,6 @@ impl Default for UpstreamConfig {
             failure_count: 0,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelAliasConfig {
-    pub slug: String,
-    pub upstream_model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,16 +201,18 @@ impl UpstreamConfig {
     pub fn route_models(&self) -> Vec<String> {
         let mut models = Vec::new();
         let mut seen = HashSet::new();
-        let aliases = self.effective_model_aliases();
 
         for model in self
             .supported_models
             .iter()
             .chain(self.premium_models.iter())
-            .chain(aliases.iter().map(|alias| &alias.slug))
         {
-            if seen.insert(model.clone()) {
-                models.push(model.clone());
+            let model = model.trim();
+            if model.is_empty() {
+                continue;
+            }
+            if seen.insert(model.to_string()) {
+                models.push(model.to_string());
             }
         }
 
@@ -217,29 +224,7 @@ impl UpstreamConfig {
     }
 
     pub fn resolved_model_name(&self, model: &str) -> Option<String> {
-        let request_model = model.trim();
-        if request_model.is_empty() {
-            return None;
-        }
-        let canonical_model = self.canonical_route_model(request_model)?;
-
-        self.effective_model_aliases()
-            .iter()
-            .find(|alias| model_name_eq(&alias.slug, request_model))
-            .map(|alias| alias.upstream_model.clone())
-            .or_else(|| {
-                self.effective_model_aliases()
-                    .iter()
-                    .find(|alias| model_name_eq(&alias.slug, &canonical_model))
-                    .map(|alias| alias.upstream_model.clone())
-            })
-            .or_else(|| {
-                self.effective_model_aliases()
-                    .iter()
-                    .find(|alias| model_name_eq(&alias.upstream_model, request_model))
-                    .map(|alias| alias.upstream_model.clone())
-            })
-            .or_else(|| Some(canonical_model))
+        self.canonical_route_model(model)
     }
 
     pub fn is_premium_model_request(&self, model: &str) -> bool {
@@ -247,26 +232,25 @@ impl UpstreamConfig {
             return false;
         }
 
-        let request_candidates = self.model_equivalents(model);
-        !request_candidates.is_empty()
+        let model = model.trim();
+        !model.is_empty()
             && self
                 .premium_models
                 .iter()
-                .any(|premium| request_candidates.iter().any(|candidate| candidate == premium))
+                .any(|premium| premium.trim() == model)
     }
 
     pub fn request_cost_for_model(&self, model: &str) -> f64 {
-        for candidate in self.model_equivalents(model) {
-            if let Some(rule) = self
-                .model_request_costs
-                .iter()
-                .find(|rule| rule.slug == candidate)
-            {
-                return rule.cost.max(1.0);
-            }
+        let model = model.trim();
+        if model.is_empty() {
+            return 1.0;
         }
 
-        1.0
+        self.model_request_costs
+            .iter()
+            .find(|rule| rule.slug.trim() == model)
+            .map(|rule| rule.cost.max(1.0))
+            .unwrap_or(1.0)
     }
 
     pub fn request_quota_window_seconds(&self) -> u64 {
@@ -277,10 +261,12 @@ impl UpstreamConfig {
         let mut models = Vec::new();
         let mut seen = HashSet::new();
         for premium in &self.premium_models {
-            for equivalent in self.model_equivalents(premium) {
-                if seen.insert(equivalent.clone()) {
-                    models.push(equivalent);
-                }
+            let premium = premium.trim();
+            if premium.is_empty() {
+                continue;
+            }
+            if seen.insert(premium.to_string()) {
+                models.push(premium.to_string());
             }
         }
         models
@@ -302,8 +288,6 @@ impl UpstreamConfig {
         self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
         self.model_request_costs =
             normalized_model_request_costs(std::mem::take(&mut self.model_request_costs));
-        self.model_aliases = normalized_model_aliases(std::mem::take(&mut self.model_aliases));
-        self.model_aliases = self.effective_model_aliases();
         self.model_contexts = normalized_model_contexts(std::mem::take(&mut self.model_contexts));
     }
 
@@ -312,70 +296,22 @@ impl UpstreamConfig {
             return Ok(());
         }
 
-        let mut routable = self.supported_models.iter().cloned().collect::<HashSet<_>>();
-        for alias in self.effective_model_aliases() {
-            routable.insert(alias.slug);
-        }
-
+        let routable = self.supported_models.iter().cloned().collect::<HashSet<_>>();
         let invalid = self
             .premium_models
             .iter()
-            .filter(|model| !routable.contains(*model))
-            .cloned()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty() && !routable.contains(model))
             .collect::<Vec<_>>();
 
         if invalid.is_empty() {
             Ok(())
         } else {
             Err(format!(
-                "invalid premium_models: {}; each premium model must exist in supported_models or model_aliases.slug",
+                "invalid premium_models: {}; each premium model must exist in supported_models",
                 invalid.join(", ")
             ))
         }
-    }
-
-    fn model_equivalents(&self, model: &str) -> Vec<String> {
-        let mut equivalents = Vec::new();
-        let mut seen = HashSet::new();
-        let mut push_unique = |value: String| {
-            let key = value.to_ascii_lowercase();
-            if seen.insert(key) {
-                equivalents.push(value);
-            }
-        };
-
-        let model = model.trim();
-        if model.is_empty() {
-            return equivalents;
-        }
-        let canonical_model = match self.canonical_route_model(model) {
-            Some(model) => model,
-            None => return equivalents,
-        };
-
-        let aliases = self.effective_model_aliases();
-        let resolved = aliases
-            .iter()
-            .find(|alias| model_name_eq(&alias.slug, model))
-            .map(|alias| alias.upstream_model.clone())
-            .or_else(|| {
-                aliases
-                    .iter()
-                    .find(|alias| model_name_eq(&alias.slug, &canonical_model))
-                    .map(|alias| alias.upstream_model.clone())
-            })
-            .unwrap_or_else(|| canonical_model.clone());
-
-        push_unique(model.to_string());
-        push_unique(canonical_model.clone());
-        push_unique(resolved.clone());
-        for alias in &aliases {
-            if model_name_eq(&alias.upstream_model, &resolved) {
-                push_unique(alias.slug.clone());
-            }
-        }
-
-        equivalents
     }
 
     fn canonical_route_model(&self, model: &str) -> Option<String> {
@@ -393,50 +329,16 @@ impl UpstreamConfig {
             return Some(model.to_string());
         }
 
-        route_models
-            .into_iter()
-            .find(|candidate| model_name_eq(candidate, model))
-    }
-
-    fn effective_model_aliases(&self) -> Vec<ModelAliasConfig> {
-        let mut aliases = normalized_model_aliases(self.model_aliases.clone());
-        let mut seen = aliases
-            .iter()
-            .map(|alias| alias.slug.clone())
-            .collect::<HashSet<_>>();
-
-        for model in &self.supported_models {
-            let upstream_model = model.trim().to_string();
-            let slug = upstream_model.to_ascii_lowercase();
-            if upstream_model.is_empty()
-                || slug.is_empty()
-                || slug == upstream_model
-                || seen.contains(&slug)
-            {
-                continue;
-            }
-
-            aliases.push(ModelAliasConfig {
-                slug: slug.clone(),
-                upstream_model,
-            });
-            seen.insert(slug);
-        }
-
-        aliases
+        None
     }
 
     pub fn context_config_for_model(&self, model: &str) -> Option<ModelContextConfig> {
-        let mut candidates = self.model_equivalents(model);
-        if let Some(resolved) = self.resolved_model_name(model) {
-            candidates.push(resolved);
-        }
-
-        for candidate in candidates {
+        let candidate = self.resolved_model_name(model)?;
+        for candidate in [candidate, model.trim().to_string()] {
             if let Some(config) = self
                 .model_contexts
                 .iter()
-                .find(|config| model_name_eq(&config.slug, &candidate))
+                .find(|config| config.slug.trim() == candidate)
             {
                 return Some(config.clone());
             }
@@ -454,14 +356,14 @@ impl UpstreamConfig {
         if group.is_empty() {
             return None;
         }
-        let current_resolved = self
-            .resolved_model_name(model)
-            .unwrap_or_else(|| model.to_string());
+        let current_resolved = self.resolved_model_name(model).unwrap_or_else(|| model.to_string());
 
         let mut candidates = self
             .model_contexts
             .iter()
-            .filter(|config| config.context_group == group && config.context_limit > current.context_limit)
+            .filter(|config| {
+                config.context_group.trim() == group && config.context_limit > current.context_limit
+            })
             .cloned()
             .collect::<Vec<_>>();
         candidates.sort_by_key(|config| config.context_limit);
@@ -469,7 +371,7 @@ impl UpstreamConfig {
         for candidate in &candidates {
             if candidate.context_limit >= minimum_context_limit {
                 if let Some(resolved) = self.resolved_model_name(&candidate.slug) {
-                    if !model_name_eq(&resolved, &current_resolved) {
+                    if resolved.trim() != current_resolved.trim() {
                         return Some(resolved);
                     }
                 }
@@ -478,7 +380,7 @@ impl UpstreamConfig {
 
         for candidate in candidates {
             if let Some(resolved) = self.resolved_model_name(&candidate.slug) {
-                if !model_name_eq(&resolved, &current_resolved) {
+                if resolved.trim() != current_resolved.trim() {
                     return Some(resolved);
                 }
             }
@@ -525,24 +427,6 @@ fn normalized_string_list(values: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn model_name_eq(lhs: &str, rhs: &str) -> bool {
-    lhs.trim().eq_ignore_ascii_case(rhs.trim())
-}
-
-fn normalized_model_aliases(values: Vec<ModelAliasConfig>) -> Vec<ModelAliasConfig> {
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for alias in values {
-        let slug = alias.slug.trim().to_ascii_lowercase();
-        let upstream_model = alias.upstream_model.trim().to_string();
-        if slug.is_empty() || upstream_model.is_empty() || !seen.insert(slug.clone()) {
-            continue;
-        }
-        normalized.push(ModelAliasConfig { slug, upstream_model });
-    }
-    normalized
-}
-
 fn normalized_model_request_costs(values: Vec<ModelRequestCostConfig>) -> Vec<ModelRequestCostConfig> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
@@ -563,7 +447,7 @@ fn normalized_model_contexts(values: Vec<ModelContextConfig>) -> Vec<ModelContex
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
     for config in values {
-        let slug = config.slug.trim().to_ascii_lowercase();
+        let slug = config.slug.trim().to_string();
         if slug.is_empty() || !seen.insert(slug.clone()) {
             continue;
         }
@@ -578,7 +462,7 @@ fn normalized_model_contexts(values: Vec<ModelContextConfig>) -> Vec<ModelContex
             slug,
             context_limit,
             output_reserve,
-            context_group: config.context_group.trim().to_ascii_lowercase(),
+            context_group: config.context_group.trim().to_string(),
         });
     }
     normalized
@@ -703,6 +587,7 @@ pub struct AppState {
     client: Client,
     direct_client: Client,
     postgres: Option<Arc<PostgresStateStore>>,
+    redis: Option<Arc<Mutex<ConnectionManager>>>,
 }
 
 impl AppState {
@@ -725,6 +610,7 @@ impl AppState {
             .cloned()
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
+        let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
         Self {
             inner: Arc::new(Mutex::new(state)),
             archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
@@ -742,12 +628,10 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: store_path.into(),
             config,
-            client: Client::new(),
-            direct_client: Client::builder().no_proxy().build().unwrap_or_else(|error| {
-                tracing::warn!(%error, "failed to build direct HTTP client, falling back");
-                Client::new()
-            }),
+            client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
+            direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
             postgres: None,
+            redis: None,
         }
     }
 
@@ -760,6 +644,7 @@ impl AppState {
             upstream.normalize_for_storage();
         }
         let downstream_usage_logs = state.usage_logs.clone();
+        let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
         Self {
             inner: Arc::new(Mutex::new(state)),
             archived_usage_logs: Arc::new(Mutex::new(Vec::new())),
@@ -777,12 +662,36 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: PathBuf::new(),
             config,
-            client: Client::new(),
-            direct_client: Client::builder().no_proxy().build().unwrap_or_else(|error| {
-                tracing::warn!(%error, "failed to build direct HTTP client, falling back");
-                Client::new()
-            }),
+            client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
+            direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
             postgres: Some(Arc::new(postgres)),
+            redis: None,
+        }
+    }
+
+    pub async fn maybe_attach_redis(&mut self) -> bool {
+        let Some(redis_url) = self.config.redis_url.as_deref().map(str::trim) else {
+            return false;
+        };
+        if redis_url.is_empty() {
+            return false;
+        }
+        match redis::Client::open(redis_url) {
+            Ok(client) => match client.get_connection_manager().await {
+                Ok(connection) => {
+                    tracing::info!(redis_url = %redis_url, "redis cache enabled");
+                    self.redis = Some(Arc::new(Mutex::new(connection)));
+                    true
+                }
+                Err(error) => {
+                    tracing::warn!(redis_url = %redis_url, error = %error, "failed to connect to redis");
+                    false
+                }
+            },
+            Err(error) => {
+                tracing::warn!(redis_url = %redis_url, error = %error, "failed to open redis client");
+                false
+            }
         }
     }
 
@@ -796,6 +705,33 @@ impl AppState {
         } else {
             self.client.clone()
         }
+    }
+
+    pub async fn get_cached_json<T>(&self, key: &str) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let redis = self.redis.as_ref()?.clone();
+        let mut connection = redis.lock().await;
+        let value = match connection.get::<_, Option<String>>(key).await {
+            Ok(Some(value)) => value,
+            _ => return None,
+        };
+        serde_json::from_str(&value).ok()
+    }
+
+    pub async fn set_cached_json<T>(&self, key: &str, value: &T, ttl_seconds: u64)
+    where
+        T: Serialize,
+    {
+        let Some(redis) = &self.redis else {
+            return;
+        };
+        let Ok(serialized) = serde_json::to_string(value) else {
+            return;
+        };
+        let mut connection = redis.lock().await;
+        let _ = connection.set_ex::<_, _, ()>(key, serialized, ttl_seconds).await;
     }
 
     pub fn create_admin_session(&self) -> String {
@@ -1992,7 +1928,7 @@ pub struct UpstreamRuntimeSnapshot {
 }
 
 impl UpstreamRuntimeSnapshot {
-    pub fn is_cooled_down(&self, now: u64) -> bool {
+    pub fn is_in_cooldown(&self, now: u64) -> bool {
         self.cooldown_until > now
     }
 
@@ -2085,6 +2021,20 @@ fn build_downstream_token_windows(
             });
     }
     windows
+}
+
+fn build_upstream_http_client(connect_timeout_seconds: u64, no_proxy: bool) -> Client {
+    let mut builder = Client::builder().connect_timeout(Duration::from_secs(
+        connect_timeout_seconds.max(1),
+    ));
+    if no_proxy {
+        builder = builder.no_proxy();
+    }
+
+    builder.build().unwrap_or_else(|error| {
+        tracing::warn!(%error, no_proxy, "failed to build upstream HTTP client, falling back");
+        Client::new()
+    })
 }
 
 fn normalized_usage_logs(logs: &[UsageLog]) -> Vec<UsageLog> {
@@ -2595,19 +2545,6 @@ impl AppState {
         } else if let Some(protocol) = updates.get("protocol").and_then(Value::as_str) {
             upstream.protocol = parse_upstream_protocol(protocol);
         }
-        if let Some(model_aliases) = updates.get("model_aliases").and_then(|v| v.as_array()) {
-            upstream.model_aliases = model_aliases
-                .iter()
-                .filter_map(|value| {
-                    let slug = value.get("slug").and_then(|v| v.as_str())?;
-                    let upstream_model = value.get("upstream_model").and_then(|v| v.as_str())?;
-                    Some(ModelAliasConfig {
-                        slug: slug.to_string(),
-                        upstream_model: upstream_model.to_string(),
-                    })
-                })
-                .collect();
-        }
         if let Some(model_contexts) = updates.get("model_contexts").and_then(|v| v.as_array()) {
             upstream.model_contexts = model_contexts
                 .iter()
@@ -2840,36 +2777,19 @@ impl AppState {
 mod tests {
     use super::{
         should_bypass_proxy_for_host, should_bypass_proxy_for_url, AppConfig, AppState,
-        ModelAliasConfig, ModelContextConfig, ModelRequestCostConfig, PersistedState,
-        UpstreamConfig,
+        ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
     };
 
     #[test]
-    fn normalize_for_storage_auto_fills_aliases_and_preserves_manual_conflicts() {
+    fn normalize_for_storage_preserves_exact_model_names_and_clears_aliases() {
         let mut upstream = UpstreamConfig {
-            supported_models: vec!["GLM-5".into(), "MiniMax2.7".into()],
-            model_aliases: vec![ModelAliasConfig {
-                slug: "glm-5".into(),
-                upstream_model: "GLM-5-MANUAL".into(),
-            }],
+            supported_models: vec![" GLM-5 ".into(), "MiniMax2.7".into(), "GLM-5".into()],
             ..Default::default()
         };
 
         upstream.normalize_for_storage();
 
-        assert_eq!(
-            upstream.model_aliases,
-            vec![
-                ModelAliasConfig {
-                    slug: "glm-5".into(),
-                    upstream_model: "GLM-5-MANUAL".into(),
-                },
-                ModelAliasConfig {
-                    slug: "minimax2.7".into(),
-                    upstream_model: "MiniMax2.7".into(),
-                },
-            ]
-        );
+        assert_eq!(upstream.supported_models, vec!["GLM-5".into(), "MiniMax2.7".into()]);
     }
 
     #[test]
@@ -2887,7 +2807,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_request_resolves_to_premium_model_and_cost_rule() {
+    fn exact_model_request_resolves_to_premium_model_and_cost_rule() {
         let mut upstream = UpstreamConfig {
             supported_models: vec!["GLM-5.1".into()],
             premium_models: vec!["GLM-5.1".into()],
@@ -2899,10 +2819,14 @@ mod tests {
         };
         upstream.normalize_for_storage();
 
-        assert!(upstream.supports_model("glm-5.1"));
-        assert_eq!(upstream.resolved_model_name("glm-5.1").as_deref(), Some("GLM-5.1"));
-        assert!(upstream.is_premium_model_request("glm-5.1"));
-        assert_eq!(upstream.request_cost_for_model("glm-5.1"), 2.0);
+        assert!(upstream.supports_model("GLM-5.1"));
+        assert!(!upstream.supports_model("glm-5.1"));
+        assert_eq!(upstream.resolved_model_name("GLM-5.1").as_deref(), Some("GLM-5.1"));
+        assert_eq!(upstream.resolved_model_name("glm-5.1"), None);
+        assert!(upstream.is_premium_model_request("GLM-5.1"));
+        assert!(!upstream.is_premium_model_request("glm-5.1"));
+        assert_eq!(upstream.request_cost_for_model("GLM-5.1"), 2.0);
+        assert_eq!(upstream.request_cost_for_model("glm-5.1"), 1.0);
     }
 
     #[test]
@@ -2922,21 +2846,24 @@ mod tests {
     }
 
     #[test]
-    fn model_resolution_is_case_insensitive_and_preserves_upstream_model_case() {
+    fn model_resolution_is_exact_and_preserves_upstream_model_case() {
         let mut upstream = UpstreamConfig {
             supported_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
             premium_models: vec!["MiniMax2.7".into()],
-            model_aliases: vec![],
             ..Default::default()
         };
         upstream.normalize_for_storage();
 
-        assert!(upstream.supports_model("minimax2.7"));
+        assert!(upstream.supports_model("MiniMax2.7"));
+        assert!(!upstream.supports_model("minimax2.7"));
         assert_eq!(
-            upstream.resolved_model_name("minimax2.7").as_deref(),
+            upstream.resolved_model_name("MiniMax2.7").as_deref(),
             Some("MiniMax2.7")
         );
-        assert!(upstream.is_premium_model_request("MINIMAX2.7"));
+        assert_eq!(upstream.resolved_model_name("minimax2.7"), None);
+        assert!(upstream.is_premium_model_request("MiniMax2.7"));
+        assert!(!upstream.is_premium_model_request("minimax2.7"));
+        assert_eq!(upstream.request_cost_for_model("MiniMax2.7"), 1.0);
         assert_eq!(upstream.request_cost_for_model("minimax2.7"), 1.0);
     }
 
@@ -3001,10 +2928,10 @@ mod tests {
         assert_eq!(
             upstream.model_contexts,
             vec![ModelContextConfig {
-                slug: "gpt-4.1".into(),
+                slug: "GPT-4.1".into(),
                 context_limit: 2,
                 output_reserve: 1,
-                context_group: "high-end".into(),
+                context_group: "High-End".into(),
             }]
         );
     }
@@ -3015,13 +2942,13 @@ mod tests {
             supported_models: vec!["MiniMax2.7".into(), "MiniMax2.7-Long".into()],
             model_contexts: vec![
                 ModelContextConfig {
-                    slug: "minimax2.7".into(),
+                    slug: "MiniMax2.7".into(),
                     context_limit: 128_000,
                     output_reserve: 8_000,
                     context_group: "minimax".into(),
                 },
                 ModelContextConfig {
-                    slug: "minimax2.7-long".into(),
+                    slug: "MiniMax2.7-Long".into(),
                     context_limit: 256_000,
                     output_reserve: 8_000,
                     context_group: "minimax".into(),
@@ -3033,12 +2960,12 @@ mod tests {
 
         assert_eq!(
             upstream
-                .context_config_for_model("minimax2.7")
+                .context_config_for_model("MiniMax2.7")
                 .map(|config| config.context_limit),
             Some(128_000)
         );
         assert_eq!(
-            upstream.context_fallback_model_for("minimax2.7", 150_000),
+            upstream.context_fallback_model_for("MiniMax2.7", 150_000),
             Some("MiniMax2.7-Long".into())
         );
     }

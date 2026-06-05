@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
+use tokio::time::Instant as TokioInstant;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
@@ -83,6 +84,8 @@ struct DispatchResult {
     usage_log_timing: UsageLogTiming,
 }
 
+const SSE_KEEPALIVE_INTERVAL_SECONDS: u64 = 10;
+
 #[derive(Clone)]
 struct StreamUsageLogContext {
     state: AppState,
@@ -98,6 +101,8 @@ struct StreamUsageLogContext {
     user_agent: Option<String>,
     normalized_model: String,
     status: StatusCode,
+    error_message: Option<String>,
+    error_category: Option<String>,
     started: Instant,
 }
 
@@ -112,6 +117,7 @@ impl std::fmt::Debug for StreamUsageLogContext {
             .field("model", &self.model)
             .field("normalized_model", &self.normalized_model)
             .field("status", &self.status)
+            .field("error_category", &self.error_category)
             .finish()
     }
 }
@@ -132,6 +138,8 @@ impl StreamUsageLogContext {
             user_agent,
             normalized_model,
             status,
+            error_message,
+            error_category,
             started,
         } = self;
 
@@ -153,8 +161,8 @@ impl StreamUsageLogContext {
             user_agent,
             request_id: request_id.clone(),
             status_code: status.as_u16(),
-            error_message: None,
-            error_category: None,
+            error_message,
+            error_category,
             prompt_tokens: usage.0,
             completion_tokens: usage.1,
             total_tokens: usage.2,
@@ -236,6 +244,7 @@ fn should_rollback_downstream_reservation(error: &GatewayError) -> bool {
         error,
         GatewayError::TooManyRequests { .. }
             | GatewayError::Upstream(_)
+            | GatewayError::GatewayTimeout(_)
             | GatewayError::TemporaryUpstreamUnavailable(_)
     )
 }
@@ -250,6 +259,7 @@ enum GatewayError {
         retry_after_seconds: Option<u64>,
     },
     Upstream(String),
+    GatewayTimeout(String),
     TemporaryUpstreamUnavailable(String),
 }
 
@@ -260,6 +270,7 @@ impl std::fmt::Display for GatewayError {
             | GatewayError::Forbidden(message)
             | GatewayError::BadRequest(message)
             | GatewayError::Upstream(message)
+            | GatewayError::GatewayTimeout(message)
             | GatewayError::TemporaryUpstreamUnavailable(message) => f.write_str(message),
             GatewayError::TooManyRequests { message, .. } => f.write_str(message),
         }
@@ -273,6 +284,9 @@ impl GatewayError {
         let (status, message, retry_after_seconds) = match self {
             GatewayError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message, None),
             GatewayError::Forbidden(message) => (StatusCode::FORBIDDEN, message, None),
+            GatewayError::GatewayTimeout(message) => {
+                (StatusCode::GATEWAY_TIMEOUT, message, None)
+            }
             GatewayError::TemporaryUpstreamUnavailable(message) => {
                 (StatusCode::SERVICE_UNAVAILABLE, message, None)
             }
@@ -662,6 +676,128 @@ impl StreamCompletionContext {
     }
 }
 
+fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
+    let normalized = error_message.to_ascii_lowercase();
+    if normalized.contains("idle timeout")
+        || normalized.contains("idle-timeout")
+        || normalized.contains("waiting for sse")
+        || (normalized.contains("timeout") && normalized.contains("sse"))
+        || (normalized.contains("timed out") && normalized.contains("sse"))
+    {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            "stream_idle_timeout",
+        )
+    } else {
+        (
+            StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
+            "stream_interrupted",
+        )
+    }
+}
+
+async fn finalize_stream_interruption(
+    completion_context: Option<StreamCompletionContext>,
+    log_context: Option<StreamUsageLogContext>,
+    usage: Option<(u64, u64, u64)>,
+    error_message: String,
+) {
+    let (status, error_category) = classify_stream_failure(&error_message);
+
+    if let Some(context) = completion_context {
+        context.release_all().await;
+        context.mark_failure().await;
+    }
+
+    if let Some(mut log_context) = log_context {
+        log_context.status = status;
+        log_context.error_message = Some(error_message);
+        log_context.error_category = Some(error_category.to_string());
+        log_context.emit(usage.unwrap_or((0, 0, 0))).await;
+    }
+}
+
+fn spawn_stream_interruption_cleanup(
+    completion_context: Option<StreamCompletionContext>,
+    log_context: Option<StreamUsageLogContext>,
+    usage: Option<(u64, u64, u64)>,
+    error_message: String,
+) {
+    if completion_context.is_none() && log_context.is_none() {
+        return;
+    }
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            finalize_stream_interruption(completion_context, log_context, usage, error_message)
+                .await;
+        });
+    } else {
+        tracing::warn!("stream cleanup dropped outside runtime; cleanup skipped");
+    }
+}
+
+enum StreamReadOutcome {
+    Chunk(Result<Option<Bytes>, reqwest::Error>),
+    Heartbeat,
+    IdleTimeout,
+}
+
+struct StreamWatchdog {
+    heartbeat_interval: Duration,
+    idle_timeout: Duration,
+    last_upstream_activity_at: TokioInstant,
+    last_heartbeat_at: TokioInstant,
+}
+
+impl StreamWatchdog {
+    fn new(heartbeat_interval: Duration, idle_timeout: Duration) -> Self {
+        let now = TokioInstant::now();
+        Self {
+            heartbeat_interval,
+            idle_timeout,
+            last_upstream_activity_at: now,
+            last_heartbeat_at: now,
+        }
+    }
+
+    fn heartbeat_deadline(&self) -> TokioInstant {
+        self.last_heartbeat_at + self.heartbeat_interval
+    }
+
+    fn idle_deadline(&self) -> TokioInstant {
+        self.last_upstream_activity_at + self.idle_timeout
+    }
+
+    fn record_upstream_activity(&mut self, at: TokioInstant) {
+        self.last_upstream_activity_at = at;
+        self.last_heartbeat_at = at;
+    }
+
+    fn record_heartbeat(&mut self, at: TokioInstant) {
+        self.last_heartbeat_at = at;
+    }
+}
+
+async fn wait_for_upstream_chunk(
+    response: &mut reqwest::Response,
+    watchdog: &StreamWatchdog,
+) -> StreamReadOutcome {
+    let idle_deadline = watchdog.idle_deadline();
+    let next_deadline = std::cmp::min(watchdog.heartbeat_deadline(), idle_deadline);
+
+    tokio::select! {
+        chunk = response.chunk() => StreamReadOutcome::Chunk(chunk),
+        _ = tokio::time::sleep_until(next_deadline) => {
+            if TokioInstant::now() >= idle_deadline {
+                StreamReadOutcome::IdleTimeout
+            } else {
+                StreamReadOutcome::Heartbeat
+            }
+        }
+    }
+}
+
 async fn process_gateway_request(
     state: AppState,
     headers: HeaderMap,
@@ -905,7 +1041,7 @@ async fn process_gateway_request(
             let minute_pressure = runtime.minute_cost + request_cost;
             let five_hour_pressure = runtime.five_hour_cost + request_cost;
             (
-                runtime.is_cooled_down(now),
+                runtime.is_in_cooldown(now),
                 runtime.cooldown_remaining(now),
                 runtime.in_flight,
                 minute_pressure as u64 * 1_000 / upstream.requests_per_minute.max(1) as u64,
@@ -1233,6 +1369,9 @@ async fn process_gateway_request(
                             retry_after_seconds,
                             "upstream rate limited"
                         );
+                        if state.config.routing_affinity_enabled {
+                            state.clear_affinity_upstream(&downstream.id, normalized_model);
+                        }
                         state
                             .mark_upstream_rate_limited(&upstream.id, retry_after_seconds)
                             .await;
@@ -1241,20 +1380,30 @@ async fn process_gateway_request(
                             retry_after_seconds: Some(retry_after_seconds),
                         });
 
-                        let has_uncooled_alternative =
+                        let has_available_alternative =
                             upstreams_for_retry.iter().any(|candidate| {
                                 candidate.id != upstream.id
                                     && upstream_runtime_snapshots
                                         .get(&candidate.id)
-                                        .map(|runtime| !runtime.is_cooled_down(now))
+                                        .map(|runtime| !runtime.is_in_cooldown(now))
                                         .unwrap_or(true)
                             });
-                        if request_cost >= 2.0
-                            && !has_uncooled_alternative
+                        // If every other candidate is currently unavailable, retry the
+                        // same upstream after its cooldown so single-candidate models
+                        // can still recover instead of failing immediately.
+                        if !has_available_alternative
                             && rate_limit_retry_attempts_used
                                 < state.config.upstream_rate_limit_retry_attempts.max(1)
                             && retry_after_seconds
-                                <= state.config.upstream_rate_limit_retry_window_seconds.max(1)
+                                <= state
+                                    .config
+                                    .upstream_rate_limit_retry_window_seconds
+                                    .max(1)
+                            && retry_after_seconds
+                                <= state
+                                    .config
+                                    .upstream_rate_limit_max_retry_after_seconds
+                                    .max(1)
                         {
                             rate_limit_retry_attempts_used =
                                 rate_limit_retry_attempts_used.saturating_add(1);
@@ -1381,9 +1530,9 @@ async fn process_gateway_request(
     if request_stream {
         state.release_downstream_concurrency(&downstream.id);
     }
-    state
-        .rollback_downstream_request_reservation(&downstream.id)
-        .await;
+    // Keep the downstream reservation so the portal reflects that the gateway
+    // actually received and processed one request attempt, even if no upstream
+    // could be routed.
     Err(no_routable_model_error(&routing_snapshot, model))
 }
 
@@ -2136,8 +2285,14 @@ async fn send_to_upstream(
         "dispatching request to upstream service"
     );
     let mut context_retry_attempted = false;
+    let response_header_timeout = Duration::from_secs(
+        state
+            .config
+            .upstream_response_header_timeout_seconds
+            .max(1),
+    );
     let response = loop {
-        let response = state
+        let send_future = state
             .client_for_url(&url)
             .post(url.clone())
             .header(
@@ -2145,9 +2300,10 @@ async fn send_to_upstream(
                 format!("Bearer {}", upstream.api_key),
             )
             .json(&upstream_body)
-            .send()
-            .await
-            .map_err(|error| {
+            .send();
+
+        let response = match tokio::time::timeout(response_header_timeout, send_future).await {
+            Ok(result) => result.map_err(|error| {
                 tracing::warn!(
                     request_id = %request_id,
                     downstream_key_id = %downstream_key_id,
@@ -2162,7 +2318,27 @@ async fn send_to_upstream(
                     "upstream request failed"
                 );
                 GatewayError::Upstream(format!("upstream request failed: {error}"))
-            })?;
+            })?,
+            Err(_) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream_key_id,
+                    path = %endpoint.path(),
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    selected_upstream_id = %upstream.id,
+                    selected_upstream_name = %upstream.name,
+                    selected_upstream_protocol = ?upstream_protocol,
+                    url = %url,
+                    header_timeout_seconds = response_header_timeout.as_secs(),
+                    "upstream response header timeout"
+                );
+                return Err(GatewayError::GatewayTimeout(format!(
+                    "upstream response header timeout after {}s",
+                    response_header_timeout.as_secs()
+                )));
+            }
+        };
 
         let status = response.status();
         if status.is_success() {
@@ -2304,6 +2480,12 @@ async fn send_to_upstream(
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
+        let stream_idle_timeout = Duration::from_secs(
+            state
+                .config
+                .upstream_stream_idle_timeout_seconds
+                .max(1),
+        );
 
         let mut usage_body = None;
         let body = if content_type.contains("text/event-stream") {
@@ -2321,10 +2503,17 @@ async fn send_to_upstream(
                 user_agent: user_agent.map(str::to_string),
                 normalized_model: normalized_model.to_string(),
                 status,
+                error_message: None,
+                error_category: None,
                 started,
             };
             if upstream_protocol == endpoint.native_protocol() {
-                proxied_stream_body(response, stream_log_context, stream_completion_context)?
+                proxied_stream_body(
+                    response,
+                    stream_log_context,
+                    stream_completion_context,
+                    stream_idle_timeout,
+                )?
             } else {
                 translated_stream_body(
                     response,
@@ -2332,6 +2521,7 @@ async fn send_to_upstream(
                     endpoint.native_protocol(),
                     stream_log_context,
                     stream_completion_context,
+                    stream_idle_timeout,
                 )?
             }
         } else {
@@ -2416,11 +2606,11 @@ fn no_routable_model_error(snapshot: &crate::state::PersistedState, model: &str)
 
     if visible_models.is_empty() {
         GatewayError::BadRequest(format!(
-            "model \"{model}\" is not configured on any active upstream; check supported_models or model_aliases"
+            "model \"{model}\" is not configured on any active upstream; check supported_models"
         ))
     } else {
         GatewayError::BadRequest(format!(
-            "model \"{model}\" is not configured on any active upstream; available models: {}; check supported_models or model_aliases",
+            "model \"{model}\" is not configured on any active upstream; available models: {}; check supported_models",
             visible_models.join(", ")
         ))
     }
@@ -3425,6 +3615,14 @@ fn dispatch_success(result: DispatchResult) -> Response {
                 HeaderValue::from_static("text/event-stream"),
             );
             headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-transform"),
+            );
+            headers.insert(
+                header::HeaderName::from_static("x-accel-buffering"),
+                HeaderValue::from_static("no"),
+            );
+            headers.insert(
                 header::HeaderName::from_static("x-gateway-request-id"),
                 request_id,
             );
@@ -3437,7 +3635,9 @@ fn proxied_stream_body(
     response: reqwest::Response,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
+    stream_idle_timeout: Duration,
 ) -> Result<Body, GatewayError> {
+    let heartbeat_interval = Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECONDS);
     let state = ProxiedStreamState {
         response,
         buffer: Vec::new(),
@@ -3446,16 +3646,18 @@ fn proxied_stream_body(
         completion_context: stream_completion_context,
         finished: false,
         usage_log_flushed: false,
+        watchdog: StreamWatchdog::new(heartbeat_interval, stream_idle_timeout),
     };
-    let stream = stream::try_unfold(state, |mut state| async move {
+    let stream = stream::try_unfold(state, move |mut state| async move {
         if state.finished {
             state.flush_usage_log().await?;
             state.finalize_completion().await?;
             return Ok(None);
         }
 
-        match state.response.chunk().await {
-            Ok(Some(chunk)) => {
+        match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
+            StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
+                state.watchdog.record_upstream_activity(TokioInstant::now());
                 state.buffer.extend_from_slice(&chunk);
                 state.drain_usage_from_buffer()?;
                 if state.finished {
@@ -3464,15 +3666,24 @@ fn proxied_stream_body(
                 }
                 Ok(Some((chunk, state)))
             }
-            Ok(None) => {
+            StreamReadOutcome::Chunk(Ok(None)) => {
                 state.finish_stream();
                 state.flush_usage_log().await?;
                 state.finalize_completion().await?;
                 Ok(None)
             }
-            Err(error) => {
-                state.mark_stream_interrupted().await;
+            StreamReadOutcome::Chunk(Err(error)) => {
+                state.mark_stream_interrupted(error.to_string()).await;
                 Err(std::io::Error::other(error.to_string()))
+            }
+            StreamReadOutcome::Heartbeat => {
+                state.watchdog.record_heartbeat(TokioInstant::now());
+                Ok(Some((sse_keepalive_frame(), state)))
+            }
+            StreamReadOutcome::IdleTimeout => {
+                let error_message = "idle timeout waiting for SSE".to_string();
+                state.mark_stream_interrupted(error_message.clone()).await;
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, error_message))
             }
         }
     });
@@ -3488,6 +3699,7 @@ struct ProxiedStreamState {
     completion_context: Option<StreamCompletionContext>,
     finished: bool,
     usage_log_flushed: bool,
+    watchdog: StreamWatchdog,
 }
 
 impl ProxiedStreamState {
@@ -3550,11 +3762,35 @@ impl ProxiedStreamState {
         Ok(())
     }
 
-    async fn mark_stream_interrupted(&mut self) {
-        if let Some(context) = self.completion_context.take() {
-            context.release_all().await;
-            context.mark_failure().await;
+    async fn mark_stream_interrupted(&mut self, error_message: String) {
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+        finalize_stream_interruption(
+            completion_context,
+            log_context,
+            usage,
+            error_message,
+        )
+        .await;
+    }
+}
+
+impl Drop for ProxiedStreamState {
+    fn drop(&mut self) {
+        if self.completion_context.is_none() && self.log_context.is_none() {
+            return;
         }
+
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+        spawn_stream_interruption_cleanup(
+            completion_context,
+            log_context,
+            usage,
+            "stream disconnected before completion".to_string(),
+        );
     }
 }
 
@@ -3564,6 +3800,7 @@ fn translated_stream_body(
     target_protocol: UpstreamProtocol,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
+    stream_idle_timeout: Duration,
 ) -> Result<Body, GatewayError> {
     let translator = StreamTranslator::new(source_protocol, target_protocol).ok_or_else(|| {
         GatewayError::BadRequest(
@@ -3571,6 +3808,7 @@ fn translated_stream_body(
         )
     })?;
 
+    let heartbeat_interval = Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECONDS);
     let state = TranslatedStreamState {
         response,
         translator,
@@ -3581,10 +3819,15 @@ fn translated_stream_body(
         completion_context: stream_completion_context,
         finished: false,
         usage_log_flushed: false,
+        watchdog: StreamWatchdog::new(heartbeat_interval, stream_idle_timeout),
     };
-    let stream = stream::try_unfold(state, |mut state| async move {
+    let stream = stream::try_unfold(state, move |mut state| async move {
         loop {
             if let Some(bytes) = state.pending.pop_front() {
+                if state.finished {
+                    state.flush_usage_log().await?;
+                    state.finalize_completion().await?;
+                }
                 return Ok(Some((bytes, state)));
             }
 
@@ -3594,23 +3837,38 @@ fn translated_stream_body(
                 return Ok(None);
             }
 
-            match state.response.chunk().await {
-                Ok(Some(chunk)) => {
+            match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
+                StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
+                    state.watchdog.record_upstream_activity(TokioInstant::now());
                     state.buffer.extend_from_slice(&chunk);
                     state.drain_buffer()?;
                 }
-                Ok(None) => {
+                StreamReadOutcome::Chunk(Ok(None)) => {
                     state.finish_stream()?;
                     if let Some(bytes) = state.pending.pop_front() {
+                        state.flush_usage_log().await?;
+                        state.finalize_completion().await?;
                         return Ok(Some((bytes, state)));
                     }
                     state.flush_usage_log().await?;
                     state.finalize_completion().await?;
                     return Ok(None);
                 }
-                Err(error) => {
-                    state.mark_stream_interrupted().await;
+                StreamReadOutcome::Chunk(Err(error)) => {
+                    state.mark_stream_interrupted(error.to_string()).await;
                     return Err(std::io::Error::other(error.to_string()));
+                }
+                StreamReadOutcome::Heartbeat => {
+                    state.watchdog.record_heartbeat(TokioInstant::now());
+                    return Ok(Some((sse_keepalive_frame(), state)));
+                }
+                StreamReadOutcome::IdleTimeout => {
+                    let error_message = "idle timeout waiting for SSE".to_string();
+                    state.mark_stream_interrupted(error_message.clone()).await;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        error_message,
+                    ));
                 }
             }
         }
@@ -3629,6 +3887,7 @@ struct TranslatedStreamState {
     completion_context: Option<StreamCompletionContext>,
     finished: bool,
     usage_log_flushed: bool,
+    watchdog: StreamWatchdog,
 }
 
 impl TranslatedStreamState {
@@ -3707,16 +3966,44 @@ impl TranslatedStreamState {
         Ok(())
     }
 
-    async fn mark_stream_interrupted(&mut self) {
-        if let Some(context) = self.completion_context.take() {
-            context.release_all().await;
-            context.mark_failure().await;
+    async fn mark_stream_interrupted(&mut self, error_message: String) {
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+        finalize_stream_interruption(
+            completion_context,
+            log_context,
+            usage,
+            error_message,
+        )
+        .await;
+    }
+}
+
+impl Drop for TranslatedStreamState {
+    fn drop(&mut self) {
+        if self.completion_context.is_none() && self.log_context.is_none() {
+            return;
         }
+
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+        spawn_stream_interruption_cleanup(
+            completion_context,
+            log_context,
+            usage,
+            "stream disconnected before completion".to_string(),
+        );
     }
 }
 
 fn serialize_sse_data(value: &Value) -> Bytes {
     Bytes::from(format!("data: {}\n\n", value))
+}
+
+fn sse_keepalive_frame() -> Bytes {
+    Bytes::from_static(b": keepalive\n\n")
 }
 
 fn sse_done_frame() -> Bytes {
@@ -3849,26 +4136,279 @@ async fn admin_login(
     }
 }
 
-async fn admin_dashboard(State(state): State<AppState>) -> impl IntoResponse {
-    let snapshot = state.snapshot().await;
+#[derive(Debug, Deserialize)]
+struct DashboardQuery {
+    #[serde(default = "default_dashboard_range")]
+    range: String,
+}
 
-    Json(json!({
-        "upstreams_count": snapshot.upstreams.len(),
-        "upstreams_active": snapshot.upstreams.iter().filter(|u| u.active).count(),
-        "downstreams_count": snapshot.downstreams.len(),
-        "downstreams_active": snapshot.downstreams.iter().filter(|d| d.active).count(),
-        "logs_count": snapshot.usage_logs.len(),
-        "active_models": snapshot.upstreams.iter()
-            .flat_map(|u| u.route_models())
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        "responses_upstreams": snapshot.upstreams.iter()
+fn default_dashboard_range() -> String {
+    "7d".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DashboardSummaryResponse {
+    upstreams_count: usize,
+    upstreams_active: usize,
+    downstreams_count: usize,
+    downstreams_active: usize,
+    logs_count: usize,
+    active_models: usize,
+    responses_upstreams: usize,
+    admin_username: String,
+    app_name: String,
+    analytics: DashboardAnalyticsResponse,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DashboardAnalyticsResponse {
+    range: String,
+    summary: DashboardAnalyticsSummary,
+    daily_series: Vec<DashboardDailySeriesItem>,
+    failure_categories: Vec<DashboardNamedValue>,
+    user_agent_clusters: Vec<DashboardNamedValue>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DashboardAnalyticsSummary {
+    total_requests: u64,
+    success_rate: f64,
+    average_latency_ms: u64,
+    total_tokens: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DashboardDailySeriesItem {
+    date: u64,
+    requests: u64,
+    tokens: u64,
+    avg_latency_ms: u64,
+    success_rate: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DashboardNamedValue {
+    name: String,
+    value: u64,
+}
+
+async fn admin_dashboard(
+    State(state): State<AppState>,
+    Query(query): Query<DashboardQuery>,
+) -> impl IntoResponse {
+    let range = match query.range.as_str() {
+        "1d" | "24h" => "1d",
+        "30d" => "30d",
+        _ => "7d",
+    };
+    let cache_key = format!("dashboard:{range}");
+    if let Some(cached) = state.get_cached_json::<DashboardSummaryResponse>(&cache_key).await {
+        return Json(cached).into_response();
+    }
+
+    let snapshot = state.snapshot().await;
+    let now = unix_seconds();
+    let days = match range {
+        "1d" => 1,
+        "30d" => 30,
+        _ => 7,
+    };
+    let window_start = now.saturating_sub((days as u64 - 1) * 24 * 60 * 60);
+    let daily_start = (window_start / 86400) * 86400;
+    let mut daily_series = Vec::with_capacity(days);
+    for offset in (0..days).rev() {
+        let date = daily_start.saturating_add((offset as u64) * 86400);
+        daily_series.push(DashboardDailySeriesItem {
+            date,
+            requests: 0,
+            tokens: 0,
+            avg_latency_ms: 0,
+            success_rate: 0.0,
+        });
+    }
+
+    let mut total_requests = 0u64;
+    let mut total_success = 0u64;
+    let mut total_latency = 0u64;
+    let mut total_tokens = 0u64;
+    let mut failure_counter: HashMap<String, u64> = HashMap::new();
+    let mut user_agent_downstreams: HashMap<String, HashSet<String>> = HashMap::new();
+
+    let day_index = daily_series
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.date, index))
+        .collect::<HashMap<_, _>>();
+
+    for log in snapshot.usage_logs.iter().filter(|log| log.created_at >= window_start) {
+        total_requests += 1;
+        if (200..300).contains(&log.status_code) {
+            total_success += 1;
+        }
+        total_latency += log.latency_ms;
+        total_tokens += log.total_tokens;
+
+        let day_key = (log.created_at / 86400) * 86400;
+        if let Some(&index) = day_index.get(&day_key) {
+            let bucket = &mut daily_series[index];
+            bucket.requests += 1;
+            bucket.tokens += log.total_tokens;
+            bucket.avg_latency_ms += log.latency_ms;
+            if (200..300).contains(&log.status_code) {
+                bucket.success_rate += 1.0;
+            }
+        }
+
+        if let Some(category) = classify_dashboard_failure(log) {
+            *failure_counter.entry(category).or_insert(0) += 1;
+        }
+
+        if let Some(cluster) = classify_user_agent(log.user_agent.as_deref()) {
+            user_agent_downstreams
+                .entry(cluster)
+                .or_default()
+                .insert(log.downstream_key_id.clone());
+        }
+    }
+
+    for bucket in &mut daily_series {
+        if bucket.requests > 0 {
+            bucket.avg_latency_ms /= bucket.requests;
+            bucket.success_rate = (bucket.success_rate / bucket.requests as f64) * 100.0;
+        }
+    }
+
+    let mut failure_categories = failure_counter
+        .into_iter()
+        .map(|(name, value)| DashboardNamedValue { name, value })
+        .collect::<Vec<_>>();
+    failure_categories.sort_by(|left, right| right.value.cmp(&left.value).then(left.name.cmp(&right.name)));
+
+    let mut user_agent_clusters = user_agent_downstreams
+        .into_iter()
+        .map(|(name, downstreams)| DashboardNamedValue {
+            name,
+            value: downstreams.len() as u64,
+        })
+        .collect::<Vec<_>>();
+    user_agent_clusters.sort_by(|left, right| right.value.cmp(&left.value).then(left.name.cmp(&right.name)));
+
+    let analytics = DashboardAnalyticsResponse {
+        range: range.to_string(),
+        summary: DashboardAnalyticsSummary {
+            total_requests,
+            success_rate: if total_requests > 0 {
+                (total_success as f64 / total_requests as f64) * 100.0
+            } else {
+                0.0
+            },
+            average_latency_ms: if total_requests > 0 {
+                total_latency / total_requests
+            } else {
+                0
+            },
+            total_tokens,
+        },
+        daily_series,
+        failure_categories,
+        user_agent_clusters,
+    };
+
+    let active_models = snapshot
+        .upstreams
+        .iter()
+        .filter(|u| u.active)
+        .flat_map(|u| u.route_models())
+        .collect::<HashSet<_>>()
+        .len();
+
+    let response = DashboardSummaryResponse {
+        upstreams_count: snapshot.upstreams.len(),
+        upstreams_active: snapshot.upstreams.iter().filter(|u| u.active).count(),
+        downstreams_count: snapshot.downstreams.len(),
+        downstreams_active: snapshot.downstreams.iter().filter(|d| d.active).count(),
+        logs_count: snapshot.usage_logs.len(),
+        active_models,
+        responses_upstreams: snapshot
+            .upstreams
+            .iter()
             .filter(|u| u.active && u.supports_protocol(UpstreamProtocol::Responses))
             .count(),
-        "admin_username": state.config.admin_username.clone(),
-        "app_name": state.config.app_name.clone(),
-    }))
-    .into_response()
+        admin_username: state.config.admin_username.clone(),
+        app_name: state.config.app_name.clone(),
+        analytics,
+    };
+
+    state
+        .set_cached_json(&cache_key, &response, state.config.dashboard_cache_ttl_seconds)
+        .await;
+
+    Json(response).into_response()
+}
+
+fn classify_dashboard_failure(log: &UsageLog) -> Option<String> {
+    let status = log.status_code;
+    if status < 400 {
+        return None;
+    }
+
+    let error_message = log.error_message.as_deref().unwrap_or("").to_lowercase();
+    if status == 400
+        && (error_message.contains("context window")
+            || error_message.contains("context length")
+            || error_message.contains("token limit")
+            || error_message.contains("request exceeds limit")
+            || error_message.contains("exceeded by"))
+    {
+        return Some("400-上下文超限".to_string());
+    }
+    if status == 429
+        || error_message.contains("rate limit")
+        || error_message.contains("quota")
+        || error_message.contains("too many requests")
+    {
+        return Some("429-配额/限流".to_string());
+    }
+    if status >= 500 || error_message.contains("upstream") || error_message.contains("bad gateway") {
+        return Some("5xx-上游异常".to_string());
+    }
+    if status == 401 || status == 403 {
+        return Some("认证/权限".to_string());
+    }
+    Some("其它错误".to_string())
+}
+
+fn classify_user_agent(user_agent: Option<&str>) -> Option<String> {
+    let raw = user_agent?.trim();
+    if raw.is_empty() || raw == "未采集" {
+        return None;
+    }
+    let lower = raw.to_lowercase();
+    let name = if lower.contains("claude-code") {
+        "Claude-Code"
+    } else if lower.contains("chatgpt") || lower.contains("openai") {
+        "OpenAI/ChatGPT"
+    } else if lower.contains("postmanruntime") {
+        "Postman"
+    } else if lower.contains("insomnia") {
+        "Insomnia"
+    } else if lower.contains("curl/") {
+        "curl"
+    } else if lower.contains("python-requests") {
+        "python-requests"
+    } else if lower.contains("httpie") {
+        "HTTPie"
+    } else if lower.contains("okhttp") {
+        "OkHttp"
+    } else if lower.contains("axios") {
+        "Axios"
+    } else if lower.contains("mozilla/") {
+        "Browser"
+    } else {
+        let token = raw.split_whitespace().next().unwrap_or(raw);
+        return Some(token.split('/').next().unwrap_or(token).chars().take(24).collect());
+    };
+    Some(name.to_string())
 }
 
 async fn portal_login(

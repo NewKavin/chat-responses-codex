@@ -7,13 +7,7 @@
       "api_key": "sk-your-glm-key",
       "protocol": "ChatCompletions",
       "supported_models": [
-        "glm-5"
-      ],
-      "model_aliases": [
-        {
-          "slug": "glm-5",
-          "upstream_model": "GLM-5"
-        }
+        "ZhipuAI/GLM-5"
       ],
       "active": true,
       "failure_count": 0
@@ -25,13 +19,7 @@
       "api_key": "sk-your-minimax-key",
       "protocol": "ChatCompletions",
       "supported_models": [
-        "minimax-m2.7"
-      ],
-      "model_aliases": [
-        {
-          "slug": "minimax-m2.7",
-          "upstream_model": "MiniMax-M2.7"
-        }
+        "MiniMax/MiniMax-M2.7"
       ],
       "active": true,
       "failure_count": 0
@@ -43,13 +31,7 @@
       "api_key": "sk-your-deepseek-key",
       "protocol": "ChatCompletions",
       "supported_models": [
-        "deepseek-r1"
-      ],
-      "model_aliases": [
-        {
-          "slug": "deepseek-r1",
-          "upstream_model": "DeepSeek-R1"
-        }
+        "deepseek-ai/DeepSeek-R1-0528"
       ],
       "active": true,
       "failure_count": 0

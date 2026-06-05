@@ -1,11 +1,12 @@
 .git
 .agents
 .codex
-.cargo
+.cargo/*
+!.cargo/config.toml
+frontend/dist/
+frontend/node_modules/
+frontend/.vite/
 *.log
 data/
 logs/
-target/*
-!target/release/
-target/release/*
-!target/release/chat-responses-codex
+target/
