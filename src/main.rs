@@ -4,7 +4,6 @@ use chrono::{FixedOffset, Utc};
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
@@ -96,9 +95,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             30,
         )
         .max(1),
+        upstream_stream_keepalive_interval_seconds: env_u64(
+            "UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS",
+            10,
+        )
+        .max(1),
         upstream_stream_idle_timeout_seconds: env_u64(
             "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS",
             1_800,
+        )
+        .max(1),
+        upstream_stream_max_duration_seconds: env_u64(
+            "UPSTREAM_STREAM_MAX_DURATION_SECONDS",
+            86_400,
         )
         .max(1),
     };

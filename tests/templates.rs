@@ -71,12 +71,36 @@ fn gateway_state_example_exposes_live_model_ids_exactly() {
 }
 
 #[test]
-fn app_config_defaults_stream_idle_timeout_to_thirty_minutes() {
+fn app_config_defaults_stream_watchdog_settings() {
     let config = AppConfig::default();
 
-    assert_eq!(
-        config.upstream_stream_idle_timeout_seconds,
-        1_800,
-        "the default stream idle timeout should give long SSE requests more headroom"
-    );
+    assert_eq!(config.upstream_stream_keepalive_interval_seconds, 10);
+    assert_eq!(config.upstream_stream_idle_timeout_seconds, 1_800);
+    assert_eq!(config.upstream_stream_max_duration_seconds, 86_400);
+}
+
+#[test]
+fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_settings() {
+    let env_example = fs::read_to_string(".env.example").unwrap();
+    let compose = fs::read_to_string("docker-compose.yml").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+
+    for marker in [
+        "UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS",
+        "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS",
+        "UPSTREAM_STREAM_MAX_DURATION_SECONDS",
+    ] {
+        assert!(
+            env_example.contains(marker),
+            ".env.example should expose {marker}"
+        );
+        assert!(
+            compose.contains(marker),
+            "docker-compose.yml should expose {marker}"
+        );
+        assert!(
+            deployment.contains(marker),
+            "DEPLOYMENT.md should document {marker}"
+        );
+    }
 }

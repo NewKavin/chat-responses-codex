@@ -8245,7 +8245,7 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stream_idle_timeout_is_not_reset_by_keepalive_heartbeats() {
+async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -8262,7 +8262,12 @@ async fn stream_idle_timeout_is_not_reset_by_keepalive_heartbeats() {
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/event-stream"),
             );
-            let stream = stream::pending::<Result<Bytes, std::io::Error>>();
+            let stream = stream::once(async {
+                tokio::time::sleep(Duration::from_millis(2_200)).await;
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n",
+                ))
+            });
             (StatusCode::OK, headers, Body::from_stream(stream))
         }),
     );
@@ -8273,7 +8278,9 @@ async fn stream_idle_timeout_is_not_reset_by_keepalive_heartbeats() {
 
     let downstream_key = generate_downstream_key("gw");
     let mut config = AppConfig::default();
-    config.upstream_stream_idle_timeout_seconds = 11;
+    config.upstream_stream_keepalive_interval_seconds = 1;
+    config.upstream_stream_idle_timeout_seconds = 2;
+    config.upstream_stream_max_duration_seconds = 10;
     config.upstream_response_header_timeout_seconds = 1;
     config.upstream_connect_timeout_seconds = 1;
     let state = AppState::new(
@@ -8352,23 +8359,181 @@ async fn stream_idle_timeout_is_not_reset_by_keepalive_heartbeats() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let first_frame = tokio::time::timeout(Duration::from_secs(12), body.frame())
+    let keepalive_bytes = Bytes::from_static(b": keepalive\n\n");
+
+    let first_frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
         .await
         .expect("expected the first keepalive frame before the idle timeout")
         .expect("expected first keepalive frame")
         .expect("expected data frame");
     let first_bytes = first_frame.into_data().expect("expected keepalive bytes");
-    assert_eq!(first_bytes, Bytes::from_static(b": keepalive\n\n"));
+    assert_eq!(first_bytes, keepalive_bytes);
 
-    let second_frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+    let mut saw_real_chunk = false;
+    let mut saw_stream_end = false;
+    for _ in 0..4 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("timed out waiting for the upstream chunk or a keepalive");
+
+        match frame {
+            Some(Ok(frame)) => {
+                let bytes = frame.into_data().expect("expected stream bytes");
+                if bytes != keepalive_bytes {
+                    saw_real_chunk = true;
+                }
+            }
+            Some(Err(error)) => panic!("unexpected stream error: {error}"),
+            None => {
+                saw_stream_end = true;
+                break;
+            }
+        }
+    }
+
+    assert!(saw_real_chunk, "expected the delayed upstream chunk to complete the stream");
+    assert!(saw_stream_end, "expected the stream to close cleanly after the upstream chunk");
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+
+    let snapshot = state.snapshot().await;
+    let log = snapshot.usage_logs.last().expect("expected usage log entry");
+    assert_eq!(log.status_code, 200);
+    assert_eq!(log.error_category.as_deref(), None);
+    assert_eq!(log.error_message.as_deref(), None);
+}
+
+#[tokio::test]
+async fn stream_max_duration_interrupts_hung_stream() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("expected the idle watchdog to fire before the next keepalive");
-    let error = second_frame
-        .expect("expected a terminal stream result")
-        .expect_err("expected the stream to fail with an idle timeout");
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|_body: String| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            let stream = stream::pending::<Result<Bytes, std::io::Error>>();
+            (StatusCode::OK, headers, Body::from_stream(stream))
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let mut config = AppConfig::default();
+    config.upstream_stream_keepalive_interval_seconds = 10;
+    config.upstream_stream_idle_timeout_seconds = 60;
+    config.upstream_stream_max_duration_seconds = 1;
+    config.upstream_response_header_timeout_seconds = 1;
+    config.upstream_connect_timeout_seconds = 1;
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                model_contexts: vec![],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                model_request_costs: vec![],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
+                active: true,
+                failure_count: 0,
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+        },
+        state_path,
+        config,
+    );
+
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let body_result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match body.frame().await {
+                Some(Ok(frame)) => {
+                    let bytes = frame.into_data().expect("expected data frame");
+                    if bytes.windows(b"[DONE]".len()).any(|window| window == b"[DONE]") {
+                        return Ok::<(), String>(());
+                    }
+                }
+                Some(Err(error)) => return Err(error.to_string()),
+                None => return Err("stream unexpectedly ended before timing out".to_string()),
+            }
+        }
+    })
+    .await
+    .expect("stream did not time out in time");
+
+    let body_error = body_result.expect_err("stream unexpectedly completed before timing out");
     assert!(
-        error.to_string().contains("idle timeout waiting for SSE"),
-        "unexpected stream error: {error}"
+        body_error.contains("max duration"),
+        "unexpected stream error: {body_error}"
     );
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
@@ -8376,7 +8541,15 @@ async fn stream_idle_timeout_is_not_reset_by_keepalive_heartbeats() {
     let snapshot = state.snapshot().await;
     let log = snapshot.usage_logs.last().expect("expected usage log entry");
     assert_eq!(log.status_code, 504);
-    assert_eq!(log.error_category.as_deref(), Some("stream_idle_timeout"));
+    assert_eq!(log.error_category.as_deref(), Some("stream_max_duration"));
+    assert!(
+        log.error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("stream max duration exceeded before completion"),
+        "unexpected max duration message: {:?}",
+        log.error_message
+    );
 }
 
 #[tokio::test]

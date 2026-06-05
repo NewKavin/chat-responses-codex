@@ -28,7 +28,12 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
 - `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
+- `UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10`
 - `UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800`
+- `UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400`
+
+Keep the keepalive interval below the idle timeout so the gateway can emit
+heartbeats before the idle watchdog fires.
 
 Optional for file-backed compatibility mode:
 
@@ -70,7 +75,9 @@ docker run -d \
   -e USAGE_LOG_ARCHIVE_MAX_FILES=10 \
   -e UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3 \
   -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
+  -e UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10 \
   -e UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800 \
+  -e UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400 \
   -v ./data:/data \
   -v ./logs:/logs \
   chat-responses-codex:latest
@@ -126,6 +133,8 @@ services:
       USAGE_LOG_ROTATION_MAX_BYTES: "1048576"
       USAGE_LOG_ARCHIVE_MAX_FILES: "10"
       UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: "1800"
+      UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS: "10"
+      UPSTREAM_STREAM_MAX_DURATION_SECONDS: "86400"
     volumes:
       - ./logs:/logs
 

@@ -55,7 +55,9 @@ pub struct AppConfig {
     pub dashboard_cache_ttl_seconds: u64,
     pub upstream_connect_timeout_seconds: u64,
     pub upstream_response_header_timeout_seconds: u64,
+    pub upstream_stream_keepalive_interval_seconds: u64,
     pub upstream_stream_idle_timeout_seconds: u64,
+    pub upstream_stream_max_duration_seconds: u64,
 }
 
 impl Default for AppConfig {
@@ -84,7 +86,9 @@ impl Default for AppConfig {
             dashboard_cache_ttl_seconds: 30,
             upstream_connect_timeout_seconds: 30,
             upstream_response_header_timeout_seconds: 30,
+            upstream_stream_keepalive_interval_seconds: 10,
             upstream_stream_idle_timeout_seconds: 1_800,
+            upstream_stream_max_duration_seconds: 86_400,
         }
     }
 }

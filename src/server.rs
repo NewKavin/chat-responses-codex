@@ -5,7 +5,7 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, unix_seconds, AppState, DownstreamConfig, UpstreamConfig,
+    join_upstream_url, unix_seconds, AppConfig, AppState, DownstreamConfig, UpstreamConfig,
     UpstreamMutationError, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
@@ -84,7 +84,24 @@ struct DispatchResult {
     usage_log_timing: UsageLogTiming,
 }
 
-const SSE_KEEPALIVE_INTERVAL_SECONDS: u64 = 10;
+#[derive(Clone, Copy)]
+struct StreamTimeouts {
+    keepalive_interval: Duration,
+    idle_timeout: Duration,
+    max_duration: Duration,
+}
+
+impl StreamTimeouts {
+    fn from_config(config: &AppConfig) -> Self {
+        Self {
+            keepalive_interval: Duration::from_secs(
+                config.upstream_stream_keepalive_interval_seconds.max(1),
+            ),
+            idle_timeout: Duration::from_secs(config.upstream_stream_idle_timeout_seconds.max(1)),
+            max_duration: Duration::from_secs(config.upstream_stream_max_duration_seconds.max(1)),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct StreamUsageLogContext {
@@ -678,7 +695,16 @@ impl StreamCompletionContext {
 
 fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
     let normalized = error_message.to_ascii_lowercase();
-    if normalized.contains("idle timeout")
+    if normalized.contains("max duration")
+        || normalized.contains("maximum duration")
+        || normalized.contains("stream duration")
+        || normalized.contains("hard timeout")
+    {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            "stream_max_duration",
+        )
+    } else if normalized.contains("idle timeout")
         || normalized.contains("idle-timeout")
         || normalized.contains("waiting for sse")
         || (normalized.contains("timeout") && normalized.contains("sse"))
@@ -741,21 +767,26 @@ enum StreamReadOutcome {
     Chunk(Result<Option<Bytes>, reqwest::Error>),
     Heartbeat,
     IdleTimeout,
+    MaxDurationExceeded,
 }
 
 struct StreamWatchdog {
     heartbeat_interval: Duration,
     idle_timeout: Duration,
+    max_duration: Duration,
+    started_at: TokioInstant,
     last_upstream_activity_at: TokioInstant,
     last_heartbeat_at: TokioInstant,
 }
 
 impl StreamWatchdog {
-    fn new(heartbeat_interval: Duration, idle_timeout: Duration) -> Self {
+    fn new(timeouts: StreamTimeouts) -> Self {
         let now = TokioInstant::now();
         Self {
-            heartbeat_interval,
-            idle_timeout,
+            heartbeat_interval: timeouts.keepalive_interval,
+            idle_timeout: timeouts.idle_timeout,
+            max_duration: timeouts.max_duration,
+            started_at: now,
             last_upstream_activity_at: now,
             last_heartbeat_at: now,
         }
@@ -769,13 +800,18 @@ impl StreamWatchdog {
         self.last_upstream_activity_at + self.idle_timeout
     }
 
+    fn max_deadline(&self) -> TokioInstant {
+        self.started_at + self.max_duration
+    }
+
     fn record_upstream_activity(&mut self, at: TokioInstant) {
         self.last_upstream_activity_at = at;
         self.last_heartbeat_at = at;
     }
 
     fn record_heartbeat(&mut self, at: TokioInstant) {
-        self.last_heartbeat_at = at;
+        // Heartbeats are downstream-visible progress and should extend the idle window.
+        self.record_upstream_activity(at);
     }
 }
 
@@ -784,12 +820,19 @@ async fn wait_for_upstream_chunk(
     watchdog: &StreamWatchdog,
 ) -> StreamReadOutcome {
     let idle_deadline = watchdog.idle_deadline();
-    let next_deadline = std::cmp::min(watchdog.heartbeat_deadline(), idle_deadline);
+    let max_deadline = watchdog.max_deadline();
+    let next_deadline = std::cmp::min(
+        watchdog.heartbeat_deadline(),
+        std::cmp::min(idle_deadline, max_deadline),
+    );
 
     tokio::select! {
         chunk = response.chunk() => StreamReadOutcome::Chunk(chunk),
         _ = tokio::time::sleep_until(next_deadline) => {
-            if TokioInstant::now() >= idle_deadline {
+            let now = TokioInstant::now();
+            if now >= max_deadline {
+                StreamReadOutcome::MaxDurationExceeded
+            } else if now >= idle_deadline {
                 StreamReadOutcome::IdleTimeout
             } else {
                 StreamReadOutcome::Heartbeat
@@ -2480,12 +2523,7 @@ async fn send_to_upstream(
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let stream_idle_timeout = Duration::from_secs(
-            state
-                .config
-                .upstream_stream_idle_timeout_seconds
-                .max(1),
-        );
+        let stream_timeouts = StreamTimeouts::from_config(&state.config);
 
         let mut usage_body = None;
         let body = if content_type.contains("text/event-stream") {
@@ -2512,7 +2550,7 @@ async fn send_to_upstream(
                     response,
                     stream_log_context,
                     stream_completion_context,
-                    stream_idle_timeout,
+                    stream_timeouts,
                 )?
             } else {
                 translated_stream_body(
@@ -2521,7 +2559,7 @@ async fn send_to_upstream(
                     endpoint.native_protocol(),
                     stream_log_context,
                     stream_completion_context,
-                    stream_idle_timeout,
+                    stream_timeouts,
                 )?
             }
         } else {
@@ -3635,9 +3673,8 @@ fn proxied_stream_body(
     response: reqwest::Response,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
-    stream_idle_timeout: Duration,
+    stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
-    let heartbeat_interval = Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECONDS);
     let state = ProxiedStreamState {
         response,
         buffer: Vec::new(),
@@ -3646,7 +3683,7 @@ fn proxied_stream_body(
         completion_context: stream_completion_context,
         finished: false,
         usage_log_flushed: false,
-        watchdog: StreamWatchdog::new(heartbeat_interval, stream_idle_timeout),
+        watchdog: StreamWatchdog::new(stream_timeouts),
     };
     let stream = stream::try_unfold(state, move |mut state| async move {
         if state.finished {
@@ -3682,6 +3719,11 @@ fn proxied_stream_body(
             }
             StreamReadOutcome::IdleTimeout => {
                 let error_message = "idle timeout waiting for SSE".to_string();
+                state.mark_stream_interrupted(error_message.clone()).await;
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, error_message))
+            }
+            StreamReadOutcome::MaxDurationExceeded => {
+                let error_message = "stream max duration exceeded before completion".to_string();
                 state.mark_stream_interrupted(error_message.clone()).await;
                 Err(std::io::Error::new(std::io::ErrorKind::TimedOut, error_message))
             }
@@ -3800,7 +3842,7 @@ fn translated_stream_body(
     target_protocol: UpstreamProtocol,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
-    stream_idle_timeout: Duration,
+    stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
     let translator = StreamTranslator::new(source_protocol, target_protocol).ok_or_else(|| {
         GatewayError::BadRequest(
@@ -3808,7 +3850,6 @@ fn translated_stream_body(
         )
     })?;
 
-    let heartbeat_interval = Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECONDS);
     let state = TranslatedStreamState {
         response,
         translator,
@@ -3819,7 +3860,7 @@ fn translated_stream_body(
         completion_context: stream_completion_context,
         finished: false,
         usage_log_flushed: false,
-        watchdog: StreamWatchdog::new(heartbeat_interval, stream_idle_timeout),
+        watchdog: StreamWatchdog::new(stream_timeouts),
     };
     let stream = stream::try_unfold(state, move |mut state| async move {
         loop {
@@ -3864,6 +3905,15 @@ fn translated_stream_body(
                 }
                 StreamReadOutcome::IdleTimeout => {
                     let error_message = "idle timeout waiting for SSE".to_string();
+                    state.mark_stream_interrupted(error_message.clone()).await;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        error_message,
+                    ));
+                }
+                StreamReadOutcome::MaxDurationExceeded => {
+                    let error_message =
+                        "stream max duration exceeded before completion".to_string();
                     state.mark_stream_interrupted(error_message.clone()).await;
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
