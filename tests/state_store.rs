@@ -2,6 +2,7 @@ use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
     AppConfig, AppState, DownstreamConfig, PersistedState, UsageLog, UsageLogQuery,
 };
+use chat_responses_codex::state::log_queries::build_downstream_usage_summary;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -103,6 +104,84 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
 }
 
 #[tokio::test]
+async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
+    let now = chat_responses_codex::state::unix_seconds();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![],
+            downstreams: vec![],
+            usage_logs: vec![
+                UsageLog {
+                    id: "z-log".to_string(),
+                    request_id: "req-a".to_string(),
+                    downstream_key_id: "downstream-1".to_string(),
+                    upstream_key_id: "upstream-1".to_string(),
+                    downstream_name: None,
+                    upstream_name: None,
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "gpt-4".to_string(),
+                    inference_strength: None,
+                    billing_mode: None,
+                    request_count: None,
+                    user_agent: None,
+                    status_code: 200,
+                    error_message: None,
+                    error_category: None,
+                    prompt_tokens: 10,
+                    completion_tokens: 10,
+                    total_tokens: 20,
+                    latency_ms: 100,
+                    created_at: now - 60,
+                },
+                UsageLog {
+                    id: "a-log".to_string(),
+                    request_id: "req-z".to_string(),
+                    downstream_key_id: "downstream-1".to_string(),
+                    upstream_key_id: "upstream-1".to_string(),
+                    downstream_name: None,
+                    upstream_name: None,
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "gpt-4".to_string(),
+                    inference_strength: None,
+                    billing_mode: None,
+                    request_count: None,
+                    user_agent: None,
+                    status_code: 200,
+                    error_message: None,
+                    error_category: None,
+                    prompt_tokens: 15,
+                    completion_tokens: 15,
+                    total_tokens: 30,
+                    latency_ms: 100,
+                    created_at: now - 60,
+                },
+            ],
+        },
+        unique_state_path(),
+        AppConfig::default(),
+    );
+
+    let page = state
+        .query_usage_logs_page(UsageLogQuery {
+            start_time: Some(now - 86_400),
+            end_time: Some(now),
+            page: 1,
+            page_size: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        page.logs
+            .iter()
+            .map(|entry| entry.log.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-log", "a-log"]
+    );
+}
+
+#[tokio::test]
 async fn downstream_usage_summary_matches_existing_portal_totals() {
     let now = chat_responses_codex::state::unix_seconds();
     let generated = generate_downstream_key("sk");
@@ -120,8 +199,8 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     rate_limit_enabled: true,
                     per_minute_limit: 100,
                     max_concurrency: 10,
-                    daily_token_limit: None,
-                    monthly_token_limit: None,
+                    daily_token_limit: Some(10_000),
+                    monthly_token_limit: Some(100_000),
                     request_quota_window_hours: Some(24),
                     request_quota_requests: Some(1000),
                     ip_allowlist: vec![],
@@ -138,8 +217,8 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     rate_limit_enabled: true,
                     per_minute_limit: 100,
                     max_concurrency: 10,
-                    daily_token_limit: None,
-                    monthly_token_limit: None,
+                    daily_token_limit: Some(10_000),
+                    monthly_token_limit: Some(100_000),
                     request_quota_window_hours: None,
                     request_quota_requests: None,
                     ip_allowlist: vec![],
@@ -157,11 +236,15 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
         AppConfig::default(),
     );
 
-    let summary = state.downstream_usage_summary("downstream-2").await.unwrap();
+    let snapshot = state.snapshot().await;
+    let summary = build_downstream_usage_summary(&snapshot, "downstream-2", now).unwrap();
+    let token_usage = state.compute_token_usage("downstream-2", now).await;
 
     assert_eq!(summary.downstream_id, "downstream-2");
     assert_eq!(summary.today_tokens, 220);
     assert_eq!(summary.month_tokens, 220);
+    assert_eq!(summary.today_tokens, token_usage.daily.unwrap().used);
+    assert_eq!(summary.month_tokens, token_usage.monthly.unwrap().used);
     assert_eq!(summary.total_models, 2);
     assert_eq!(summary.active_models, 1);
 }

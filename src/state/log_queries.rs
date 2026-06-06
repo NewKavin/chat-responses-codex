@@ -1,4 +1,4 @@
-use super::{unix_seconds, AppState, UsageLog};
+use super::{unix_seconds, AppState, PersistedState, UsageLog};
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -145,6 +145,73 @@ fn current_month_start(now: u64) -> u64 {
         .timestamp() as u64
 }
 
+pub fn build_downstream_usage_summary(
+    snapshot: &PersistedState,
+    downstream_id: &str,
+    now: u64,
+) -> io::Result<DownstreamUsageSummary> {
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == downstream_id)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("downstream not found: {downstream_id}"),
+            )
+        })?;
+
+    let today_start = (now / 86_400) * 86_400;
+    let month_start = current_month_start(now);
+
+    let downstream_logs = snapshot
+        .usage_logs
+        .iter()
+        .filter(|log| log.downstream_key_id == downstream_id)
+        .collect::<Vec<_>>();
+
+    let today_tokens = downstream_logs
+        .iter()
+        .filter(|log| log.created_at >= today_start)
+        .map(|log| log.total_tokens)
+        .sum();
+    let month_tokens = downstream_logs
+        .iter()
+        .filter(|log| log.created_at >= month_start)
+        .map(|log| log.total_tokens)
+        .sum();
+
+    let total_models = if !downstream.model_allowlist.is_empty() {
+        downstream.model_allowlist.len()
+    } else {
+        snapshot
+            .upstreams
+            .iter()
+            .filter(|upstream| upstream.active)
+            .flat_map(|upstream| upstream.route_models())
+            .collect::<HashSet<_>>()
+            .len()
+    };
+
+    let active_models = downstream_logs
+        .iter()
+        .filter(|log| {
+            downstream.model_allowlist.is_empty()
+                || downstream.model_allowlist.contains(&log.model)
+        })
+        .map(|log| log.model.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+
+    Ok(DownstreamUsageSummary {
+        downstream_id: downstream.id.clone(),
+        today_tokens,
+        month_tokens,
+        total_models,
+        active_models,
+    })
+}
+
 impl AppState {
     pub async fn query_usage_logs_page(&self, query: UsageLogQuery) -> io::Result<UsageLogPage> {
         let snapshot = self.snapshot().await;
@@ -184,12 +251,7 @@ impl AppState {
             })
             .collect::<Vec<_>>();
 
-        logs.sort_by(|left, right| {
-            right
-                .created_at
-                .cmp(&left.created_at)
-                .then_with(|| left.id.cmp(&right.id))
-        });
+        logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
 
         let total = logs.len();
         let page_size = query.page_size.clamp(1, 200);
@@ -220,66 +282,7 @@ impl AppState {
         downstream_id: &str,
     ) -> io::Result<DownstreamUsageSummary> {
         let snapshot = self.snapshot().await;
-        let downstream = snapshot
-            .downstreams
-            .iter()
-            .find(|downstream| downstream.id == downstream_id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("downstream not found: {downstream_id}"),
-                )
-            })?;
-
         let now = unix_seconds();
-        let today_start = (now / 86_400) * 86_400;
-        let month_start = current_month_start(now);
-
-        let downstream_logs = snapshot
-            .usage_logs
-            .iter()
-            .filter(|log| log.downstream_key_id == downstream_id)
-            .collect::<Vec<_>>();
-
-        let today_tokens = downstream_logs
-            .iter()
-            .filter(|log| log.created_at >= today_start)
-            .map(|log| log.total_tokens)
-            .sum();
-        let month_tokens = downstream_logs
-            .iter()
-            .filter(|log| log.created_at >= month_start)
-            .map(|log| log.total_tokens)
-            .sum();
-
-        let total_models = if !downstream.model_allowlist.is_empty() {
-            downstream.model_allowlist.len()
-        } else {
-            snapshot
-                .upstreams
-                .iter()
-                .filter(|upstream| upstream.active)
-                .flat_map(|upstream| upstream.route_models())
-                .collect::<HashSet<_>>()
-                .len()
-        };
-
-        let active_models = downstream_logs
-            .iter()
-            .filter(|log| {
-                downstream.model_allowlist.is_empty()
-                    || downstream.model_allowlist.contains(&log.model)
-            })
-            .map(|log| log.model.as_str())
-            .collect::<HashSet<_>>()
-            .len();
-
-        Ok(DownstreamUsageSummary {
-            downstream_id: downstream.id.clone(),
-            today_tokens,
-            month_tokens,
-            total_models,
-            active_models,
-        })
+        build_downstream_usage_summary(&snapshot, downstream_id, now)
     }
 }
