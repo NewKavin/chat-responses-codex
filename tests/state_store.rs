@@ -94,6 +94,12 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
     assert_eq!(page.logs[0].request_count, 1);
     assert_eq!(page.logs[0].user_agent, "未采集");
     assert!(page.logs[0].log.created_at >= page.logs[1].log.created_at);
+
+    let serialized = serde_json::to_value(&page.logs[0]).unwrap();
+    assert_eq!(serialized["id"], "log-3");
+    assert_eq!(serialized["downstream_key_id"], "downstream-1");
+    assert_eq!(serialized["api_name"], "ChatCompletions API");
+    assert!(serialized.get("log").is_none());
 }
 
 #[tokio::test]

@@ -30,6 +30,7 @@ impl Default for UsageLogQuery {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedUsageLog {
+    #[serde(flatten)]
     pub log: UsageLog,
     pub api_name: String,
     pub inference_strength: String,
