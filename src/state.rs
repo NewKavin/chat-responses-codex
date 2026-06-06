@@ -7,6 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 #[path = "state/postgres.rs"]
 mod postgres;
+#[path = "state/log_queries.rs"]
+pub mod log_queries;
 
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,9 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 
 use postgres::PostgresStateStore;
+pub use log_queries::{
+    DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery,
+};
 
 pub const ADMIN_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 
