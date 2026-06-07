@@ -7,14 +7,18 @@
 //! - compute_daily_stats
 //! - compute_model_stats
 
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
     log_queries::build_downstream_usage_summary, AppConfig, AppState, DownstreamConfig,
     PersistedState, UsageLog,
 };
 use chrono::Datelike;
+use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
@@ -601,6 +605,94 @@ async fn test_compute_token_usage_matches_summary_path() {
 
     assert_eq!(summary.today_tokens, quota.daily.map(|q| q.used).unwrap_or(0));
     assert_eq!(summary.month_tokens, quota.monthly.map(|q| q.used).unwrap_or(0));
+}
+
+#[tokio::test]
+async fn test_portal_overview_token_summary_matches_quota_summary() {
+    let now = stable_today_noon();
+
+    let logs = vec![
+        UsageLog {
+            id: "log-1".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            downstream_name: None,
+            upstream_name: None,
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            inference_strength: None,
+            billing_mode: None,
+            request_count: None,
+            user_agent: None,
+            model: "gpt-4".to_string(),
+            request_id: "req-1".to_string(),
+            status_code: 200,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            latency_ms: 500,
+            created_at: now - 3600,
+        },
+        UsageLog {
+            id: "log-2".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            downstream_name: None,
+            upstream_name: None,
+            upstream_key_id: "upstream-1".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            inference_strength: None,
+            billing_mode: None,
+            request_count: None,
+            user_agent: None,
+            model: "gpt-4".to_string(),
+            request_id: "req-2".to_string(),
+            status_code: 200,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 50,
+            completion_tokens: 25,
+            total_tokens: 75,
+            latency_ms: 300,
+            created_at: now - 7200,
+        },
+    ];
+
+    let state = create_test_state_with_logs(logs);
+    let portal_key = state.snapshot().await.downstreams[0]
+        .plaintext_key
+        .clone()
+        .unwrap();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        result["quota_summary"]["token_daily"]["used"],
+        result["token_summary"]["today"]
+    );
+    assert_eq!(
+        result["quota_summary"]["token_monthly"]["used"],
+        result["token_summary"]["this_month"]
+    );
 }
 
 // ============================================================================

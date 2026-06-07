@@ -5309,6 +5309,22 @@ async fn admin_list_logs(
             .into_response();
         }
     }
+    if query
+        .model
+        .as_deref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        let page_size = query.page_size.clamp(1, 200);
+        let page = query.page.max(1);
+        return Json(json!({
+            "logs": Vec::<Value>::new(),
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": 0,
+        }))
+        .into_response();
+    }
 
     let page = state
         .query_usage_logs_page(UsageLogQuery {
@@ -5374,7 +5390,6 @@ async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> i
 
     // Compute quota summary
     let request_quota = state.compute_request_quota_usage(downstream).await;
-    let token_usage = state.compute_token_usage(&downstream_id, now).await;
     let summary = match build_downstream_usage_summary(&snapshot, &downstream_id, now) {
         Ok(summary) => summary,
         Err(error) => {
@@ -5385,11 +5400,37 @@ async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> i
                 .into_response()
         }
     };
+    let token_daily = downstream.daily_token_limit.map(|limit| {
+        let used = summary.today_tokens;
+        json!({
+            "used": used,
+            "limit": limit,
+            "remaining": limit.saturating_sub(used),
+            "percentage": if limit > 0 {
+                (used as f64 / limit as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+    });
+    let token_monthly = downstream.monthly_token_limit.map(|limit| {
+        let used = summary.month_tokens;
+        json!({
+            "used": used,
+            "limit": limit,
+            "remaining": limit.saturating_sub(used),
+            "percentage": if limit > 0 {
+                (used as f64 / limit as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+    });
 
     let quota_summary = json!({
         "request_quota": request_quota,
-        "token_daily": token_usage.daily,
-        "token_monthly": token_usage.monthly,
+        "token_daily": token_daily,
+        "token_monthly": token_monthly,
     });
 
     let token_summary = json!({

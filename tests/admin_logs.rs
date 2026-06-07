@@ -362,6 +362,38 @@ async fn test_logs_list_supports_filtering_by_model_substring_case_insensitive()
 }
 
 #[tokio::test]
+async fn test_logs_list_with_blank_model_filter_returns_no_matches() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?model=")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["total"], 0);
+    assert_eq!(result["total_pages"], 0);
+    assert_eq!(result["logs"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn test_logs_list_supports_filtering_by_time_range() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
