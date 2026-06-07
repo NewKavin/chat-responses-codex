@@ -1,9 +1,13 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, PersistedState, UsageLog, UsageLogQuery,
+    AppConfig, AppState, DownstreamConfig, PersistedState, StateStore, StoreFuture,
+    UpstreamConfig, UsageLog, UsageLogQuery,
 };
 use chat_responses_codex::state::log_queries::build_downstream_usage_summary;
+use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
@@ -247,4 +251,77 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
     assert_eq!(summary.month_tokens, token_usage.monthly.unwrap().used);
     assert_eq!(summary.total_models, 2);
     assert_eq!(summary.active_models, 1);
+}
+
+#[derive(Clone, Default)]
+struct SlowStore {
+    persist_started: Arc<Notify>,
+    release_persist: Arc<Notify>,
+}
+
+impl SlowStore {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn handle(&self) -> Arc<dyn StateStore> {
+        Arc::new(self.clone())
+    }
+
+    fn persist_started(&self) -> Arc<Notify> {
+        self.persist_started.clone()
+    }
+
+    fn release_persist(&self) -> Arc<Notify> {
+        self.release_persist.clone()
+    }
+}
+
+impl StateStore for SlowStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            self.persist_started.notify_one();
+            self.release_persist.notified().await;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn routing_snapshot_does_not_block_behind_slow_config_persist() {
+    let slow_store = SlowStore::new();
+    let state = AppState::new_with_store(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".to_string(),
+                name: "Upstream 1".to_string(),
+                active: true,
+                ..UpstreamConfig::default()
+            }],
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        AppConfig::default(),
+        slow_store.handle(),
+    );
+
+    let persist_started = slow_store.persist_started();
+    let release_persist = slow_store.release_persist();
+
+    let updater = tokio::spawn({
+        let state = state.clone();
+        async move { state.set_upstream_active("up-1", false).await }
+    });
+
+    persist_started.notified().await;
+
+    let snapshot = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        state.routing_snapshot(),
+    )
+    .await;
+    assert!(snapshot.is_ok(), "routing snapshot should not wait for slow persist");
+
+    release_persist.notify_one();
+    let _ = updater.await;
 }

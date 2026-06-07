@@ -9,6 +9,8 @@ use base64::Engine;
 mod postgres;
 #[path = "state/log_queries.rs"]
 pub mod log_queries;
+#[path = "state/store.rs"]
+mod store;
 
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -29,9 +31,11 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 
 use postgres::PostgresStateStore;
+use store::FileStateStore;
 pub use log_queries::{
     DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery,
 };
+pub use store::{StateStore, StoreFuture};
 
 pub const ADMIN_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 
@@ -582,6 +586,7 @@ pub struct PersistedState {
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
+    config_persist_lock: Arc<Mutex<()>>,
     archived_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
     pending_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
     usage_log_flush_running: Arc<AtomicBool>,
@@ -595,13 +600,29 @@ pub struct AppState {
     pub config: AppConfig,
     client: Client,
     direct_client: Client,
+    config_store: Arc<dyn StateStore>,
     postgres: Option<Arc<PostgresStateStore>>,
     redis: Option<Arc<Mutex<ConnectionManager>>>,
+}
+
+impl StateStore for PostgresStateStore {
+    fn persist_config<'a>(&'a self, state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move { self.replace_state(state).await })
+    }
 }
 
 impl AppState {
     pub fn new(state: PersistedState, store_path: impl Into<PathBuf>, config: AppConfig) -> Self {
         Self::new_with_archived(state, Vec::new(), store_path, config)
+    }
+
+    pub fn new_with_store(
+        state: PersistedState,
+        store_path: impl Into<PathBuf>,
+        config: AppConfig,
+        config_store: Arc<dyn StateStore>,
+    ) -> Self {
+        Self::new_with_archived_and_store(state, Vec::new(), store_path.into(), config, config_store, None)
     }
 
     fn new_with_archived(
@@ -620,8 +641,11 @@ impl AppState {
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
         let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
+        let store_path = store_path.into();
+        let config_store: Arc<dyn StateStore> = Arc::new(FileStateStore::new(store_path.clone()));
         Self {
             inner: Arc::new(Mutex::new(state)),
+            config_persist_lock: Arc::new(Mutex::new(())),
             archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
@@ -635,11 +659,56 @@ impl AppState {
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
-            store_path: store_path.into(),
+            store_path,
             config,
             client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
             direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
+            config_store,
             postgres: None,
+            redis: None,
+        }
+    }
+
+    fn new_with_archived_and_store(
+        mut state: PersistedState,
+        archived_usage_logs: Vec<UsageLog>,
+        store_path: PathBuf,
+        config: AppConfig,
+        config_store: Arc<dyn StateStore>,
+        postgres: Option<Arc<PostgresStateStore>>,
+    ) -> Self {
+        for upstream in &mut state.upstreams {
+            upstream.normalize_for_storage();
+        }
+        let downstream_usage_logs = state
+            .usage_logs
+            .iter()
+            .cloned()
+            .chain(archived_usage_logs.iter().cloned())
+            .collect::<Vec<_>>();
+        let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
+        Self {
+            inner: Arc::new(Mutex::new(state)),
+            config_persist_lock: Arc::new(Mutex::new(())),
+            archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
+            pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
+            usage_log_flush_running: Arc::new(AtomicBool::new(false)),
+            upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
+            downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
+                &downstream_usage_logs,
+            ))),
+            downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
+                &downstream_usage_logs,
+            ))),
+            downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
+            admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
+            store_path,
+            config,
+            client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
+            direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
+            config_store,
+            postgres,
             redis: None,
         }
     }
@@ -654,8 +723,11 @@ impl AppState {
         }
         let downstream_usage_logs = state.usage_logs.clone();
         let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
+        let postgres = Arc::new(postgres);
+        let config_store: Arc<dyn StateStore> = postgres.clone();
         Self {
             inner: Arc::new(Mutex::new(state)),
+            config_persist_lock: Arc::new(Mutex::new(())),
             archived_usage_logs: Arc::new(Mutex::new(Vec::new())),
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
@@ -673,7 +745,8 @@ impl AppState {
             config,
             client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
             direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
-            postgres: Some(Arc::new(postgres)),
+            config_store,
+            postgres: Some(postgres),
             redis: None,
         }
     }
@@ -1079,28 +1152,32 @@ impl AppState {
     }
 
     pub async fn mark_upstream_failure(&self, upstream_id: &str) -> io::Result<()> {
-        let mut state = self.inner.lock().await;
-        if let Some(upstream) = state
-            .upstreams
-            .iter_mut()
-            .find(|upstream| upstream.id == upstream_id)
-        {
-            upstream.failure_count = upstream.failure_count.saturating_add(1);
-        }
-        self.persist_state(&state).await
+        self.mutate_persisted_state_io(|state| {
+            if let Some(upstream) = state
+                .upstreams
+                .iter_mut()
+                .find(|upstream| upstream.id == upstream_id)
+            {
+                upstream.failure_count = upstream.failure_count.saturating_add(1);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn mark_upstream_success(&self, upstream_id: &str) -> io::Result<()> {
-        let mut state = self.inner.lock().await;
-        if let Some(upstream) = state
-            .upstreams
-            .iter_mut()
-            .find(|upstream| upstream.id == upstream_id)
-        {
-            upstream.failure_count = 0;
-        }
-        let persist_result = self.persist_state(&state).await;
-        drop(state);
+        let persist_result = self
+            .mutate_persisted_state_io(|state| {
+                if let Some(upstream) = state
+                    .upstreams
+                    .iter_mut()
+                    .find(|upstream| upstream.id == upstream_id)
+                {
+                    upstream.failure_count = 0;
+                }
+                Ok(())
+            })
+            .await;
 
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         if let Some(runtime) = runtime_state.get_mut(upstream_id) {
@@ -1284,6 +1361,7 @@ impl AppState {
 
     async fn flush_usage_log_batch(&self, batch: &[UsageLog]) -> io::Result<()> {
         if let Some(postgres) = &self.postgres {
+            let _persist_guard = self.config_persist_lock.lock().await;
             postgres.append_usage_logs(batch).await?;
             let mut state = self.inner.lock().await;
             state.usage_logs.extend(batch.iter().cloned());
@@ -1291,13 +1369,16 @@ impl AppState {
         }
 
         for log in batch.iter().cloned() {
-            let mut state = self.inner.lock().await;
-            state.usage_logs.push(log);
-            let mut candidate_state = state.clone();
-            let archived_logs = trim_usage_logs_for_rotation(
-                &mut candidate_state,
-                self.config.usage_log_rotation_max_bytes,
-            );
+            let (candidate_state, archived_logs) = {
+                let state = self.inner.lock().await;
+                let mut candidate_state = state.clone();
+                candidate_state.usage_logs.push(log);
+                let archived_logs = trim_usage_logs_for_rotation(
+                    &mut candidate_state,
+                    self.config.usage_log_rotation_max_bytes,
+                );
+                (candidate_state, archived_logs)
+            };
 
             if !archived_logs.is_empty() {
                 self.write_usage_log_archive(&archived_logs).await?;
@@ -1308,7 +1389,8 @@ impl AppState {
             }
 
             self.persist_state(&candidate_state).await?;
-            *state = candidate_state;
+            let mut state = self.inner.lock().await;
+            state.usage_logs = candidate_state.usage_logs;
             self.enforce_usage_log_archive_limit().await?;
         }
 
@@ -1562,12 +1644,11 @@ impl AppState {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
         }
 
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        candidate_state.upstreams.push(upstream);
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        Ok(())
+        self.mutate_persisted_state_io(|state| {
+            state.upstreams.push(upstream);
+            Ok(())
+        })
+        .await
     }
 
     pub async fn update_upstream(
@@ -1575,49 +1656,41 @@ impl AppState {
         upstream_id: &str,
         upstream: UpstreamConfig,
     ) -> io::Result<bool> {
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        let Some(existing) = candidate_state
-            .upstreams
-            .iter_mut()
-            .find(|upstream| upstream.id == upstream_id)
-        else {
-            return Ok(false);
-        };
+        self.mutate_persisted_state_io(|state| {
+            let Some(existing) = state
+                .upstreams
+                .iter_mut()
+                .find(|upstream| upstream.id == upstream_id)
+            else {
+                return Ok(false);
+            };
 
-        let mut upstream = upstream;
-        upstream.id = upstream_id.to_string();
-        upstream.normalize_for_storage();
-        let failure_count = existing.failure_count;
-        *existing = upstream;
-        existing.failure_count = failure_count;
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        Ok(true)
+            let mut upstream = upstream;
+            upstream.id = upstream_id.to_string();
+            upstream.normalize_for_storage();
+            let failure_count = existing.failure_count;
+            *existing = upstream;
+            existing.failure_count = failure_count;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn remove_upstream(&self, upstream_id: &str) -> io::Result<bool> {
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        let original_len = candidate_state.upstreams.len();
-        candidate_state
-            .upstreams
-            .retain(|upstream| upstream.id != upstream_id);
-        if candidate_state.upstreams.len() == original_len {
-            return Ok(false);
-        }
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        Ok(true)
+        self.mutate_persisted_state_io(|state| {
+            let original_len = state.upstreams.len();
+            state.upstreams.retain(|upstream| upstream.id != upstream_id);
+            Ok(state.upstreams.len() != original_len)
+        })
+        .await
     }
 
     pub async fn insert_downstream(&self, downstream: DownstreamConfig) -> io::Result<()> {
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        candidate_state.downstreams.push(downstream);
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        Ok(())
+        self.mutate_persisted_state_io(|state| {
+            state.downstreams.push(downstream);
+            Ok(())
+        })
+        .await
     }
 
     pub async fn update_downstream(
@@ -1625,38 +1698,35 @@ impl AppState {
         downstream_id: &str,
         downstream: DownstreamConfig,
     ) -> io::Result<bool> {
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        let Some(existing) = candidate_state
-            .downstreams
-            .iter_mut()
-            .find(|downstream| downstream.id == downstream_id)
-        else {
-            return Ok(false);
-        };
+        self.mutate_persisted_state_io(|state| {
+            let Some(existing) = state
+                .downstreams
+                .iter_mut()
+                .find(|downstream| downstream.id == downstream_id)
+            else {
+                return Ok(false);
+            };
 
-        let mut downstream = downstream;
-        downstream.id = downstream_id.to_string();
-        *existing = downstream;
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        Ok(true)
+            let mut downstream = downstream;
+            downstream.id = downstream_id.to_string();
+            *existing = downstream;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn remove_downstream(&self, downstream_id: &str) -> io::Result<bool> {
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        let original_len = candidate_state.downstreams.len();
-        candidate_state
-            .downstreams
-            .retain(|downstream| downstream.id != downstream_id);
-        if candidate_state.downstreams.len() == original_len {
-            return Ok(false);
+        let removed = self
+            .mutate_persisted_state_io(|state| {
+                let original_len = state.downstreams.len();
+                state.downstreams.retain(|downstream| downstream.id != downstream_id);
+                Ok(state.downstreams.len() != original_len)
+            })
+            .await?;
+        if removed {
+            self.release_downstream_concurrency(downstream_id);
         }
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        self.release_downstream_concurrency(downstream_id);
-        Ok(true)
+        Ok(removed)
     }
 
     pub async fn set_downstream_active(
@@ -1664,35 +1734,33 @@ impl AppState {
         downstream_id: &str,
         active: bool,
     ) -> io::Result<bool> {
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        let Some(downstream) = candidate_state
-            .downstreams
-            .iter_mut()
-            .find(|downstream| downstream.id == downstream_id)
-        else {
-            return Ok(false);
-        };
-        downstream.active = active;
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        Ok(true)
+        self.mutate_persisted_state_io(|state| {
+            let Some(downstream) = state
+                .downstreams
+                .iter_mut()
+                .find(|downstream| downstream.id == downstream_id)
+            else {
+                return Ok(false);
+            };
+            downstream.active = active;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn set_upstream_active(&self, upstream_id: &str, active: bool) -> io::Result<bool> {
-        let mut state = self.inner.lock().await;
-        let mut candidate_state = state.clone();
-        let Some(upstream) = candidate_state
-            .upstreams
-            .iter_mut()
-            .find(|upstream| upstream.id == upstream_id)
-        else {
-            return Ok(false);
-        };
-        upstream.active = active;
-        self.persist_state(&candidate_state).await?;
-        *state = candidate_state;
-        Ok(true)
+        self.mutate_persisted_state_io(|state| {
+            let Some(upstream) = state
+                .upstreams
+                .iter_mut()
+                .find(|upstream| upstream.id == upstream_id)
+            else {
+                return Ok(false);
+            };
+            upstream.active = active;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn upstreams(&self) -> Vec<UpstreamConfig> {
@@ -1753,20 +1821,41 @@ impl AppState {
         models
     }
 
+    async fn mutate_persisted_state<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>
+    where
+        F: FnOnce(&mut PersistedState) -> Result<T, E>,
+        M: Fn(io::Error) -> E,
+    {
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let (candidate_state, result) = {
+            let state = self.inner.lock().await;
+            let mut candidate_state = state.clone();
+            let result = mutator(&mut candidate_state)?;
+            (candidate_state, result)
+        };
+
+        self.config_store
+            .persist_config(&candidate_state)
+            .await
+            .map_err(map_io)?;
+
+        let mut state = self.inner.lock().await;
+        state.upstreams = candidate_state.upstreams;
+        state.downstreams = candidate_state.downstreams;
+
+        Ok(result)
+    }
+
+    async fn mutate_persisted_state_io<T, F>(&self, mutator: F) -> io::Result<T>
+    where
+        F: FnOnce(&mut PersistedState) -> io::Result<T>,
+    {
+        self.mutate_persisted_state(mutator, |error| error).await
+    }
+
     async fn persist_state(&self, state: &PersistedState) -> io::Result<()> {
-        if let Some(postgres) = &self.postgres {
-            return postgres.replace_state(state).await;
-        }
-
-        if let Some(parent) = self.store_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        let bytes = serde_json::to_vec_pretty(state)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
-        let tmp_path = self.store_path.with_extension("tmp");
-        fs::write(&tmp_path, &bytes).await?;
-        fs::rename(&tmp_path, &self.store_path).await
+        let _persist_guard = self.config_persist_lock.lock().await;
+        self.config_store.persist_config(state).await
     }
 
     async fn write_usage_log_archive(&self, logs: &[UsageLog]) -> io::Result<()> {
@@ -2528,128 +2617,141 @@ impl AppState {
         id: &str,
         updates: serde_json::Value,
     ) -> Result<UpstreamConfig, UpstreamMutationError> {
-        let mut inner = self.inner.lock().await;
-        let mut candidate_state = inner.clone();
-        let upstream = candidate_state.upstreams.iter_mut().find(|u| u.id == id)
-            .ok_or_else(|| UpstreamMutationError::NotFound(format!("Upstream '{}' not found", id)))?;
-        
-        // Apply updates
-        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
-            upstream.name = name.to_string();
-        }
-        if let Some(base_url) = updates.get("base_url").and_then(|v| v.as_str()) {
-            upstream.base_url = base_url.to_string();
-        }
-        if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
-            upstream.api_key = api_key.to_string();
-        }
-        if let Some(supported_models) = updates.get("supported_models").and_then(|v| v.as_array()) {
-            upstream.supported_models = supported_models
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-        if let Some(protocols) = updates.get("protocols").and_then(Value::as_array) {
-            upstream.protocols = parse_upstream_protocols(protocols);
-        } else if let Some(protocol) = updates.get("protocol").and_then(Value::as_str) {
-            upstream.protocol = parse_upstream_protocol(protocol);
-        }
-        if let Some(model_contexts) = updates.get("model_contexts").and_then(|v| v.as_array()) {
-            upstream.model_contexts = model_contexts
-                .iter()
-                .filter_map(|value| {
-                    let slug = value.get("slug").and_then(|v| v.as_str())?;
-                    let context_limit = value.get("context_limit").and_then(|v| v.as_u64())?;
-                    let output_reserve = value
-                        .get("output_reserve")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(default_model_context_output_reserve() as u64);
-                    let context_group = value
-                        .get("context_group")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    Some(ModelContextConfig {
-                        slug: slug.to_string(),
-                        context_limit: context_limit as u32,
-                        output_reserve: output_reserve as u32,
-                        context_group: context_group.to_string(),
-                    })
-                })
-                .collect();
-        }
-        if let Some(request_quota_window_hours) = updates
-            .get("request_quota_window_hours")
-            .and_then(|v| v.as_u64())
-        {
-            upstream.request_quota_window_hours = request_quota_window_hours as u32;
-        }
-        if let Some(request_quota_requests) = updates
-            .get("request_quota_requests")
-            .and_then(|v| v.as_u64())
-        {
-            upstream.request_quota_requests = request_quota_requests as u32;
-        }
-        if let Some(request_quota_5h) = updates.get("request_quota_5h").and_then(|v| v.as_u64()) {
-            upstream.request_quota_requests = request_quota_5h as u32;
-        }
-        if let Some(requests_per_minute) = updates
-            .get("requests_per_minute")
-            .and_then(|v| v.as_u64())
-        {
-            upstream.requests_per_minute = requests_per_minute as u32;
-        }
-        if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
-            upstream.max_concurrency = max_concurrency as u32;
-        }
-        if let Some(model_request_costs) = updates
-            .get("model_request_costs")
-            .and_then(|v| v.as_array())
-        {
-            upstream.model_request_costs = model_request_costs
-                .iter()
-                .filter_map(|value| {
-                    let slug = value.get("slug").and_then(|v| v.as_str())?;
-                    let cost = value.get("cost").and_then(|v| v.as_f64())?;
-                    Some(ModelRequestCostConfig {
-                        slug: slug.to_string(),
-                        cost,
-                    })
-                })
-                .collect();
-        }
-        if let Some(priority) = updates.get("priority").and_then(|v| v.as_u64()) {
-            upstream.priority = priority as u32;
-        }
-        if let Some(premium_models) = updates.get("premium_models").and_then(|v| v.as_array()) {
-            upstream.premium_models = premium_models
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-        if let Some(premium_only) = updates.get("premium_only").and_then(|v| v.as_bool()) {
-            upstream.premium_only = premium_only;
-        }
-        if let Some(protect_premium_quota) = updates
-            .get("protect_premium_quota")
-            .and_then(|v| v.as_bool())
-        {
-            upstream.protect_premium_quota = protect_premium_quota;
-        }
-        if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
-            upstream.active = active;
-        }
+        self.mutate_persisted_state(
+            |candidate_state| {
+                let upstream = candidate_state
+                    .upstreams
+                    .iter_mut()
+                    .find(|u| u.id == id)
+                    .ok_or_else(|| {
+                        UpstreamMutationError::NotFound(format!("Upstream '{}' not found", id))
+                    })?;
 
-        upstream.normalize_for_storage();
-        if let Err(error) = upstream.validate_configuration() {
-            return Err(UpstreamMutationError::InvalidInput(error));
-        }
+                if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+                    upstream.name = name.to_string();
+                }
+                if let Some(base_url) = updates.get("base_url").and_then(|v| v.as_str()) {
+                    upstream.base_url = base_url.to_string();
+                }
+                if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
+                    upstream.api_key = api_key.to_string();
+                }
+                if let Some(supported_models) =
+                    updates.get("supported_models").and_then(|v| v.as_array())
+                {
+                    upstream.supported_models = supported_models
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+                if let Some(protocols) = updates.get("protocols").and_then(Value::as_array) {
+                    upstream.protocols = parse_upstream_protocols(protocols);
+                } else if let Some(protocol) = updates.get("protocol").and_then(Value::as_str) {
+                    upstream.protocol = parse_upstream_protocol(protocol);
+                }
+                if let Some(model_contexts) =
+                    updates.get("model_contexts").and_then(|v| v.as_array())
+                {
+                    upstream.model_contexts = model_contexts
+                        .iter()
+                        .filter_map(|value| {
+                            let slug = value.get("slug").and_then(|v| v.as_str())?;
+                            let context_limit =
+                                value.get("context_limit").and_then(|v| v.as_u64())?;
+                            let output_reserve = value
+                                .get("output_reserve")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(default_model_context_output_reserve() as u64);
+                            let context_group = value
+                                .get("context_group")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
+                            Some(ModelContextConfig {
+                                slug: slug.to_string(),
+                                context_limit: context_limit as u32,
+                                output_reserve: output_reserve as u32,
+                                context_group: context_group.to_string(),
+                            })
+                        })
+                        .collect();
+                }
+                if let Some(request_quota_window_hours) = updates
+                    .get("request_quota_window_hours")
+                    .and_then(|v| v.as_u64())
+                {
+                    upstream.request_quota_window_hours = request_quota_window_hours as u32;
+                }
+                if let Some(request_quota_requests) = updates
+                    .get("request_quota_requests")
+                    .and_then(|v| v.as_u64())
+                {
+                    upstream.request_quota_requests = request_quota_requests as u32;
+                }
+                if let Some(request_quota_5h) =
+                    updates.get("request_quota_5h").and_then(|v| v.as_u64())
+                {
+                    upstream.request_quota_requests = request_quota_5h as u32;
+                }
+                if let Some(requests_per_minute) = updates
+                    .get("requests_per_minute")
+                    .and_then(|v| v.as_u64())
+                {
+                    upstream.requests_per_minute = requests_per_minute as u32;
+                }
+                if let Some(max_concurrency) =
+                    updates.get("max_concurrency").and_then(|v| v.as_u64())
+                {
+                    upstream.max_concurrency = max_concurrency as u32;
+                }
+                if let Some(model_request_costs) =
+                    updates.get("model_request_costs").and_then(|v| v.as_array())
+                {
+                    upstream.model_request_costs = model_request_costs
+                        .iter()
+                        .filter_map(|value| {
+                            let slug = value.get("slug").and_then(|v| v.as_str())?;
+                            let cost = value.get("cost").and_then(|v| v.as_f64())?;
+                            Some(ModelRequestCostConfig {
+                                slug: slug.to_string(),
+                                cost,
+                            })
+                        })
+                        .collect();
+                }
+                if let Some(priority) = updates.get("priority").and_then(|v| v.as_u64()) {
+                    upstream.priority = priority as u32;
+                }
+                if let Some(premium_models) =
+                    updates.get("premium_models").and_then(|v| v.as_array())
+                {
+                    upstream.premium_models = premium_models
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+                if let Some(premium_only) = updates.get("premium_only").and_then(|v| v.as_bool()) {
+                    upstream.premium_only = premium_only;
+                }
+                if let Some(protect_premium_quota) = updates
+                    .get("protect_premium_quota")
+                    .and_then(|v| v.as_bool())
+                {
+                    upstream.protect_premium_quota = protect_premium_quota;
+                }
+                if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
+                    upstream.active = active;
+                }
 
-        let updated = upstream.clone();
-        self.persist_state(&candidate_state)
-            .await
-            .map_err(|e| UpstreamMutationError::Persist(format!("Failed to persist state: {e}")))?;
-        *inner = candidate_state;
-        Ok(updated)
+                upstream.normalize_for_storage();
+                if let Err(error) = upstream.validate_configuration() {
+                    return Err(UpstreamMutationError::InvalidInput(error));
+                }
+
+                Ok(upstream.clone())
+            },
+            |e| UpstreamMutationError::Persist(format!("Failed to persist state: {e}")),
+        )
+        .await
     }
     
     /// Delete an upstream
@@ -2685,70 +2787,81 @@ impl AppState {
     
     /// Update an existing downstream
     pub async fn update_downstream_by_id(&self, id: &str, updates: serde_json::Value) -> Result<DownstreamConfig, String> {
-        let mut inner = self.inner.lock().await;
-        let mut candidate_state = inner.clone();
-        let downstream = candidate_state.downstreams.iter_mut().find(|d| d.id == id)
-            .ok_or_else(|| format!("Downstream '{}' not found", id))?;
-        
-        // Apply updates (preserve hash)
-        if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
-            downstream.name = name.to_string();
-        }
-        if let Some(per_minute_limit) = updates.get("per_minute_limit").and_then(|v| v.as_u64()) {
-            downstream.per_minute_limit = per_minute_limit as u32;
-        }
-        if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64()) {
-            downstream.max_concurrency = max_concurrency as u32;
-        }
-        if let Some(rate_limit_enabled) = updates.get("rate_limit_enabled").and_then(|v| v.as_bool()) {
-            downstream.rate_limit_enabled = rate_limit_enabled;
-        }
-        if let Some(request_quota_window_hours) = updates
-            .get("request_quota_window_hours")
-            .and_then(|v| v.as_u64())
-        {
-            downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
-        }
-        if updates
-            .get("request_quota_window_hours")
-            .is_some_and(serde_json::Value::is_null)
-        {
-            downstream.request_quota_window_hours = None;
-        }
-        if let Some(request_quota_requests) = updates
-            .get("request_quota_requests")
-            .and_then(|v| v.as_u64())
-        {
-            downstream.request_quota_requests = Some(request_quota_requests as u32);
-        }
-        if updates
-            .get("request_quota_requests")
-            .is_some_and(serde_json::Value::is_null)
-        {
-            downstream.request_quota_requests = None;
-        }
-        if let Some(model_allowlist) = updates.get("model_allowlist").and_then(|v| v.as_array()) {
-            downstream.model_allowlist = model_allowlist
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-        if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
-            downstream.ip_allowlist = ip_allowlist
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-        }
-        if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
-            downstream.active = active;
-        }
-        
-        let updated = downstream.clone();
-        self.persist_state(&candidate_state)
-            .await
-            .map_err(|e| format!("Failed to persist state: {e}"))?;
-        *inner = candidate_state;
-        Ok(updated)
+        self.mutate_persisted_state(
+            |candidate_state| {
+                let downstream = candidate_state
+                    .downstreams
+                    .iter_mut()
+                    .find(|d| d.id == id)
+                    .ok_or_else(|| format!("Downstream '{}' not found", id))?;
+
+                if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
+                    downstream.name = name.to_string();
+                }
+                if let Some(per_minute_limit) =
+                    updates.get("per_minute_limit").and_then(|v| v.as_u64())
+                {
+                    downstream.per_minute_limit = per_minute_limit as u32;
+                }
+                if let Some(max_concurrency) =
+                    updates.get("max_concurrency").and_then(|v| v.as_u64())
+                {
+                    downstream.max_concurrency = max_concurrency as u32;
+                }
+                if let Some(rate_limit_enabled) =
+                    updates.get("rate_limit_enabled").and_then(|v| v.as_bool())
+                {
+                    downstream.rate_limit_enabled = rate_limit_enabled;
+                }
+                if let Some(request_quota_window_hours) = updates
+                    .get("request_quota_window_hours")
+                    .and_then(|v| v.as_u64())
+                {
+                    downstream.request_quota_window_hours = Some(request_quota_window_hours as u32);
+                }
+                if updates
+                    .get("request_quota_window_hours")
+                    .is_some_and(serde_json::Value::is_null)
+                {
+                    downstream.request_quota_window_hours = None;
+                }
+                if let Some(request_quota_requests) = updates
+                    .get("request_quota_requests")
+                    .and_then(|v| v.as_u64())
+                {
+                    downstream.request_quota_requests = Some(request_quota_requests as u32);
+                }
+                if updates
+                    .get("request_quota_requests")
+                    .is_some_and(serde_json::Value::is_null)
+                {
+                    downstream.request_quota_requests = None;
+                }
+                if let Some(model_allowlist) =
+                    updates.get("model_allowlist").and_then(|v| v.as_array())
+                {
+                    downstream.model_allowlist = model_allowlist
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+                if let Some(ip_allowlist) =
+                    updates.get("ip_allowlist").and_then(|v| v.as_array())
+                {
+                    downstream.ip_allowlist = ip_allowlist
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+                if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
+                    downstream.active = active;
+                }
+
+                Ok(downstream.clone())
+            },
+            |e| format!("Failed to persist state: {e}"),
+        )
+        .await
     }
     
     /// Delete a downstream
