@@ -4,9 +4,10 @@ use crate::protocol::{
     StreamTranslator,
 };
 use crate::routing::UpstreamProtocol;
+use crate::state::log_queries::build_downstream_usage_summary;
 use crate::state::{
     join_upstream_url, unix_seconds, AppConfig, AppState, DownstreamConfig, UpstreamConfig,
-    UpstreamMutationError, UsageLog,
+    UpstreamMutationError, UsageLog, UsageLogQuery,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::Body;
@@ -5252,79 +5253,6 @@ fn default_time_range() -> String {
     "7d".to_string()
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct EnrichedUsageLog {
-    #[serde(flatten)]
-    log: UsageLog,
-    api_name: String,
-    inference_strength: String,
-    log_type: String,
-    billing_mode: String,
-    request_count: u64,
-    user_agent: String,
-}
-
-fn resolve_api_name_and_type(endpoint: &str) -> (&'static str, &'static str) {
-    let lower = endpoint.to_ascii_lowercase();
-    if lower.contains("/files") && (lower.contains("/content") || lower.contains("/download")) {
-        return ("文件下载", "文件");
-    }
-    if lower.contains("/files") || lower.contains("/upload") {
-        return ("文件上传", "文件");
-    }
-    if lower.contains("/responses") {
-        return ("Responses API", "推理");
-    }
-    if lower.contains("/chat/completions") {
-        return ("ChatCompletions API", "对话");
-    }
-    if lower.contains("/embeddings") {
-        return ("Embeddings API", "向量");
-    }
-    ("通用 API", "其它")
-}
-
-fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
-    let (api_name, log_type) = resolve_api_name_and_type(&log.endpoint);
-    let inference_strength = log
-        .inference_strength
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("标准")
-        .to_string();
-    let billing_mode = log
-        .billing_mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            if log.total_tokens > 0 {
-                "Token 计费".to_string()
-            } else {
-                "请求计费".to_string()
-            }
-        });
-    let request_count = log.request_count.unwrap_or(1);
-    let user_agent = log
-        .user_agent
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("未采集")
-        .to_string();
-    EnrichedUsageLog {
-        log: log.clone(),
-        api_name: api_name.to_string(),
-        inference_strength,
-        log_type: log_type.to_string(),
-        billing_mode,
-        request_count,
-        user_agent,
-    }
-}
-
 /// List logs with filtering and pagination
 async fn admin_list_logs(
     State(state): State<AppState>,
@@ -5333,7 +5261,6 @@ async fn admin_list_logs(
     // Flush pending logs before querying
     let _ = state.flush_usage_logs_for_test().await;
 
-    let snapshot = state.snapshot().await;
     let now = unix_seconds();
 
     let (start_time, end_time) = if query.start_time.is_some() || query.end_time.is_some() {
@@ -5354,7 +5281,7 @@ async fn admin_list_logs(
         (now.saturating_sub(time_range_seconds), now)
     };
 
-    let status_codes = query
+    let mut status_codes = query
         .status_codes
         .as_deref()
         .map(|raw| {
@@ -5363,72 +5290,58 @@ async fn admin_list_logs(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let model_filter = query
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
+    if let Some(status_code) = query.status_code {
+        if status_codes.is_empty() {
+            status_codes.push(status_code);
+        } else if status_codes.contains(&status_code) {
+            status_codes = vec![status_code];
+        } else {
+            status_codes.clear();
+            let page_size = query.page_size.clamp(1, 200);
+            let page = query.page.max(1);
+            return Json(json!({
+                "logs": Vec::<Value>::new(),
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 0,
+            }))
+            .into_response();
+        }
+    }
 
-    // Filter logs
-    let mut logs: Vec<_> = snapshot
-        .usage_logs
-        .iter()
-        .filter(|log| {
-            if log.created_at < start_time || log.created_at > end_time {
-                return false;
-            }
-
-            if let Some(status_code) = query.status_code {
-                if log.status_code != status_code {
-                    return false;
-                }
-            }
-
-            if !status_codes.is_empty() && !status_codes.contains(&log.status_code) {
-                return false;
-            }
-
-            if let Some(model) = &model_filter {
-                if !log.model.to_ascii_lowercase().contains(model) {
-                    return false;
-                }
-            } else if let Some(ref model) = query.model {
-                if &log.model != model {
-                    return false;
-                }
-            }
-
-            true
+    let page = state
+        .query_usage_logs_page(UsageLogQuery {
+            page: query.page,
+            page_size: query.page_size,
+            status_codes,
+            model_substring: query.model.clone(),
+            start_time: Some(start_time),
+            end_time: Some(end_time),
         })
-        .collect();
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "message": format!("Failed to query usage logs: {error}")
+                    }
+                })),
+            )
+        });
 
-    // Sort by created_at descending
-    logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
-
-    let total = logs.len();
-    let page_size = query.page_size.min(200); // Max 200 per page
-    let total_pages = total.div_ceil(page_size);
-    let page = query.page.max(1);
-
-    // Paginate
-    let start = (page - 1) * page_size;
-    let page_logs: Vec<_> = if start >= total {
-        Vec::new()
-    } else {
-        let end = (start + page_size).min(total);
-        logs[start..end]
-            .iter()
-            .map(|log| enrich_usage_log(log))
-            .collect()
+    let page = match page {
+        Ok(page) => page,
+        Err(response) => return response.into_response(),
     };
 
     Json(json!({
-        "logs": page_logs,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": total_pages,
+        "logs": page.logs,
+        "total": page.total,
+        "page": page.page,
+        "page_size": page.page_size,
+        "total_pages": page.total_pages,
     }))
     .into_response()
 }
@@ -5462,6 +5375,16 @@ async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> i
     // Compute quota summary
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let token_usage = state.compute_token_usage(&downstream_id, now).await;
+    let summary = match build_downstream_usage_summary(&snapshot, &downstream_id, now) {
+        Ok(summary) => summary,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": format!("Failed to compute downstream summary: {error}")}})),
+            )
+                .into_response()
+        }
+    };
 
     let quota_summary = json!({
         "request_quota": request_quota,
@@ -5469,63 +5392,14 @@ async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> i
         "token_monthly": token_usage.monthly,
     });
 
-    let today_start = (now / 86400) * 86400;
-    let month_start = {
-        use chrono::Datelike;
-        use std::time::UNIX_EPOCH;
-        let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
-        let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
-        let first_of_month = datetime.date_naive().with_day(1).unwrap();
-        first_of_month
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp() as u64
-    };
-    let downstream_logs = snapshot
-        .usage_logs
-        .iter()
-        .filter(|log| log.downstream_key_id == downstream_id)
-        .collect::<Vec<_>>();
-    let today_tokens = downstream_logs
-        .iter()
-        .filter(|log| log.created_at >= today_start)
-        .map(|log| log.total_tokens)
-        .sum::<u64>();
-    let month_tokens = downstream_logs
-        .iter()
-        .filter(|log| log.created_at >= month_start)
-        .map(|log| log.total_tokens)
-        .sum::<u64>();
-
     let token_summary = json!({
-        "today": today_tokens,
-        "this_month": month_tokens,
+        "today": summary.today_tokens,
+        "this_month": summary.month_tokens,
     });
 
-    let total_models = if !downstream.model_allowlist.is_empty() {
-        downstream.model_allowlist.len()
-    } else {
-        snapshot
-            .upstreams
-            .iter()
-            .filter(|upstream| upstream.active)
-            .flat_map(|upstream| upstream.route_models())
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-    };
-    let active_models = downstream_logs
-        .iter()
-        .filter(|log| {
-            downstream.model_allowlist.is_empty() || downstream.model_allowlist.contains(&log.model)
-        })
-        .map(|log| log.model.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-
     let model_summary = json!({
-        "total_models": total_models,
-        "active_models": active_models,
+        "total_models": summary.total_models,
+        "active_models": summary.active_models,
     });
 
     Json(json!({
