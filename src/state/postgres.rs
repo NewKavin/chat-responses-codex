@@ -20,7 +20,7 @@ pub(crate) struct PostgresStateStore {
 }
 
 impl PostgresStateStore {
-    pub async fn connect(database_url: &str) -> io::Result<Self> {
+    pub async fn connect(database_url: &str, pool_max_size: u32) -> io::Result<Self> {
         let mut config = Config::from_str(database_url).map_err(io_other)?;
         if config.get_password().is_none() {
             if let Ok(password) = env::var("PGPASSWORD") {
@@ -35,7 +35,7 @@ impl PostgresStateStore {
 
         let manager = PostgresConnectionManager::new(config, NoTls);
         let pool = Pool::builder()
-            .max_size(16)
+            .max_size(pool_max_size.max(1))
             .connection_timeout(Duration::from_secs(2))
             .build(manager)
             .await

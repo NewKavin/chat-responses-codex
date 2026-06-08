@@ -64,6 +64,9 @@ pub struct AppConfig {
     pub routing_affinity_escape_pressure_ratio: f64,
     pub redis_url: Option<String>,
     pub dashboard_cache_ttl_seconds: u64,
+    pub postgres_pool_max_size: u32,
+    pub admin_logs_page_size_max: usize,
+    pub upstream_http_pool_max_idle_per_host: usize,
     pub upstream_connect_timeout_seconds: u64,
     pub upstream_response_header_timeout_seconds: u64,
     pub upstream_stream_keepalive_interval_seconds: u64,
@@ -95,6 +98,9 @@ impl Default for AppConfig {
             routing_affinity_escape_pressure_ratio: 1.5,
             redis_url: None,
             dashboard_cache_ttl_seconds: 30,
+            postgres_pool_max_size: 16,
+            admin_logs_page_size_max: 200,
+            upstream_http_pool_max_idle_per_host: 32,
             upstream_connect_timeout_seconds: 30,
             upstream_response_header_timeout_seconds: 30,
             upstream_stream_keepalive_interval_seconds: 10,
@@ -662,9 +668,9 @@ impl AppState {
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path,
+            client: build_upstream_http_client(&config, false),
+            direct_client: build_upstream_http_client(&config, true),
             config,
-            client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
-            direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
             config_store,
             postgres: None,
             redis: None,
@@ -688,7 +694,6 @@ impl AppState {
             .cloned()
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
-        let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -706,9 +711,9 @@ impl AppState {
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path,
+            client: build_upstream_http_client(&config, false),
+            direct_client: build_upstream_http_client(&config, true),
             config,
-            client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
-            direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
             config_store,
             postgres,
             redis: None,
@@ -724,7 +729,6 @@ impl AppState {
             upstream.normalize_for_storage();
         }
         let downstream_usage_logs = state.usage_logs.clone();
-        let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
         let postgres = Arc::new(postgres);
         let config_store: Arc<dyn StateStore> = postgres.clone();
         Self {
@@ -744,9 +748,9 @@ impl AppState {
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: PathBuf::new(),
+            client: build_upstream_http_client(&config, false),
+            direct_client: build_upstream_http_client(&config, true),
             config,
-            client: build_upstream_http_client(upstream_connect_timeout_seconds, false),
-            direct_client: build_upstream_http_client(upstream_connect_timeout_seconds, true),
             config_store,
             postgres: Some(postgres),
             redis: None,
@@ -937,7 +941,10 @@ impl AppState {
         database_url: impl AsRef<str>,
         config: AppConfig,
     ) -> io::Result<Self> {
-        let postgres = PostgresStateStore::connect(database_url.as_ref())
+        let postgres = PostgresStateStore::connect(
+            database_url.as_ref(),
+            config.postgres_pool_max_size,
+        )
             .await
             .map_err(|error| {
                 io::Error::new(
@@ -2058,10 +2065,11 @@ fn build_downstream_token_windows(
     windows
 }
 
-fn build_upstream_http_client(connect_timeout_seconds: u64, no_proxy: bool) -> Client {
+fn build_upstream_http_client(config: &AppConfig, no_proxy: bool) -> Client {
     let mut builder = Client::builder().connect_timeout(Duration::from_secs(
-        connect_timeout_seconds.max(1),
+        config.upstream_connect_timeout_seconds.max(1),
     ));
+    builder = builder.pool_max_idle_per_host(config.upstream_http_pool_max_idle_per_host);
     if no_proxy {
         builder = builder.no_proxy();
     }
