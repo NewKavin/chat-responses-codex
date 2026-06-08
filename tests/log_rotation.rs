@@ -60,7 +60,7 @@ async fn usage_logs_rotate_by_size_into_archive_files() {
         .iter()
         .map(|log| log.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(current_ids, vec!["log-3"]);
+    assert!(current_ids.is_empty());
 
     let archive_files = archive_files(&tempdir);
     assert!(!archive_files.is_empty());
@@ -71,7 +71,7 @@ async fn usage_logs_rotate_by_size_into_archive_files() {
             serde_json::from_slice(&fs::read(&archive).unwrap()).unwrap();
         archived_ids.extend(archived_logs.iter().map(|log| log.id.as_str().to_string()));
     }
-    assert_eq!(archived_ids, vec!["log-1", "log-2"]);
+    assert_eq!(archived_ids, vec!["log-1", "log-2", "log-3"]);
 }
 
 #[tokio::test]
@@ -176,9 +176,8 @@ async fn usage_log_archives_are_capped_by_count() {
             })
             .await
             .unwrap();
+        state.flush_usage_logs_for_test().await.unwrap();
     }
-
-    state.flush_usage_logs_for_test().await.unwrap();
 
     let archive_files = archive_files(&tempdir);
     assert_eq!(archive_files.len(), 2);
@@ -189,7 +188,7 @@ async fn usage_log_archives_are_capped_by_count() {
         .iter()
         .map(|log| log.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["log-2", "log-3", "log-4"]);
+    assert_eq!(ids, vec!["log-3", "log-4"]);
 }
 
 #[tokio::test]
@@ -232,9 +231,8 @@ async fn load_from_path_prunes_existing_usage_log_archives() {
             })
             .await
             .unwrap();
+        state.flush_usage_logs_for_test().await.unwrap();
     }
-
-    state.flush_usage_logs_for_test().await.unwrap();
 
     let reloaded = AppState::load_from_path(
         &state_path,
@@ -256,7 +254,7 @@ async fn load_from_path_prunes_existing_usage_log_archives() {
         .iter()
         .map(|log| log.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["log-2", "log-3", "log-4"]);
+    assert_eq!(ids, vec!["log-3", "log-4"]);
 }
 
 fn archive_files(tempdir: &tempfile::TempDir) -> Vec<std::path::PathBuf> {

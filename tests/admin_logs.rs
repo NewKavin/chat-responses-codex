@@ -27,6 +27,10 @@ fn create_test_state() -> AppState {
         jwt_secret: "test_secret".to_string(),
         ..Default::default()
     };
+    create_test_state_with_config(config)
+}
+
+fn create_test_state_with_config(config: AppConfig) -> AppState {
 
     let now = chat_responses_codex::state::unix_seconds();
 
@@ -255,6 +259,43 @@ async fn test_logs_list_supports_pagination() {
 }
 
 #[tokio::test]
+async fn test_logs_list_respects_admin_logs_page_size_max() {
+    let state = create_test_state_with_config(AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        admin_logs_page_size_max: 1,
+        ..Default::default()
+    });
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?page=1&page_size=50")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["page_size"], 1);
+    assert_eq!(result["logs"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn test_logs_list_supports_filtering_by_status_code() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
@@ -359,6 +400,38 @@ async fn test_logs_list_supports_filtering_by_model_substring_case_insensitive()
         let model = log["model"].as_str().unwrap().to_ascii_lowercase();
         assert!(model.contains("gpt"));
     }
+}
+
+#[tokio::test]
+async fn test_logs_list_with_blank_model_filter_returns_no_matches() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?model=")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["total"], 0);
+    assert_eq!(result["total_pages"], 0);
+    assert_eq!(result["logs"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -636,4 +709,43 @@ async fn test_logs_list_enriched_fields_follow_endpoint_and_token_shape() {
     assert_eq!(row["billing_mode"], "请求计费");
     assert_eq!(row["request_count"], 1);
     assert_eq!(row["user_agent"], "未采集");
+}
+
+#[tokio::test]
+async fn test_logs_list_keeps_existing_shape_after_query_api_switch() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?status_codes=200&page=1&page_size=2")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    let logs = result["logs"].as_array().unwrap();
+
+    assert_eq!(logs.len(), 2);
+    assert_eq!(result["total"], 3);
+    assert_eq!(result["page"], 1);
+    assert_eq!(result["page_size"], 2);
+    assert_eq!(result["total_pages"], 2);
+    assert_eq!(logs[0]["id"], "log-1");
+    assert_eq!(logs[0]["api_name"], "ChatCompletions API");
+    assert_eq!(logs[0]["downstream_name"], "Team Alpha");
+    assert!(logs[0].get("log").is_none());
 }

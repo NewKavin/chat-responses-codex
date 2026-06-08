@@ -17,6 +17,14 @@ use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 
+#[test]
+fn app_config_exposes_postgres_pool_and_admin_query_limits() {
+    let config = AppConfig::default();
+    assert!(config.postgres_pool_max_size >= 4);
+    assert!(config.admin_logs_page_size_max >= 200);
+    assert!(config.upstream_http_pool_max_idle_per_host >= 8);
+}
+
 #[tokio::test]
 #[ignore]
 async fn load_gateway_chat_path_with_twenty_way_concurrency() {

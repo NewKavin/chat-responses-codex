@@ -26,6 +26,9 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `APP_NAME=chat-responses-codex`
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
+- `POSTGRES_POOL_MAX_SIZE=16`
+- `ADMIN_LOGS_PAGE_SIZE_MAX=200`
+- `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
 - `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
 - `UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10`
@@ -48,6 +51,10 @@ Optional but useful:
 
 If Redis is configured, the admin dashboard response is cached in Redis and reused
 until the TTL expires. This reduces repeated log scans on refresh-heavy admin pages.
+`POSTGRES_POOL_MAX_SIZE` sets the maximum number of pooled PostgreSQL connections.
+`ADMIN_LOGS_PAGE_SIZE_MAX` is the intended ceiling for admin log pagination responses.
+`UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST` controls how many idle upstream HTTP connections
+the gateway keeps per host before opening new sockets.
 
 ## Build The Image
 
@@ -73,6 +80,9 @@ docker run -d \
   -e APP_NAME=chat-responses-codex \
   -e USAGE_LOG_ROTATION_MAX_BYTES=1048576 \
   -e USAGE_LOG_ARCHIVE_MAX_FILES=10 \
+  -e POSTGRES_POOL_MAX_SIZE=16 \
+  -e ADMIN_LOGS_PAGE_SIZE_MAX=200 \
+  -e UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32 \
   -e UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3 \
   -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
   -e UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10 \
@@ -132,6 +142,9 @@ services:
       APP_NAME: chat-responses-codex
       USAGE_LOG_ROTATION_MAX_BYTES: "1048576"
       USAGE_LOG_ARCHIVE_MAX_FILES: "10"
+      POSTGRES_POOL_MAX_SIZE: "16"
+      ADMIN_LOGS_PAGE_SIZE_MAX: "200"
+      UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST: "32"
       UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: "1800"
       UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS: "10"
       UPSTREAM_STREAM_MAX_DURATION_SECONDS: "86400"

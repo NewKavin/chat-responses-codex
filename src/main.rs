@@ -89,6 +89,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .max(1.0),
         redis_url: env::var("REDIS_URL").ok().filter(|value| !value.trim().is_empty()),
         dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
+        postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
+        admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
+        upstream_http_pool_max_idle_per_host: env_usize(
+            "UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST",
+            32,
+        )
+        .max(8),
         upstream_connect_timeout_seconds: env_u64("UPSTREAM_CONNECT_TIMEOUT_SECONDS", 30).max(1),
         upstream_response_header_timeout_seconds: env_u64(
             "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS",
