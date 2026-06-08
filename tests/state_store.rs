@@ -1,7 +1,7 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
     AppConfig, AppState, DownstreamConfig, PersistedState, StateStore, StoreFuture,
-    UpstreamConfig, UsageLog, UsageLogQuery,
+    UpstreamConfig, UsageLog, UsageLogPage, UsageLogQuery, DownstreamUsageSummary,
 };
 use chat_responses_codex::state::log_queries::build_downstream_usage_summary;
 use std::io;
@@ -288,6 +288,34 @@ impl StateStore for SlowStore {
     }
 }
 
+#[derive(Clone)]
+struct QueryStore {
+    page: UsageLogPage,
+    summary: DownstreamUsageSummary,
+}
+
+impl StateStore for QueryStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn query_usage_logs_page<'a>(
+        &'a self,
+        _query: &'a UsageLogQuery,
+    ) -> StoreFuture<'a, io::Result<Option<UsageLogPage>>> {
+        let page = self.page.clone();
+        Box::pin(async move { Ok(Some(page)) })
+    }
+
+    fn downstream_usage_summary<'a>(
+        &'a self,
+        _downstream_id: &'a str,
+    ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
+        let summary = self.summary.clone();
+        Box::pin(async move { Ok(Some(summary)) })
+    }
+}
+
 #[tokio::test]
 async fn routing_snapshot_does_not_block_behind_slow_config_persist() {
     let slow_store = SlowStore::new();
@@ -368,4 +396,65 @@ async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
     let config_body = tokio::fs::read_to_string(&config_path).await.unwrap();
     assert!(config_body.contains("\"upstreams\""));
     assert!(!config_body.contains("\"log-1\""));
+}
+
+#[tokio::test]
+async fn query_usage_logs_page_uses_store_result_when_available() {
+    let expected = UsageLogPage {
+        logs: vec![],
+        total: 42,
+        page: 3,
+        page_size: 7,
+        total_pages: 6,
+    };
+    let state = AppState::new_with_store(
+        PersistedState::default(),
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(QueryStore {
+            page: expected.clone(),
+            summary: DownstreamUsageSummary {
+                downstream_id: "down-1".to_string(),
+                today_tokens: 1,
+                month_tokens: 2,
+                total_models: 3,
+                active_models: 4,
+            },
+        }),
+    );
+
+    let page = state.query_usage_logs_page(UsageLogQuery::default()).await.unwrap();
+    assert_eq!(page.total, expected.total);
+    assert_eq!(page.page, expected.page);
+    assert_eq!(page.page_size, expected.page_size);
+    assert_eq!(page.total_pages, expected.total_pages);
+}
+
+#[tokio::test]
+async fn downstream_usage_summary_uses_store_result_when_available() {
+    let expected = DownstreamUsageSummary {
+        downstream_id: "down-1".to_string(),
+        today_tokens: 11,
+        month_tokens: 22,
+        total_models: 33,
+        active_models: 44,
+    };
+    let state = AppState::new_with_store(
+        PersistedState::default(),
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(QueryStore {
+            page: UsageLogPage {
+                logs: vec![],
+                total: 0,
+                page: 1,
+                page_size: 10,
+                total_pages: 0,
+            },
+            summary: expected.clone(),
+        }),
+    );
+
+    let summary = state.downstream_usage_summary("down-1").await.unwrap();
+    assert_eq!(summary, expected);
 }

@@ -27,6 +27,10 @@ fn create_test_state() -> AppState {
         jwt_secret: "test_secret".to_string(),
         ..Default::default()
     };
+    create_test_state_with_config(config)
+}
+
+fn create_test_state_with_config(config: AppConfig) -> AppState {
 
     let now = chat_responses_codex::state::unix_seconds();
 
@@ -252,6 +256,43 @@ async fn test_logs_list_supports_pagination() {
     assert_eq!(result["page_size"], 2);
     assert_eq!(result["total"], 5);
     assert_eq!(result["total_pages"], 3);
+}
+
+#[tokio::test]
+async fn test_logs_list_respects_admin_logs_page_size_max() {
+    let state = create_test_state_with_config(AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        admin_logs_page_size_max: 1,
+        ..Default::default()
+    });
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?page=1&page_size=50")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["page_size"], 1);
+    assert_eq!(result["logs"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

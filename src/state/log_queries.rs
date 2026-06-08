@@ -214,6 +214,10 @@ pub fn build_downstream_usage_summary(
 
 impl AppState {
     pub async fn query_usage_logs_page(&self, query: UsageLogQuery) -> io::Result<UsageLogPage> {
+        if let Some(page) = self.config_store.query_usage_logs_page(&query).await? {
+            return Ok(page);
+        }
+
         let snapshot = self.snapshot().await;
         let now = unix_seconds();
         let (start_time, end_time) = query_time_bounds(&query, now);
@@ -254,7 +258,9 @@ impl AppState {
         logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
 
         let total = logs.len();
-        let page_size = query.page_size.clamp(1, 200);
+        let page_size = query
+            .page_size
+            .clamp(1, self.config.admin_logs_page_size_max.max(1));
         let total_pages = total.div_ceil(page_size);
         let page = query.page.max(1);
         let start = (page - 1) * page_size;
@@ -281,6 +287,14 @@ impl AppState {
         &self,
         downstream_id: &str,
     ) -> io::Result<DownstreamUsageSummary> {
+        if let Some(summary) = self
+            .config_store
+            .downstream_usage_summary(downstream_id)
+            .await?
+        {
+            return Ok(summary);
+        }
+
         let snapshot = self.snapshot().await;
         let now = unix_seconds();
         build_downstream_usage_summary(&snapshot, downstream_id, now)

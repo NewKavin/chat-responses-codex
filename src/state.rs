@@ -648,7 +648,6 @@ impl AppState {
             .cloned()
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
-        let upstream_connect_timeout_seconds = config.upstream_connect_timeout_seconds;
         let store_path = store_path.into();
         let config_store: Arc<dyn StateStore> = Arc::new(FileStateStore::new(store_path.clone()));
         Self {
@@ -2135,13 +2134,6 @@ fn downstream_token_retry_after_seconds(
     }
 
     window_seconds.max(1)
-}
-
-fn unix_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 fn prune_expired_admin_sessions(sessions: &mut HashMap<String, u64>) {

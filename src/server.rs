@@ -5297,7 +5297,9 @@ async fn admin_list_logs(
             status_codes = vec![status_code];
         } else {
             status_codes.clear();
-            let page_size = query.page_size.clamp(1, 200);
+            let page_size = query
+                .page_size
+                .clamp(1, state.config.admin_logs_page_size_max.max(1));
             let page = query.page.max(1);
             return Json(json!({
                 "logs": Vec::<Value>::new(),
@@ -5314,7 +5316,9 @@ async fn admin_list_logs(
         .as_deref()
         .is_some_and(|model| model.trim().is_empty())
     {
-        let page_size = query.page_size.clamp(1, 200);
+        let page_size = query
+            .page_size
+            .clamp(1, state.config.admin_logs_page_size_max.max(1));
         let page = query.page.max(1);
         return Json(json!({
             "logs": Vec::<Value>::new(),
