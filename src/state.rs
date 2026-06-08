@@ -7,6 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 #[path = "state/postgres.rs"]
 mod postgres;
+#[path = "state/file_store.rs"]
+mod file_store;
 #[path = "state/log_queries.rs"]
 pub mod log_queries;
 #[path = "state/store.rs"]
@@ -31,7 +33,7 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 
 use postgres::PostgresStateStore;
-use store::FileStateStore;
+use file_store::FileStateStore;
 pub use log_queries::{
     DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery,
 };
@@ -1368,31 +1370,14 @@ impl AppState {
             return Ok(());
         }
 
-        for log in batch.iter().cloned() {
-            let (candidate_state, archived_logs) = {
-                let state = self.inner.lock().await;
-                let mut candidate_state = state.clone();
-                candidate_state.usage_logs.push(log);
-                let archived_logs = trim_usage_logs_for_rotation(
-                    &mut candidate_state,
-                    self.config.usage_log_rotation_max_bytes,
-                );
-                (candidate_state, archived_logs)
-            };
-
-            if !archived_logs.is_empty() {
-                self.write_usage_log_archive(&archived_logs).await?;
-                {
-                    let mut archived = self.archived_usage_logs.lock().await;
-                    archived.extend(archived_logs);
-                }
-            }
-
-            self.persist_state(&candidate_state).await?;
-            let mut state = self.inner.lock().await;
-            state.usage_logs = candidate_state.usage_logs;
-            self.enforce_usage_log_archive_limit().await?;
+        let state = self.inner.lock().await.clone();
+        self.config_store.append_usage_logs(batch).await?;
+        self.persist_state(&state).await?;
+        {
+            let mut archived = self.archived_usage_logs.lock().await;
+            archived.extend(batch.iter().cloned());
         }
+        self.enforce_usage_log_archive_limit().await?;
 
         Ok(())
     }
@@ -1858,37 +1843,6 @@ impl AppState {
         self.config_store.persist_config(state).await
     }
 
-    async fn write_usage_log_archive(&self, logs: &[UsageLog]) -> io::Result<()> {
-        if logs.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(parent) = self.store_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        let archive_path = self.usage_log_archive_path();
-        let bytes = serde_json::to_vec(logs)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
-        let tmp_path = archive_path.with_extension("tmp");
-        fs::write(&tmp_path, &bytes).await?;
-        fs::rename(&tmp_path, &archive_path).await
-    }
-
-    fn usage_log_archive_path(&self) -> PathBuf {
-        let base_name = self
-            .store_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("state.json");
-        let archive_name = format!(
-            "{base_name}.usage.{:020}-{}.json",
-            unix_millis(),
-            Uuid::new_v4()
-        );
-        self.store_path.with_file_name(archive_name)
-    }
-
     async fn enforce_usage_log_archive_limit(&self) -> io::Result<()> {
         let limit = self.config.usage_log_archive_max_files.max(1);
         let archive_paths = usage_log_archive_paths(&self.store_path).await?;
@@ -1916,23 +1870,6 @@ impl AppState {
 
         Ok(())
     }
-}
-
-fn trim_usage_logs_for_rotation(state: &mut PersistedState, max_bytes: usize) -> Vec<UsageLog> {
-    let max_bytes = max_bytes.max(1);
-    let mut archived_logs = Vec::new();
-
-    while serialized_state_size(state) > max_bytes && !state.usage_logs.is_empty() {
-        archived_logs.push(state.usage_logs.remove(0));
-    }
-
-    archived_logs
-}
-
-fn serialized_state_size(state: &PersistedState) -> usize {
-    serde_json::to_vec_pretty(state)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
 }
 
 async fn load_archived_usage_logs(store_path: &Path) -> io::Result<Vec<UsageLog>> {

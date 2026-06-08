@@ -7,6 +7,7 @@ use chat_responses_codex::state::log_queries::build_downstream_usage_summary;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::tempdir;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -324,4 +325,47 @@ async fn routing_snapshot_does_not_block_behind_slow_config_persist() {
 
     release_persist.notify_one();
     let _ = updater.await;
+}
+
+#[tokio::test]
+async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
+    let temp_dir = tempdir().unwrap();
+    let config_path = temp_dir.path().join("state.json");
+    let state = AppState::new(
+        PersistedState::default(),
+        config_path.clone(),
+        AppConfig::default(),
+    );
+
+    state
+        .append_usage_log(UsageLog {
+            id: "log-1".into(),
+            downstream_key_id: "downstream-1".into(),
+            upstream_key_id: "upstream-1".into(),
+            downstream_name: None,
+            upstream_name: None,
+            endpoint: "/v1/chat/completions".into(),
+            model: "gpt-4".into(),
+            inference_strength: None,
+            billing_mode: None,
+            request_count: None,
+            user_agent: None,
+            request_id: "req-1".into(),
+            status_code: 200,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
+            latency_ms: 10,
+            created_at: chat_responses_codex::state::unix_seconds(),
+        })
+        .await
+        .unwrap();
+
+    state.flush_usage_logs_for_test().await.unwrap();
+
+    let config_body = tokio::fs::read_to_string(&config_path).await.unwrap();
+    assert!(config_body.contains("\"upstreams\""));
+    assert!(!config_body.contains("\"log-1\""));
 }
