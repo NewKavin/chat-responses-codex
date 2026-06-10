@@ -1,17 +1,22 @@
 import axios from 'axios'
 import type {
+  Announcement,
   PortalOverview,
   PortalQuota,
   PortalUsageHistory
 } from '@/types'
 
-const api = axios.create({
+export interface AnnouncementResponse {
+  announcement: Announcement | null
+}
+
+export const portalHttp = axios.create({
   baseURL: '/api',
   timeout: 10000
 })
 
 // 请求拦截器：添加 Bearer token
-api.interceptors.request.use(config => {
+portalHttp.interceptors.request.use(config => {
   const token = localStorage.getItem('portal_token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
@@ -20,7 +25,7 @@ api.interceptors.request.use(config => {
 })
 
 // 响应拦截器：处理 401 错误
-api.interceptors.response.use(
+portalHttp.interceptors.response.use(
   response => response,
   error => {
     if (error.response?.status === 401) {
@@ -35,19 +40,22 @@ api.interceptors.response.use(
 export const portalApi = {
   // Authentication
   login: (data: { employee_id: string; key: string }) =>
-    api.post<{ token: string }>('/portal/login', data),
+    portalHttp.post<{ token: string }>('/portal/login', data),
 
   // Overview
-  getOverview: () => api.get<PortalOverview>('/portal/overview'),
+  getOverview: () => portalHttp.get<PortalOverview>('/portal/overview'),
 
   // Quota
-  getQuota: () => api.get<PortalQuota>('/portal/quota'),
+  getQuota: () => portalHttp.get<PortalQuota>('/portal/quota'),
 
   // Usage History
   getUsageHistory: (params?: { time_range?: string; page?: number; page_size?: number }) =>
-    api.get<PortalUsageHistory>('/portal/usage-history', { params }),
+    portalHttp.get<PortalUsageHistory>('/portal/usage-history', { params }),
 
   // Key Management
-  getKey: () => api.get<{ plaintext_key: string | null }>('/portal/key'),
-  rotateKey: () => api.post<{ plaintext_key: string }>('/portal/key/rotate')
+  getKey: () => portalHttp.get<{ plaintext_key: string | null }>('/portal/key'),
+  rotateKey: () => portalHttp.post<{ plaintext_key: string }>('/portal/key/rotate'),
+
+  // Announcement
+  getAnnouncement: () => portalHttp.get<AnnouncementResponse>('/portal/announcement')
 }

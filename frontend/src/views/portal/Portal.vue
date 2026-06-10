@@ -12,6 +12,25 @@
       </el-header>
 
       <el-main class="portal-main">
+        <el-dialog
+          v-model="announcementDialogVisible"
+          :title="currentAnnouncement?.title || '系统公告'"
+          width="560px"
+          :close-on-click-modal="false"
+          :close-on-press-escape="false"
+        >
+          <div v-if="currentAnnouncement" class="announcement-dialog">
+            <div class="announcement-badge">
+              <el-tag :type="announcementTagType" effect="light">{{ announcementLevelLabel }}</el-tag>
+            </div>
+            <div class="announcement-content">{{ currentAnnouncement.content }}</div>
+          </div>
+
+          <template #footer>
+            <el-button type="primary" @click="handleAcknowledge">我知道了</el-button>
+          </template>
+        </el-dialog>
+
         <el-tabs v-model="activeTab" @tab-change="handleTabChange">
           <el-tab-pane label="概览" name="overview">
             <Overview />
@@ -35,25 +54,96 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, provide } from 'vue'
+import { computed, onMounted, provide, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Overview from './Overview.vue'
 import QuotaDetails from './QuotaDetails.vue'
 import UsageHistory from './UsageHistory.vue'
 import Integration from './Integration.vue'
 import KeyManagement from './KeyManagement.vue'
+import { portalApi } from '@/api/portal'
+import { buildAnnouncementSeenKey, shouldShowAnnouncement } from '@/utils/announcement'
+import type { Announcement } from '@/types'
 
 const router = useRouter()
 const activeTab = ref('overview')
 const employeeId = ref('')
+const announcementDialogVisible = ref(false)
+const currentAnnouncement = ref<Announcement | null>(null)
+
+const safeLocalStorageGet = (key: string) => {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+const safeLocalStorageSet = (key: string, value: string) => {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Local storage can be unavailable in privacy-restricted environments.
+  }
+}
 
 const extractEmployeeId = () => {
-  const id = localStorage.getItem('portal_employee_id')
+  const id = safeLocalStorageGet('portal_employee_id')
   if (id) {
     employeeId.value = id
-  } else {
-    router.push('/portal/login')
+    return id
   }
+  router.push('/portal/login')
+  return null
+}
+
+const announcementLevelLabel = computed(() => {
+  const level = currentAnnouncement.value?.level
+  if (level === 'success') return '成功'
+  if (level === 'warning') return '警告'
+  if (level === 'error') return '错误'
+  return '信息'
+})
+
+const announcementTagType = computed(() => {
+  const level = currentAnnouncement.value?.level
+  if (level === 'success') return 'success'
+  if (level === 'warning') return 'warning'
+  if (level === 'error') return 'danger'
+  return 'info'
+})
+
+const loadAnnouncement = async (employee: string) => {
+  try {
+    const { data } = await portalApi.getAnnouncement()
+    const announcement = data.announcement
+
+    if (!shouldShowAnnouncement(announcement, safeLocalStorageGet(buildAnnouncementSeenKey(employee)))) {
+      currentAnnouncement.value = null
+      announcementDialogVisible.value = false
+      return
+    }
+
+    currentAnnouncement.value = announcement
+    announcementDialogVisible.value = true
+  } catch (error) {
+    console.error('加载公告失败', error)
+  }
+}
+
+const handleAcknowledge = () => {
+  if (!currentAnnouncement.value || !employeeId.value) {
+    announcementDialogVisible.value = false
+    currentAnnouncement.value = null
+    return
+  }
+
+  safeLocalStorageSet(
+    buildAnnouncementSeenKey(employeeId.value),
+    currentAnnouncement.value.id
+  )
+  announcementDialogVisible.value = false
+  currentAnnouncement.value = null
 }
 
 const handleTabChange = (tabName: string) => {
@@ -61,17 +151,26 @@ const handleTabChange = (tabName: string) => {
 }
 
 const handleLogout = () => {
-  localStorage.removeItem('portal_token')
-  localStorage.removeItem('portal_employee_id')
+  try {
+    localStorage.removeItem('portal_token')
+    localStorage.removeItem('portal_employee_id')
+  } catch {
+    // Ignore local storage failures during logout.
+  }
+  announcementDialogVisible.value = false
+  currentAnnouncement.value = null
   router.push('/portal/login')
 }
 
-onMounted(() => {
-  extractEmployeeId()
+onMounted(async () => {
+  const id = extractEmployeeId()
+  if (id) {
+    await loadAnnouncement(id)
+  }
 })
 
 // 提供 token 给子组件
-provide('portalToken', () => localStorage.getItem('portal_token'))
+provide('portalToken', () => safeLocalStorageGet('portal_token'))
 </script>
 
 <style scoped>
@@ -114,6 +213,24 @@ provide('portalToken', () => localStorage.getItem('portal_token'))
 
 .portal-main {
   padding: 0;
+}
+
+.announcement-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.announcement-badge {
+  display: flex;
+  align-items: center;
+}
+
+.announcement-content {
+  white-space: pre-wrap;
+  line-height: 1.75;
+  color: #303133;
+  font-size: 15px;
 }
 
 :deep(.el-tabs) {

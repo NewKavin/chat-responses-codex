@@ -16,6 +16,7 @@
             <el-menu-item index="/admin/upstreams">上游管理</el-menu-item>
             <el-menu-item index="/admin/downstreams">下游管理</el-menu-item>
             <el-menu-item index="/admin/logs">运行日志</el-menu-item>
+            <el-menu-item index="/admin/announcement">公告管理</el-menu-item>
           </el-menu>
         </el-aside>
         <el-container>
