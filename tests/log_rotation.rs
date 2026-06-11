@@ -14,6 +14,7 @@ async fn usage_logs_rotate_by_size_into_archive_files() {
             ..AppConfig::default()
         },
     );
+    state.persist().await.unwrap();
 
     for index in 1..=3 {
         state

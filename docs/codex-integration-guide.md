@@ -46,11 +46,11 @@ cp templates/codex/model-catalog.json ~/.codex/model-catalog.json
 
 ```toml
 model_provider = "gateway"
-model = "ZhipuAI/GLM-5"
-review_model = "ZhipuAI/GLM-5"
+model = "<model_slug>"
+review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
-model_catalog_json = "/home/<你的用户名>/.codex/model-catalog.json"
+model_catalog_json = "<model_catalog_path>"
 
 [features]
 skill_mcp_dependency_install = true
@@ -58,21 +58,18 @@ tool_suggest = true
 
 [model_providers.gateway]
 name = "chat-responses-codex"
-base_url = "http://127.0.0.1:3001/v1"
+base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
 
-如果你的网关不在本机，就把 `base_url` 改成远程网关地址，例如：
-
-- `http://<网关机器 IP>:3001/v1`
-- `https://codex-gateway.example.com/v1`
+把 `<gateway_origin>` 换成你的网关根地址，本机就填你本机监听的网关地址，远程就填你反向代理或公网域名对应的根地址。
 
 ### 3. 网关上配置上游
 
 在网关管理页打开：
 
-- `http://<网关地址>:3001/admin`
+- `<gateway_origin>/admin`
 
 进入 `Upstreams`，给每个上游填：
 
@@ -81,7 +78,7 @@ requires_openai_auth = true
 - `protocol`
 - `supported_models`
 
-当前模板里按这三个模型先配：
+下面这三个模型名只是示例，按你的实际上游模型替换也可以；这里只是演示如何把模型名写进 `supported_models`。
 
 - `ZhipuAI/GLM-5`
 - `MiniMax/MiniMax-M2.7`
@@ -139,12 +136,12 @@ cargo run
 
 如果网关在本机：
 
-- `http://127.0.0.1:3001/v1`
+- `<gateway_origin>/v1`
 
 如果网关在其他机器：
 
-- `http://<网关机器 IP>:3001/v1`
-- 或者你反向代理后的地址，例如 `https://codex-gateway.example.com/v1`
+- `<gateway_origin>/v1`
+- 如果你走了反向代理，也把代理后的根地址放进 `<gateway_origin>`
 
 Codex 里填的是网关地址，不是上游厂商地址。
 
@@ -165,7 +162,7 @@ Codex 里填的是网关地址，不是上游厂商地址。
 
 打开：
 
-- `http://<网关地址>:3001/admin`
+- `<gateway_origin>/admin`
 
 登录后去：
 
@@ -185,12 +182,12 @@ Codex 里填的是网关地址，不是上游厂商地址。
 
 ```json
 {
-  "id": "glm-5",
-  "name": "GLM-5",
-  "base_url": "https://glm.example.com/v1",
-  "api_key": "sk-your-glm-key",
+  "id": "<upstream_id>",
+  "name": "<upstream_name>",
+  "base_url": "<upstream_base_url>",
+  "api_key": "<upstream_api_key>",
   "protocol": "ChatCompletions",
-  "supported_models": ["ZhipuAI/GLM-5"],
+  "supported_models": ["<model_slug>"],
   "active": true,
   "failure_count": 0
 }
@@ -228,7 +225,7 @@ Codex 不应该直接用上游厂商 key。它应该用网关发的下游 key。
 
 同样是在网关管理页：
 
-- `http://<网关地址>:3001/admin`
+- `<gateway_origin>/admin`
 - 进入 `Downstreams`
 
 ### 3.2 下游 key 是什么
@@ -237,7 +234,7 @@ Codex 不应该直接用上游厂商 key。它应该用网关发的下游 key。
 
 Codex 请求网关时，实际发送的是：
 
-- `Authorization: Bearer <downstream-key>`
+- `Authorization: Bearer <downstream_key>`
 
 ### 3.3 下游允许哪些模型
 
@@ -269,15 +266,15 @@ Codex 请求网关时，实际发送的是：
 
 ```toml
 model_provider = "gateway"
-model = "ZhipuAI/GLM-5"
-review_model = "ZhipuAI/GLM-5"
+model = "<model_slug>"
+review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
-model_catalog_json = "/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"
+model_catalog_json = "<model_catalog_path>"
 
 [model_providers.gateway]
 name = "chat-responses-codex"
-base_url = "http://gateway-host:3001/v1"
+base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
@@ -290,15 +287,15 @@ requires_openai_auth = true
 - `model_reasoning_effort`：推理强度
 - `disable_response_storage`：关闭响应存储
 - `model_catalog_json`：Codex 模型目录文件路径
-- `base_url`：网关地址
+- `base_url`：网关根地址加 `/v1`
 - `wire_api = "responses"`：让 Codex 按 Responses 协议跟网关通信
 - `requires_openai_auth = true`：使用 OpenAI 风格的 Bearer 鉴权头
 
 ### 4.4 你现在最容易配错的地方
 
 1. `model_catalog_json` 路径写错
-2. `base_url` 写成了上游厂商地址，而不是网关地址
-3. `model` 和 `slug` 不一致
+2. `base_url` 写成了上游厂商地址，而不是网关根地址
+3. `model` 和 `model_slug` 不一致
 4. 模型名大小写不一致
 
 ## 第五步: 配置 Codex 模型目录
@@ -326,20 +323,14 @@ Codex 会根据这个目录决定模型是否存在。
 
 ### 5.3 你要改什么
 
-如果你只想先跑通三个模型，就保留：
-
-- `ZhipuAI/GLM-5`
-- `MiniMax/MiniMax-M2.7`
-- `deepseek-ai/DeepSeek-R1-0528`
-
-然后按你真实上游支持情况，把 `display_name`、`priority` 和推理等级再微调。
+如果你只想先跑通三个模型，就保留这三个示例即可；如果你的环境不同，就把它们替换成你自己的 slug，并同步调整 `display_name`、`priority` 和推理等级。
 
 ## 第六步: 如果你想直接用模板
 
 建议按这个顺序做：
 
 1. 在网关上启动服务
-2. 打开 `http://<网关地址>:3001/admin`
+2. 打开 `<gateway_origin>/admin`
 3. 配好上游模型
 4. 配好下游 key
 5. 把 `templates/codex/config.toml.example` 复制到 `~/.codex/config.toml`
@@ -352,13 +343,13 @@ Codex 会根据这个目录决定模型是否存在。
 ### 7.1 先测网关健康
 
 ```bash
-curl -i http://<网关地址>:3001/healthz
+curl -i <gateway_origin>/healthz
 ```
 
 ### 7.2 再测管理页
 
 ```bash
-curl -u admin:<ADMIN_PASSWORD> http://<网关地址>:3001/admin
+curl -u admin:<admin_password> <gateway_origin>/admin
 ```
 
 ### 7.3 再测下游模型列表
@@ -367,18 +358,18 @@ curl -u admin:<ADMIN_PASSWORD> http://<网关地址>:3001/admin
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer <downstream-key>" \
-  http://<网关地址>:3001/v1/models
+  -H "Authorization: Bearer <downstream_key>" \
+  <gateway_origin>/v1/models
 ```
 
 ### 7.4 再测 chat 请求
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer <downstream-key>" \
+  -H "Authorization: Bearer <downstream_key>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"ZhipuAI/GLM-5","messages":[{"role":"user","content":"hello"}]}' \
-  http://<网关地址>:3001/v1/chat/completions
+  -d '{"model":"<model_slug>","messages":[{"role":"user","content":"hello"}]}' \
+  <gateway_origin>/v1/chat/completions
 ```
 
 ### 7.5 再测 Codex

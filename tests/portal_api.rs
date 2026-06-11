@@ -98,6 +98,7 @@ fn create_test_state() -> (AppState, String) {
                 created_at: now - 7200,
             },
         ],
+        announcement: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -176,6 +177,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 created_at: now - 300,
             },
         ],
+        announcement: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -234,6 +236,7 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             active: true,
         }],
         usage_logs,
+        announcement: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -940,6 +943,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
             active: true,
         }],
         usage_logs: vec![],
+    announcement: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

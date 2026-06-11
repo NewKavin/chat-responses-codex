@@ -584,11 +584,32 @@ pub struct UsageLog {
     pub created_at: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnouncementLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncementConfig {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub level: AnnouncementLevel,
+    pub active: bool,
+    pub updated_at: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PersistedState {
     pub upstreams: Vec<UpstreamConfig>,
     pub downstreams: Vec<DownstreamConfig>,
     pub usage_logs: Vec<UsageLog>,
+    #[serde(default)]
+    pub announcement: Option<AnnouncementConfig>,
 }
 
 #[derive(Clone)]
@@ -616,6 +637,20 @@ pub struct AppState {
 impl StateStore for PostgresStateStore {
     fn persist_config<'a>(&'a self, state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async move { self.replace_state(state).await })
+    }
+
+    fn query_usage_logs_page<'a>(
+        &'a self,
+        query: &'a UsageLogQuery,
+    ) -> StoreFuture<'a, io::Result<Option<UsageLogPage>>> {
+        Box::pin(async move { self.query_usage_logs_page(query).await })
+    }
+
+    fn downstream_usage_summary<'a>(
+        &'a self,
+        downstream_id: &'a str,
+    ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
+        Box::pin(async move { self.downstream_usage_summary(downstream_id).await })
     }
 }
 
@@ -893,6 +928,7 @@ impl AppState {
             upstreams: state.upstreams.clone(),
             downstreams: state.downstreams.clone(),
             usage_logs: Vec::new(),
+            announcement: None,
         }
     }
 
@@ -965,6 +1001,18 @@ impl AppState {
     pub async fn persist(&self) -> io::Result<()> {
         let state = self.snapshot().await;
         self.persist_state(&state).await
+    }
+
+    pub async fn update_announcement(&self, announcement: Option<AnnouncementConfig>) -> io::Result<()> {
+        self.mutate_persisted_state_io(move |state| {
+            state.announcement = announcement;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn announcement(&self) -> Option<AnnouncementConfig> {
+        self.snapshot().await.announcement
     }
 
     pub async fn downstream_for_secret(&self, secret: &str) -> Option<DownstreamConfig> {
@@ -1376,9 +1424,7 @@ impl AppState {
             return Ok(());
         }
 
-        let state = self.inner.lock().await.clone();
         self.config_store.append_usage_logs(batch).await?;
-        self.persist_state(&state).await?;
         {
             let mut archived = self.archived_usage_logs.lock().await;
             archived.extend(batch.iter().cloned());
@@ -1833,6 +1879,7 @@ impl AppState {
         let mut state = self.inner.lock().await;
         state.upstreams = candidate_state.upstreams;
         state.downstreams = candidate_state.downstreams;
+        state.announcement = candidate_state.announcement;
 
         Ok(result)
     }

@@ -221,6 +221,7 @@ fn create_test_state() -> AppState {
                 created_at: seven_days_ago - 60,
             },
         ],
+        announcement: None,
     };
 
     AppState::new(state, unique_state_path(), config)

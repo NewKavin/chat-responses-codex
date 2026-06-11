@@ -1,134 +1,222 @@
 <template>
-  <div class="integration-container">
-    <el-card>
+  <div class="integration-page">
+    <el-card class="integration-hero">
+      <div class="hero-top">
+        <div>
+          <p class="eyebrow">复制即用</p>
+          <h2>门户集成配置</h2>
+          <p class="hero-copy">
+            本页会自动读取当前下游的 key、当前网关 URL 和模型统计，生成可以直接复制到本地的配置文件。
+          </p>
+        </div>
+        <el-tag type="success" effect="light">
+          {{ primaryModelSlug || '未发现模型' }}
+        </el-tag>
+      </div>
+
+      <el-descriptions class="summary-grid" :column="2" border>
+        <el-descriptions-item label="网关地址">
+          <code>{{ gatewayApiBaseUrl || '等待加载' }}</code>
+        </el-descriptions-item>
+        <el-descriptions-item label="当前 key">
+          <code>{{ portalKey || '未读取到 key' }}</code>
+        </el-descriptions-item>
+        <el-descriptions-item label="可用模型数">
+          <code>{{ allModelSlugs.length }}</code>
+        </el-descriptions-item>
+        <el-descriptions-item label="默认模型">
+          <code>{{ primaryModelSlug || '未发现模型' }}</code>
+        </el-descriptions-item>
+      </el-descriptions>
+
+      <el-alert
+        class="status-alert"
+        type="info"
+        :closable="false"
+        show-icon
+        title="Codex 不把 key 写进 config.toml，而是通过 `codex login --with-api-key` 写进 `~/.codex/auth.json`。"
+      />
+
+      <el-alert
+        v-for="warning in loadWarnings"
+        :key="warning"
+        class="status-alert"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="warning"
+      />
+
+      <el-alert
+        v-if="fatalError"
+        class="status-alert"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="fatalError"
+      />
+    </el-card>
+
+    <el-card v-if="sortedModelStats.length" class="model-card">
       <template #header>
-        <h2>集成示例</h2>
+        <div class="section-head">
+          <div>
+            <h3>模型排序</h3>
+            <p>按月使用量优先，月使用量相同再看今日使用量。</p>
+          </div>
+          <el-tag effect="plain">{{ sortedModelStats.length }} 个统计项</el-tag>
+        </div>
       </template>
 
-      <el-tabs v-model="activeTab">
-        <!-- Codex Tab -->
+      <div class="model-grid">
+        <div v-for="stat in sortedModelStats" :key="stat.model" class="model-chip">
+          <strong>{{ stat.model }}</strong>
+          <span>
+            月 {{ stat.month_count }} · 今 {{ stat.today_count }} · 成功率
+            {{ Math.round(stat.success_rate * 100) }}%
+          </span>
+        </div>
+      </div>
+    </el-card>
+
+    <el-empty
+      v-if="!hasConfigContent"
+      class="integration-empty"
+      description="当前还不能生成可直接复制的配置"
+    >
+      <p class="empty-copy">
+        请先确认当前下游 key 可读，并且网关至少能返回一个模型。然后刷新本页即可生成完整配置。
+      </p>
+    </el-empty>
+
+    <el-card v-else class="tabs-card">
+      <el-tabs v-model="activeTab" class="integration-tabs">
         <el-tab-pane label="Codex" name="codex">
-          <div class="integration-section">
-            <h3>Codex 配置指南</h3>
-            
-            <div class="steps">
-              <h4>步骤 1: 复制配置文件到本地</h4>
-              <pre class="code-block">mkdir -p ~/.codex
-cp templates/codex/config.toml.example ~/.codex/config.toml
-cp templates/codex/model-catalog.json ~/.codex/model-catalog.json</pre>
-              <el-button @click="copyCode(codexCopyCmd)" class="copy-btn" size="small">复制</el-button>
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="Codex 需要 3 个内容：`config.toml`、`model-catalog.json`，以及通过 `codex login --with-api-key` 写入的 `auth.json`。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 写入 `~/.codex/config.toml`</h4>
+                  <p>
+                    这个文件只放非敏感配置，key 不写在这里。直接把下面内容保存到
+                    <code>~/.codex/config.toml</code>。
+                  </p>
+                </div>
+                <el-button size="small" @click="copyCode(codexConfigToml)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ codexConfigToml }}</pre>
             </div>
 
-            <div class="steps">
-              <h4>步骤 2: 修改 ~/.codex/config.toml</h4>
-              <p>将以下配置复制到你的 Codex 配置文件中，替换 YOUR_API_KEY 为你的下游密钥：</p>
-              <pre class="code-block">{{ codexConfig }}</pre>
-              <el-button @click="copyCode(codexConfig)" class="copy-btn" size="small">复制</el-button>
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 2: 写入 `~/.codex/model-catalog.json`</h4>
+                  <p>
+                    这个文件按门户统计排序，优先展示最近一个月最常用的模型。
+                  </p>
+                </div>
+                <el-button size="small" @click="copyCode(codexModelCatalogJson)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ codexModelCatalogJson }}</pre>
             </div>
 
-            <div class="steps">
-              <h4>步骤 3: 在网关配置上游和下游</h4>
-              <p>打开网关管理页面配置上游模型和下游密钥：</p>
-              <ul>
-                <li>访问 <code>http://网关地址:3001/admin</code></li>
-                <li>在 Upstreams 中添加上游模型配置</li>
-                <li>在 Downstreams 中创建下游密钥（Codex 使用此密钥）</li>
-              </ul>
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 3: 写入 `~/.codex/auth.json`</h4>
+                  <p>
+                    先确保 <code>config.toml</code> 里已经设置了
+                    <code>cli_auth_credentials_store = "file"</code>，然后执行下面命令把当前门户
+                    key 写进 <code>auth.json</code>。
+                  </p>
+                </div>
+                <el-button size="small" @click="copyCode(codexAuthLoginCommand)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ codexAuthLoginCommand }}</pre>
             </div>
 
-            <div class="steps">
-              <h4>步骤 4: 启动 Codex 并选择模型</h4>
-              <p>配置完成后，启动 Codex 并选择你在 model-catalog.json 中定义的模型（如 ZhipuAI/GLM-5, MiniMax/MiniMax-M2.7, deepseek-ai/DeepSeek-R1-0528）。</p>
-            </div>
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="完成后直接启动 Codex。默认模型已经按门户统计排好顺序，Codex 会优先使用最常用的模型。"
+            />
           </div>
         </el-tab-pane>
 
-        <!-- OpenCode Tab -->
         <el-tab-pane label="OpenCode" name="opencode">
-          <div class="integration-section">
-            <h3>OpenCode 配置指南</h3>
-            
-            <div class="steps">
-              <h4>步骤 1: 创建配置文件</h4>
-              <p>OpenCode 配置文件通常位于项目根目录或 ~/.opencode/opencode.json：</p>
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="OpenCode 直接使用一个完整的 `opencode.json`。把当前门户 key 和网关 URL 写进去后，保存即可使用。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 写入 `~/.config/opencode/opencode.json`</h4>
+                  <p>
+                    这个 JSON 文件已经填好当前 key、网关 URL 和模型列表，复制后可直接使用。
+                  </p>
+                </div>
+                <el-button size="small" @click="copyCode(opencodeConfig)">复制</el-button>
+              </div>
               <pre class="code-block">{{ opencodeConfig }}</pre>
-              <el-button @click="copyCode(opencodeConfig)" class="copy-btn" size="small">复制</el-button>
             </div>
 
-            <div class="steps">
-              <h4>步骤 2: 替换 YOUR_API_KEY</h4>
-              <p>将 YOUR_API_KEY 替换为你在网关管理页面创建的下游密钥。</p>
-            </div>
-
-            <div class="steps">
-              <h4>步骤 3: 确保模型名称一致</h4>
-              <p>OpenCode 使用的模型名称必须与网关配置的 supported_models 中的模型名称一致。</p>
-            </div>
-
-            <div class="steps">
-              <h4>步骤 4: 启动 OpenCode</h4>
-              <p>配置完成后，启动 OpenCode 即可使用网关提供的模型服务。</p>
-            </div>
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="保存后重新打开 OpenCode 即可。默认模型和小模型都已经按当前门户的使用量自动选好了。"
+            />
           </div>
         </el-tab-pane>
 
-        <!-- Claude Code Tab -->
         <el-tab-pane label="Claude Code" name="claude">
-          <div class="integration-section">
-            <h3>Claude Code 配置指南</h3>
-            
-            <div class="steps">
-              <h4>步骤 1: 找到配置文件位置</h4>
-              <p>Claude Desktop 配置文件位置：</p>
-              <ul>
-                <li>macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code></li>
-                <li>Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code></li>
-                <li>Linux: <code>~/.config/Claude/claude_desktop_config.json</code></li>
-              </ul>
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="Claude Code 直接使用 `~/.claude/settings.json`。当前 key、网关 URL 和默认模型都会写进去。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 写入 `~/.claude/settings.json`</h4>
+                  <p>
+                    这个配置已经写好了 Anthropic 兼容网关所需的环境变量；如果模型名不是 Claude
+                    前缀，页面会自动补一个 custom model option。
+                  </p>
+                </div>
+                <el-button size="small" @click="copyCode(claudeCodeSettingsJson)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ claudeCodeSettingsJson }}</pre>
             </div>
 
-            <div class="steps">
-              <h4>步骤 2: 编辑配置文件</h4>
-              <p>将以下配置添加到 claude_desktop_config.json：</p>
-              <pre class="code-block">{{ claudeConfig }}</pre>
-              <el-button @click="copyCode(claudeConfig)" class="copy-btn" size="small">复制</el-button>
-            </div>
-
-            <div class="steps">
-              <h4>步骤 3: 替换 YOUR_API_KEY</h4>
-              <p>将 YOUR_API_KEY 替换为你在网关创建的下游密钥。</p>
-            </div>
-
-            <div class="steps">
-              <h4>步骤 4: 重启 Claude Desktop</h4>
-              <p>保存配置后重启 Claude Desktop 应用，即可使用网关提供的模型。</p>
-            </div>
-
-            </div>
-        </el-tab-pane>
-
-        <!-- Python SDK Tab -->
-        <el-tab-pane label="Python SDK" name="python">
-          <div class="integration-section">
-            <h3>Python SDK 使用示例</h3>
-            
-            <div class="steps">
-              <h4>步骤 1: 安装 OpenAI Python SDK</h4>
-              <pre class="code-block">pip install openai</pre>
-              <el-button @click="copyCode('pip install openai')" class="copy-btn" size="small">复制</el-button>
-            </div>
-
-            <div class="steps">
-              <h4>步骤 2: 创建 Python 脚本</h4>
-              <p>将以下代码复制到你的 Python 脚本中，替换 YOUR_API_KEY 为你的下游密钥：</p>
-              <pre class="code-block">{{ pythonSdkExample }}</pre>
-              <el-button @click="copyCode(pythonSdkExample)" class="copy-btn" size="small">复制</el-button>
-            </div>
-
-            <div class="steps">
-              <h4>步骤 3: 运行脚本</h4>
-              <p>确保网关服务正在运行，然后执行你的 Python 脚本即可。</p>
-            </div>
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="保存后重启 Claude Code 即可。默认模型会跟随门户使用量最高的模型。"
+            />
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -137,184 +225,398 @@ cp templates/codex/model-catalog.json ~/.codex/model-catalog.json</pre>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { portalApi } from '@/api/portal'
+import type { PortalModelStat } from '@/types'
+import {
+  buildClaudeCodeSettingsJson,
+  buildCodexAuthLoginCommand,
+  buildCodexConfigToml,
+  buildCodexModelCatalogJson,
+  buildGatewayBaseUrl,
+  buildGatewayModelsEndpoint,
+  buildOpenCodeConfig,
+  extractGatewayModelSlugs,
+  rankModelSlugsByUsage,
+  sortPortalModelStats
+} from '@/utils/integration'
+
+type GatewayModelsResponse = {
+  data?: Array<{
+    id?: unknown
+  }>
+}
 
 const activeTab = ref('codex')
-const gatewayUrl = 'http://localhost:3001/v1'
+const loading = ref(true)
+const gatewayBaseUrl = ref('')
+const portalKey = ref('')
+const portalModelStats = ref<PortalModelStat[]>([])
+const gatewayModelSlugs = ref<string[]>([])
+const loadWarnings = ref<string[]>([])
+const fatalError = ref('')
 
-const codexCopyCmd = `mkdir -p ~/.codex
-cp templates/codex/config.toml.example ~/.codex/config.toml
-cp templates/codex/model-catalog.json ~/.codex/model-catalog.json`
+const gatewayApiBaseUrl = computed(() =>
+  gatewayBaseUrl.value ? `${gatewayBaseUrl.value}/v1` : ''
+)
 
-const codexConfig = computed(() => `model_provider = "gateway"
-model = "ZhipuAI/GLM-5"
-review_model = "ZhipuAI/GLM-5"
-model_reasoning_effort = "high"
-disable_response_storage = true
-model_catalog_json = "/home/YOUR_USERNAME/.codex/model-catalog.json"
+const allModelSlugs = computed(() =>
+  rankModelSlugsByUsage(
+    [...gatewayModelSlugs.value, ...portalModelStats.value.map(stat => stat.model)],
+    portalModelStats.value
+  )
+)
 
-[features]
-skill_mcp_dependency_install = true
-tool_suggest = true
+const primaryModelSlug = computed(() => allModelSlugs.value[0] ?? '')
+const sortedModelStats = computed(() => sortPortalModelStats(portalModelStats.value))
+const hasConfigContent = computed(
+  () => Boolean(portalKey.value.trim()) && allModelSlugs.value.length > 0 && !fatalError.value
+)
 
-[model_providers.gateway]
-name = "chat-responses-codex"
-base_url = "${gatewayUrl}"
-wire_api = "responses"
-requires_openai_auth = true
+const codexConfigToml = computed(() =>
+  primaryModelSlug.value
+    ? buildCodexConfigToml({
+        gatewayBaseUrl: gatewayBaseUrl.value,
+        modelSlug: primaryModelSlug.value
+      })
+    : ''
+)
 
-# 在网关管理页面创建下游密钥后，
-# Codex 请求时会自动使用 Bearer YOUR_API_KEY 鉴权`)
+const codexModelCatalogJson = computed(() => buildCodexModelCatalogJson(allModelSlugs.value))
 
-const opencodeConfig = computed(() => `{
-  "model": "ZhipuAI/GLM-5",
-  "base_url": "${gatewayUrl}",
-  "api_key": "YOUR_API_KEY",
-  "provider": "openai-compatible",
-  "features": {
-    "streaming": true,
-    "tools": true
-  }
-}`)
+const codexAuthLoginCommand = computed(() =>
+  portalKey.value ? buildCodexAuthLoginCommand(portalKey.value) : ''
+)
 
-const claudeConfig = computed(() => `{
-  "mcpServers": {
-    "chat-gateway": {
-      "command": "node",
-      "args": ["mcp-client.js"],
-      "env": {
-        "OPENAI_API_KEY": "YOUR_API_KEY",
-        "OPENAI_BASE_URL": "${gatewayUrl.replace('/v1', '')}"
-      }
+const opencodeConfig = computed(() =>
+  buildOpenCodeConfig({
+    gatewayBaseUrl: gatewayBaseUrl.value,
+    portalKey: portalKey.value,
+    modelSlugs: allModelSlugs.value,
+    selectedModelSlug: primaryModelSlug.value
+  })
+)
+
+const claudeCodeSettingsJson = computed(() =>
+  buildClaudeCodeSettingsJson({
+    gatewayBaseUrl: gatewayBaseUrl.value,
+    portalKey: portalKey.value,
+    modelSlugs: allModelSlugs.value,
+    selectedModelSlug: primaryModelSlug.value
+  })
+)
+
+const fetchGatewayModelSlugs = async (key: string) => {
+  const response = await fetch(buildGatewayModelsEndpoint(gatewayBaseUrl.value), {
+    headers: {
+      Authorization: `Bearer ${key}`
     }
+  })
+
+  if (!response.ok) {
+    throw new Error(`网关模型接口返回 ${response.status}`)
+  }
+
+  const payload = (await response.json()) as GatewayModelsResponse
+  return extractGatewayModelSlugs(payload)
+}
+
+const loadIntegrationData = async () => {
+  loading.value = true
+  fatalError.value = ''
+  loadWarnings.value = []
+  portalKey.value = ''
+  portalModelStats.value = []
+  gatewayModelSlugs.value = []
+
+  try {
+    gatewayBaseUrl.value = buildGatewayBaseUrl(window.location.origin)
+
+    const [keyResult, modelsResult] = await Promise.allSettled([
+      portalApi.getKey(),
+      portalApi.getModels()
+    ])
+
+    if (keyResult.status === 'rejected') {
+      fatalError.value = '无法读取当前门户 key，无法生成可直接复制的配置。'
+      return
+    }
+
+    portalKey.value = keyResult.value.data.plaintext_key?.trim() ?? ''
+    if (!portalKey.value) {
+      fatalError.value = '当前门户没有可用的下游 key，请先到“秘钥管理”生成或轮换一次。'
+      return
+    }
+
+    if (modelsResult.status === 'fulfilled') {
+      portalModelStats.value = modelsResult.value.data ?? []
+    } else {
+      loadWarnings.value.push('模型统计读取失败，将改为使用网关模型列表生成排序。')
+    }
+
+    try {
+      gatewayModelSlugs.value = await fetchGatewayModelSlugs(portalKey.value)
+    } catch (error) {
+      gatewayModelSlugs.value = []
+      const message = error instanceof Error ? error.message : '无法读取网关模型列表'
+      loadWarnings.value.push(`${message}，将仅使用模型统计生成配置。`)
+    }
+
+    if (!allModelSlugs.value.length) {
+      fatalError.value = '未能发现任何可用模型，请先在网关后台配置上游模型。'
+    }
+  } finally {
+    loading.value = false
   }
 }
 
-# 或直接使用 API 方式 (如果 Claude Code 支持 OpenAI compatible):
-# {
-#   "apiConfiguration": {
-#     "baseURL": "${gatewayUrl}",
-#     "apiKey": "YOUR_API_KEY",
-#     "provider": "openai-compatible"
-#   }
-# }`)
+const copyCode = async (content: string) => {
+  const text = content.trim()
+  if (!text) {
+    ElMessage.warning('当前没有可复制的内容')
+    return
+  }
 
-const pythonSdkExample = computed(() => `from openai import OpenAI
+  try {
+    await navigator.clipboard.writeText(content)
+    ElMessage.success('已复制到剪贴板')
+    return
+  } catch {
+    // Fall back to a hidden textarea for browsers that block Clipboard API.
+  }
 
-# 初始化客户端，指向网关地址
-client = OpenAI(
-    api_key="YOUR_API_KEY",  # 替换为你的下游密钥
-    base_url="${gatewayUrl}"  # 网关地址
-)
+  const textarea = document.createElement('textarea')
+  textarea.value = content
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.appendChild(textarea)
+  textarea.select()
 
-# 发送请求
-response = client.chat.completions.create(
-    model="ZhipuAI/GLM-5",  # 使用网关支持的模型
-    messages=[
-        {"role": "user", "content": "Hello, how are you?"}
-    ],
-    stream=True  # 支持流式输出
-)
-
-# 处理响应
-for chunk in response:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="")`)
-
-const copyCode = (text: string) => {
-  navigator.clipboard.writeText(text)
-  ElMessage.success('已复制到剪贴板')
+  try {
+    document.execCommand('copy')
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
+  } finally {
+    document.body.removeChild(textarea)
+  }
 }
+
+onMounted(() => {
+  void loadIntegrationData()
+})
 </script>
 
 <style scoped>
-.integration-container {
+.integration-page {
   padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  background:
+    radial-gradient(circle at top right, rgba(64, 158, 255, 0.12), transparent 30%),
+    linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
+  min-height: 100%;
 }
 
-h2 {
-  margin: 0;
+.integration-hero,
+.model-card,
+.tabs-card,
+.integration-empty {
+  border-radius: 16px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
 }
 
-.integration-section {
-  padding: 20px 0;
+.hero-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
 }
 
-.integration-section h3 {
-  margin: 0 0 20px 0;
-  color: #303133;
-}
-
-.steps {
-  margin-bottom: 24px;
-  padding: 16px;
-  background: #f5f7fa;
-  border-radius: 4px;
-}
-
-.steps h4 {
-  margin: 0 0 12px 0;
+.eyebrow {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   color: #409eff;
-  font-size: 15px;
 }
 
-.steps p {
-  margin: 0 0 8px 0;
-  color: #606266;
-  line-height: 1.6;
-}
-
-.steps ul {
+h2,
+h3,
+h4,
+p {
   margin: 0;
-  padding-left: 20px;
+}
+
+.hero-copy {
+  margin-top: 8px;
   color: #606266;
+  line-height: 1.8;
+  max-width: 760px;
 }
 
-.steps li {
-  margin-bottom: 6px;
+.summary-grid {
+  margin-top: 20px;
 }
 
-.steps code {
-  background: #e4e7ed;
-  padding: 2px 6px;
-  border-radius: 3px;
-  color: #303133;
+.status-alert {
+  margin-top: 12px;
 }
 
-.code-block {
-  background: #2d2d2d;
-  color: #ccc;
-  padding: 16px;
-  border-radius: 4px;
-  overflow-x: auto;
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-  font-size: 14px;
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-head h3 {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+.section-head p {
+  color: #8a8f98;
+  font-size: 13px;
+}
+
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.model-chip {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  border: 1px solid #e6eef9;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-chip strong {
+  font-size: 13px;
   line-height: 1.5;
-  margin: 12px 0;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 
-.copy-btn {
-  margin-top: 8px;
-}
-
-.python-sdk-section {
-  padding: 20px 0;
-}
-
-.python-sdk-section h3 {
-  margin: 0 0 16px 0;
-  color: #303133;
-}
-
-.python-sdk-section p {
-  margin: 0 0 12px 0;
+.model-chip span {
   color: #606266;
+  font-size: 12px;
 }
 
-.el-divider {
-  margin: 24px 0;
+.integration-empty {
+  margin-top: 0;
+  padding: 40px 20px;
+}
+
+.empty-copy {
+  margin-top: 12px;
+  color: #606266;
+  line-height: 1.7;
+}
+
+.tabs-card {
+  padding-top: 4px;
+}
+
+.tab-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.section-alert {
+  border-radius: 12px;
+}
+
+.step-card {
+  border: 1px solid #e6eef9;
+  background: #fff;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.step-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.step-head h4 {
+  margin-bottom: 8px;
+  font-size: 15px;
+  color: #1f2d3d;
+}
+
+.step-head p {
+  color: #606266;
+  line-height: 1.8;
+}
+
+.step-head code,
+.summary-grid code {
+  background: #f3f6fa;
+  border: 1px solid #e3eaf3;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: #1f2d3d;
+}
+
+.code-block {
+  margin: 14px 0 0;
+  padding: 16px;
+  border-radius: 12px;
+  background: #111827;
+  color: #e5e7eb;
+  overflow-x: auto;
+  white-space: pre;
+  line-height: 1.7;
+  font-size: 13px;
+  font-family:
+    'SFMono-Regular',
+    'Consolas',
+    'Liberation Mono',
+    'Courier New',
+    monospace;
+}
+
+.integration-tabs :deep(.el-tabs__header) {
+  margin-bottom: 18px;
+}
+
+.integration-tabs :deep(.el-tabs__item) {
+  font-size: 14px;
+}
+
+.integration-tabs :deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
+}
+
+@media (max-width: 768px) {
+  .integration-page {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .hero-top,
+  .step-head,
+  .section-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .summary-grid :deep(.el-descriptions__body) {
+    display: block;
+  }
 }
 </style>

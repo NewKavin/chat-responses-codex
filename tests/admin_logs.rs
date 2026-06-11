@@ -149,6 +149,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 created_at: now - 604800, // 7 days ago
             },
         ],
+        announcement: None,
     };
 
     AppState::new(state, unique_state_path(), config)

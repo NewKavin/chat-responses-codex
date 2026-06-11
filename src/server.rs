@@ -4,10 +4,9 @@ use crate::protocol::{
     StreamTranslator,
 };
 use crate::routing::UpstreamProtocol;
-use crate::state::log_queries::build_downstream_usage_summary;
 use crate::state::{
-    join_upstream_url, unix_seconds, AppConfig, AppState, DownstreamConfig, UpstreamConfig,
-    UpstreamMutationError, UsageLog, UsageLogQuery,
+    join_upstream_url, unix_seconds, AnnouncementConfig, AnnouncementLevel, AppConfig, AppState,
+    DownstreamConfig, UpstreamConfig, UpstreamMutationError, UsageLog, UsageLogQuery,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::Body;
@@ -298,6 +297,18 @@ impl std::fmt::Display for GatewayError {
 impl std::error::Error for GatewayError {}
 
 impl GatewayError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            GatewayError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            GatewayError::Forbidden(_) => StatusCode::FORBIDDEN,
+            GatewayError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            GatewayError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
+            GatewayError::Upstream(_) => StatusCode::BAD_GATEWAY,
+            GatewayError::GatewayTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            GatewayError::TemporaryUpstreamUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
     fn into_response(self) -> Response {
         let (status, message, retry_after_seconds) = match self {
             GatewayError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message, None),
@@ -340,6 +351,65 @@ impl GatewayError {
     }
 }
 
+async fn append_gateway_usage_log(
+    state: &AppState,
+    request_id: &str,
+    downstream_id: &str,
+    downstream_name: &str,
+    upstream_id: &str,
+    upstream_name: Option<&str>,
+    endpoint: &str,
+    model: &str,
+    inference_strength: Option<&str>,
+    user_agent: Option<&str>,
+    status_code: StatusCode,
+    error_message: Option<String>,
+    error_category: Option<String>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    started: Instant,
+) {
+    let log = UsageLog {
+        id: request_id.to_string(),
+        downstream_key_id: downstream_id.to_string(),
+        upstream_key_id: upstream_id.to_string(),
+        downstream_name: Some(downstream_name.to_string()),
+        upstream_name: upstream_name.map(str::to_string),
+        endpoint: endpoint.to_string(),
+        model: model.to_string(),
+        inference_strength: inference_strength.map(str::to_string),
+        billing_mode: Some(if total_tokens > 0 {
+            "Token 计费".to_string()
+        } else {
+            "请求计费".to_string()
+        }),
+        request_count: Some(1),
+        user_agent: user_agent.map(str::to_string),
+        request_id: request_id.to_string(),
+        status_code: status_code.as_u16(),
+        error_message,
+        error_category,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        latency_ms: started.elapsed().as_millis() as u64,
+        created_at: unix_seconds(),
+    };
+
+    if let Err(error) = state.append_usage_log(log).await {
+        tracing::error!(
+            request_id = %request_id,
+            downstream_key_id = %downstream_id,
+            path = %endpoint,
+            model = %model,
+            status = status_code.as_u16(),
+            error = %error,
+            "failed to save usage log"
+        );
+    }
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -372,6 +442,15 @@ pub fn build_router(state: AppState) -> Router {
                 state.clone(),
                 admin_auth_middleware,
             )),
+        )
+        .route(
+            "/api/admin/announcement",
+            get(admin_get_announcement)
+                .put(admin_update_announcement)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
         )
         .route(
             "/api/admin/upstreams/{id}",
@@ -438,6 +517,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/quota", get(portal_quota))
         .route("/api/portal/usage-history", get(portal_usage_history))
         .route("/api/portal/models", get(portal_models))
+        .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
         // Frontend assets and SPA fallback
@@ -874,6 +954,7 @@ async fn process_gateway_request(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let started = Instant::now();
     tracing::info!(
         request_id = %request_id,
         downstream_key_id = %downstream.id,
@@ -895,7 +976,28 @@ async fn process_gateway_request(
                 expires_at,
                 "downstream key expired"
             );
-            return Err(GatewayError::Forbidden("downstream key expired".into()));
+            let error = GatewayError::Forbidden("downstream key expired".into());
+            append_gateway_usage_log(
+                &state,
+                &request_id,
+                &downstream.id,
+                &downstream.name,
+                "",
+                None,
+                request_path,
+                model,
+                inference_strength.as_deref(),
+                user_agent.as_deref(),
+                error.status_code(),
+                Some(error.to_string()),
+                None,
+                0,
+                0,
+                0,
+                started,
+            )
+            .await;
+            return Err(error);
         }
     }
 
@@ -915,7 +1017,28 @@ async fn process_gateway_request(
                 client_ip = %client_ip,
                 "client IP not allowed"
             );
-            return Err(GatewayError::Forbidden("ip not allowed".into()));
+            let error = GatewayError::Forbidden("ip not allowed".into());
+            append_gateway_usage_log(
+                &state,
+                &request_id,
+                &downstream.id,
+                &downstream.name,
+                "",
+                None,
+                request_path,
+                model,
+                inference_strength.as_deref(),
+                user_agent.as_deref(),
+                error.status_code(),
+                Some(error.to_string()),
+                None,
+                0,
+                0,
+                0,
+                started,
+            )
+            .await;
+            return Err(error);
         }
     }
 
@@ -930,7 +1053,28 @@ async fn process_gateway_request(
             normalized_model = %normalized_model,
             "model not allowed"
         );
-        return Err(GatewayError::Forbidden("model not allowed".into()));
+        let error = GatewayError::Forbidden("model not allowed".into());
+        append_gateway_usage_log(
+            &state,
+            &request_id,
+            &downstream.id,
+            &downstream.name,
+            "",
+            None,
+            request_path,
+            model,
+            inference_strength.as_deref(),
+            user_agent.as_deref(),
+            error.status_code(),
+            Some(error.to_string()),
+            None,
+            0,
+            0,
+            0,
+            started,
+        )
+        .await;
+        return Err(error);
     }
 
     if let Err(retry_after_seconds) = state.reserve_downstream_request(&downstream).await {
@@ -943,10 +1087,31 @@ async fn process_gateway_request(
             retry_after_seconds,
             "downstream per-minute request limit exceeded"
         );
-        return Err(GatewayError::TooManyRequests {
+        let error = GatewayError::TooManyRequests {
             message: "downstream per-minute request limit exceeded".into(),
             retry_after_seconds: Some(retry_after_seconds),
-        });
+        };
+        append_gateway_usage_log(
+            &state,
+            &request_id,
+            &downstream.id,
+            &downstream.name,
+            "",
+            None,
+            request_path,
+            model,
+            inference_strength.as_deref(),
+            user_agent.as_deref(),
+            error.status_code(),
+            Some(error.to_string()),
+            None,
+            0,
+            0,
+            0,
+            started,
+        )
+        .await;
+        return Err(error);
     }
 
     if let Err(retry_after_seconds) = state.try_reserve_downstream_concurrency(&downstream) {
@@ -963,10 +1128,31 @@ async fn process_gateway_request(
             max_concurrency = downstream.max_concurrency,
             "downstream concurrency limit exceeded"
         );
-        return Err(GatewayError::TooManyRequests {
+        let error = GatewayError::TooManyRequests {
             message: "downstream concurrency limit exceeded".into(),
             retry_after_seconds: Some(retry_after_seconds),
-        });
+        };
+        append_gateway_usage_log(
+            &state,
+            &request_id,
+            &downstream.id,
+            &downstream.name,
+            "",
+            None,
+            request_path,
+            model,
+            inference_strength.as_deref(),
+            user_agent.as_deref(),
+            error.status_code(),
+            Some(error.to_string()),
+            None,
+            0,
+            0,
+            0,
+            started,
+        )
+        .await;
+        return Err(error);
     }
     let _downstream_concurrency_guard = if !request_stream {
         Some(DownstreamConcurrencyGuard::new(state.clone(), downstream.id.clone()))
@@ -1010,11 +1196,10 @@ async fn process_gateway_request(
         );
     }
 
-    let started = Instant::now();
-
     let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
     let now = unix_seconds();
     let mut rate_limit_retry_attempts_used = 0u32;
+    let mut last_failure_upstream: Option<(String, Option<String>)> = None;
     let candidate_protocols = if requires_responses_tooling {
         if fallback_to_chat {
             vec![UpstreamProtocol::ChatCompletions]
@@ -1348,45 +1533,26 @@ async fn process_gateway_request(
                         );
                         if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
                             let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
-                            let log = UsageLog {
-                                id: request_id.clone(),
-                                downstream_key_id: downstream.id.clone(),
-                                upstream_key_id: upstream.id.clone(),
-                                downstream_name: Some(downstream.name.clone()),
-                                upstream_name: Some(upstream.name.clone()),
-                                endpoint: request_path.to_string(),
-                                model: model.to_string(),
-                                inference_strength: inference_strength.clone(),
-                                billing_mode: Some(if total_tokens > 0 {
-                                    "Token 计费".to_string()
-                                } else {
-                                    "请求计费".to_string()
-                                }),
-                                request_count: Some(1),
-                                user_agent: user_agent.clone(),
-                                request_id: request_id.clone(),
-                                status_code: result.status.as_u16(),
-                                error_message: None,
-                                error_category: None,
+                            append_gateway_usage_log(
+                                &state,
+                                &request_id,
+                                &downstream.id,
+                                &downstream.name,
+                                &upstream.id,
+                                Some(&upstream.name),
+                                request_path,
+                                model,
+                                inference_strength.as_deref(),
+                                user_agent.as_deref(),
+                                result.status,
+                                None,
+                                None,
                                 prompt_tokens,
                                 completion_tokens,
                                 total_tokens,
-                                latency_ms: started.elapsed().as_millis() as u64,
-                                created_at: unix_seconds(),
-                            };
-                            if let Err(error) = state.append_usage_log(log).await {
-                                tracing::error!(
-                                    request_id = %request_id,
-                                    downstream_key_id = %downstream.id,
-                                    path = %request_path,
-                                    original_model = %model,
-                                    normalized_model = %normalized_model,
-                                    selected_upstream_id = %upstream.id,
-                                    selected_upstream_protocol = ?protocol,
-                                    error = %error,
-                                    "failed to save usage log"
-                                );
-                            }
+                                started,
+                            )
+                            .await;
                         }
                         return Ok(result);
                     }
@@ -1423,6 +1589,8 @@ async fn process_gateway_request(
                             message,
                             retry_after_seconds: Some(retry_after_seconds),
                         });
+                        last_failure_upstream =
+                            Some((upstream.id.clone(), Some(upstream.name.clone())));
 
                         let has_available_alternative =
                             upstreams_for_retry.iter().any(|candidate| {
@@ -1486,6 +1654,8 @@ async fn process_gateway_request(
                             "upstream rejected request payload"
                         );
                         last_error = Some(GatewayError::BadRequest(error));
+                        last_failure_upstream =
+                            Some((upstream.id.clone(), Some(upstream.name.clone())));
                         break;
                     }
                     Err(error) if attempt_stream => {
@@ -1517,6 +1687,8 @@ async fn process_gateway_request(
                             "upstream temporarily unavailable, trying next candidate"
                         );
                         last_error = Some(GatewayError::TemporaryUpstreamUnavailable(message));
+                        last_failure_upstream =
+                            Some((upstream.id.clone(), Some(upstream.name.clone())));
                         break;
                     }
                     Err(error) => {
@@ -1533,6 +1705,8 @@ async fn process_gateway_request(
                         );
                         state.mark_upstream_failure(&upstream.id).await.ok();
                         last_error = Some(error);
+                        last_failure_upstream =
+                            Some((upstream.id.clone(), Some(upstream.name.clone())));
                         break;
                     }
                 }
@@ -1541,6 +1715,30 @@ async fn process_gateway_request(
     }
 
     if let Some(error) = last_error {
+        let (upstream_id, upstream_name) = last_failure_upstream
+            .as_ref()
+            .map(|(id, name)| (id.as_str(), name.as_deref()))
+            .unwrap_or(("", None));
+        append_gateway_usage_log(
+            &state,
+            &request_id,
+            &downstream.id,
+            &downstream.name,
+            upstream_id,
+            upstream_name,
+            request_path,
+            model,
+            inference_strength.as_deref(),
+            user_agent.as_deref(),
+            error.status_code(),
+            Some(error.to_string()),
+            None,
+            0,
+            0,
+            0,
+            started,
+        )
+        .await;
         if should_rollback_downstream_reservation(&error) {
             state
                 .rollback_downstream_request_reservation(&downstream.id)
@@ -1562,6 +1760,27 @@ async fn process_gateway_request(
         return Err(error);
     }
 
+    let error = no_routable_model_error(&routing_snapshot, model);
+    append_gateway_usage_log(
+        &state,
+        &request_id,
+        &downstream.id,
+        &downstream.name,
+        "",
+        None,
+        request_path,
+        model,
+        inference_strength.as_deref(),
+        user_agent.as_deref(),
+        error.status_code(),
+        Some(error.to_string()),
+        None,
+        0,
+        0,
+        0,
+        started,
+    )
+    .await;
     tracing::warn!(
         request_id = %request_id,
         downstream_key_id = %downstream.id,
@@ -1577,7 +1796,7 @@ async fn process_gateway_request(
     // Keep the downstream reservation so the portal reflects that the gateway
     // actually received and processed one request attempt, even if no upstream
     // could be routed.
-    Err(no_routable_model_error(&routing_snapshot, model))
+    Err(error)
 }
 
 fn responses_request_requires_responses_upstream(body: &Value) -> bool {
@@ -4625,6 +4844,109 @@ async fn admin_list_models(State(state): State<AppState>) -> impl IntoResponse {
     .into_response()
 }
 
+async fn admin_get_announcement(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({
+        "announcement": state.snapshot().await.announcement,
+    }))
+    .into_response()
+}
+
+fn announcement_bad_request(message: impl Into<String>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "message": message.into()
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn parse_announcement_level(level: &str) -> Result<AnnouncementLevel, String> {
+    match level.trim() {
+        "info" => Ok(AnnouncementLevel::Info),
+        "success" => Ok(AnnouncementLevel::Success),
+        "warning" => Ok(AnnouncementLevel::Warning),
+        "error" => Ok(AnnouncementLevel::Error),
+        _ => Err("公告等级仅支持 info、success、warning、error".to_string()),
+    }
+}
+
+fn normalize_announcement_field(
+    value: Option<&str>,
+    max_len: usize,
+    field_name: &str,
+) -> Result<String, String> {
+    let value = value.unwrap_or("").trim();
+    if value.chars().count() > max_len {
+        Err(format!("{field_name} 最长 {max_len} 个字符"))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+async fn admin_update_announcement(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let Some(title_value) = body.get("title").and_then(Value::as_str) else {
+        return announcement_bad_request("标题不能为空");
+    };
+    let Some(content_value) = body.get("content").and_then(Value::as_str) else {
+        return announcement_bad_request("正文不能为空");
+    };
+    let Some(level_value) = body.get("level").and_then(Value::as_str) else {
+        return announcement_bad_request("公告等级仅支持 info、success、warning、error");
+    };
+    let Some(active) = body.get("active").and_then(Value::as_bool) else {
+        return announcement_bad_request("启用状态必须是布尔值");
+    };
+
+    let title = match normalize_announcement_field(Some(title_value), 120, "标题") {
+        Ok(value) => value,
+        Err(message) => return announcement_bad_request(message),
+    };
+    let content = match normalize_announcement_field(Some(content_value), 5000, "正文") {
+        Ok(value) => value,
+        Err(message) => return announcement_bad_request(message),
+    };
+    let level = match parse_announcement_level(level_value) {
+        Ok(level) => level,
+        Err(message) => return announcement_bad_request(message),
+    };
+
+    if active && (title.is_empty() || content.is_empty()) {
+        return announcement_bad_request("启用状态下标题和正文不能为空");
+    }
+
+    let announcement = AnnouncementConfig {
+        id: Uuid::new_v4().to_string(),
+        title,
+        content,
+        level,
+        active,
+        updated_at: unix_seconds(),
+    };
+
+    if let Err(error) = state.update_announcement(Some(announcement.clone())).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to save announcement: {error}")
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    Json(json!({
+        "announcement": announcement
+    }))
+    .into_response()
+}
+
 /// Create a new upstream
 async fn admin_create_upstream(
     State(state): State<AppState>,
@@ -5378,7 +5700,7 @@ async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> i
         Err(response) => return response,
     };
 
-    let snapshot = state.snapshot().await;
+    let snapshot = state.routing_snapshot().await;
     let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
         Some(d) => d,
         None => {
@@ -5390,11 +5712,9 @@ async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> i
         }
     };
 
-    let now = unix_seconds();
-
     // Compute quota summary
     let request_quota = state.compute_request_quota_usage(downstream).await;
-    let summary = match build_downstream_usage_summary(&snapshot, &downstream_id, now) {
+    let summary = match state.downstream_usage_summary(&downstream_id).await {
         Ok(summary) => summary,
         Err(error) => {
             return (
@@ -5576,6 +5896,25 @@ async fn portal_models(State(state): State<AppState>, headers: HeaderMap) -> imp
     let model_stats = state.compute_model_stats(downstream).await;
 
     Json(model_stats).into_response()
+}
+
+async fn portal_announcement(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let _ = downstream_id;
+    let announcement = state.snapshot().await.announcement.filter(|announcement| {
+        announcement.active
+            && !announcement.title.trim().is_empty()
+            && !announcement.content.trim().is_empty()
+    });
+
+    Json(json!({
+        "announcement": announcement,
+    }))
+    .into_response()
 }
 
 /// Portal get key - returns plaintext_key for the authenticated downstream

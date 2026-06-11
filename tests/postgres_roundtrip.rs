@@ -1,8 +1,8 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, ModelRequestCostConfig, UpstreamConfig, UsageLog,
-    UsageLogQuery,
+    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DownstreamConfig,
+    ModelRequestCostConfig, UpstreamConfig, UsageLog, UsageLogQuery,
 };
 use std::env;
 use std::process::Command;
@@ -116,6 +116,10 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         .append_usage_log(log.clone())
         .await
         .expect("should persist usage log rows");
+    state
+        .flush_usage_logs_for_test()
+        .await
+        .expect("should flush usage log rows");
 
     let reloaded = AppState::load_from_database_url(&database_url, config)
         .await
@@ -134,11 +138,79 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         serde_json::to_value(&downstream).unwrap()
     );
 
-    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert!(
+        snapshot.usage_logs.is_empty(),
+        "PostgreSQL startup should not load historical usage logs into the routing/config snapshot"
+    );
+
+    let page = reloaded
+        .query_usage_logs_page(UsageLogQuery {
+            start_time: Some(0),
+            end_time: Some(u64::MAX),
+            status_codes: vec![200],
+            model_substring: Some("glm".to_string()),
+            page: 1,
+            page_size: 10,
+        })
+        .await
+        .expect("PostgreSQL store-backed query should return persisted usage logs");
+    assert_eq!(page.total, 1);
     assert_eq!(
-        serde_json::to_value(&snapshot.usage_logs[0]).unwrap(),
+        serde_json::to_value(&page.logs[0].log).unwrap(),
         serde_json::to_value(&log).unwrap()
     );
+
+    let summary = reloaded
+        .downstream_usage_summary("down-1")
+        .await
+        .expect("PostgreSQL store-backed summary should read persisted usage logs");
+    assert_eq!(summary.total_models, 1);
+    assert_eq!(summary.active_models, 1);
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_announcement_state() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    let announcement = AnnouncementConfig {
+        id: "ann-1".into(),
+        title: "系统公告".into(),
+        content: "请今天完成发布检查".into(),
+        level: AnnouncementLevel::Warning,
+        active: true,
+        updated_at: 1_710_000_000,
+    };
+
+    state
+        .update_announcement(Some(announcement.clone()))
+        .await
+        .expect("should persist announcement rows");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL");
+    let snapshot = reloaded.snapshot().await;
+
+    assert_eq!(snapshot.announcement, Some(announcement));
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
@@ -243,7 +315,10 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
     state.append_usage_log(log).await.unwrap();
     state.flush_usage_logs_for_test().await.unwrap();
 
-    state.set_upstream_active(&upstream_id, false).await.unwrap();
+    state
+        .set_upstream_active(&upstream_id, false)
+        .await
+        .unwrap();
 
     let page = state
         .query_usage_logs_page(UsageLogQuery {
@@ -360,7 +435,10 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
 
     let before_ctid = query_usage_log_ctid(&database_url, &log_id);
 
-    state.set_upstream_active(&upstream_id, false).await.unwrap();
+    state
+        .set_upstream_active(&upstream_id, false)
+        .await
+        .unwrap();
 
     let after_ctid = query_usage_log_ctid(&database_url, &log_id);
     assert_eq!(before_ctid, after_ctid);

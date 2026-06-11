@@ -78,7 +78,7 @@ fn resolve_api_name_and_type(endpoint: &str) -> (&'static str, &'static str) {
     ("通用 API", "其它")
 }
 
-fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
+pub(crate) fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
     let (api_name, log_type) = resolve_api_name_and_type(&log.endpoint);
     let inference_strength = log
         .inference_strength
@@ -120,7 +120,7 @@ fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
     }
 }
 
-fn query_time_bounds(query: &UsageLogQuery, now: u64) -> (u64, u64) {
+pub(crate) fn query_time_bounds(query: &UsageLogQuery, now: u64) -> (u64, u64) {
     if query.start_time.is_some() || query.end_time.is_some() {
         let start = query.start_time.unwrap_or(0);
         let end = query.end_time.unwrap_or(now);
@@ -134,7 +134,7 @@ fn query_time_bounds(query: &UsageLogQuery, now: u64) -> (u64, u64) {
     }
 }
 
-fn current_month_start(now: u64) -> u64 {
+pub(crate) fn current_month_start(now: u64) -> u64 {
     let dt = UNIX_EPOCH + Duration::from_secs(now);
     let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
     let first_of_month = datetime.date_naive().with_day(1).unwrap();
@@ -214,6 +214,17 @@ pub fn build_downstream_usage_summary(
 
 impl AppState {
     pub async fn query_usage_logs_page(&self, query: UsageLogQuery) -> io::Result<UsageLogPage> {
+        let query = UsageLogQuery {
+            page: query.page.max(1),
+            page_size: query
+                .page_size
+                .clamp(1, self.config.admin_logs_page_size_max.max(1)),
+            status_codes: query.status_codes,
+            model_substring: query.model_substring,
+            start_time: query.start_time,
+            end_time: query.end_time,
+        };
+
         if let Some(page) = self.config_store.query_usage_logs_page(&query).await? {
             return Ok(page);
         }
@@ -258,11 +269,9 @@ impl AppState {
         logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
 
         let total = logs.len();
-        let page_size = query
-            .page_size
-            .clamp(1, self.config.admin_logs_page_size_max.max(1));
+        let page_size = query.page_size;
         let total_pages = total.div_ceil(page_size);
-        let page = query.page.max(1);
+        let page = query.page;
         let start = (page - 1) * page_size;
         let logs = if start >= total {
             Vec::new()

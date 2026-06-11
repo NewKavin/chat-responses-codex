@@ -120,6 +120,7 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),

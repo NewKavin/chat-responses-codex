@@ -212,6 +212,16 @@ export interface PortalOverview {
   }
 }
 
+export interface PortalModelStat {
+  model: string
+  today_count: number
+  month_count: number
+  today_tokens: number
+  month_tokens: number
+  avg_latency_ms: number
+  success_rate: number
+}
+
 export interface PortalQuota {
   request_quota?: RequestQuotaUsage
   token_quota?: {
@@ -229,4 +239,19 @@ export interface PortalUsageHistory {
   recent_logs_page: number
   recent_logs_page_size: number
   recent_logs_total_pages: number
+}
+
+// ============================================================================
+// Announcement Types
+// ============================================================================
+
+export type AnnouncementLevel = 'info' | 'success' | 'warning' | 'error'
+
+export interface Announcement {
+  id: string
+  title: string
+  content: string
+  level: AnnouncementLevel
+  active: boolean
+  updated_at: number
 }

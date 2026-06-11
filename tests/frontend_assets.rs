@@ -26,6 +26,7 @@ fn create_test_state() -> AppState {
         upstreams: vec![],
         downstreams: vec![],
         usage_logs: vec![],
+    announcement: None,
     };
     AppState::new(state, unique_state_path(), config)
 }

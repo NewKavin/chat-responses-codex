@@ -1,7 +1,9 @@
 use super::{
-    DownstreamConfig, ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
-    UpstreamProtocol, UsageLog,
+    unix_seconds, AnnouncementConfig, AnnouncementLevel, DownstreamConfig, DownstreamUsageSummary,
+    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UpstreamProtocol,
+    UsageLog, UsageLogPage, UsageLogQuery,
 };
+use super::log_queries::{current_month_start, enrich_usage_log, query_time_bounds};
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use std::collections::{HashMap, HashSet};
@@ -10,9 +12,10 @@ use std::io;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{Config, NoTls, Transaction};
+use tokio_postgres::{Config, NoTls, Row, Transaction};
 
 type PgManager = PostgresConnectionManager<NoTls>;
+const POSTGRES_RUNTIME_USAGE_LOG_WINDOW_DAYS: u64 = 32;
 
 #[derive(Clone)]
 pub(crate) struct PostgresStateStore {
@@ -214,46 +217,29 @@ impl PostgresStateStore {
             }
         }
 
+        let runtime_usage_start = runtime_usage_log_start(unix_seconds());
         let mut usage_logs = Vec::new();
         for row in conn
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
                  endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
                  status_code, error_message, error_category, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at \
-                 FROM usage_logs ORDER BY created_at, request_id, id",
-                &[],
+                 FROM usage_logs WHERE created_at >= $1 ORDER BY created_at, request_id, id",
+                &[&runtime_usage_start],
             )
             .await
             .map_err(io_other)?
         {
-            usage_logs.push(UsageLog {
-                id: row.get::<_, String>(0),
-                downstream_key_id: row.get::<_, String>(1),
-                upstream_key_id: row.get::<_, String>(2),
-                downstream_name: row.get::<_, Option<String>>(3),
-                upstream_name: row.get::<_, Option<String>>(4),
-                endpoint: row.get::<_, String>(5),
-                model: row.get::<_, String>(6),
-                inference_strength: row.get::<_, Option<String>>(7),
-                billing_mode: row.get::<_, Option<String>>(8),
-                request_count: row.get::<_, Option<i64>>(9).map(|value| value as u64),
-                user_agent: row.get::<_, Option<String>>(10),
-                request_id: row.get::<_, String>(11),
-                status_code: row.get::<_, i32>(12) as u16,
-                error_message: row.get::<_, Option<String>>(13),
-                error_category: row.get::<_, Option<String>>(14),
-                prompt_tokens: row.get::<_, i64>(15) as u64,
-                completion_tokens: row.get::<_, i64>(16) as u64,
-                total_tokens: row.get::<_, i64>(17) as u64,
-                latency_ms: row.get::<_, i64>(18) as u64,
-                created_at: row.get::<_, i64>(19) as u64,
-            });
+            usage_logs.push(usage_log_from_row(&row));
         }
+
+        let announcement = load_announcement(&conn).await?;
 
         Ok(PersistedState {
             upstreams,
             downstreams,
             usage_logs,
+            announcement,
         })
     }
 
@@ -276,6 +262,189 @@ impl PostgresStateStore {
         tx.commit().await.map_err(io_other)
     }
 
+    pub async fn query_usage_logs_page(
+        &self,
+        query: &UsageLogQuery,
+    ) -> io::Result<Option<UsageLogPage>> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let (start_time, end_time) = query_time_bounds(query, unix_seconds());
+        let start_time = u64_to_i64(start_time);
+        let end_time = u64_to_i64(end_time);
+        let status_codes = query
+            .status_codes
+            .iter()
+            .map(|status_code| i32::from(*status_code))
+            .collect::<Vec<_>>();
+        let no_status_filter = status_codes.is_empty();
+        let model_substring = query
+            .model_substring
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
+
+        let total_row = conn
+            .query_one(
+                "SELECT COUNT(*)::BIGINT
+                 FROM usage_logs
+                 WHERE created_at >= $1
+                   AND created_at <= $2
+                   AND ($3 OR status_code = ANY($4))
+                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(model)) > 0)",
+                &[
+                    &start_time,
+                    &end_time,
+                    &no_status_filter,
+                    &status_codes,
+                    &model_substring,
+                ],
+            )
+            .await
+            .map_err(io_other)?;
+        let total = i64_to_usize(total_row.get::<_, i64>(0));
+        let page_size = query.page_size.max(1);
+        let page = query.page.max(1);
+        let total_pages = total.div_ceil(page_size);
+        let offset = page
+            .saturating_sub(1)
+            .saturating_mul(page_size)
+            .min(i64::MAX as usize) as i64;
+        let limit = page_size.min(i64::MAX as usize) as i64;
+
+        let rows = conn
+            .query(
+                "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
+                        endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
+                        status_code, error_message, error_category, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
+                 FROM usage_logs
+                 WHERE created_at >= $1
+                   AND created_at <= $2
+                   AND ($3 OR status_code = ANY($4))
+                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(model)) > 0)
+                 ORDER BY created_at DESC, request_id ASC, id ASC
+                 LIMIT $6 OFFSET $7",
+                &[
+                    &start_time,
+                    &end_time,
+                    &no_status_filter,
+                    &status_codes,
+                    &model_substring,
+                    &limit,
+                    &offset,
+                ],
+            )
+            .await
+            .map_err(io_other)?;
+        let logs = rows
+            .iter()
+            .map(usage_log_from_row)
+            .map(|log| enrich_usage_log(&log))
+            .collect();
+
+        Ok(Some(UsageLogPage {
+            logs,
+            total,
+            page,
+            page_size,
+            total_pages,
+        }))
+    }
+
+    pub async fn downstream_usage_summary(
+        &self,
+        downstream_id: &str,
+    ) -> io::Result<Option<DownstreamUsageSummary>> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let downstream_row = conn
+            .query_opt("SELECT id FROM downstreams WHERE id = $1", &[&downstream_id])
+            .await
+            .map_err(io_other)?;
+        if downstream_row.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("downstream not found: {downstream_id}"),
+            ));
+        }
+
+        let allowlist_count = conn
+            .query_one(
+                "SELECT COUNT(*)::BIGINT
+                 FROM downstream_model_allowlist
+                 WHERE downstream_id = $1",
+                &[&downstream_id],
+            )
+            .await
+            .map_err(io_other)?
+            .get::<_, i64>(0);
+        let total_models = if allowlist_count > 0 {
+            i64_to_usize(allowlist_count)
+        } else {
+            let row = conn
+                .query_one(
+                    "SELECT COUNT(DISTINCT model_slug)::BIGINT
+                     FROM (
+                         SELECT supported.model_slug
+                         FROM upstream_supported_models supported
+                         JOIN upstreams upstream ON upstream.id = supported.upstream_id
+                         WHERE upstream.active
+                         UNION
+                         SELECT premium.model_slug
+                         FROM upstream_premium_models premium
+                         JOIN upstreams upstream ON upstream.id = premium.upstream_id
+                         WHERE upstream.active
+                     ) route_models",
+                    &[],
+                )
+                .await
+                .map_err(io_other)?;
+            i64_to_usize(row.get::<_, i64>(0))
+        };
+
+        let allowlist_empty = allowlist_count == 0;
+        let active_models = conn
+            .query_one(
+                "SELECT COUNT(DISTINCT usage_logs.model)::BIGINT
+                 FROM usage_logs
+                 WHERE usage_logs.downstream_key_id = $1
+                   AND (
+                       $2
+                       OR EXISTS (
+                           SELECT 1
+                           FROM downstream_model_allowlist allowlist
+                           WHERE allowlist.downstream_id = $1
+                             AND allowlist.model_slug = usage_logs.model
+                       )
+                   )",
+                &[&downstream_id, &allowlist_empty],
+            )
+            .await
+            .map_err(io_other)?
+            .get::<_, i64>(0);
+
+        let now = unix_seconds();
+        let today_start = u64_to_i64((now / 86_400) * 86_400);
+        let month_start = u64_to_i64(current_month_start(now));
+        let token_row = conn
+            .query_one(
+                "SELECT
+                     COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $2), 0)::BIGINT,
+                     COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $3), 0)::BIGINT
+                 FROM usage_logs
+                 WHERE downstream_key_id = $1",
+                &[&downstream_id, &today_start, &month_start],
+            )
+            .await
+            .map_err(io_other)?;
+
+        Ok(Some(DownstreamUsageSummary {
+            downstream_id: downstream_id.to_string(),
+            today_tokens: i64_to_u64(token_row.get::<_, i64>(0)),
+            month_tokens: i64_to_u64(token_row.get::<_, i64>(1)),
+            total_models,
+            active_models: i64_to_usize(active_models),
+        }))
+    }
+
     async fn initialize_schema(&self) -> io::Result<()> {
         let conn = self.pool.get().await.map_err(io_other)?;
         conn.batch_execute(SCHEMA_SQL).await.map_err(io_other)
@@ -284,7 +453,8 @@ impl PostgresStateStore {
 
 async fn sync_config_tables(tx: &Transaction<'_>, state: &PersistedState) -> io::Result<()> {
     sync_upstreams(tx, &state.upstreams).await?;
-    sync_downstreams(tx, &state.downstreams).await
+    sync_downstreams(tx, &state.downstreams).await?;
+    sync_announcements(tx, &state.announcement).await
 }
 
 async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> io::Result<()> {
@@ -535,6 +705,55 @@ async fn sync_downstreams(tx: &Transaction<'_>, downstreams: &[DownstreamConfig]
     Ok(())
 }
 
+async fn sync_announcements(
+    tx: &Transaction<'_>,
+    announcement: &Option<AnnouncementConfig>,
+) -> io::Result<()> {
+    match announcement {
+        Some(announcement) => {
+            let level = match announcement.level {
+                AnnouncementLevel::Info => "info",
+                AnnouncementLevel::Success => "success",
+                AnnouncementLevel::Warning => "warning",
+                AnnouncementLevel::Error => "error",
+            };
+            let updated_at = announcement.updated_at as i64;
+            let params: &[&(dyn ToSql + Sync)] = &[
+                &announcement.id,
+                &announcement.title,
+                &announcement.content,
+                &level,
+                &announcement.active,
+                &updated_at,
+            ];
+            tx.execute(
+                "INSERT INTO app_announcements (
+                    singleton_id, announcement_id, title, content, level, active, updated_at
+                ) VALUES (
+                    'global', $1, $2, $3, $4, $5, $6
+                )
+                ON CONFLICT (singleton_id) DO UPDATE SET
+                    announcement_id = EXCLUDED.announcement_id,
+                    title = EXCLUDED.title,
+                    content = EXCLUDED.content,
+                    level = EXCLUDED.level,
+                    active = EXCLUDED.active,
+                    updated_at = EXCLUDED.updated_at",
+                params,
+            )
+            .await
+            .map_err(io_other)?;
+        }
+        None => {
+            tx.execute("DELETE FROM app_announcements WHERE singleton_id = 'global'", &[])
+                .await
+                .map_err(io_other)?;
+        }
+    }
+
+    Ok(())
+}
+
 async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Result<()> {
     for log in logs {
         let request_count = log.request_count.map(|value| value as i64);
@@ -586,6 +805,87 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
     }
 
     Ok(())
+}
+
+async fn load_announcement(conn: &tokio_postgres::Client) -> io::Result<Option<AnnouncementConfig>> {
+    let row = conn
+        .query_opt(
+            "SELECT announcement_id, title, content, level, active, updated_at
+             FROM app_announcements
+             WHERE singleton_id = 'global'",
+            &[],
+        )
+        .await
+        .map_err(io_other)?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let level_text: String = row.get(3);
+    let level = match level_text.as_str() {
+        "info" => AnnouncementLevel::Info,
+        "success" => AnnouncementLevel::Success,
+        "warning" => AnnouncementLevel::Warning,
+        "error" => AnnouncementLevel::Error,
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid announcement level: {other}"),
+            ))
+        }
+    };
+
+    Ok(Some(AnnouncementConfig {
+        id: row.get(0),
+        title: row.get(1),
+        content: row.get(2),
+        level,
+        active: row.get(4),
+        updated_at: row.get::<_, i64>(5).max(0) as u64,
+    }))
+}
+
+fn usage_log_from_row(row: &Row) -> UsageLog {
+    UsageLog {
+        id: row.get::<_, String>(0),
+        downstream_key_id: row.get::<_, String>(1),
+        upstream_key_id: row.get::<_, String>(2),
+        downstream_name: row.get::<_, Option<String>>(3),
+        upstream_name: row.get::<_, Option<String>>(4),
+        endpoint: row.get::<_, String>(5),
+        model: row.get::<_, String>(6),
+        inference_strength: row.get::<_, Option<String>>(7),
+        billing_mode: row.get::<_, Option<String>>(8),
+        request_count: row.get::<_, Option<i64>>(9).map(i64_to_u64),
+        user_agent: row.get::<_, Option<String>>(10),
+        request_id: row.get::<_, String>(11),
+        status_code: row.get::<_, i32>(12).clamp(0, u16::MAX as i32) as u16,
+        error_message: row.get::<_, Option<String>>(13),
+        error_category: row.get::<_, Option<String>>(14),
+        prompt_tokens: i64_to_u64(row.get::<_, i64>(15)),
+        completion_tokens: i64_to_u64(row.get::<_, i64>(16)),
+        total_tokens: i64_to_u64(row.get::<_, i64>(17)),
+        latency_ms: i64_to_u64(row.get::<_, i64>(18)),
+        created_at: i64_to_u64(row.get::<_, i64>(19)),
+    }
+}
+
+fn runtime_usage_log_start(now: u64) -> i64 {
+    let window_start = now.saturating_sub(POSTGRES_RUNTIME_USAGE_LOG_WINDOW_DAYS * 86_400);
+    u64_to_i64(window_start.min(current_month_start(now)))
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    value.min(i64::MAX as u64) as i64
+}
+
+fn i64_to_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn i64_to_usize(value: i64) -> usize {
+    usize::try_from(value).unwrap_or(0)
 }
 
 fn decode_protocol(value: String) -> io::Result<UpstreamProtocol> {
@@ -735,6 +1035,16 @@ CREATE TABLE IF NOT EXISTS downstream_ip_allowlist (
     PRIMARY KEY (downstream_id, ip_address)
 );
 
+CREATE TABLE IF NOT EXISTS app_announcements (
+    singleton_id TEXT PRIMARY KEY,
+    announcement_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    level TEXT NOT NULL,
+    active BOOLEAN NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage_logs (
     id TEXT PRIMARY KEY,
     downstream_key_id TEXT NOT NULL,
@@ -777,6 +1087,10 @@ ALTER TABLE usage_logs
 
 CREATE INDEX IF NOT EXISTS usage_logs_created_at_idx
     ON usage_logs (created_at DESC, id);
+CREATE INDEX IF NOT EXISTS usage_logs_created_request_id_idx
+    ON usage_logs (created_at DESC, request_id, id);
+CREATE INDEX IF NOT EXISTS usage_logs_status_created_at_idx
+    ON usage_logs (status_code, created_at DESC, request_id, id);
 CREATE INDEX IF NOT EXISTS usage_logs_downstream_idx
     ON usage_logs (downstream_key_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS usage_logs_upstream_idx

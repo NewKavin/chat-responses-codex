@@ -173,6 +173,7 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -228,6 +229,95 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
     assert_eq!(log.inference_strength.as_deref(), Some("xhigh"));
     assert_eq!(log.user_agent.as_deref(), Some("Claude-Code/1.2.3"));
     assert_eq!(log.request_count, Some(1));
+}
+
+#[tokio::test]
+async fn downstream_rejected_request_is_logged_with_error_status() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+    announcement: None,
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(
+        snapshot.usage_logs.len(),
+        1,
+        "rejected gateway requests should still be recorded"
+    );
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.status_code, 403);
+    assert_eq!(log.endpoint, "/v1/chat/completions");
+    assert!(
+        log.error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("model not allowed"),
+        "unexpected log error message: {:?}",
+        log.error_message
+    );
 }
 
 #[tokio::test]
@@ -319,6 +409,7 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -438,6 +529,7 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -568,6 +660,7 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -706,6 +799,7 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -838,6 +932,7 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -1010,6 +1105,7 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -1077,6 +1173,7 @@ async fn claude_count_tokens_endpoint_accepts_x_api_key() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -1439,6 +1536,7 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -1561,6 +1659,7 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -1649,6 +1748,7 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -1734,6 +1834,7 @@ async fn premium_only_model_routes_to_protected_upstream() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -1912,6 +2013,7 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -2027,6 +2129,7 @@ async fn routing_affinity_is_scoped_by_requested_model() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig {
@@ -2129,6 +2232,7 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -2255,6 +2359,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -2360,6 +2465,7 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig {
@@ -2454,6 +2560,7 @@ async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig {
@@ -2605,6 +2712,7 @@ async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_mul
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -2740,6 +2848,7 @@ async fn context_limit_error_retries_once_with_reduced_max_tokens() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -2844,6 +2953,7 @@ async fn context_limit_error_without_adjustable_token_cap_returns_bad_request() 
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -2974,6 +3084,7 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -3130,6 +3241,7 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -3261,6 +3373,7 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
                     active: true,
                 }],
                 usage_logs: vec![],
+    announcement: None,
             },
             state_path,
             AppConfig::default(),
@@ -3446,6 +3559,7 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -3681,6 +3795,7 @@ async fn downstream_streaming_request_reports_model_routing_failure_precisely() 
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -3812,6 +3927,7 @@ async fn downstream_chat_request_supports_upstream_base_url_with_v1_prefix() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -3955,6 +4071,7 @@ async fn downstream_models_are_discovered_from_upstream_when_configured_models_a
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -4112,6 +4229,7 @@ async fn downstream_request_is_rejected_after_exceeding_per_minute_limit() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -4239,6 +4357,7 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -4381,6 +4500,7 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -4539,6 +4659,7 @@ async fn downstream_chat_stream_records_usage_from_final_chunk() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -4672,6 +4793,7 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -4812,6 +4934,7 @@ async fn downstream_chat_stream_is_synthesized_from_json_response() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -4972,6 +5095,7 @@ async fn downstream_responses_stream_retries_without_stream_when_upstream_reject
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -5151,6 +5275,7 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_tool_ca
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -5337,6 +5462,7 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -5491,6 +5617,7 @@ async fn downstream_responses_request_downgrades_developer_role_for_chat_upstrea
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -5624,6 +5751,7 @@ async fn downstream_responses_request_translates_flat_tools_for_chat_upstream() 
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -5770,6 +5898,7 @@ async fn downstream_responses_request_with_non_function_tool_choice_falls_back_t
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -5916,6 +6045,7 @@ async fn downstream_responses_request_with_unknown_string_tool_choice_falls_back
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -6077,6 +6207,7 @@ async fn downstream_responses_request_with_non_function_tools_falls_back_to_chat
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -6168,13 +6299,27 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
                             Ok(Bytes::from(format!(
                                 "data: {}\n\n",
                                 json!({
+                                    "type": "response.output_item.added",
+                                    "response_id": "resp-1",
+                                    "output_index": 0,
+                                    "item": {
+                                        "id": "reasoning-1",
+                                        "type": "reasoning",
+                                        "status": "in_progress"
+                                    },
+                                    "sequence_number": 2
+                                })
+                            ))),
+                            Ok(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
                                     "type": "response.output_text.delta",
                                     "response_id": "resp-1",
                                     "item_id": "msg-1",
-                                    "output_index": 0,
+                                    "output_index": 1,
                                     "content_index": 0,
                                     "delta": "Hi",
-                                    "sequence_number": 2
+                                    "sequence_number": 3
                                 })
                             ))),
                             Ok(Bytes::from(format!(
@@ -6183,23 +6328,48 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
                                     "type": "response.output_text.done",
                                     "response_id": "resp-1",
                                     "item_id": "msg-1",
-                                    "output_index": 0,
+                                    "output_index": 1,
                                     "content_index": 0,
                                     "text": "Hi",
-                                    "sequence_number": 3
+                                    "sequence_number": 4
+                                })
+                            ))),
+                            Ok(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "type": "response.output_item.done",
+                                    "response_id": "resp-1",
+                                    "output_index": 0,
+                                    "item": {
+                                        "id": "reasoning-1",
+                                        "type": "reasoning",
+                                        "status": "completed"
+                                    },
+                                    "sequence_number": 5
                                 })
                             ))),
                             Ok(Bytes::from(format!(
                                 "data: {}\n\n",
                                 json!({
                                     "type": "response.completed",
+                                    "sequence_number": 6,
                                     "response": {
                                         "id": "resp-1",
                                         "object": "response",
                                         "created_at": 1,
                                         "status": "completed",
                                         "model": "gpt-4.1-mini",
+                                        "usage": {
+                                            "input_tokens": 10,
+                                            "output_tokens": 5,
+                                            "total_tokens": 15
+                                        },
                                         "output": [
+                                            {
+                                                "id": "reasoning-1",
+                                                "type": "reasoning",
+                                                "status": "completed"
+                                            },
                                             {
                                                 "id": "msg-1",
                                                 "type": "message",
@@ -6269,6 +6439,7 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -6312,6 +6483,16 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
     assert!(text.contains("\"content\":\"Hi\""));
     assert!(text.contains("\"finish_reason\":\"stop\""));
     assert!(text.contains("data: [DONE]"));
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    let log = snapshot.usage_logs.last().expect("expected usage log entry");
+    assert_eq!(log.status_code, 200);
+    assert_eq!(log.error_category.as_deref(), None);
+    assert_eq!(log.error_message.as_deref(), None);
+    assert_eq!(log.prompt_tokens, 10);
+    assert_eq!(log.completion_tokens, 5);
+    assert_eq!(log.total_tokens, 15);
 
     let captured = capture.lock().unwrap().clone();
     assert_eq!(captured.path, "/v1/responses");
@@ -6418,6 +6599,7 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -6708,6 +6890,7 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -6854,6 +7037,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -6968,6 +7152,7 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -7129,6 +7314,7 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -7251,6 +7437,7 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -7373,6 +7560,7 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -7575,6 +7763,7 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -7682,6 +7871,7 @@ async fn stream_disconnect_releases_runtime_state() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -7796,6 +7986,7 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -7923,6 +8114,7 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -8038,6 +8230,7 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -8171,6 +8364,7 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         config,
@@ -8325,6 +8519,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         config,
@@ -8479,6 +8674,7 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         config,
@@ -8639,6 +8835,7 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -8765,6 +8962,7 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),
@@ -8884,6 +9082,7 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 active: true,
             }],
             usage_logs: vec![],
+    announcement: None,
         },
         state_path,
         AppConfig::default(),

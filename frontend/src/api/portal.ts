@@ -2,6 +2,7 @@ import axios from 'axios'
 import type {
   Announcement,
   PortalOverview,
+  PortalModelStat,
   PortalQuota,
   PortalUsageHistory
 } from '@/types'
@@ -54,6 +55,7 @@ export const portalApi = {
 
   // Key Management
   getKey: () => portalHttp.get<{ plaintext_key: string | null }>('/portal/key'),
+  getModels: () => portalHttp.get<PortalModelStat[]>('/portal/models'),
   rotateKey: () => portalHttp.post<{ plaintext_key: string }>('/portal/key/rotate'),
 
   // Announcement

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { createAdminApiClient, hasUsableAdminToken, splitDashboardResponse } from './admin'
+import { describe, expect, it, vi } from 'vitest'
+import { adminApi, adminHttp, createAdminApiClient, hasUsableAdminToken, splitDashboardResponse } from './admin'
 import type { DashboardSummaryResponse } from '@/types'
 
 describe('admin api auth behavior', () => {
@@ -56,5 +56,33 @@ describe('admin api auth behavior', () => {
       app_name: 'chat-responses-codex'
     })
     expect(view.analytics.summary.total_requests).toBe(9)
+  })
+})
+
+describe('admin announcement api', () => {
+  it('calls the announcement read endpoint', async () => {
+    const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({ data: { announcement: null } } as never)
+
+    await adminApi.getAnnouncement()
+
+    expect(spy).toHaveBeenCalledWith('/admin/announcement')
+  })
+
+  it('calls the announcement update endpoint', async () => {
+    const spy = vi.spyOn(adminHttp, 'put').mockResolvedValue({ data: { announcement: null } } as never)
+
+    await adminApi.updateAnnouncement({
+      title: '系统公告',
+      content: '正文',
+      level: 'info',
+      active: true
+    })
+
+    expect(spy).toHaveBeenCalledWith('/admin/announcement', {
+      title: '系统公告',
+      content: '正文',
+      level: 'info',
+      active: true
+    })
   })
 })

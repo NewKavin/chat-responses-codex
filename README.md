@@ -94,7 +94,7 @@ cargo run
 
 启动后打开：
 
-- `http://127.0.0.1:3001/admin`
+- `<gateway_origin>/admin`
 
 建议按这个顺序操作：
 
@@ -102,7 +102,7 @@ cargo run
 2. 在 `Upstreams` 中配置一个或多个上游，填好 `base_url`、`api_key`、`protocol` 和 `supported_models`。
 3. 在 `Downstreams` 中创建下游 Key。
 4. 用下游 Key 作为客户端访问凭证。
-5. 把客户端的 `base_url` 指向 `http://127.0.0.1:3001/v1`。
+5. 把客户端的 `base_url` 指向 `<gateway_origin>/v1`。
 6. 先请求 `GET /v1/models`，再发一条真正的 `chat.completions` 或 `responses` 请求。
 
 如果你只是想本地验证协议转换，这个模式已经足够。
@@ -207,15 +207,11 @@ flowchart LR
 
 ### Codex 集成
 
-如果你要把 Codex 接到本项目上，推荐直接看：
+如果你要把 Codex 接到本项目上，直接看：
 
 - [docs/codex-integration-guide.md](docs/codex-integration-guide.md)
 
-最简配置思路是：
-
-1. 让 Codex 指向网关的 `/v1`。
-2. 让 Codex 使用下游 Key，而不是上游厂商 Key。
-3. 让模型名在 Codex、网关和上游之间保持一致或通过 alias 映射一致。
+那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>` 和 `<model_slug>`，按步骤替换即可。
 
 ### 开发
 
@@ -300,7 +296,7 @@ Default environment:
 
 Open:
 
-- `http://127.0.0.1:3001/admin`
+- `<gateway_origin>/admin`
 
 Recommended bootstrap sequence:
 
@@ -308,7 +304,7 @@ Recommended bootstrap sequence:
 2. Configure one or more upstreams with `base_url`, `api_key`, `protocol`, and `supported_models`.
 3. Create a downstream key.
 4. Use that downstream key as the client credential.
-5. Point the client `base_url` to `http://127.0.0.1:3001/v1`.
+5. Point the client `base_url` to `<gateway_origin>/v1`.
 6. Test `GET /v1/models`, then send a real `chat.completions` or `responses` request.
 
 This mode is enough if you only want to verify protocol conversion locally.
@@ -413,11 +409,7 @@ The full integration guide lives here:
 
 - [docs/codex-integration-guide.md](docs/codex-integration-guide.md)
 
-Minimal setup idea:
-
-1. Point Codex to the gateway `/v1` endpoint.
-2. Use a downstream key, not an upstream vendor key.
-3. Keep model slugs aligned across Codex, the gateway, and the upstream provider, or map them with aliases.
+That guide uses one placeholder set: `<gateway_origin>`, `<downstream_key>`, and `<model_slug>`. Replace those values and follow the steps.
 
 ### Development
 

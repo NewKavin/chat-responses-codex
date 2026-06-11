@@ -1,11 +1,13 @@
 use chat_responses_codex::keys::generate_downstream_key;
-use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, PersistedState, StateStore, StoreFuture,
-    UpstreamConfig, UsageLog, UsageLogPage, UsageLogQuery, DownstreamUsageSummary,
-};
 use chat_responses_codex::state::log_queries::build_downstream_usage_summary;
+use chat_responses_codex::state::{
+    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DownstreamConfig,
+    DownstreamUsageSummary, PersistedState, StateStore, StoreFuture, UpstreamConfig, UsageLog,
+    UsageLogPage, UsageLogQuery,
+};
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::Notify;
@@ -14,6 +16,48 @@ use uuid::Uuid;
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
     PathBuf::from(format!("/tmp/test_state_store_{unique}.json"))
+}
+
+#[tokio::test]
+async fn persisted_state_without_announcement_still_deserializes() {
+    let raw = serde_json::json!({
+        "upstreams": [],
+        "downstreams": [],
+        "usage_logs": []
+    });
+
+    let state: PersistedState = serde_json::from_value(raw).unwrap();
+    assert!(state.announcement.is_none());
+}
+
+#[tokio::test]
+async fn file_store_persists_announcement_payload() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let announcement = AnnouncementConfig {
+        id: "ann-1".to_string(),
+        title: "系统公告".to_string(),
+        content: "请今天完成发布检查".to_string(),
+        level: AnnouncementLevel::Warning,
+        active: true,
+        updated_at: 1_710_000_000,
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![],
+            downstreams: vec![],
+            usage_logs: vec![],
+            announcement: Some(announcement.clone()),
+        },
+        state_path.clone(),
+        AppConfig::default(),
+    );
+
+    state.persist().await.unwrap();
+
+    let persisted: PersistedState =
+        serde_json::from_slice(&tokio::fs::read(state_path).await.unwrap()).unwrap();
+    assert_eq!(persisted.announcement, Some(announcement));
 }
 
 fn usage_log(
@@ -64,6 +108,7 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
                 usage_log("log-6", "downstream-1", "gpt-4", 500, 60, now - 360),
                 usage_log("log-7", "downstream-1", "gpt-4", 200, 50, now - 8 * 86_400),
             ],
+            announcement: None,
         },
         unique_state_path(),
         AppConfig::default(),
@@ -161,6 +206,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     created_at: now - 60,
                 },
             ],
+            announcement: None,
         },
         unique_state_path(),
         AppConfig::default(),
@@ -236,6 +282,7 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                 usage_log("log-b", "downstream-2", "gpt-4", 200, 120, now - 300),
                 usage_log("log-c", "downstream-3", "gpt-4.1-mini", 200, 999, now - 60),
             ],
+            announcement: None,
         },
         unique_state_path(),
         AppConfig::default(),
@@ -258,6 +305,28 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
 struct SlowStore {
     persist_started: Arc<Notify>,
     release_persist: Arc<Notify>,
+}
+
+#[derive(Clone, Default)]
+struct CountingStore {
+    persist_count: Arc<AtomicUsize>,
+    append_count: Arc<AtomicUsize>,
+}
+
+impl StateStore for CountingStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            self.persist_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    fn append_usage_logs<'a>(&'a self, _logs: &'a [UsageLog]) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            self.append_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
 }
 
 impl SlowStore {
@@ -349,7 +418,10 @@ async fn routing_snapshot_does_not_block_behind_slow_config_persist() {
         state.routing_snapshot(),
     )
     .await;
-    assert!(snapshot.is_ok(), "routing snapshot should not wait for slow persist");
+    assert!(
+        snapshot.is_ok(),
+        "routing snapshot should not wait for slow persist"
+    );
 
     release_persist.notify_one();
     let _ = updater.await;
@@ -364,6 +436,7 @@ async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
         config_path.clone(),
         AppConfig::default(),
     );
+    state.persist().await.unwrap();
 
     state
         .append_usage_log(UsageLog {
@@ -399,6 +472,39 @@ async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
 }
 
 #[tokio::test]
+async fn flushing_usage_logs_does_not_persist_unchanged_config() {
+    let store = CountingStore::default();
+    let persist_count = store.persist_count.clone();
+    let append_count = store.append_count.clone();
+    let state = AppState::new_with_store(
+        PersistedState::default(),
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(store),
+    );
+
+    state
+        .append_usage_log(usage_log(
+            "log-no-config-persist",
+            "downstream-1",
+            "gpt-4",
+            200,
+            2,
+            chat_responses_codex::state::unix_seconds(),
+        ))
+        .await
+        .unwrap();
+    state.flush_usage_logs_for_test().await.unwrap();
+
+    assert_eq!(append_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        persist_count.load(Ordering::SeqCst),
+        0,
+        "usage-log flush should append logs without rewriting unchanged config"
+    );
+}
+
+#[tokio::test]
 async fn query_usage_logs_page_uses_store_result_when_available() {
     let expected = UsageLogPage {
         logs: vec![],
@@ -423,7 +529,10 @@ async fn query_usage_logs_page_uses_store_result_when_available() {
         }),
     );
 
-    let page = state.query_usage_logs_page(UsageLogQuery::default()).await.unwrap();
+    let page = state
+        .query_usage_logs_page(UsageLogQuery::default())
+        .await
+        .unwrap();
     assert_eq!(page.total, expected.total);
     assert_eq!(page.page, expected.page);
     assert_eq!(page.page_size, expected.page_size);

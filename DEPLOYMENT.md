@@ -76,7 +76,7 @@ docker run -d \
   -e STATE_PATH=/data/state.json \
   -e LOG_PATH=/logs/runtime.log \
   -e ADMIN_USERNAME=admin \
-  -e ADMIN_PASSWORD='replace-this-with-a-strong-password' \
+  -e ADMIN_PASSWORD='<admin_password>' \
   -e APP_NAME=chat-responses-codex \
   -e USAGE_LOG_ROTATION_MAX_BYTES=1048576 \
   -e USAGE_LOG_ARCHIVE_MAX_FILES=10 \
@@ -180,38 +180,38 @@ proxy_set_header X-Forwarded-Proto $scheme;
 ## Bootstrap Checklist
 
 1. Start the container.
-2. Open `http://<host>:3001/admin`.
+2. Open `<gateway_origin>/admin`.
 3. Log in with the admin credentials.
 4. Add upstream keys and model support.
 5. Generate a downstream key.
-6. Test `GET /v1/models` with `Authorization: Bearer <downstream-key>`.
+6. Test `GET /v1/models` with `Authorization: Bearer <downstream_key>`.
 7. Send one chat request and confirm the upstream receives it.
 
 ## Smoke Test
 
 ```bash
-curl -i http://127.0.0.1:3001/healthz
+curl -i <gateway_origin>/healthz
 ```
 
 ```bash
-curl -u admin:replace-this-with-a-strong-password \
-  http://127.0.0.1:3001/admin
+curl -u admin:<admin_password> \
+  <gateway_origin>/admin
 ```
 
 After you create a downstream key:
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer <downstream-key>" \
-  http://127.0.0.1:3001/v1/models
+  -H "Authorization: Bearer <downstream_key>" \
+  <gateway_origin>/v1/models
 ```
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer <downstream-key>" \
+  -H "Authorization: Bearer <downstream_key>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hello"}]}' \
-  http://127.0.0.1:3001/v1/chat/completions
+  -d '{"model":"<model_slug>","messages":[{"role":"user","content":"hello"}]}' \
+  <gateway_origin>/v1/chat/completions
 ```
 
 ## Operational Notes
