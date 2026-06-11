@@ -38,7 +38,7 @@
       "input_modalities": [
         "text"
       ],
-      "supports_search_tool": true
+      "supports_search_tool": false
     },
     {
       "slug": "MiniMax/MiniMax-M2.7",
@@ -78,7 +78,7 @@
       "input_modalities": [
         "text"
       ],
-      "supports_search_tool": true
+      "supports_search_tool": false
     },
     {
       "slug": "deepseek-ai/DeepSeek-R1-0528",
@@ -118,7 +118,7 @@
       "input_modalities": [
         "text"
       ],
-      "supports_search_tool": true
+      "supports_search_tool": false
     }
   ]
 }

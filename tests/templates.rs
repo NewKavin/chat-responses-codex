@@ -30,6 +30,14 @@ fn codex_model_catalog_preserves_upstream_model_slugs_exactly() {
             "deepseek-ai/DeepSeek-R1-0528",
         ]
     );
+
+    for model in models {
+        assert_eq!(
+            model["supports_search_tool"],
+            false,
+            "template catalog should not overstate search tool support"
+        );
+    }
 }
 
 #[test]

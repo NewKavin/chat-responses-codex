@@ -127,12 +127,14 @@ describe('integration config generators', () => {
     expect(catalog.models[0]).toMatchObject({
       slug: 'MiniMax/MiniMax-M2.7',
       display_name: 'MiniMax/MiniMax-M2.7',
-      priority: 0
+      priority: 0,
+      supports_search_tool: false
     })
     expect(catalog.models[1]).toMatchObject({
       slug: 'DeepSeek/DeepSeek-V3',
       display_name: 'DeepSeek/DeepSeek-V3',
-      priority: 1
+      priority: 1,
+      supports_search_tool: false
     })
   })
 

@@ -159,7 +159,7 @@ export const buildCodexModelCatalogJson = (modelSlugs: string[]) => {
       supports_parallel_tool_calls: true,
       experimental_supported_tools: [],
       input_modalities: ['text'],
-      supports_search_tool: true
+      supports_search_tool: false
     }))
   }
 
