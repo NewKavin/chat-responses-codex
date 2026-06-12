@@ -28,6 +28,11 @@ const normalizeSlug = (value: unknown) => {
   return value.trim()
 }
 
+const normalizeModelMatchKey = (value: unknown) => {
+  const slug = normalizeSlug(value)
+  return slug ? slug.toLowerCase() : ''
+}
+
 const tomlEscape = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 
 const tomlString = (value: string) => `"${tomlEscape(value)}"`
@@ -94,22 +99,33 @@ export const extractGatewayModelSlugs = (response: GatewayModelsResponse) => {
 export const sortPortalModelStats = (stats: PortalModelStat[]) =>
   [...stats].sort(comparePortalModelStats)
 
+const buildStatsByModel = (stats: PortalModelStat[]) => {
+  const statsByModel = new Map<string, PortalModelStat>()
+
+  for (const stat of sortPortalModelStats(stats)) {
+    const key = normalizeModelMatchKey(stat.model)
+    if (!key || statsByModel.has(key)) continue
+    statsByModel.set(key, stat)
+  }
+
+  return statsByModel
+}
+
 export const rankModelSlugsByUsage = (modelSlugs: string[], stats: PortalModelStat[]) => {
   const uniqueSlugs: string[] = []
   const seen = new Set<string>()
+  const statsByModel = buildStatsByModel(stats)
 
-  for (const slug of [...modelSlugs, ...stats.map(stat => stat.model)]) {
+  for (const slug of modelSlugs) {
     const normalized = normalizeSlug(slug)
     if (!normalized || seen.has(normalized)) continue
     seen.add(normalized)
     uniqueSlugs.push(normalized)
   }
 
-  const statsByModel = new Map(stats.map(stat => [normalizeSlug(stat.model), stat]))
-
   return uniqueSlugs.sort((leftSlug, rightSlug) => {
-    const left = statsByModel.get(leftSlug)
-    const right = statsByModel.get(rightSlug)
+    const left = statsByModel.get(normalizeModelMatchKey(leftSlug))
+    const right = statsByModel.get(normalizeModelMatchKey(rightSlug))
 
     if (left && right) {
       return comparePortalModelStats(left, right)
@@ -118,6 +134,30 @@ export const rankModelSlugsByUsage = (modelSlugs: string[], stats: PortalModelSt
     if (left) return -1
     if (right) return 1
     return 0
+  })
+}
+
+const createEmptyPortalModelStat = (model: string): PortalModelStat => ({
+  model,
+  today_count: 0,
+  month_count: 0,
+  today_tokens: 0,
+  month_tokens: 0,
+  avg_latency_ms: 0,
+  success_rate: 0
+})
+
+export const buildModelUsageStats = (modelSlugs: string[], stats: PortalModelStat[]) => {
+  if (!modelSlugs.length) {
+    return sortPortalModelStats(stats)
+  }
+
+  const rankedModelSlugs = rankModelSlugsByUsage(modelSlugs, stats)
+  const statsByModel = buildStatsByModel(stats)
+
+  return rankedModelSlugs.map(slug => {
+    const matchedStat = statsByModel.get(normalizeModelMatchKey(slug))
+    return matchedStat ? { ...matchedStat, model: slug } : createEmptyPortalModelStat(slug)
   })
 }
 

@@ -6,6 +6,7 @@ import {
   buildCodexModelCatalogJson,
   buildGatewayBaseUrl,
   buildGatewayModelsEndpoint,
+  buildModelUsageStats,
   buildOpenCodeConfig,
   extractGatewayModelSlugs,
   rankModelSlugsByUsage,
@@ -74,7 +75,7 @@ describe('integration config generators', () => {
     ])
   })
 
-  it('ranks model slugs by portal usage and keeps unseen models at the end', () => {
+  it('ranks gateway model slugs by portal usage and keeps unseen models at the end', () => {
     expect(
       rankModelSlugsByUsage(
         ['MiniMax/MiniMax-M2.7', 'Qwen/Qwen3'],
@@ -99,7 +100,63 @@ describe('integration config generators', () => {
           }
         ]
       )
-    ).toEqual(['MiniMax/MiniMax-M2.7', 'DeepSeek/DeepSeek-V3', 'Qwen/Qwen3'])
+    ).toEqual(['MiniMax/MiniMax-M2.7', 'Qwen/Qwen3'])
+  })
+
+  it('keeps upstream casing when stats contain lowercase aliases', () => {
+    expect(
+      buildModelUsageStats(
+        ['ZhipuAI/GLM-5', 'MiniMax/MiniMax-M2.7'],
+        [
+          {
+            model: 'legacy/lowercase-model',
+            today_count: 1,
+            month_count: 99,
+            today_tokens: 10,
+            month_tokens: 990,
+            avg_latency_ms: 150,
+            success_rate: 0.9
+          },
+          {
+            model: 'zhipuai/glm-5',
+            today_count: 2,
+            month_count: 12,
+            today_tokens: 20,
+            month_tokens: 120,
+            avg_latency_ms: 140,
+            success_rate: 0.91
+          },
+          {
+            model: 'minimax/minimax-m2.7',
+            today_count: 8,
+            month_count: 45,
+            today_tokens: 80,
+            month_tokens: 450,
+            avg_latency_ms: 70,
+            success_rate: 0.99
+          }
+        ]
+      )
+    ).toEqual([
+      {
+        model: 'MiniMax/MiniMax-M2.7',
+        today_count: 8,
+        month_count: 45,
+        today_tokens: 80,
+        month_tokens: 450,
+        avg_latency_ms: 70,
+        success_rate: 0.99
+      },
+      {
+        model: 'ZhipuAI/GLM-5',
+        today_count: 2,
+        month_count: 12,
+        today_tokens: 20,
+        month_tokens: 120,
+        avg_latency_ms: 140,
+        success_rate: 0.91
+      }
+    ])
   })
 
   it('builds a codex config that keeps the key out of config.toml', () => {

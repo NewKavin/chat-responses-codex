@@ -234,6 +234,7 @@ import {
   buildCodexAuthLoginCommand,
   buildCodexConfigToml,
   buildCodexModelCatalogJson,
+  buildModelUsageStats,
   buildGatewayBaseUrl,
   buildGatewayModelsEndpoint,
   buildOpenCodeConfig,
@@ -262,14 +263,15 @@ const gatewayApiBaseUrl = computed(() =>
 )
 
 const allModelSlugs = computed(() =>
-  rankModelSlugsByUsage(
-    [...gatewayModelSlugs.value, ...portalModelStats.value.map(stat => stat.model)],
-    portalModelStats.value
-  )
+  gatewayModelSlugs.value.length
+    ? rankModelSlugsByUsage(gatewayModelSlugs.value, portalModelStats.value)
+    : sortPortalModelStats(portalModelStats.value).map(stat => stat.model)
 )
 
 const primaryModelSlug = computed(() => allModelSlugs.value[0] ?? '')
-const sortedModelStats = computed(() => sortPortalModelStats(portalModelStats.value))
+const sortedModelStats = computed(() =>
+  buildModelUsageStats(gatewayModelSlugs.value, portalModelStats.value)
+)
 const hasConfigContent = computed(
   () => Boolean(portalKey.value.trim()) && allModelSlugs.value.length > 0 && !fatalError.value
 )
