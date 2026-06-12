@@ -157,6 +157,8 @@ volumes:
 
 If you use a `.env` file, copy [`.env.example`](.env.example) to `.env`, keep the recommended defaults, and rotate the secrets before first launch.
 
+For Codex client setup, copy [templates/codex/config.toml.example](templates/codex/config.toml.example) and [templates/codex/model-catalog.json](templates/codex/model-catalog.json) into `~/.codex/`. The config template uses `model_catalog_json = "model-catalog.json"`, so the two files must live side by side.
+
 Generate a secure JWT_SECRET with: `openssl rand -base64 32`
 
 ## Reverse Proxy Notes

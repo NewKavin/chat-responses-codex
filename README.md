@@ -212,6 +212,7 @@ flowchart LR
 - [docs/codex-integration-guide.md](docs/codex-integration-guide.md)
 
 那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>` 和 `<model_slug>`，按步骤替换即可。
+Codex 的 `model_catalog_json` 示例也已经做成了同目录相对路径，复制到 `~/.codex/` 后不需要再手工改路径。
 
 ### 开发
 

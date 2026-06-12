@@ -47,6 +47,8 @@ fn codex_config_example_uses_live_model_slug_exactly() {
     assert!(config.contains(r#"model = "ZhipuAI/GLM-5""#));
     assert!(config.contains(r#"review_model = "ZhipuAI/GLM-5""#));
     assert!(!config.contains(r#"model = "glm-5""#));
+    assert!(config.contains(r#"model_catalog_json = "model-catalog.json""#));
+    assert!(!config.contains("/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"));
 }
 
 #[test]
@@ -111,4 +113,15 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
             "DEPLOYMENT.md should document {marker}"
         );
     }
+}
+
+#[test]
+fn codex_docs_mention_the_copy_ready_relative_catalog_path() {
+    let readme = fs::read_to_string("README.md").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+    let guide = fs::read_to_string("docs/codex-integration-guide.md").unwrap();
+
+    assert!(readme.contains("model_catalog_json"));
+    assert!(deployment.contains(r#"model_catalog_json = "model-catalog.json""#));
+    assert!(guide.contains(r#"model_catalog_json = "model-catalog.json""#));
 }

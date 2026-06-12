@@ -21,7 +21,7 @@
 一共有三类配置，分别在不同地方改：
 
 1. Codex 本地配置：`~/.codex/config.toml`
-2. Codex 模型目录：`templates/codex/model-catalog.json`
+2. Codex 模型目录：`~/.codex/model-catalog.json`
 3. 网关状态：`STATE_PATH` 指向的 JSON 文件，通常通过网关管理页维护
 
 项目里已经准备了三个模板：
@@ -50,7 +50,7 @@ model = "<model_slug>"
 review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
-model_catalog_json = "<model_catalog_path>"
+model_catalog_json = "model-catalog.json"
 
 [features]
 skill_mcp_dependency_install = true
@@ -270,7 +270,7 @@ model = "<model_slug>"
 review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
-model_catalog_json = "<model_catalog_path>"
+model_catalog_json = "model-catalog.json"
 
 [model_providers.gateway]
 name = "chat-responses-codex"
@@ -286,7 +286,7 @@ requires_openai_auth = true
 - `review_model`：审查/评审模型
 - `model_reasoning_effort`：推理强度
 - `disable_response_storage`：关闭响应存储
-- `model_catalog_json`：Codex 模型目录文件路径
+- `model_catalog_json`：Codex 模型目录文件路径，按相对路径解析
 - `base_url`：网关根地址加 `/v1`
 - `wire_api = "responses"`：让 Codex 按 Responses 协议跟网关通信
 - `requires_openai_auth = true`：使用 OpenAI 风格的 Bearer 鉴权头
@@ -295,8 +295,9 @@ requires_openai_auth = true
 
 1. `model_catalog_json` 路径写错
 2. `base_url` 写成了上游厂商地址，而不是网关根地址
-3. `model` 和 `model_slug` 不一致
-4. 模型名大小写不一致
+3. `model_catalog_json` 不在 `~/.codex/config.toml` 同目录
+4. `model` 和 `model_slug` 不一致
+5. 模型名大小写不一致
 
 ## 第五步: 配置 Codex 模型目录
 
@@ -325,7 +326,7 @@ Codex 会根据这个目录决定模型是否存在。
 
 ### 5.3 你要改什么
 
-如果你只想先跑通三个模型，就保留这三个示例即可；如果你的环境不同，就把它们替换成你自己的 slug，并同步调整 `display_name`、`priority` 和推理等级。
+如果你只想先跑通三个模型，就保留这三个示例即可；如果你的环境不同，就把它们替换成你自己的 slug，并同步调整 `display_name`、`priority` 和推理等级。`model_catalog_json` 保持为 `model-catalog.json`，只要这个文件和 `config.toml` 放在同一个 `~/.codex` 目录下就能直接生效。
 
 ## 第六步: 如果你想直接用模板
 
@@ -336,7 +337,7 @@ Codex 会根据这个目录决定模型是否存在。
 3. 配好上游模型
 4. 配好下游 key
 5. 把 `templates/codex/config.toml.example` 复制到 `~/.codex/config.toml`
-6. 把 `model_catalog_json` 指到你本机的 `templates/codex/model-catalog.json`
+6. 把 `templates/codex/model-catalog.json` 复制到 `~/.codex/model-catalog.json`
 7. 确认 `base_url` 是网关地址
 8. 确认 `model` 和 `review_model` 都是目录里真实存在的 slug
 
@@ -409,7 +410,7 @@ Codex 启动后选你在目录里写的模型，比如：
 怎么查：
 
 - 检查 `model_catalog_json` 是否指向正确文件
-   - 检查 `model = "..."` 是否和 `templates/codex/model-catalog.json` 里的 `slug` 完全一致
+   - 检查 `model = "..."` 是否和 `~/.codex/model-catalog.json` 里的 `slug` 完全一致
 
 ### 3. `skill descriptions were shortened to fit the skills context budget`
 
@@ -439,7 +440,7 @@ Codex 启动后选你在目录里写的模型，比如：
 如果你是第一次接，建议按这个组合来：
 
 - Codex 本机：只放 `~/.codex/config.toml`
-- 模型目录：放 `templates/codex/model-catalog.json`
+- 模型目录：放 `~/.codex/model-catalog.json`
 - 网关机器：运行 `chat-responses-codex`
 - 网关管理页：配置上游和下游
 
