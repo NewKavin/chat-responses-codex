@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, PersistedState, UsageLog,
+    AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig, UsageLog,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -21,6 +21,148 @@ use uuid::Uuid;
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
     PathBuf::from(format!("/tmp/test_state_portal_api_{unique}.json"))
+}
+
+fn stable_today_noon() -> u64 {
+    let now = chat_responses_codex::state::unix_seconds();
+    (now / 86_400) * 86_400 + 12 * 60 * 60
+}
+
+fn canonical_upstream_state() -> (AppState, String) {
+    let config = AppConfig::default();
+    let generated = generate_downstream_key("sk");
+    let now = stable_today_noon();
+
+    let state = PersistedState {
+        upstreams: vec![UpstreamConfig {
+            id: "upstream-1".to_string(),
+            name: "Primary Upstream".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            api_key: "test-key".to_string(),
+            supported_models: vec![
+                "ZhipuAI/GLM-5".to_string(),
+                "MiniMax/MiniMax-M2.7".to_string(),
+            ],
+            active: true,
+            ..UpstreamConfig::default()
+        }],
+        downstreams: vec![DownstreamConfig {
+            id: "downstream-1".to_string(),
+            name: "Test Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec![
+                "ZhipuAI/GLM-5".to_string(),
+                "MiniMax/MiniMax-M2.7".to_string(),
+            ],
+            per_minute_limit: 100,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: Some(10000),
+            monthly_token_limit: Some(100000),
+            request_quota_window_hours: Some(24),
+            request_quota_requests: Some(1000),
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        usage_logs: vec![
+            UsageLog {
+                id: "log-1".to_string(),
+                downstream_key_id: "downstream-1".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("Test Downstream".to_string()),
+                upstream_name: Some("Primary Upstream".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "zhipuai/glm-5".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "req-1".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+                latency_ms: 500,
+                created_at: now - 3600,
+            },
+            UsageLog {
+                id: "log-2".to_string(),
+                downstream_key_id: "downstream-1".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("Test Downstream".to_string()),
+                upstream_name: Some("Primary Upstream".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "ZhipuAI/GLM-5".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "req-2".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 50,
+                completion_tokens: 25,
+                total_tokens: 75,
+                latency_ms: 300,
+                created_at: now - 7200,
+            },
+            UsageLog {
+                id: "log-3".to_string(),
+                downstream_key_id: "downstream-1".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("Test Downstream".to_string()),
+                upstream_name: Some("Primary Upstream".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "minimax/minimax-m2.7".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "req-3".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 80,
+                completion_tokens: 20,
+                total_tokens: 100,
+                latency_ms: 200,
+                created_at: now - 1800,
+            },
+            UsageLog {
+                id: "log-4".to_string(),
+                downstream_key_id: "downstream-1".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("Test Downstream".to_string()),
+                upstream_name: Some("Primary Upstream".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "legacy/lowercase-model".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "req-4".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                latency_ms: 120,
+                created_at: now - 900,
+            },
+        ],
+        announcement: None,
+    };
+
+    let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
+    let app_state = AppState::new(state, unique_state_path(), config);
+    (app_state, portal_key)
 }
 
 /// Helper function to create a test AppState with downstream and logs
@@ -784,6 +926,55 @@ async fn test_portal_models_returns_model_stats() {
     assert!(model["month_count"].is_number());
     assert!(model["avg_latency_ms"].is_number());
     assert!(model["success_rate"].is_number());
+}
+
+#[tokio::test]
+async fn test_portal_models_preserves_canonical_upstream_model_casing() {
+    let (state, portal_key) = canonical_upstream_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let models: Vec<Value> = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(models.len(), 2);
+
+    let glm5 = models.iter().find(|model| model["model"] == "ZhipuAI/GLM-5");
+    assert!(glm5.is_some());
+    let glm5 = glm5.unwrap();
+    assert_eq!(glm5["today_count"], 2);
+    assert_eq!(glm5["month_count"], 2);
+
+    let minimax = models
+        .iter()
+        .find(|model| model["model"] == "MiniMax/MiniMax-M2.7");
+    assert!(minimax.is_some());
+    let minimax = minimax.unwrap();
+    assert_eq!(minimax["today_count"], 1);
+    assert_eq!(minimax["month_count"], 1);
+
+    assert!(!models
+        .iter()
+        .any(|model| model["model"] == "zhipuai/glm-5"));
+    assert!(!models
+        .iter()
+        .any(|model| model["model"] == "legacy/lowercase-model"));
 }
 
 #[tokio::test]

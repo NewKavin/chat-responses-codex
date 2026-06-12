@@ -2522,37 +2522,48 @@ impl AppState {
             let first_of_month = datetime.date_naive().with_day(1).unwrap();
             first_of_month.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64
         };
-        
-        // Group logs by model
-        let mut model_logs: std::collections::HashMap<String, Vec<&UsageLog>> = std::collections::HashMap::new();
-        
+
+        let canonical_models = build_active_upstream_model_catalog(&snapshot);
+
+        let mut model_logs: std::collections::HashMap<String, Vec<&UsageLog>> =
+            std::collections::HashMap::new();
+
         for log in &snapshot.usage_logs {
-            if log.downstream_key_id == downstream.id {
-                if downstream.model_allowlist.is_empty() || downstream.model_allowlist.contains(&log.model) {
-                    model_logs.entry(log.model.clone()).or_insert_with(Vec::new).push(log);
-                }
+            if log.downstream_key_id != downstream.id {
+                continue;
             }
+
+            let Some(model) = canonicalize_portal_model_name(&canonical_models, &log.model) else {
+                continue;
+            };
+
+            if !portal_model_is_allowed(&downstream.model_allowlist, &model) {
+                continue;
+            }
+
+            model_logs.entry(model).or_default().push(log);
         }
-        
-        // Calculate stats for each model
+
         let mut stats = Vec::new();
-        
+
         for (model, logs) in model_logs {
-            let today_logs: Vec<&&UsageLog> = logs.iter().filter(|log| log.created_at >= today_start).collect();
-            let month_logs: Vec<&&UsageLog> = logs.iter().filter(|log| log.created_at >= month_start).collect();
-            
+            let today_logs: Vec<&&UsageLog> =
+                logs.iter().filter(|log| log.created_at >= today_start).collect();
+            let month_logs: Vec<&&UsageLog> =
+                logs.iter().filter(|log| log.created_at >= month_start).collect();
+
             let today_count = today_logs.len() as u32;
             let month_count = month_logs.len() as u32;
             let today_tokens: u64 = today_logs.iter().map(|log| log.total_tokens).sum();
             let month_tokens: u64 = month_logs.iter().map(|log| log.total_tokens).sum();
-            
+
             let total_latency: u64 = logs.iter().map(|log| log.latency_ms).sum();
             let avg_latency_ms = if !logs.is_empty() {
                 total_latency / logs.len() as u64
             } else {
                 0
             };
-            
+
             let successful = logs.iter().filter(|log| log.status_code == 200).count();
             let success_rate = if !logs.is_empty() {
                 let raw_rate = successful as f64 / logs.len() as f64;
@@ -2560,7 +2571,7 @@ impl AppState {
             } else {
                 0.0
             };
-            
+
             stats.push(ModelStats {
                 model,
                 today_count,
@@ -2571,9 +2582,68 @@ impl AppState {
                 success_rate,
             });
         }
-        
+
         stats
     }
+}
+
+fn build_active_upstream_model_catalog(snapshot: &PersistedState) -> HashMap<String, Vec<String>> {
+    let mut catalog: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen_exact = HashSet::new();
+
+    for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
+        for model in upstream.route_models() {
+            let model = model.trim();
+            if model.is_empty() {
+                continue;
+            }
+
+            let model = model.to_string();
+            if !seen_exact.insert(model.clone()) {
+                continue;
+            }
+
+            catalog
+                .entry(model.to_ascii_lowercase())
+                .or_default()
+                .push(model);
+        }
+    }
+
+    catalog
+}
+
+fn canonicalize_portal_model_name(
+    catalog: &HashMap<String, Vec<String>>,
+    model: &str,
+) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+
+    let lookup_key = model.to_ascii_lowercase();
+    let Some(candidates) = catalog.get(&lookup_key) else {
+        return Some(model.to_string());
+    };
+    if let Some(exact_match) = candidates.iter().find(|candidate| candidate.as_str() == model) {
+        return Some(exact_match.clone());
+    }
+
+    candidates
+        .first()
+        .cloned()
+        .or_else(|| Some(model.to_string()))
+}
+
+fn portal_model_is_allowed(allowlist: &[String], model: &str) -> bool {
+    if allowlist.is_empty() {
+        return true;
+    }
+
+    allowlist
+        .iter()
+        .any(|allowed| allowed.trim().eq_ignore_ascii_case(model.trim()))
 }
 
 // ============================================================================
