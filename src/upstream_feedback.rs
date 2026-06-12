@@ -21,8 +21,34 @@ impl UpstreamFeedbackClassification {
         headers: &reqwest::header::HeaderMap,
         body: Option<&str>,
     ) -> Self {
-        // HTTP 429 is always rate limited
         if status == 429 {
+            if let Some(body_text) = body {
+                let body_lower = body_text.to_lowercase();
+
+                if body_lower.contains("concurrency")
+                    || body_lower.contains("concurrent")
+                    || body_lower.contains("in-flight")
+                {
+                    return Self::ConcurrencyFull;
+                }
+
+                if body_lower.contains("rate limit")
+                    || body_lower.contains("rate_limit")
+                    || body_lower.contains("too many requests")
+                {
+                    return Self::RateLimited;
+                }
+
+                if body_lower.contains("busy")
+                    || body_lower.contains("overloaded")
+                    || body_lower.contains("capacity")
+                    || body_lower.contains("throttle")
+                {
+                    return Self::ProviderBusy;
+                }
+            }
+
+            // HTTP 429 without stronger hints is treated as rate limiting.
             return Self::RateLimited;
         }
 
@@ -135,6 +161,20 @@ mod tests {
         let headers = reqwest::header::HeaderMap::new();
         let classification = UpstreamFeedbackClassification::from_response(429, &headers, None);
         assert_eq!(classification, UpstreamFeedbackClassification::RateLimited);
+    }
+
+    #[test]
+    fn test_429_with_concurrency_body_is_concurrency_full() {
+        let headers = reqwest::header::HeaderMap::new();
+        let classification = UpstreamFeedbackClassification::from_response(
+            429,
+            &headers,
+            Some(r#"{"error": {"message": "concurrency limit exceeded"}}"#),
+        );
+        assert_eq!(
+            classification,
+            UpstreamFeedbackClassification::ConcurrencyFull
+        );
     }
 
     #[test]

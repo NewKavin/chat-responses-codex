@@ -260,6 +260,7 @@ fn should_rollback_downstream_reservation(error: &GatewayError) -> bool {
     matches!(
         error,
         GatewayError::TooManyRequests { .. }
+            | GatewayError::ConcurrencyFull { .. }
             | GatewayError::Upstream(_)
             | GatewayError::GatewayTimeout(_)
             | GatewayError::TemporaryUpstreamUnavailable(_)
@@ -272,6 +273,10 @@ enum GatewayError {
     Forbidden(String),
     BadRequest(String),
     TooManyRequests {
+        message: String,
+        retry_after_seconds: Option<u64>,
+    },
+    ConcurrencyFull {
         message: String,
         retry_after_seconds: Option<u64>,
     },
@@ -290,6 +295,7 @@ impl std::fmt::Display for GatewayError {
             | GatewayError::GatewayTimeout(message)
             | GatewayError::TemporaryUpstreamUnavailable(message) => f.write_str(message),
             GatewayError::TooManyRequests { message, .. } => f.write_str(message),
+            GatewayError::ConcurrencyFull { message, .. } => f.write_str(message),
         }
     }
 }
@@ -302,7 +308,9 @@ impl GatewayError {
             GatewayError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             GatewayError::Forbidden(_) => StatusCode::FORBIDDEN,
             GatewayError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            GatewayError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
+            GatewayError::TooManyRequests { .. } | GatewayError::ConcurrencyFull { .. } => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             GatewayError::Upstream(_) => StatusCode::BAD_GATEWAY,
             GatewayError::GatewayTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             GatewayError::TemporaryUpstreamUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -321,6 +329,10 @@ impl GatewayError {
             }
             GatewayError::BadRequest(message) => (StatusCode::BAD_REQUEST, message, None),
             GatewayError::TooManyRequests {
+                message,
+                retry_after_seconds,
+            } => (StatusCode::TOO_MANY_REQUESTS, message, retry_after_seconds),
+            GatewayError::ConcurrencyFull {
                 message,
                 retry_after_seconds,
             } => (StatusCode::TOO_MANY_REQUESTS, message, retry_after_seconds),
@@ -1445,6 +1457,7 @@ async fn process_gateway_request(
                 "considering upstream candidate"
             );
 
+            let mut concurrency_retry_attempts_used = 0u32;
             let mut attempt_stream = request_stream;
             loop {
                 let _ = state.try_reserve_upstream_request(&upstream, model).await;
@@ -1555,6 +1568,69 @@ async fn process_gateway_request(
                             .await;
                         }
                         return Ok(result);
+                    }
+                    Err(GatewayError::ConcurrencyFull {
+                        message,
+                        retry_after_seconds,
+                    }) => {
+                        let backoff_ms = state.config.upstream_concurrency_retry_backoff_ms.max(1);
+                        let configured_retry_after_seconds =
+                            (backoff_ms.saturating_add(999) / 1000).max(1);
+                        let retry_after_seconds = retry_after_seconds
+                            .unwrap_or(configured_retry_after_seconds)
+                            .max(1);
+                        tracing::warn!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream.id,
+                            path = %request_path,
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_name = %upstream.name,
+                            selected_upstream_protocol = ?protocol,
+                            error = %message,
+                            retry_after_seconds,
+                            "upstream concurrency full"
+                        );
+                        if state.config.routing_affinity_enabled {
+                            state.clear_affinity_upstream(&downstream.id, normalized_model);
+                        }
+                        state
+                            .mark_upstream_concurrency_full(&upstream.id, backoff_ms)
+                            .await;
+                        last_error = Some(GatewayError::ConcurrencyFull {
+                            message,
+                            retry_after_seconds: Some(retry_after_seconds),
+                        });
+                        last_failure_upstream =
+                            Some((upstream.id.clone(), Some(upstream.name.clone())));
+
+                        if concurrency_retry_attempts_used
+                            < state.config.upstream_concurrency_retry_attempts.max(1)
+                        {
+                            concurrency_retry_attempts_used =
+                                concurrency_retry_attempts_used.saturating_add(1);
+                            tracing::info!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_name = %upstream.name,
+                                selected_upstream_protocol = ?protocol,
+                                retry_after_seconds,
+                                concurrency_retry_attempts_used,
+                                concurrency_retry_attempts_limit = state
+                                    .config
+                                    .upstream_concurrency_retry_attempts,
+                                "waiting for upstream concurrency slot before retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            continue;
+                        }
+
+                        break;
                     }
                     Err(GatewayError::TooManyRequests {
                         message,
@@ -2691,8 +2767,17 @@ async fn send_to_upstream(
                     retry_after_seconds: Some(retry_after_seconds),
                 });
             }
+            UpstreamFeedbackClassification::ConcurrencyFull => {
+                return Err(GatewayError::ConcurrencyFull {
+                    message: if error_excerpt.is_empty() {
+                        "upstream concurrency limit reached".into()
+                    } else {
+                        format!("upstream concurrency limit reached: {error_excerpt}")
+                    },
+                    retry_after_seconds: None,
+                });
+            }
             UpstreamFeedbackClassification::ProviderBusy
-            | UpstreamFeedbackClassification::ConcurrencyFull
             | UpstreamFeedbackClassification::TemporaryUnavailable => {
                 // Return error to allow outer loop to try next upstream
                 return Err(GatewayError::TemporaryUpstreamUnavailable(

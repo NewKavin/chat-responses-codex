@@ -1244,15 +1244,31 @@ impl AppState {
     }
 
     pub async fn mark_upstream_rate_limited(&self, upstream_id: &str, retry_after_seconds: u64) {
+        self.mark_upstream_cooldown(upstream_id, retry_after_seconds, "rate_limited")
+            .await;
+    }
+
+    pub async fn mark_upstream_concurrency_full(&self, upstream_id: &str, backoff_ms: u64) {
+        let backoff_seconds = backoff_ms.saturating_add(999) / 1000;
+        self.mark_upstream_cooldown(upstream_id, backoff_seconds.max(1), "concurrency_full")
+            .await;
+    }
+
+    async fn mark_upstream_cooldown(
+        &self,
+        upstream_id: &str,
+        cooldown_seconds: u64,
+        feedback_type: &str,
+    ) {
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         let state = runtime_state
             .entry(upstream_id.to_string())
             .or_insert_with(UpstreamRuntimeState::default);
         let now = unix_seconds();
-        let cooldown_until = now.saturating_add(retry_after_seconds.max(1));
+        let cooldown_until = now.saturating_add(cooldown_seconds.max(1));
         state.cooldown_until = state.cooldown_until.max(cooldown_until);
-        state.last_feedback_type = Some("rate_limited".to_string());
-        state.last_retry_after_seconds = Some(retry_after_seconds);
+        state.last_feedback_type = Some(feedback_type.to_string());
+        state.last_retry_after_seconds = Some(cooldown_seconds.max(1));
     }
 
     pub async fn upstream_runtime_snapshots_with_feedback(&self) -> HashMap<String, UpstreamRuntimeSnapshotWithFeedback> {
