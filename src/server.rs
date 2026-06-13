@@ -1273,6 +1273,10 @@ async fn process_gateway_request(
                 true
             }
         });
+        let total_candidate_count = upstreams.len() + deprioritized_upstreams.len();
+        // Stickiness only helps when there is a single viable upstream; with a pool,
+        // live pressure balancing should decide every request.
+        let use_routing_affinity = state.config.routing_affinity_enabled && total_candidate_count == 1;
         let ranking_pressure = |upstream: &UpstreamConfig| {
             let runtime = upstream_runtime_snapshots
                 .get(&upstream.id)
@@ -1305,87 +1309,130 @@ async fn process_gateway_request(
         upstreams.sort_by_key(&ranking_key);
         deprioritized_upstreams.sort_by_key(ranking_key);
         upstreams.extend(deprioritized_upstreams);
-        if let Some(preferred_upstream_id) = preferred_upstream_id.as_deref() {
-            if let Some(position) = upstreams
-                .iter()
-                .position(|upstream| upstream.id == preferred_upstream_id)
-            {
-                if position > 0 {
-                    let escape_ratio = state
-                        .config
-                        .routing_affinity_escape_pressure_ratio
-                        .max(1.0);
-                    let (
-                        preferred_cooled,
-                        preferred_cooldown,
-                        preferred_in_flight,
-                        preferred_minute_pressure,
-                        preferred_five_hour_pressure,
-                    ) = ranking_pressure(&upstreams[position]);
-                    let (
-                        best_cooled,
-                        best_cooldown,
-                        best_in_flight,
-                        best_minute_pressure,
-                        best_five_hour_pressure,
-                    ) = ranking_pressure(&upstreams[0]);
-                    let should_escape = (preferred_cooled && !best_cooled)
-                        || metric_exceeds_ratio(
-                            preferred_cooldown as f64,
-                            best_cooldown as f64,
-                            escape_ratio,
-                        )
-                        || metric_exceeds_ratio(
-                            preferred_in_flight as f64,
-                            best_in_flight as f64,
-                            escape_ratio,
-                        )
-                        || metric_exceeds_ratio(
-                            preferred_minute_pressure as f64,
-                            best_minute_pressure as f64,
-                            escape_ratio,
-                        )
-                        || metric_exceeds_ratio(
-                            preferred_five_hour_pressure as f64,
-                            best_five_hour_pressure as f64,
-                            escape_ratio,
-                        );
-                    if should_escape {
-                        tracing::debug!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            protocol = ?protocol,
-                            preferred_upstream_id = %preferred_upstream_id,
-                            escape_ratio,
-                            preferred_minute_pressure,
-                            best_minute_pressure,
-                            preferred_five_hour_pressure,
-                            best_five_hour_pressure,
-                            preferred_in_flight,
-                            best_in_flight,
+        if use_routing_affinity {
+            if let Some(preferred_upstream_id) = preferred_upstream_id.as_deref() {
+                if let Some(position) = upstreams
+                    .iter()
+                    .position(|upstream| upstream.id == preferred_upstream_id)
+                {
+                    if position > 0 {
+                        let escape_ratio = state
+                            .config
+                            .routing_affinity_escape_pressure_ratio
+                            .max(1.0);
+                        let (
+                            preferred_cooled,
                             preferred_cooldown,
+                            preferred_in_flight,
+                            preferred_minute_pressure,
+                            preferred_five_hour_pressure,
+                        ) = ranking_pressure(&upstreams[position]);
+                        let (
+                            best_cooled,
                             best_cooldown,
-                            "routing affinity escaped due upstream pressure"
-                        );
-                    } else {
-                        let preferred = upstreams.remove(position);
-                        upstreams.insert(0, preferred);
-                        tracing::debug!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            protocol = ?protocol,
-                            preferred_upstream_id = %preferred_upstream_id,
-                            escape_ratio,
-                            "applied routing affinity to candidate order"
-                        );
+                            best_in_flight,
+                            best_minute_pressure,
+                            best_five_hour_pressure,
+                        ) = ranking_pressure(&upstreams[0]);
+                        let should_escape = (preferred_cooled && !best_cooled)
+                            || metric_exceeds_ratio(
+                                preferred_cooldown as f64,
+                                best_cooldown as f64,
+                                escape_ratio,
+                            )
+                            || metric_exceeds_ratio(
+                                preferred_in_flight as f64,
+                                best_in_flight as f64,
+                                escape_ratio,
+                            )
+                            || metric_exceeds_ratio(
+                                preferred_minute_pressure as f64,
+                                best_minute_pressure as f64,
+                                escape_ratio,
+                            )
+                            || metric_exceeds_ratio(
+                                preferred_five_hour_pressure as f64,
+                                best_five_hour_pressure as f64,
+                                escape_ratio,
+                            );
+                        if should_escape {
+                            tracing::debug!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                protocol = ?protocol,
+                                preferred_upstream_id = %preferred_upstream_id,
+                                escape_ratio,
+                                preferred_minute_pressure,
+                                best_minute_pressure,
+                                preferred_five_hour_pressure,
+                                best_five_hour_pressure,
+                                preferred_in_flight,
+                                best_in_flight,
+                                preferred_cooldown,
+                                best_cooldown,
+                                "routing affinity escaped due upstream pressure"
+                            );
+                        } else {
+                            let preferred = upstreams.remove(position);
+                            upstreams.insert(0, preferred);
+                            tracing::debug!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                protocol = ?protocol,
+                                preferred_upstream_id = %preferred_upstream_id,
+                                escape_ratio,
+                                "applied routing affinity to candidate order"
+                            );
+                        }
                     }
                 }
+            }
+        }
+        let ranking_bucket_key = |upstream: &UpstreamConfig| {
+            let (cooled, cooldown_remaining, in_flight, minute_pressure, five_hour_pressure) =
+                ranking_pressure(upstream);
+            (
+                cooled,
+                cooldown_remaining,
+                in_flight,
+                minute_pressure,
+                five_hour_pressure,
+                upstream.failure_count,
+            )
+        };
+        if upstreams.len() > 1 {
+            let top_bucket_key = ranking_bucket_key(&upstreams[0]);
+            let top_bucket_len = upstreams
+                .iter()
+                .take_while(|upstream| ranking_bucket_key(upstream) == top_bucket_key)
+                .count();
+            let tie_breaker = state.next_routing_tie_breaker(
+                &downstream.id,
+                normalized_model,
+                protocol,
+            );
+            if top_bucket_len > 1 {
+                let rotation = tie_breaker as usize % top_bucket_len;
+                if rotation > 0 {
+                    upstreams[..top_bucket_len].rotate_left(rotation);
+                }
+                tracing::debug!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream.id,
+                    path = %request_path,
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    protocol = ?protocol,
+                    tie_bucket_size = top_bucket_len,
+                    tie_rotation = rotation,
+                    "rotated equal-pressure upstream candidates"
+                );
             }
         }
         let candidate_summary = upstreams
@@ -1523,7 +1570,7 @@ async fn process_gateway_request(
                         result.request_id = request_id.clone();
                         let completed_after_stream_fallback = request_stream && !attempt_stream;
                         state.mark_upstream_success(&upstream.id).await.ok();
-                        if state.config.routing_affinity_enabled {
+                        if use_routing_affinity {
                             state.set_affinity_upstream(
                                 &downstream.id,
                                 normalized_model,

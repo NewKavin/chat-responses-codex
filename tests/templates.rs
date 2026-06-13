@@ -113,6 +113,16 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
             "DEPLOYMENT.md should document {marker}"
         );
     }
+
+    for marker in [
+        "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
+        "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS",
+    ] {
+        assert!(
+            deployment.contains(marker),
+            "DEPLOYMENT.md should document {marker}"
+        );
+    }
 }
 
 #[test]
@@ -120,8 +130,13 @@ fn codex_docs_mention_the_copy_ready_relative_catalog_path() {
     let readme = fs::read_to_string("README.md").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
     let guide = fs::read_to_string("docs/codex-integration-guide.md").unwrap();
+    let contributing = fs::read_to_string("CONTRIBUTING.md").unwrap();
 
+    assert!(readme.contains("/portal/integration"));
     assert!(readme.contains("model_catalog_json"));
     assert!(deployment.contains(r#"model_catalog_json = "model-catalog.json""#));
     assert!(guide.contains(r#"model_catalog_json = "model-catalog.json""#));
+    assert!(!readme.contains("Gitee"));
+    assert!(!deployment.contains("Gitee"));
+    assert!(!contributing.contains("Gitee"));
 }

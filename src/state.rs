@@ -624,6 +624,7 @@ pub struct AppState {
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
+    routing_tie_breakers: Arc<StdMutex<HashMap<String, u64>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
     pub store_path: PathBuf,
     pub config: AppConfig,
@@ -700,6 +701,7 @@ impl AppState {
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
+            routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path,
             client: build_upstream_http_client(&config, false),
@@ -743,6 +745,7 @@ impl AppState {
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
+            routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path,
             client: build_upstream_http_client(&config, false),
@@ -780,6 +783,7 @@ impl AppState {
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
+            routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             store_path: PathBuf::new(),
             client: build_upstream_http_client(&config, false),
@@ -1689,6 +1693,35 @@ impl AppState {
             .lock()
             .expect("routing affinity lock poisoned");
         affinity.remove(&key);
+    }
+
+    fn routing_tie_breaker_key(
+        downstream_id: &str,
+        normalized_model: &str,
+        protocol: UpstreamProtocol,
+    ) -> String {
+        format!(
+            "{}::{}::{protocol:?}",
+            downstream_id,
+            normalized_model.trim().to_ascii_lowercase()
+        )
+    }
+
+    pub fn next_routing_tie_breaker(
+        &self,
+        downstream_id: &str,
+        normalized_model: &str,
+        protocol: UpstreamProtocol,
+    ) -> u64 {
+        let key = Self::routing_tie_breaker_key(downstream_id, normalized_model, protocol);
+        let mut tie_breakers = self
+            .routing_tie_breakers
+            .lock()
+            .expect("routing tie breaker lock poisoned");
+        let entry = tie_breakers.entry(key).or_insert(0);
+        let current = *entry;
+        *entry = entry.saturating_add(1);
+        current
     }
 
     pub async fn insert_upstream(&self, mut upstream: UpstreamConfig) -> io::Result<()> {

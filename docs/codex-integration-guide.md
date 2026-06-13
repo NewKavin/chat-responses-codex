@@ -8,6 +8,8 @@
 - 网关再连各家上游模型。
 - 模型名必须在 Codex、网关、上游三处保持完全一致。
 
+如果你已经登录了门户，优先打开 `<gateway_origin>/portal/integration`。页面会自动读取当前下游 key、当前网关 URL 和 live `/v1/models`，直接生成 Codex / OpenCode / Claude Code 的可复制配置。下面这些手工步骤保留着，方便你离线配置或做模板化部署。
+
 ## 先看整体结构
 
 推荐的链路是：
@@ -18,11 +20,12 @@
 
 ## 你需要改哪些地方
 
-一共有三类配置，分别在不同地方改：
+一共有三类配置，再加一个推荐入口，分别在不同地方改：
 
 1. Codex 本地配置：`~/.codex/config.toml`
 2. Codex 模型目录：`~/.codex/model-catalog.json`
 3. 网关状态：`STATE_PATH` 指向的 JSON 文件，通常通过网关管理页维护
+4. 门户集成页：`<gateway_origin>/portal/integration`
 
 项目里已经准备了三个模板：
 
@@ -297,7 +300,7 @@ requires_openai_auth = true
 2. `base_url` 写成了上游厂商地址，而不是网关根地址
 3. `model_catalog_json` 不在 `~/.codex/config.toml` 同目录
 4. `model` 和 `model_slug` 不一致
-5. 模型名大小写不一致
+5. 模型名被手动转成小写，或者改成了别名
 
 ## 第五步: 配置 Codex 模型目录
 
@@ -326,7 +329,7 @@ Codex 会根据这个目录决定模型是否存在。
 
 ### 5.3 你要改什么
 
-如果你只想先跑通三个模型，就保留这三个示例即可；如果你的环境不同，就把它们替换成你自己的 slug，并同步调整 `display_name`、`priority` 和推理等级。`model_catalog_json` 保持为 `model-catalog.json`，只要这个文件和 `config.toml` 放在同一个 `~/.codex` 目录下就能直接生效。
+如果你只想先跑通三个模型，就保留这三个示例即可；如果你的环境不同，就把它们替换成你自己的 slug，并同步调整 `display_name`、`priority` 和推理等级。`model_catalog_json` 保持为 `model-catalog.json`，只要这个文件和 `config.toml` 放在同一个 `~/.codex` 目录下就能直接生效。门户集成页生成的目录会直接使用上游 `/v1/models` 返回的原始 slug，不会额外转成小写。
 
 ## 第六步: 如果你想直接用模板
 
@@ -420,7 +423,20 @@ Codex 启动后选你在目录里写的模型，比如：
 
 通常可以先忽略，除非你发现技能自动加载异常。
 
-### 4. 能用 Python `requests`，但 Codex 不行
+### 4. 上游并发满导致 429
+
+如果错误里明确是 `429`，而且上游文案提到了 `concurrency`、`busy`、`limit exceeded` 这类并发饱和信号，先调这两个参数：
+
+- `UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS`
+- `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS`
+
+这组参数控制网关遇到并发饱和时会不会换一个候选上游、以及换候选前等多久。它和普通限流 429 不是一回事：
+
+- 普通限流 429 看 `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS`
+- 普通限流窗口看 `UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS`
+- `Retry-After` 过大的保护上限看 `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS`
+
+### 5. 能用 Python `requests`，但 Codex 不行
 
 这通常说明：
 
@@ -443,6 +459,11 @@ Codex 启动后选你在目录里写的模型，比如：
 - 模型目录：放 `~/.codex/model-catalog.json`
 - 网关机器：运行 `chat-responses-codex`
 - 网关管理页：配置上游和下游
+
+补充两条实战规则：
+
+- 同一个模型挂在多个上游账号上时，网关会自动按请求压力分摊，不需要拆成不同的模型名。
+- 如果上游因为并发满返回 429，可以调 `UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS` 和 `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS`；常规限流 429 则看 `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS`、`UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS` 和 `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS`。
 
 这样职责最清楚：
 

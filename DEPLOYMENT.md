@@ -1,7 +1,6 @@
 # Deployment Runbook
 
 `chat-responses-codex` is designed for a single active gateway instance backed by PostgreSQL 15.
-GitHub is the canonical repository and Gitee mirrors the same `main` branch.
 
 ## Operating Model
 
@@ -31,12 +30,18 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
 - `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
+- `UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS=20`
+- `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50`
 - `UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10`
 - `UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800`
 - `UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400`
 
 Keep the keepalive interval below the idle timeout so the gateway can emit
 heartbeats before the idle watchdog fires.
+
+`UPSTREAM_RATE_LIMIT_*` handles ordinary 429 retries. `UPSTREAM_CONCURRENCY_RETRY_*`
+handles 429s that come from upstream concurrency saturation, where the account is
+alive but temporarily out of slots.
 
 Optional for file-backed compatibility mode:
 
@@ -85,6 +90,8 @@ docker run -d \
   -e UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32 \
   -e UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3 \
   -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
+  -e UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS=20 \
+  -e UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50 \
   -e UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10 \
   -e UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800 \
   -e UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400 \

@@ -9,7 +9,6 @@ OpenAI-compatible gateway for Codex and other clients.
 Repositories:
 
 - GitHub: [NewKavin/chat-responses-codex](https://github.com/NewKavin/chat-responses-codex)
-- Gitee: mirror of the same `main` branch
 
 ## 中文
 
@@ -207,12 +206,17 @@ flowchart LR
 
 ### Codex 集成
 
-如果你要把 Codex 接到本项目上，直接看：
+如果你要把 Codex 接到本项目上，优先打开门户里的集成页：
+
+- `<gateway_origin>/portal/integration`
+
+页面会自动读取当前下游 key、当前网关 URL 和当前可用模型，并生成可直接复制的 Codex / OpenCode / Claude Code 配置。
+
+如果你想看手工步骤，再看：
 
 - [docs/codex-integration-guide.md](docs/codex-integration-guide.md)
 
-那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>` 和 `<model_slug>`，按步骤替换即可。
-Codex 的 `model_catalog_json` 示例也已经做成了同目录相对路径，复制到 `~/.codex/` 后不需要再手工改路径。
+那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>` 和 `<model_slug>`，按步骤替换即可。Codex 的 `model_catalog_json` 示例也已经做成了同目录相对路径，复制到 `~/.codex/` 后不需要再手工改路径。
 
 ### 开发
 

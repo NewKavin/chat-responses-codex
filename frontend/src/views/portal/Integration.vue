@@ -6,7 +6,8 @@
           <p class="eyebrow">复制即用</p>
           <h2>门户集成配置</h2>
           <p class="hero-copy">
-            本页会自动读取当前下游的 key、当前网关 URL 和模型统计，生成可以直接复制到本地的配置文件。
+            本页会自动读取当前下游的 key、当前网关 URL 和 live
+            `/v1/models`，生成可以直接复制到本地的配置文件。
           </p>
         </div>
         <el-tag type="success" effect="light">
@@ -35,6 +36,14 @@
         :closable="false"
         show-icon
         title="Codex 不把 key 写进 config.toml，而是通过 `codex login --with-api-key` 写进 `~/.codex/auth.json`。"
+      />
+
+      <el-alert
+        class="status-alert"
+        type="info"
+        :closable="false"
+        show-icon
+        title="模型名直接使用上游 `/v1/models` 返回的原始 slug；如果多个上游账号暴露同一个模型，网关会自动按压力分摊，不需要手工转成小写或拆成别名。"
       />
 
       <el-alert
@@ -181,7 +190,7 @@
               type="success"
               :closable="false"
               show-icon
-              title="保存后重新打开 OpenCode 即可。默认模型和小模型都已经按当前门户的使用量自动选好了。"
+              title="保存后重新打开 OpenCode 即可。模型名、网关 URL 和 key 都已经按当前门户的最新值写好了。"
             />
           </div>
         </el-tab-pane>
@@ -215,7 +224,7 @@
               type="success"
               :closable="false"
               show-icon
-              title="保存后重启 Claude Code 即可。默认模型会跟随门户使用量最高的模型。"
+              title="保存后重启 Claude Code 即可。默认模型会跟随门户使用量最高的模型，非 Claude 前缀模型会自动补 custom model option。"
             />
           </div>
         </el-tab-pane>

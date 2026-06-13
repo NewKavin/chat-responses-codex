@@ -2057,7 +2057,7 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn routing_affinity_is_scoped_by_requested_model() {
+async fn routing_rebalances_when_models_overlap() {
     with_proxy_env_cleared(|| async move {
         let hits = Arc::new(Mutex::new(Vec::<String>::new()));
         let tempdir = tempdir().unwrap();
@@ -2174,7 +2174,132 @@ async fn routing_affinity_is_scoped_by_requested_model() {
         let hits = hits.lock().unwrap().clone();
         assert_eq!(
             hits,
-            vec!["up-b".to_string(), "up-b".to_string(), "up-a".to_string()]
+            vec!["up-b".to_string(), "up-a".to_string(), "up-b".to_string()]
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn equal_model_accounts_rotate_when_their_pressure_ties() {
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let upstream_a = spawn_recording_chat_upstream("up-a", "upstream-a-secret", hits.clone()).await;
+        let upstream_b = spawn_recording_chat_upstream("up-b", "upstream-b-secret", hits.clone()).await;
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![
+                    UpstreamConfig {
+                        id: "up-a".into(),
+                        name: "primary-a".into(),
+                        base_url: upstream_a,
+                        api_key: "upstream-a-secret".into(),
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        protocols: vec![UpstreamProtocol::ChatCompletions],
+                        supported_models: vec!["gpt-4.1-mini".into()],
+                        model_contexts: vec![],
+                        request_quota_window_hours: 5,
+                        request_quota_requests: 600,
+                        requests_per_minute: 20,
+                        max_concurrency: 4,
+                        model_request_costs: vec![],
+                        priority: 0,
+                        premium_models: vec![],
+                        premium_only: false,
+                        protect_premium_quota: false,
+                        active: true,
+                        failure_count: 0,
+                    },
+                    UpstreamConfig {
+                        id: "up-b".into(),
+                        name: "backup-b".into(),
+                        base_url: upstream_b,
+                        api_key: "upstream-b-secret".into(),
+                        protocol: UpstreamProtocol::ChatCompletions,
+                        protocols: vec![UpstreamProtocol::ChatCompletions],
+                        supported_models: vec!["gpt-4.1-mini".into()],
+                        model_contexts: vec![],
+                        request_quota_window_hours: 5,
+                        request_quota_requests: 600,
+                        requests_per_minute: 20,
+                        max_concurrency: 4,
+                        model_request_costs: vec![],
+                        priority: 0,
+                        premium_models: vec![],
+                        premium_only: false,
+                        protect_premium_quota: false,
+                        active: true,
+                        failure_count: 0,
+                    },
+                ],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+            },
+            state_path,
+            AppConfig {
+                routing_affinity_enabled: true,
+                routing_affinity_escape_pressure_ratio: 10.0,
+                ..AppConfig::default()
+            },
+        );
+
+        let app = build_router(state);
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        for _ in 0..4 {
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        }
+
+        let hits = hits.lock().unwrap().clone();
+        assert_eq!(
+            hits,
+            vec![
+                "up-a".to_string(),
+                "up-b".to_string(),
+                "up-a".to_string(),
+                "up-b".to_string(),
+            ]
         );
     })
     .await;
