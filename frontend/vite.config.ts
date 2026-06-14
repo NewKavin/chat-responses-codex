@@ -34,7 +34,12 @@ export default defineConfig({
     outDir: 'dist',
     assetsDir: 'assets',
     sourcemap: false,
-    rollupOptions: {
+    // @vueuse/core 的发布产物会触发 Rolldown 的无效注释告警，这里只关掉这一个噪音。
+    chunkSizeWarningLimit: 800,
+    rolldownOptions: {
+      checks: {
+        invalidAnnotation: false,
+      },
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined

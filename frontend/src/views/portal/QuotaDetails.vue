@@ -1,6 +1,6 @@
 <template>
   <div class="quota-details-container">
-    <el-card>
+    <el-card v-loading="loading">
       <template #header>
         <h2>限额详情</h2>
       </template>
@@ -80,15 +80,20 @@
 
         <!-- 模型白名单 -->
         <div class="section">
-          <h3>模型白名单</h3>
-          <el-tag
-            v-for="model in data.model_allowlist"
-            :key="model"
-            style="margin-right: 8px; margin-bottom: 8px;"
-          >
-            {{ model }}
-          </el-tag>
-          <el-empty v-if="data.model_allowlist.length === 0" description="无限制" />
+          <div class="section-head">
+            <h3>模型白名单</h3>
+            <p>{{ modelSectionHint }}</p>
+          </div>
+          <template v-if="displayModelSlugs.length > 0">
+            <el-tag
+              v-for="model in displayModelSlugs"
+              :key="model"
+              style="margin-right: 8px; margin-bottom: 8px;"
+            >
+              {{ model }}
+            </el-tag>
+          </template>
+          <el-empty v-else :description="modelEmptyDescription" />
         </div>
 
         <!-- IP 白名单 -->
@@ -110,12 +115,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { portalApi } from '@/api/portal'
 import type { PortalQuota } from '@/types'
 import { formatPercentageLabel, formatPercentageTwoDecimals } from '@/utils/percentage'
+import {
+  buildGatewayModelsEndpoint,
+  extractGatewayModelSlugs
+} from '@/utils/integration'
+import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
 
+const loading = ref(false)
 const data = ref<PortalQuota>({
   request_quota: undefined,
   token_quota: {
@@ -124,6 +135,42 @@ const data = ref<PortalQuota>({
   },
   model_allowlist: [],
   ip_allowlist: []
+})
+const availableModelSlugs = ref<string[]>([])
+const modelLoadError = ref('')
+
+const displayModelSlugs = computed(() =>
+  resolvePortalQuotaModelSlugs(data.value.model_allowlist, availableModelSlugs.value)
+)
+
+const allowlistIsEmpty = computed(() => data.value.model_allowlist.length === 0)
+
+const modelSectionHint = computed(() => {
+  if (!allowlistIsEmpty.value) {
+    return '仅展示当前下游配置的模型白名单。'
+  }
+
+  if (availableModelSlugs.value.length > 0) {
+    return '当前未配置白名单，下面展示全部可用模型。'
+  }
+
+  if (modelLoadError.value) {
+    return '当前未配置白名单，但暂时无法读取全部可用模型。'
+  }
+
+  return '当前未配置白名单，下面展示全部可用模型。'
+})
+
+const modelEmptyDescription = computed(() => {
+  if (!allowlistIsEmpty.value) {
+    return '无限制'
+  }
+
+  if (modelLoadError.value) {
+    return '未能读取全部可用模型'
+  }
+
+  return '未发现可用模型'
 })
 
 const getQuotaColor = (percentage: number) => {
@@ -134,6 +181,10 @@ const getQuotaColor = (percentage: number) => {
 
 const loadData = async () => {
   try {
+    loading.value = true
+    modelLoadError.value = ''
+    availableModelSlugs.value = []
+
     const response = await portalApi.getQuota()
     const responseData = response.data as any
     data.value = {
@@ -142,8 +193,41 @@ const loadData = async () => {
       model_allowlist: responseData.model_allowlist || [],
       ip_allowlist: responseData.ip_allowlist || []
     }
+
+    if (data.value.model_allowlist.length === 0) {
+      const keyResponse = await portalApi.getKey()
+      const portalKey = keyResponse.data.plaintext_key?.trim() ?? ''
+      if (!portalKey) {
+        modelLoadError.value = '当前下游没有可用秘钥，无法读取全部模型。'
+        return
+      }
+
+      const modelsResponse = await fetch(
+        buildGatewayModelsEndpoint(window.location.origin),
+        {
+          headers: {
+            Authorization: `Bearer ${portalKey}`
+          }
+        }
+      )
+
+      if (!modelsResponse.ok) {
+        modelLoadError.value = `网关模型接口返回 ${modelsResponse.status}`
+        return
+      }
+
+      const payload = await modelsResponse.json()
+      availableModelSlugs.value = extractGatewayModelSlugs(payload)
+      if (availableModelSlugs.value.length === 0) {
+        modelLoadError.value = '未发现可用模型。'
+      }
+    }
   } catch (error) {
     ElMessage.error('加载数据失败')
+    modelLoadError.value = error instanceof Error ? error.message : '加载模型失败'
+  }
+  finally {
+    loading.value = false
   }
 }
 
@@ -163,10 +247,23 @@ onMounted(() => {
   gap: 20px;
 }
 
+.section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 15px;
+}
+
 .section h3 {
-  margin: 0 0 15px 0;
+  margin: 0;
   font-size: 16px;
   color: #303133;
+}
+
+.section-head p {
+  color: #909399;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 :deep(.el-descriptions__label) {
