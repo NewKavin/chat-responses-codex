@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3001");
     let state_path = PathBuf::from(env_or("STATE_PATH", "data/state.json"));
-    let log_path = env_or("LOG_PATH", "logs/runtime.log");
+    let log_path = env_or("LOG_PATH", "logs/chat-responses-codex.log");
     let context_retry_max_attempts_chat_default = env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 2).max(1);
     let context_retry_max_attempts_responses_default =
         env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 3).max(1);

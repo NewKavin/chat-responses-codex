@@ -86,7 +86,7 @@ cargo run
 
 - `BIND_ADDR=0.0.0.0:3001`
 - `STATE_PATH=data/state.json`
-- `LOG_PATH=logs/runtime.log`
+- `LOG_PATH=logs/chat-responses-codex.log`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=admin`
 - `APP_NAME=chat-responses-codex`
@@ -294,7 +294,7 @@ Default environment:
 
 - `BIND_ADDR=0.0.0.0:3001`
 - `STATE_PATH=data/state.json`
-- `LOG_PATH=logs/runtime.log`
+- `LOG_PATH=logs/chat-responses-codex.log`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=admin`
 - `APP_NAME=chat-responses-codex`

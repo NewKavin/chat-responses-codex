@@ -107,7 +107,7 @@ pkill -f chat-responses-codex
 tail -f logs/server.log
 
 # 查看运行时日志
-tail -f logs/runtime.log
+tail -f logs/chat-responses-codex.log
 ```
 
 ## 配置示例

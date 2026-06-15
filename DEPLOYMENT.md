@@ -18,7 +18,7 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `BIND_ADDR=0.0.0.0:3001`
 - `DATABASE_URL=postgres://chat_responses_codex@postgres/chat_responses_codex`
 - `POSTGRES_PASSWORD=<strong-secret>`
-- `LOG_PATH=/logs/runtime.log`
+- `LOG_PATH=/logs/chat-responses-codex.log`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=<strong-secret>`
 - `JWT_SECRET=<strong-secret-at-least-32-characters>`
@@ -79,7 +79,7 @@ docker run -d \
   -p 3001:3001 \
   -e BIND_ADDR=0.0.0.0:3001 \
   -e STATE_PATH=/data/state.json \
-  -e LOG_PATH=/logs/runtime.log \
+  -e LOG_PATH=/logs/chat-responses-codex.log \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD='<admin_password>' \
   -e APP_NAME=chat-responses-codex \
@@ -143,7 +143,7 @@ services:
       BIND_ADDR: 0.0.0.0:3001
       DATABASE_URL: postgres://chat_responses_codex@postgres/chat_responses_codex
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your shell or .env file}
-      LOG_PATH: /logs/runtime.log
+      LOG_PATH: /logs/chat-responses-codex.log
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in your shell or .env file}
       APP_NAME: chat-responses-codex

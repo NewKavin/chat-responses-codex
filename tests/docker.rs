@@ -33,8 +33,8 @@ fn dockerfile_builds_frontend_and_backend_inside_the_image() {
         "Dockerfile should keep the container healthcheck"
     );
     assert!(
-        dockerfile.contains("LOG_PATH=/logs/runtime.log"),
-        "Dockerfile should default runtime logs to /logs/runtime.log"
+        dockerfile.contains("LOG_PATH=/logs/chat-responses-codex.log"),
+        "Dockerfile should default runtime logs to /logs/chat-responses-codex.log"
     );
     assert!(
         dockerfile.contains("BIND_ADDR=0.0.0.0:3001"),
@@ -117,7 +117,7 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should configure the gateway state path"
     );
     assert!(
-        compose.contains("LOG_PATH: ${LOG_PATH:-/logs/runtime.log}"),
+        compose.contains("LOG_PATH: ${LOG_PATH:-/logs/chat-responses-codex.log}"),
         "docker-compose.yml should configure the runtime log path"
     );
     assert!(
@@ -244,9 +244,9 @@ fn docker_compose_maps_runtime_logs_to_a_local_directory() {
         "docker-compose.yml should mount a local ./logs directory into /logs"
     );
     assert!(
-        compose.contains("LOG_PATH=/logs/runtime.log")
-            || compose.contains("LOG_PATH: /logs/runtime.log")
-            || compose.contains("LOG_PATH: ${LOG_PATH:-/logs/runtime.log}"),
+        compose.contains("LOG_PATH=/logs/chat-responses-codex.log")
+            || compose.contains("LOG_PATH: /logs/chat-responses-codex.log")
+            || compose.contains("LOG_PATH: ${LOG_PATH:-/logs/chat-responses-codex.log}"),
         "docker-compose.yml should point LOG_PATH at the mounted logs directory"
     );
     assert!(
@@ -324,7 +324,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "STATE_PATH: ${STATE_PATH:-/data/state.json}",
         "DATABASE_URL: ${DATABASE_URL:-postgres://chat_responses_codex@postgres/chat_responses_codex}",
         "REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}",
-        "LOG_PATH: ${LOG_PATH:-/logs/runtime.log}",
+        "LOG_PATH: ${LOG_PATH:-/logs/chat-responses-codex.log}",
         "TZ: ${TZ:-Asia/Shanghai}",
         "ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}",
         "APP_NAME: ${APP_NAME:-chat-responses-codex}",
