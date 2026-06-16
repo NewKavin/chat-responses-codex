@@ -182,7 +182,12 @@ pub fn build_downstream_usage_summary(
         .sum();
 
     let total_models = if !downstream.model_allowlist.is_empty() {
-        downstream.model_allowlist.len()
+        downstream
+            .model_allowlist
+            .iter()
+            .map(|model| model.trim().to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+            .len()
     } else {
         snapshot
             .upstreams
@@ -195,11 +200,8 @@ pub fn build_downstream_usage_summary(
 
     let active_models = downstream_logs
         .iter()
-        .filter(|log| {
-            downstream.model_allowlist.is_empty()
-                || downstream.model_allowlist.contains(&log.model)
-        })
-        .map(|log| log.model.as_str())
+        .filter(|log| super::portal_model_is_allowed(&downstream.model_allowlist, &log.model))
+        .map(|log| log.model.trim().to_ascii_lowercase())
         .collect::<HashSet<_>>()
         .len();
 
@@ -225,8 +227,15 @@ impl AppState {
             end_time: query.end_time,
         };
 
-        if let Some(page) = self.config_store.query_usage_logs_page(&query).await? {
-            return Ok(page);
+        let has_pending_usage_logs = {
+            let pending = self.pending_usage_logs.lock().await;
+            !pending.is_empty()
+        };
+
+        if !has_pending_usage_logs {
+            if let Some(page) = self.config_store.query_usage_logs_page(&query).await? {
+                return Ok(page);
+            }
         }
 
         let snapshot = self.snapshot().await;
@@ -253,11 +262,7 @@ impl AppState {
                 }
 
                 if let Some(model_substring) = &model_substring {
-                    if !log
-                        .model
-                        .to_ascii_lowercase()
-                        .contains(model_substring)
-                    {
+                    if !log.model.to_ascii_lowercase().contains(model_substring) {
                         return false;
                     }
                 }
@@ -296,12 +301,19 @@ impl AppState {
         &self,
         downstream_id: &str,
     ) -> io::Result<DownstreamUsageSummary> {
-        if let Some(summary) = self
-            .config_store
-            .downstream_usage_summary(downstream_id)
-            .await?
-        {
-            return Ok(summary);
+        let has_pending_usage_logs = {
+            let pending = self.pending_usage_logs.lock().await;
+            !pending.is_empty()
+        };
+
+        if !has_pending_usage_logs {
+            if let Some(summary) = self
+                .config_store
+                .downstream_usage_summary(downstream_id)
+                .await?
+            {
+                return Ok(summary);
+            }
         }
 
         let snapshot = self.snapshot().await;

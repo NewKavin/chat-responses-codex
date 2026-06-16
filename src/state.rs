@@ -1,19 +1,21 @@
 use crate::keys::verify_downstream_key;
-use chrono::Datelike;
 use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-#[path = "state/postgres.rs"]
-mod postgres;
+use chrono::Datelike;
 #[path = "state/file_store.rs"]
 mod file_store;
 #[path = "state/log_queries.rs"]
 pub mod log_queries;
+#[path = "state/postgres.rs"]
+mod postgres;
 #[path = "state/store.rs"]
 mod store;
 
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,14 +31,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use redis::AsyncCommands;
-use redis::aio::ConnectionManager;
 
-use postgres::PostgresStateStore;
 use file_store::FileStateStore;
-pub use log_queries::{
-    DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery,
-};
+pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
+use postgres::PostgresStateStore;
 pub use store::{StateStore, StoreFuture};
 
 pub const ADMIN_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
@@ -125,7 +123,10 @@ pub struct UpstreamConfig {
     pub model_contexts: Vec<ModelContextConfig>,
     #[serde(default = "default_upstream_request_quota_window_hours")]
     pub request_quota_window_hours: u32,
-    #[serde(default = "default_upstream_request_quota_requests", alias = "request_quota_5h")]
+    #[serde(
+        default = "default_upstream_request_quota_requests",
+        alias = "request_quota_5h"
+    )]
     pub request_quota_requests: u32,
     #[serde(default = "default_upstream_requests_per_minute")]
     pub requests_per_minute: u32,
@@ -317,7 +318,11 @@ impl UpstreamConfig {
             return Ok(());
         }
 
-        let routable = self.supported_models.iter().cloned().collect::<HashSet<_>>();
+        let routable = self
+            .supported_models
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
         let invalid = self
             .premium_models
             .iter()
@@ -377,7 +382,9 @@ impl UpstreamConfig {
         if group.is_empty() {
             return None;
         }
-        let current_resolved = self.resolved_model_name(model).unwrap_or_else(|| model.to_string());
+        let current_resolved = self
+            .resolved_model_name(model)
+            .unwrap_or_else(|| model.to_string());
 
         let mut candidates = self
             .model_contexts
@@ -448,7 +455,9 @@ fn normalized_string_list(values: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn normalized_model_request_costs(values: Vec<ModelRequestCostConfig>) -> Vec<ModelRequestCostConfig> {
+fn normalized_model_request_costs(
+    values: Vec<ModelRequestCostConfig>,
+) -> Vec<ModelRequestCostConfig> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
     for rule in values {
@@ -666,7 +675,14 @@ impl AppState {
         config: AppConfig,
         config_store: Arc<dyn StateStore>,
     ) -> Self {
-        Self::new_with_archived_and_store(state, Vec::new(), store_path.into(), config, config_store, None)
+        Self::new_with_archived_and_store(
+            state,
+            Vec::new(),
+            store_path.into(),
+            config,
+            config_store,
+            None,
+        )
     }
 
     fn new_with_archived(
@@ -857,7 +873,9 @@ impl AppState {
             return;
         };
         let mut connection = redis.lock().await;
-        let _ = connection.set_ex::<_, _, ()>(key, serialized, ttl_seconds).await;
+        let _ = connection
+            .set_ex::<_, _, ()>(key, serialized, ttl_seconds)
+            .await;
     }
 
     pub fn create_admin_session(&self) -> String {
@@ -980,17 +998,15 @@ impl AppState {
         database_url: impl AsRef<str>,
         config: AppConfig,
     ) -> io::Result<Self> {
-        let postgres = PostgresStateStore::connect(
-            database_url.as_ref(),
-            config.postgres_pool_max_size,
-        )
-            .await
-            .map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to initialize postgres backend: {error}"),
-                )
-            })?;
+        let postgres =
+            PostgresStateStore::connect(database_url.as_ref(), config.postgres_pool_max_size)
+                .await
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("failed to initialize postgres backend: {error}"),
+                    )
+                })?;
         let state = postgres.load_state().await?;
         tracing::info!(
             backend = "postgres",
@@ -1007,7 +1023,10 @@ impl AppState {
         self.persist_state(&state).await
     }
 
-    pub async fn update_announcement(&self, announcement: Option<AnnouncementConfig>) -> io::Result<()> {
+    pub async fn update_announcement(
+        &self,
+        announcement: Option<AnnouncementConfig>,
+    ) -> io::Result<()> {
         self.mutate_persisted_state_io(move |state| {
             state.announcement = announcement;
             Ok(())
@@ -1113,15 +1132,11 @@ impl AppState {
                     .supported_protocols()
                     .into_iter()
                     .map(|protocol| {
-                        UpstreamCandidate::new(
-                            upstream.id.clone(),
-                            upstream.name.clone(),
-                            protocol,
-                        )
-                        .with_models(upstream.route_models())
-                        .with_priority(upstream.priority)
-                        .with_premium_models(upstream.premium_route_models())
-                        .with_failure_count(upstream.failure_count)
+                        UpstreamCandidate::new(upstream.id.clone(), upstream.name.clone(), protocol)
+                            .with_models(upstream.route_models())
+                            .with_priority(upstream.priority)
+                            .with_premium_models(upstream.premium_route_models())
+                            .with_failure_count(upstream.failure_count)
                     })
                     .collect::<Vec<_>>()
             })
@@ -1275,7 +1290,9 @@ impl AppState {
         state.last_retry_after_seconds = Some(cooldown_seconds.max(1));
     }
 
-    pub async fn upstream_runtime_snapshots_with_feedback(&self) -> HashMap<String, UpstreamRuntimeSnapshotWithFeedback> {
+    pub async fn upstream_runtime_snapshots_with_feedback(
+        &self,
+    ) -> HashMap<String, UpstreamRuntimeSnapshotWithFeedback> {
         let upstream_windows = {
             let state = self.inner.lock().await;
             state
@@ -1765,7 +1782,9 @@ impl AppState {
     pub async fn remove_upstream(&self, upstream_id: &str) -> io::Result<bool> {
         self.mutate_persisted_state_io(|state| {
             let original_len = state.upstreams.len();
-            state.upstreams.retain(|upstream| upstream.id != upstream_id);
+            state
+                .upstreams
+                .retain(|upstream| upstream.id != upstream_id);
             Ok(state.upstreams.len() != original_len)
         })
         .await
@@ -1805,7 +1824,9 @@ impl AppState {
         let removed = self
             .mutate_persisted_state_io(|state| {
                 let original_len = state.downstreams.len();
-                state.downstreams.retain(|downstream| downstream.id != downstream_id);
+                state
+                    .downstreams
+                    .retain(|downstream| downstream.id != downstream_id);
                 Ok(state.downstreams.len() != original_len)
             })
             .await?;
@@ -1895,7 +1916,7 @@ impl AppState {
 
             for model in upstream_models {
                 if downstream.model_allowlist.is_empty()
-                    || downstream.model_allowlist.contains(&model)
+                    || portal_model_is_allowed(&downstream.model_allowlist, &model)
                 {
                     models.insert(model);
                 }
@@ -2344,9 +2365,9 @@ impl AppState {
     pub async fn compute_per_minute_usage(&self, downstream_id: &str) -> PerMinuteUsage {
         let now = unix_seconds();
         let one_minute_ago = now.saturating_sub(60);
-        
+
         let snapshot = self.snapshot().await;
-        
+
         // Find the downstream to get the limit
         let downstream = snapshot.downstreams.iter().find(|d| d.id == downstream_id);
         let limit = downstream
@@ -2358,36 +2379,41 @@ impl AppState {
                 }
             })
             .unwrap_or(0);
-        
+
         // Count requests in the last 60 seconds
         let used = snapshot
             .usage_logs
             .iter()
-            .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= one_minute_ago)
+            .filter(|log| {
+                log.downstream_key_id == downstream_id && log.created_at >= one_minute_ago
+            })
             .count() as u32;
-        
+
         let percentage = if limit > 0 {
             (used as f64 / limit as f64) * 100.0
         } else {
             0.0
         };
-        
+
         PerMinuteUsage {
             used,
             limit,
             percentage,
         }
     }
-    
+
     /// Compute request quota usage for a downstream (sliding window)
-    pub async fn compute_request_quota_usage(&self, downstream: &DownstreamConfig) -> Option<RequestQuotaUsage> {
+    pub async fn compute_request_quota_usage(
+        &self,
+        downstream: &DownstreamConfig,
+    ) -> Option<RequestQuotaUsage> {
         if !downstream.rate_limit_enabled || !downstream.uses_request_quota() {
             return None;
         }
-        
+
         let window_hours = downstream.request_quota_window_hours.unwrap();
         let limit = downstream.request_quota_requests.unwrap();
-        
+
         let now = unix_seconds();
         let window_start = now.saturating_sub((window_hours as u64) * 3600);
 
@@ -2416,15 +2442,15 @@ impl AppState {
         // Use the larger value so UI keeps reflecting runtime reservations and
         // persisted successful requests consistently.
         let used = used_from_windows.max(used_from_logs);
-        
+
         let percentage = if limit > 0 {
             (used as f64 / limit as f64) * 100.0
         } else {
             0.0
         };
-        
+
         let remaining = limit.saturating_sub(used);
-        
+
         Some(RequestQuotaUsage {
             used,
             limit,
@@ -2433,35 +2459,41 @@ impl AppState {
             percentage,
         })
     }
-    
+
     /// Compute token usage for a downstream
     pub async fn compute_token_usage(&self, downstream_id: &str, now: u64) -> TokenUsage {
         let snapshot = self.snapshot().await;
-        
+
         // Find the downstream to get limits
         let downstream = snapshot.downstreams.iter().find(|d| d.id == downstream_id);
-        
+
         let daily_limit = downstream.and_then(|d| d.daily_token_limit);
         let monthly_limit = downstream.and_then(|d| d.monthly_token_limit);
-        
+
         // Calculate start of today (UTC)
         let today_start = (now / 86400) * 86400;
-        
+
         // Calculate start of this month (UTC)
         let month_start = {
             use std::time::UNIX_EPOCH;
             let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
             let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
             let first_of_month = datetime.date_naive().with_day(1).unwrap();
-            first_of_month.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64
+            first_of_month
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp() as u64
         };
-        
+
         // Calculate daily usage
         let daily = if let Some(limit) = daily_limit {
             let used: u64 = snapshot
                 .usage_logs
                 .iter()
-                .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= today_start)
+                .filter(|log| {
+                    log.downstream_key_id == downstream_id && log.created_at >= today_start
+                })
                 .map(|log| log.total_tokens)
                 .sum();
 
@@ -2482,13 +2514,15 @@ impl AppState {
         } else {
             None
         };
-        
+
         // Calculate monthly usage
         let monthly = if let Some(limit) = monthly_limit {
             let used: u64 = snapshot
                 .usage_logs
                 .iter()
-                .filter(|log| log.downstream_key_id == downstream_id && log.created_at >= month_start)
+                .filter(|log| {
+                    log.downstream_key_id == downstream_id && log.created_at >= month_start
+                })
                 .map(|log| log.total_tokens)
                 .sum();
 
@@ -2509,22 +2543,22 @@ impl AppState {
         } else {
             None
         };
-        
+
         TokenUsage { daily, monthly }
     }
-    
+
     /// Compute daily statistics for a downstream
     pub async fn compute_daily_stats(&self, downstream_id: &str, days: usize) -> Vec<DailyStats> {
         let snapshot = self.snapshot().await;
         let now = unix_seconds();
-        
+
         let mut stats = Vec::new();
-        
+
         for day_offset in 0..days {
             let day_start = now.saturating_sub((day_offset as u64) * 86400);
             let day_start = (day_start / 86400) * 86400;
             let day_end = day_start + 86400;
-            
+
             // Filter logs for this day
             let day_logs: Vec<_> = snapshot
                 .usage_logs
@@ -2535,17 +2569,17 @@ impl AppState {
                         && log.created_at < day_end
                 })
                 .collect();
-            
+
             let requests = day_logs.len() as u32;
             let tokens: u64 = day_logs.iter().map(|log| log.total_tokens).sum();
-            
+
             let successful = day_logs.iter().filter(|log| log.status_code == 200).count();
             let success_rate = if requests > 0 {
                 successful as f64 / requests as f64
             } else {
                 0.0
             };
-            
+
             stats.push(DailyStats {
                 date: day_start,
                 total_requests: requests,
@@ -2553,15 +2587,15 @@ impl AppState {
                 success_rate,
             });
         }
-        
+
         stats
     }
-    
+
     /// Compute model statistics for a downstream
     pub async fn compute_model_stats(&self, downstream: &DownstreamConfig) -> Vec<ModelStats> {
         let snapshot = self.snapshot().await;
         let now = unix_seconds();
-        
+
         // Calculate start of today and this month
         let today_start = (now / 86400) * 86400;
         let month_start = {
@@ -2569,7 +2603,11 @@ impl AppState {
             let dt = UNIX_EPOCH + std::time::Duration::from_secs(now);
             let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
             let first_of_month = datetime.date_naive().with_day(1).unwrap();
-            first_of_month.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64
+            first_of_month
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp() as u64
         };
 
         let canonical_models = build_active_upstream_model_catalog(&snapshot);
@@ -2596,10 +2634,14 @@ impl AppState {
         let mut stats = Vec::new();
 
         for (model, logs) in model_logs {
-            let today_logs: Vec<&&UsageLog> =
-                logs.iter().filter(|log| log.created_at >= today_start).collect();
-            let month_logs: Vec<&&UsageLog> =
-                logs.iter().filter(|log| log.created_at >= month_start).collect();
+            let today_logs: Vec<&&UsageLog> = logs
+                .iter()
+                .filter(|log| log.created_at >= today_start)
+                .collect();
+            let month_logs: Vec<&&UsageLog> = logs
+                .iter()
+                .filter(|log| log.created_at >= month_start)
+                .collect();
 
             let today_count = today_logs.len() as u32;
             let month_count = month_logs.len() as u32;
@@ -2675,7 +2717,10 @@ fn canonicalize_portal_model_name(
     let Some(candidates) = catalog.get(&lookup_key) else {
         return Some(model.to_string());
     };
-    if let Some(exact_match) = candidates.iter().find(|candidate| candidate.as_str() == model) {
+    if let Some(exact_match) = candidates
+        .iter()
+        .find(|candidate| candidate.as_str() == model)
+    {
         return Some(exact_match.clone());
     }
 
@@ -2685,14 +2730,26 @@ fn canonicalize_portal_model_name(
         .or_else(|| Some(model.to_string()))
 }
 
-fn portal_model_is_allowed(allowlist: &[String], model: &str) -> bool {
+fn normalize_model_name(model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    Some(model.to_ascii_lowercase())
+}
+
+pub fn portal_model_is_allowed(allowlist: &[String], model: &str) -> bool {
     if allowlist.is_empty() {
         return true;
     }
 
+    let Some(model) = normalize_model_name(model) else {
+        return false;
+    };
     allowlist
         .iter()
-        .any(|allowed| allowed.trim().eq_ignore_ascii_case(model.trim()))
+        .filter_map(|allowed| normalize_model_name(allowed))
+        .any(|allowed| allowed == model)
 }
 
 // ============================================================================
@@ -2713,7 +2770,7 @@ impl AppState {
         inner.upstreams.push(upstream);
         Ok(())
     }
-    
+
     /// Update an existing upstream
     pub async fn update_upstream_by_id(
         &self,
@@ -2795,9 +2852,8 @@ impl AppState {
                 {
                     upstream.request_quota_requests = request_quota_5h as u32;
                 }
-                if let Some(requests_per_minute) = updates
-                    .get("requests_per_minute")
-                    .and_then(|v| v.as_u64())
+                if let Some(requests_per_minute) =
+                    updates.get("requests_per_minute").and_then(|v| v.as_u64())
                 {
                     upstream.requests_per_minute = requests_per_minute as u32;
                 }
@@ -2806,8 +2862,9 @@ impl AppState {
                 {
                     upstream.max_concurrency = max_concurrency as u32;
                 }
-                if let Some(model_request_costs) =
-                    updates.get("model_request_costs").and_then(|v| v.as_array())
+                if let Some(model_request_costs) = updates
+                    .get("model_request_costs")
+                    .and_then(|v| v.as_array())
                 {
                     upstream.model_request_costs = model_request_costs
                         .iter()
@@ -2856,7 +2913,7 @@ impl AppState {
         )
         .await
     }
-    
+
     /// Delete an upstream
     pub async fn delete_upstream_by_id(&self, id: &str) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
@@ -2868,28 +2925,38 @@ impl AppState {
             Err(format!("Upstream '{}' not found", id))
         }
     }
-    
+
     /// Toggle upstream active status
     pub async fn toggle_upstream_by_id(&self, id: &str) -> Result<bool, String> {
         let mut inner = self.inner.lock().await;
-        let upstream = inner.upstreams.iter_mut().find(|u| u.id == id)
+        let upstream = inner
+            .upstreams
+            .iter_mut()
+            .find(|u| u.id == id)
             .ok_or_else(|| format!("Upstream '{}' not found", id))?;
         upstream.active = !upstream.active;
         Ok(upstream.active)
     }
-    
+
     /// Add a new downstream
     pub async fn add_downstream(&self, downstream: DownstreamConfig) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
         if inner.downstreams.iter().any(|d| d.id == downstream.id) {
-            return Err(format!("Downstream with ID '{}' already exists", downstream.id));
+            return Err(format!(
+                "Downstream with ID '{}' already exists",
+                downstream.id
+            ));
         }
         inner.downstreams.push(downstream);
         Ok(())
     }
-    
+
     /// Update an existing downstream
-    pub async fn update_downstream_by_id(&self, id: &str, updates: serde_json::Value) -> Result<DownstreamConfig, String> {
+    pub async fn update_downstream_by_id(
+        &self,
+        id: &str,
+        updates: serde_json::Value,
+    ) -> Result<DownstreamConfig, String> {
         self.mutate_persisted_state(
             |candidate_state| {
                 let downstream = candidate_state
@@ -2948,9 +3015,7 @@ impl AppState {
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
                 }
-                if let Some(ip_allowlist) =
-                    updates.get("ip_allowlist").and_then(|v| v.as_array())
-                {
+                if let Some(ip_allowlist) = updates.get("ip_allowlist").and_then(|v| v.as_array()) {
                     downstream.ip_allowlist = ip_allowlist
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -2966,7 +3031,7 @@ impl AppState {
         )
         .await
     }
-    
+
     /// Delete a downstream
     pub async fn delete_downstream_by_id(&self, id: &str) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
@@ -2978,20 +3043,26 @@ impl AppState {
             Err(format!("Downstream '{}' not found", id))
         }
     }
-    
+
     /// Toggle downstream active status
     pub async fn toggle_downstream_by_id(&self, id: &str) -> Result<bool, String> {
         let mut inner = self.inner.lock().await;
-        let downstream = inner.downstreams.iter_mut().find(|d| d.id == id)
+        let downstream = inner
+            .downstreams
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or_else(|| format!("Downstream '{}' not found", id))?;
         downstream.active = !downstream.active;
         Ok(downstream.active)
     }
-    
+
     /// Update downstream hash (for key rotation)
     pub async fn update_downstream_hash(&self, id: &str, new_hash: String) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
-        let downstream = inner.downstreams.iter_mut().find(|d| d.id == id)
+        let downstream = inner
+            .downstreams
+            .iter_mut()
+            .find(|d| d.id == id)
             .ok_or_else(|| format!("Downstream '{}' not found", id))?;
         downstream.hash = new_hash;
         Ok(())
@@ -3014,7 +3085,10 @@ mod tests {
 
         upstream.normalize_for_storage();
 
-        assert_eq!(upstream.supported_models, vec!["GLM-5".into(), "MiniMax2.7".into()]);
+        assert_eq!(
+            upstream.supported_models,
+            vec!["GLM-5".into(), "MiniMax2.7".into()]
+        );
     }
 
     #[test]
@@ -3046,7 +3120,10 @@ mod tests {
 
         assert!(upstream.supports_model("GLM-5.1"));
         assert!(!upstream.supports_model("glm-5.1"));
-        assert_eq!(upstream.resolved_model_name("GLM-5.1").as_deref(), Some("GLM-5.1"));
+        assert_eq!(
+            upstream.resolved_model_name("GLM-5.1").as_deref(),
+            Some("GLM-5.1")
+        );
         assert_eq!(upstream.resolved_model_name("glm-5.1"), None);
         assert!(upstream.is_premium_model_request("GLM-5.1"));
         assert!(!upstream.is_premium_model_request("glm-5.1"));
@@ -3064,9 +3141,15 @@ mod tests {
 
     #[test]
     fn bypasses_proxy_for_loopback_urls_only() {
-        assert!(should_bypass_proxy_for_url("http://127.0.0.1:8080/v1/chat/completions"));
-        assert!(should_bypass_proxy_for_url("http://localhost:8080/v1/chat/completions"));
-        assert!(!should_bypass_proxy_for_url("https://api.openai.com/v1/chat/completions"));
+        assert!(should_bypass_proxy_for_url(
+            "http://127.0.0.1:8080/v1/chat/completions"
+        ));
+        assert!(should_bypass_proxy_for_url(
+            "http://localhost:8080/v1/chat/completions"
+        ));
+        assert!(!should_bypass_proxy_for_url(
+            "https://api.openai.com/v1/chat/completions"
+        ));
         assert!(!should_bypass_proxy_for_url("not-a-url"));
     }
 
@@ -3111,7 +3194,10 @@ mod tests {
                 crate::routing::UpstreamProtocol::ChatCompletions,
             ]
         );
-        assert_eq!(upstream.protocol, crate::routing::UpstreamProtocol::Responses);
+        assert_eq!(
+            upstream.protocol,
+            crate::routing::UpstreamProtocol::Responses
+        );
 
         let mut legacy_only = UpstreamConfig {
             protocol: crate::routing::UpstreamProtocol::ChatCompletions,
@@ -3207,11 +3293,15 @@ mod tests {
         state.set_affinity_upstream("down-1", "deepseek-v3", "up-b");
 
         assert_eq!(
-            state.get_affinity_upstream("down-1", "minimax2.7").as_deref(),
+            state
+                .get_affinity_upstream("down-1", "minimax2.7")
+                .as_deref(),
             Some("up-a")
         );
         assert_eq!(
-            state.get_affinity_upstream("down-1", "DEEPSEEK-V3").as_deref(),
+            state
+                .get_affinity_upstream("down-1", "DEEPSEEK-V3")
+                .as_deref(),
             Some("up-b")
         );
         assert_eq!(state.get_affinity_upstream("down-1", "glm-5.1"), None);
@@ -3219,7 +3309,9 @@ mod tests {
         state.clear_affinity_upstream("down-1", "MINIMAX2.7");
         assert_eq!(state.get_affinity_upstream("down-1", "minimax2.7"), None);
         assert_eq!(
-            state.get_affinity_upstream("down-1", "deepseek-v3").as_deref(),
+            state
+                .get_affinity_upstream("down-1", "deepseek-v3")
+                .as_deref(),
             Some("up-b")
         );
     }

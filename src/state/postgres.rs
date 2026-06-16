@@ -1,9 +1,9 @@
+use super::log_queries::{current_month_start, enrich_usage_log, query_time_bounds};
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, DownstreamConfig, DownstreamUsageSummary,
     ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UpstreamProtocol,
     UsageLog, UsageLogPage, UsageLogQuery,
 };
-use super::log_queries::{current_month_start, enrich_usage_log, query_time_bounds};
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use std::collections::{HashMap, HashSet};
@@ -290,7 +290,7 @@ impl PostgresStateStore {
                  WHERE created_at >= $1
                    AND created_at <= $2
                    AND ($3 OR status_code = ANY($4))
-                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(model)) > 0)",
+                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(TRIM(model))) > 0)",
                 &[
                     &start_time,
                     &end_time,
@@ -320,7 +320,7 @@ impl PostgresStateStore {
                  WHERE created_at >= $1
                    AND created_at <= $2
                    AND ($3 OR status_code = ANY($4))
-                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(model)) > 0)
+                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(TRIM(model))) > 0)
                  ORDER BY created_at DESC, request_id ASC, id ASC
                  LIMIT $6 OFFSET $7",
                 &[
@@ -356,7 +356,10 @@ impl PostgresStateStore {
     ) -> io::Result<Option<DownstreamUsageSummary>> {
         let conn = self.pool.get().await.map_err(io_other)?;
         let downstream_row = conn
-            .query_opt("SELECT id FROM downstreams WHERE id = $1", &[&downstream_id])
+            .query_opt(
+                "SELECT id FROM downstreams WHERE id = $1",
+                &[&downstream_id],
+            )
             .await
             .map_err(io_other)?;
         if downstream_row.is_none() {
@@ -368,9 +371,10 @@ impl PostgresStateStore {
 
         let allowlist_count = conn
             .query_one(
-                "SELECT COUNT(*)::BIGINT
+                "SELECT COUNT(DISTINCT LOWER(TRIM(model_slug)))::BIGINT
                  FROM downstream_model_allowlist
-                 WHERE downstream_id = $1",
+                 WHERE downstream_id = $1
+                   AND TRIM(model_slug) <> ''",
                 &[&downstream_id],
             )
             .await
@@ -381,7 +385,7 @@ impl PostgresStateStore {
         } else {
             let row = conn
                 .query_one(
-                    "SELECT COUNT(DISTINCT model_slug)::BIGINT
+                    "SELECT COUNT(DISTINCT LOWER(TRIM(model_slug)))::BIGINT
                      FROM (
                          SELECT supported.model_slug
                          FROM upstream_supported_models supported
@@ -403,7 +407,7 @@ impl PostgresStateStore {
         let allowlist_empty = allowlist_count == 0;
         let active_models = conn
             .query_one(
-                "SELECT COUNT(DISTINCT usage_logs.model)::BIGINT
+                "SELECT COUNT(DISTINCT LOWER(TRIM(usage_logs.model)))::BIGINT
                  FROM usage_logs
                  WHERE usage_logs.downstream_key_id = $1
                    AND (
@@ -412,7 +416,7 @@ impl PostgresStateStore {
                            SELECT 1
                            FROM downstream_model_allowlist allowlist
                            WHERE allowlist.downstream_id = $1
-                             AND allowlist.model_slug = usage_logs.model
+                             AND LOWER(TRIM(allowlist.model_slug)) = LOWER(TRIM(usage_logs.model))
                        )
                    )",
                 &[&downstream_id, &allowlist_empty],
@@ -544,8 +548,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
         .await
         .map_err(io_other)?;
         for (position, model_slug) in upstream.supported_models.iter().enumerate() {
-            let params: &[&(dyn ToSql + Sync)] =
-                &[&upstream.id, &(position as i32), model_slug];
+            let params: &[&(dyn ToSql + Sync)] = &[&upstream.id, &(position as i32), model_slug];
             tx.execute(
                 "INSERT INTO upstream_supported_models (upstream_id, position, model_slug)
                  VALUES ($1, $2, $3)",
@@ -562,8 +565,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
         .await
         .map_err(io_other)?;
         for (position, model_slug) in upstream.premium_models.iter().enumerate() {
-            let params: &[&(dyn ToSql + Sync)] =
-                &[&upstream.id, &(position as i32), model_slug];
+            let params: &[&(dyn ToSql + Sync)] = &[&upstream.id, &(position as i32), model_slug];
             tx.execute(
                 "INSERT INTO upstream_premium_models (upstream_id, position, model_slug)
                  VALUES ($1, $2, $3)",
@@ -596,7 +598,10 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
     Ok(())
 }
 
-async fn sync_downstreams(tx: &Transaction<'_>, downstreams: &[DownstreamConfig]) -> io::Result<()> {
+async fn sync_downstreams(
+    tx: &Transaction<'_>,
+    downstreams: &[DownstreamConfig],
+) -> io::Result<()> {
     let desired_ids = downstreams
         .iter()
         .map(|downstream| downstream.id.as_str())
@@ -617,8 +622,9 @@ async fn sync_downstreams(tx: &Transaction<'_>, downstreams: &[DownstreamConfig]
     for downstream in downstreams {
         let daily_token_limit = downstream.daily_token_limit.map(|value| value as i64);
         let monthly_token_limit = downstream.monthly_token_limit.map(|value| value as i64);
-        let request_quota_window_hours =
-            downstream.request_quota_window_hours.map(|value| value as i32);
+        let request_quota_window_hours = downstream
+            .request_quota_window_hours
+            .map(|value| value as i32);
         let request_quota_requests = downstream.request_quota_requests.map(|value| value as i32);
         let expires_at = downstream.expires_at.map(|value| value as i64);
         let params: &[&(dyn ToSql + Sync)] = &[
@@ -672,8 +678,7 @@ async fn sync_downstreams(tx: &Transaction<'_>, downstreams: &[DownstreamConfig]
         .await
         .map_err(io_other)?;
         for (position, model_slug) in downstream.model_allowlist.iter().enumerate() {
-            let params: &[&(dyn ToSql + Sync)] =
-                &[&downstream.id, &(position as i32), model_slug];
+            let params: &[&(dyn ToSql + Sync)] = &[&downstream.id, &(position as i32), model_slug];
             tx.execute(
                 "INSERT INTO downstream_model_allowlist (downstream_id, position, model_slug)
                  VALUES ($1, $2, $3)",
@@ -690,8 +695,7 @@ async fn sync_downstreams(tx: &Transaction<'_>, downstreams: &[DownstreamConfig]
         .await
         .map_err(io_other)?;
         for (position, ip_address) in downstream.ip_allowlist.iter().enumerate() {
-            let params: &[&(dyn ToSql + Sync)] =
-                &[&downstream.id, &(position as i32), ip_address];
+            let params: &[&(dyn ToSql + Sync)] = &[&downstream.id, &(position as i32), ip_address];
             tx.execute(
                 "INSERT INTO downstream_ip_allowlist (downstream_id, position, ip_address)
                  VALUES ($1, $2, $3)",
@@ -745,9 +749,12 @@ async fn sync_announcements(
             .map_err(io_other)?;
         }
         None => {
-            tx.execute("DELETE FROM app_announcements WHERE singleton_id = 'global'", &[])
-                .await
-                .map_err(io_other)?;
+            tx.execute(
+                "DELETE FROM app_announcements WHERE singleton_id = 'global'",
+                &[],
+            )
+            .await
+            .map_err(io_other)?;
         }
     }
 
@@ -807,7 +814,9 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
     Ok(())
 }
 
-async fn load_announcement(conn: &tokio_postgres::Client) -> io::Result<Option<AnnouncementConfig>> {
+async fn load_announcement(
+    conn: &tokio_postgres::Client,
+) -> io::Result<Option<AnnouncementConfig>> {
     let row = conn
         .query_opt(
             "SELECT announcement_id, title, content, level, active, updated_at
@@ -897,7 +906,9 @@ fn decode_protocols(
     value: Option<String>,
     fallback: UpstreamProtocol,
 ) -> io::Result<Vec<UpstreamProtocol>> {
-    let Some(value) = value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
     else {
         return Ok(vec![fallback]);
     };
@@ -914,7 +925,9 @@ fn encode_protocols(protocols: &[UpstreamProtocol]) -> String {
 }
 
 fn decode_model_contexts(value: Option<String>) -> io::Result<Vec<ModelContextConfig>> {
-    let Some(value) = value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
     else {
         return Ok(Vec::new());
     };

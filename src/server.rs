@@ -5,8 +5,9 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, unix_seconds, AnnouncementConfig, AnnouncementLevel, AppConfig, AppState,
-    DownstreamConfig, UpstreamConfig, UpstreamMutationError, UsageLog, UsageLogQuery,
+    join_upstream_url, portal_model_is_allowed, unix_seconds, AnnouncementConfig,
+    AnnouncementLevel, AppConfig, AppState, DownstreamConfig, UpstreamConfig,
+    UpstreamMutationError, UsageLog, UsageLogQuery,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::Body;
@@ -25,10 +26,10 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use tokio::time::Instant as TokioInstant;
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
-use tokio::time::Instant as TokioInstant;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist"]
@@ -321,9 +322,7 @@ impl GatewayError {
         let (status, message, retry_after_seconds) = match self {
             GatewayError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message, None),
             GatewayError::Forbidden(message) => (StatusCode::FORBIDDEN, message, None),
-            GatewayError::GatewayTimeout(message) => {
-                (StatusCode::GATEWAY_TIMEOUT, message, None)
-            }
+            GatewayError::GatewayTimeout(message) => (StatusCode::GATEWAY_TIMEOUT, message, None),
             GatewayError::TemporaryUpstreamUnavailable(message) => {
                 (StatusCode::SERVICE_UNAVAILABLE, message, None)
             }
@@ -711,9 +710,7 @@ async fn claude_count_tokens(
         Ok(model) => model,
         Err(error) => return error.into_response(),
     };
-    if !downstream.model_allowlist.is_empty()
-        && !downstream_model_is_allowed(downstream.model_allowlist.as_slice(), model)
-    {
+    if !portal_model_is_allowed(downstream.model_allowlist.as_slice(), model) {
         return GatewayError::Forbidden("model not allowed".into()).into_response();
     }
 
@@ -774,15 +771,22 @@ struct StreamCompletionContext {
 impl StreamCompletionContext {
     async fn release_all(&self) {
         self.state.release_upstream_request(&self.upstream_id).await;
-        self.state.release_downstream_concurrency(&self.downstream_id);
+        self.state
+            .release_downstream_concurrency(&self.downstream_id);
     }
 
     async fn mark_success(&self) {
-        self.state.mark_upstream_success(&self.upstream_id).await.ok();
+        self.state
+            .mark_upstream_success(&self.upstream_id)
+            .await
+            .ok();
     }
 
     async fn mark_failure(&self) {
-        self.state.mark_upstream_failure(&self.upstream_id).await.ok();
+        self.state
+            .mark_upstream_failure(&self.upstream_id)
+            .await
+            .ok();
     }
 }
 
@@ -793,20 +797,14 @@ fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
         || normalized.contains("stream duration")
         || normalized.contains("hard timeout")
     {
-        (
-            StatusCode::GATEWAY_TIMEOUT,
-            "stream_max_duration",
-        )
+        (StatusCode::GATEWAY_TIMEOUT, "stream_max_duration")
     } else if normalized.contains("idle timeout")
         || normalized.contains("idle-timeout")
         || normalized.contains("waiting for sse")
         || (normalized.contains("timeout") && normalized.contains("sse"))
         || (normalized.contains("timed out") && normalized.contains("sse"))
     {
-        (
-            StatusCode::GATEWAY_TIMEOUT,
-            "stream_idle_timeout",
-        )
+        (StatusCode::GATEWAY_TIMEOUT, "stream_idle_timeout")
     } else {
         (
             StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
@@ -1054,9 +1052,7 @@ async fn process_gateway_request(
         }
     }
 
-    if !downstream.model_allowlist.is_empty()
-        && !downstream_model_is_allowed(downstream.model_allowlist.as_slice(), model)
-    {
+    if !portal_model_is_allowed(downstream.model_allowlist.as_slice(), model) {
         tracing::warn!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -1167,7 +1163,10 @@ async fn process_gateway_request(
         return Err(error);
     }
     let _downstream_concurrency_guard = if !request_stream {
-        Some(DownstreamConcurrencyGuard::new(state.clone(), downstream.id.clone()))
+        Some(DownstreamConcurrencyGuard::new(
+            state.clone(),
+            downstream.id.clone(),
+        ))
     } else {
         None
     };
@@ -1276,7 +1275,8 @@ async fn process_gateway_request(
         let total_candidate_count = upstreams.len() + deprioritized_upstreams.len();
         // Stickiness only helps when there is a single viable upstream; with a pool,
         // live pressure balancing should decide every request.
-        let use_routing_affinity = state.config.routing_affinity_enabled && total_candidate_count == 1;
+        let use_routing_affinity =
+            state.config.routing_affinity_enabled && total_candidate_count == 1;
         let ranking_pressure = |upstream: &UpstreamConfig| {
             let runtime = upstream_runtime_snapshots
                 .get(&upstream.id)
@@ -1316,10 +1316,8 @@ async fn process_gateway_request(
                     .position(|upstream| upstream.id == preferred_upstream_id)
                 {
                     if position > 0 {
-                        let escape_ratio = state
-                            .config
-                            .routing_affinity_escape_pressure_ratio
-                            .max(1.0);
+                        let escape_ratio =
+                            state.config.routing_affinity_escape_pressure_ratio.max(1.0);
                         let (
                             preferred_cooled,
                             preferred_cooldown,
@@ -1412,11 +1410,8 @@ async fn process_gateway_request(
                 .iter()
                 .take_while(|upstream| ranking_bucket_key(upstream) == top_bucket_key)
                 .count();
-            let tie_breaker = state.next_routing_tie_breaker(
-                &downstream.id,
-                normalized_model,
-                protocol,
-            );
+            let tie_breaker =
+                state.next_routing_tie_breaker(&downstream.id, normalized_model, protocol);
             if top_bucket_len > 1 {
                 let rotation = tie_breaker as usize % top_bucket_len;
                 if rotation > 0 {
@@ -1730,10 +1725,7 @@ async fn process_gateway_request(
                             && rate_limit_retry_attempts_used
                                 < state.config.upstream_rate_limit_retry_attempts.max(1)
                             && retry_after_seconds
-                                <= state
-                                    .config
-                                    .upstream_rate_limit_retry_window_seconds
-                                    .max(1)
+                                <= state.config.upstream_rate_limit_retry_window_seconds.max(1)
                             && retry_after_seconds
                                 <= state
                                     .config
@@ -2178,7 +2170,11 @@ fn estimate_payload_baseline_tokens(payload: &Value) -> u64 {
     estimate_tokens_from_value(&base)
 }
 
-fn allowed_input_tokens(context_limit: u32, requested_output_tokens: u64, output_reserve: u32) -> u64 {
+fn allowed_input_tokens(
+    context_limit: u32,
+    requested_output_tokens: u64,
+    output_reserve: u32,
+) -> u64 {
     let limit = u64::from(context_limit.max(2));
     let reserved = requested_output_tokens
         .max(u64::from(output_reserve))
@@ -2200,7 +2196,10 @@ fn entry_is_system(entry: &Value) -> bool {
 
 fn entry_is_tool_result(entry: &Value) -> bool {
     matches!(entry_role(entry), Some("tool" | "function"))
-        || matches!(entry_type(entry), Some("function_call_output" | "tool_result"))
+        || matches!(
+            entry_type(entry),
+            Some("function_call_output" | "tool_result")
+        )
 }
 
 fn summarize_text(text: &str, max_chars: usize, label: &str) -> String {
@@ -2488,6 +2487,40 @@ fn is_context_limit_error(error_text: &str) -> bool {
         || normalized.contains("token limit")
 }
 
+fn parse_u16_code(value: &Value) -> Option<u16> {
+    if let Some(code) = value.as_u64().and_then(|code| u16::try_from(code).ok()) {
+        return Some(code);
+    }
+    if let Some(code) = value.as_i64().and_then(|code| u16::try_from(code).ok()) {
+        return Some(code);
+    }
+    if let Some(code) = value.as_str() {
+        return code.parse::<u16>().ok();
+    }
+    None
+}
+
+fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
+    if let Ok(value) = serde_json::from_str::<Value>(error_text) {
+        let candidate_code = value.get("error").and_then(|error| error.get("code"));
+        let code = candidate_code.or_else(|| value.get("code"))?;
+        return parse_u16_code(code);
+    }
+
+    let normalized = error_text.to_ascii_lowercase();
+    let mut tokens = normalized.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
+    while let Some(token) = tokens.next() {
+        if token == "code" {
+            if let Some(value) = tokens.next() {
+                if let Ok(code) = value.parse::<u16>() {
+                    return Some(code);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn halve_generation_cap_for_context_retry(payload: &mut Value) -> Option<(&'static str, u64, u64)> {
     let object = payload.as_object_mut()?;
     for key in ["max_output_tokens", "max_tokens", "max_completion_tokens"] {
@@ -2566,12 +2599,13 @@ async fn send_to_upstream(
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
-    let mut final_upstream_model = upstream.resolved_model_name(request_model).ok_or_else(|| {
-        GatewayError::BadRequest(format!(
-            "model \"{request_model}\" is not configured for upstream \"{}\"",
-            upstream.name
-        ))
-    })?;
+    let mut final_upstream_model =
+        upstream.resolved_model_name(request_model).ok_or_else(|| {
+            GatewayError::BadRequest(format!(
+                "model \"{request_model}\" is not configured for upstream \"{}\"",
+                upstream.name
+            ))
+        })?;
     let model_rewritten = final_upstream_model != request_model;
     let protocol_path = protocol_transition_label(endpoint, upstream_protocol);
     if let Some(object) = upstream_body.as_object_mut() {
@@ -2671,12 +2705,8 @@ async fn send_to_upstream(
         "dispatching request to upstream service"
     );
     let mut context_retry_attempted = false;
-    let response_header_timeout = Duration::from_secs(
-        state
-            .config
-            .upstream_response_header_timeout_seconds
-            .max(1),
-    );
+    let response_header_timeout =
+        Duration::from_secs(state.config.upstream_response_header_timeout_seconds.max(1));
     let response = loop {
         let send_future = state
             .client_for_url(&url)
@@ -2735,6 +2765,7 @@ async fn send_to_upstream(
         let headers = response.headers().clone();
         let error_text = response.text().await.unwrap_or_default();
         let error_excerpt = error_text.chars().take(512).collect::<String>();
+        let upstream_error_code = extract_upstream_error_code(&error_text);
 
         // Classify the upstream response to determine how to handle it
         let feedback = UpstreamFeedbackClassification::from_response(
@@ -2798,6 +2829,30 @@ async fn send_to_upstream(
             )));
         }
 
+        if let Some(inner_code) = upstream_error_code {
+            if (400..=499).contains(&inner_code) {
+                if inner_code == 429 {
+                    let retry_after_seconds = parse_retry_after_seconds(
+                        &headers,
+                        state.config.upstream_rate_limit_default_retry_seconds,
+                    );
+                    return Err(GatewayError::TooManyRequests {
+                        message: if error_excerpt.is_empty() {
+                            format!("upstream rate limited (code {inner_code})")
+                        } else {
+                            format!("upstream rate limited: {error_text}")
+                        },
+                        retry_after_seconds: Some(retry_after_seconds),
+                    });
+                }
+                return Err(GatewayError::BadRequest(if error_text.is_empty() {
+                    format!("upstream rejected request with status {inner_code}")
+                } else {
+                    error_text
+                }));
+            }
+        }
+
         // Handle feedback-based decisions
         match feedback {
             UpstreamFeedbackClassification::RateLimited => {
@@ -2829,28 +2884,30 @@ async fn send_to_upstream(
                 // Return error to allow outer loop to try next upstream
                 return Err(GatewayError::TemporaryUpstreamUnavailable(
                     if error_excerpt.is_empty() {
-                        format!("upstream temporarily unavailable (status {})", status.as_u16())
+                        format!(
+                            "upstream temporarily unavailable (status {})",
+                            status.as_u16()
+                        )
                     } else {
                         format!("upstream temporarily unavailable: {error_excerpt}")
-                    }
+                    },
                 ));
             }
             UpstreamFeedbackClassification::ProtocolUnsupported => {
                 // Protocol not supported, return error to try next upstream
-                return Err(GatewayError::TemporaryUpstreamUnavailable(
-                    format!("protocol not supported by upstream (status {})", status.as_u16())
-                ));
+                return Err(GatewayError::TemporaryUpstreamUnavailable(format!(
+                    "protocol not supported by upstream (status {})",
+                    status.as_u16()
+                )));
             }
             UpstreamFeedbackClassification::Unknown => {
                 // Unknown error - pass through client errors (4xx) as BadRequest, server errors (5xx) as Upstream
                 if status.is_client_error() {
-                    return Err(GatewayError::BadRequest(
-                        if error_text.is_empty() {
-                            format!("upstream rejected request with status {}", status.as_u16())
-                        } else {
-                            error_text
-                        }
-                    ));
+                    return Err(GatewayError::BadRequest(if error_text.is_empty() {
+                        format!("upstream rejected request with status {}", status.as_u16())
+                    } else {
+                        error_text
+                    }));
                 } else {
                     return Err(GatewayError::Upstream(format!(
                         "upstream responded with status {}{}",
@@ -3004,12 +3061,6 @@ fn no_routable_model_error(snapshot: &crate::state::PersistedState, model: &str)
             visible_models.join(", ")
         ))
     }
-}
-
-fn downstream_model_is_allowed(allowlist: &[String], model: &str) -> bool {
-    allowlist
-        .iter()
-        .any(|allowed| allowed.trim().eq_ignore_ascii_case(model.trim()))
 }
 
 fn endpoint_for_upstream(protocol: UpstreamProtocol) -> &'static str {
@@ -3378,7 +3429,10 @@ fn claude_message_to_sse_body(message: &Value) -> Result<Body, GatewayError> {
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or("assistant");
-    let model = message.get("model").and_then(Value::as_str).unwrap_or_default();
+    let model = message
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let stop_reason = message.get("stop_reason").cloned().unwrap_or(Value::Null);
     let stop_sequence = message.get("stop_sequence").cloned().unwrap_or(Value::Null);
     let input_tokens = message
@@ -3427,14 +3481,12 @@ fn claude_message_to_sse_body(message: &Value) -> Result<Body, GatewayError> {
 
         match block_type.as_str() {
             "tool_use" => {
-                let id = block
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| GatewayError::Upstream("claude tool_use block missing id".into()))?;
-                let name = block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| GatewayError::Upstream("claude tool_use block missing name".into()))?;
+                let id = block.get("id").and_then(Value::as_str).ok_or_else(|| {
+                    GatewayError::Upstream("claude tool_use block missing id".into())
+                })?;
+                let name = block.get("name").and_then(Value::as_str).ok_or_else(|| {
+                    GatewayError::Upstream("claude tool_use block missing name".into())
+                })?;
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
                 chunks.push(claude_sse_event(
                     "content_block_start",
@@ -3449,8 +3501,9 @@ fn claude_message_to_sse_body(message: &Value) -> Result<Body, GatewayError> {
                         }
                     }),
                 ));
-                let partial_json = serde_json::to_string(&input)
-                    .map_err(|error| GatewayError::Upstream(format!("failed to encode tool input json: {error}")))?;
+                let partial_json = serde_json::to_string(&input).map_err(|error| {
+                    GatewayError::Upstream(format!("failed to encode tool input json: {error}"))
+                })?;
                 if !partial_json.is_empty() && partial_json != "{}" {
                     chunks.push(claude_sse_event(
                         "content_block_delta",
@@ -3690,10 +3743,7 @@ fn claude_message_to_chat_messages(message: &Value) -> Result<Vec<Value>, String
             let mut text_parts = Vec::new();
             let mut tool_calls = Vec::new();
             for part in parts {
-                let part_type = part
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
                 match part_type {
                     "tool_use" => tool_calls.push(claude_tool_use_to_chat_tool_call(part)?),
                     "text" => {
@@ -3730,10 +3780,7 @@ fn claude_message_to_chat_messages(message: &Value) -> Result<Vec<Value>, String
             let mut messages = Vec::new();
             let mut text_parts = Vec::new();
             for part in parts {
-                let part_type = part
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
                 match part_type {
                     "tool_result" => messages.push(claude_tool_result_to_chat_tool_message(part)?),
                     "text" => {
@@ -4072,12 +4119,18 @@ fn proxied_stream_body(
             StreamReadOutcome::IdleTimeout => {
                 let error_message = "idle timeout waiting for SSE".to_string();
                 state.mark_stream_interrupted(error_message.clone()).await;
-                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, error_message))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    error_message,
+                ))
             }
             StreamReadOutcome::MaxDurationExceeded => {
                 let error_message = "stream max duration exceeded before completion".to_string();
                 state.mark_stream_interrupted(error_message.clone()).await;
-                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, error_message))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    error_message,
+                ))
             }
         }
     });
@@ -4160,13 +4213,7 @@ impl ProxiedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        finalize_stream_interruption(
-            completion_context,
-            log_context,
-            usage,
-            error_message,
-        )
-        .await;
+        finalize_stream_interruption(completion_context, log_context, usage, error_message).await;
     }
 }
 
@@ -4372,13 +4419,7 @@ impl TranslatedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        finalize_stream_interruption(
-            completion_context,
-            log_context,
-            usage,
-            error_message,
-        )
-        .await;
+        finalize_stream_interruption(completion_context, log_context, usage, error_message).await;
     }
 }
 
@@ -4604,7 +4645,10 @@ async fn admin_dashboard(
         _ => "7d",
     };
     let cache_key = format!("dashboard:{range}");
-    if let Some(cached) = state.get_cached_json::<DashboardSummaryResponse>(&cache_key).await {
+    if let Some(cached) = state
+        .get_cached_json::<DashboardSummaryResponse>(&cache_key)
+        .await
+    {
         return Json(cached).into_response();
     }
 
@@ -4642,7 +4686,11 @@ async fn admin_dashboard(
         .map(|(index, item)| (item.date, index))
         .collect::<HashMap<_, _>>();
 
-    for log in snapshot.usage_logs.iter().filter(|log| log.created_at >= window_start) {
+    for log in snapshot
+        .usage_logs
+        .iter()
+        .filter(|log| log.created_at >= window_start)
+    {
         total_requests += 1;
         if (200..300).contains(&log.status_code) {
             total_success += 1;
@@ -4684,7 +4732,12 @@ async fn admin_dashboard(
         .into_iter()
         .map(|(name, value)| DashboardNamedValue { name, value })
         .collect::<Vec<_>>();
-    failure_categories.sort_by(|left, right| right.value.cmp(&left.value).then(left.name.cmp(&right.name)));
+    failure_categories.sort_by(|left, right| {
+        right
+            .value
+            .cmp(&left.value)
+            .then(left.name.cmp(&right.name))
+    });
 
     let mut user_agent_clusters = user_agent_downstreams
         .into_iter()
@@ -4693,7 +4746,12 @@ async fn admin_dashboard(
             value: downstreams.len() as u64,
         })
         .collect::<Vec<_>>();
-    user_agent_clusters.sort_by(|left, right| right.value.cmp(&left.value).then(left.name.cmp(&right.name)));
+    user_agent_clusters.sort_by(|left, right| {
+        right
+            .value
+            .cmp(&left.value)
+            .then(left.name.cmp(&right.name))
+    });
 
     let analytics = DashboardAnalyticsResponse {
         range: range.to_string(),
@@ -4742,7 +4800,11 @@ async fn admin_dashboard(
     };
 
     state
-        .set_cached_json(&cache_key, &response, state.config.dashboard_cache_ttl_seconds)
+        .set_cached_json(
+            &cache_key,
+            &response,
+            state.config.dashboard_cache_ttl_seconds,
+        )
         .await;
 
     Json(response).into_response()
@@ -4771,7 +4833,8 @@ fn classify_dashboard_failure(log: &UsageLog) -> Option<String> {
     {
         return Some("429-配额/限流".to_string());
     }
-    if status >= 500 || error_message.contains("upstream") || error_message.contains("bad gateway") {
+    if status >= 500 || error_message.contains("upstream") || error_message.contains("bad gateway")
+    {
         return Some("5xx-上游异常".to_string());
     }
     if status == 401 || status == 403 {
@@ -4808,7 +4871,15 @@ fn classify_user_agent(user_agent: Option<&str>) -> Option<String> {
         "Browser"
     } else {
         let token = raw.split_whitespace().next().unwrap_or(raw);
-        return Some(token.split('/').next().unwrap_or(token).chars().take(24).collect());
+        return Some(
+            token
+                .split('/')
+                .next()
+                .unwrap_or(token)
+                .chars()
+                .take(24)
+                .collect(),
+        );
     };
     Some(name.to_string())
 }
@@ -6030,7 +6101,10 @@ async fn portal_models(State(state): State<AppState>, headers: HeaderMap) -> imp
     Json(model_stats).into_response()
 }
 
-async fn portal_announcement(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+async fn portal_announcement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,

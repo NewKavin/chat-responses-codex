@@ -567,3 +567,139 @@ async fn downstream_usage_summary_uses_store_result_when_available() {
     let summary = state.downstream_usage_summary("down-1").await.unwrap();
     assert_eq!(summary, expected);
 }
+
+#[tokio::test]
+async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_case_insensitively() {
+    let now = chat_responses_codex::state::unix_seconds();
+    let pending_log = usage_log(
+        "pending-log",
+        "down-1",
+        "glm-5",
+        200,
+        24,
+        now.saturating_sub(60),
+    );
+    let state = AppState::new_with_store(
+        PersistedState {
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: generate_downstream_key("pending").hash,
+                plaintext_key: None,
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["GLM-5".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: Some(1_000),
+                monthly_token_limit: Some(2_000),
+                request_quota_window_hours: Some(5),
+                request_quota_requests: Some(600),
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(QueryStore {
+            page: UsageLogPage {
+                logs: vec![],
+                total: 0,
+                page: 1,
+                page_size: 10,
+                total_pages: 0,
+            },
+            summary: DownstreamUsageSummary {
+                downstream_id: "down-1".to_string(),
+                today_tokens: 0,
+                month_tokens: 0,
+                total_models: 1,
+                active_models: 0,
+            },
+        }),
+    );
+
+    state.append_usage_log(pending_log).await.unwrap();
+
+    let summary = state.downstream_usage_summary("down-1").await.unwrap();
+    assert_eq!(summary.today_tokens, 24);
+    assert_eq!(summary.month_tokens, 24);
+    assert_eq!(summary.active_models, 1);
+}
+
+#[tokio::test]
+async fn query_usage_logs_page_includes_pending_logs_before_flush() {
+    let now = chat_responses_codex::state::unix_seconds();
+    let pending_log = usage_log(
+        "pending-log",
+        "down-1",
+        "glm-5",
+        200,
+        24,
+        now.saturating_sub(60),
+    );
+    let state = AppState::new_with_store(
+        PersistedState {
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: generate_downstream_key("pending").hash,
+                plaintext_key: None,
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["GLM-5".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: Some(1_000),
+                monthly_token_limit: Some(2_000),
+                request_quota_window_hours: Some(5),
+                request_quota_requests: Some(600),
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(QueryStore {
+            page: UsageLogPage {
+                logs: vec![],
+                total: 0,
+                page: 1,
+                page_size: 10,
+                total_pages: 0,
+            },
+            summary: DownstreamUsageSummary {
+                downstream_id: "down-1".to_string(),
+                today_tokens: 0,
+                month_tokens: 0,
+                total_models: 1,
+                active_models: 0,
+            },
+        }),
+    );
+
+    state.append_usage_log(pending_log).await.unwrap();
+
+    let page = state
+        .query_usage_logs_page(UsageLogQuery {
+            page: 1,
+            page_size: 10,
+            start_time: Some(0),
+            end_time: Some(u64::MAX),
+            model_substring: Some("glm".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(page.total, 1);
+    assert_eq!(page.logs.len(), 1);
+    assert_eq!(page.logs[0].log.id, "pending-log");
+    assert_eq!(page.logs[0].log.total_tokens, 24);
+}
