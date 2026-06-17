@@ -693,7 +693,7 @@ async fn claude_count_tokens(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let Ok(secret) = downstream_secret_from_headers(&headers) else {
-        return GatewayError::Unauthorized("missing bearer token or x-api-key".into())
+        return GatewayError::Unauthorized("missing authorization header or x-api-key".into())
             .into_response();
     };
     let routing_snapshot = state.routing_snapshot().await;
