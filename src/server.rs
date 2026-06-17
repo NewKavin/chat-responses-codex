@@ -632,7 +632,8 @@ async fn healthz() -> impl IntoResponse {
 
 async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let Ok(secret) = downstream_secret_from_headers(&headers) else {
-        return GatewayError::Unauthorized("missing bearer token".into()).into_response();
+        return GatewayError::Unauthorized("missing authorization header or x-api-key".into())
+            .into_response();
     };
 
     let models = state.available_models_for_downstream(&secret).await;
@@ -4501,16 +4502,33 @@ fn downstream_secret_from_headers(headers: &HeaderMap) -> Result<String, Gateway
     let auth_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
+        .map(str::trim)
         .ok_or_else(|| {
             GatewayError::Unauthorized("missing authorization header or x-api-key".into())
         })?;
 
-    auth_header
-        .strip_prefix("Bearer ")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| GatewayError::Unauthorized("invalid authorization header".into()))
+    let mut auth_parts = auth_header.split_whitespace();
+    let scheme = auth_parts.next().filter(|value| !value.is_empty());
+    let token = auth_parts.next().filter(|value| !value.is_empty());
+    if auth_parts.next().is_some() {
+        return Err(GatewayError::Unauthorized(
+            "invalid authorization header".into(),
+        ));
+    }
+
+    if scheme
+        .map(|scheme| scheme.eq_ignore_ascii_case("bearer"))
+        .unwrap_or(false)
+    {
+        token
+            .map(str::to_string)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| GatewayError::Unauthorized("invalid authorization header".into()))
+    } else {
+        Err(GatewayError::Unauthorized(
+            "invalid authorization header".into(),
+        ))
+    }
 }
 
 fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
