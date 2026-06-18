@@ -85,6 +85,9 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 5,
 
@@ -120,7 +123,7 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 active: true,
             }],
             usage_logs: vec![],
-    announcement: None,
+            announcement: None,
         },
         state_path,
         AppConfig::default(),

@@ -211,8 +211,8 @@ impl DownstreamListQuery {
 }
 
 impl DownstreamFormView {
-pub fn blank() -> Self {
-Self {
+    pub fn blank() -> Self {
+        Self {
             action: "/admin/downstreams".to_string(),
             heading: "创建下游密钥".to_string(),
             submit_label: "创建密钥".to_string(),
@@ -232,7 +232,7 @@ Self {
             never_expires: true,
             active: true,
             plaintext_key: None,
-plaintext_key_prefix: None,
+            plaintext_key_prefix: None,
             legacy_secret: false,
         }
     }
@@ -409,7 +409,8 @@ impl UpstreamFormView {
         let is_editing = action != "/admin/upstreams";
         let existing_request_quota_window_hours =
             existing.map(|upstream| upstream.request_quota_window_hours);
-        let existing_request_quota_requests = existing.map(|upstream| upstream.request_quota_requests);
+        let existing_request_quota_requests =
+            existing.map(|upstream| upstream.request_quota_requests);
         let existing_requests_per_minute = existing.map(|upstream| upstream.requests_per_minute);
         let existing_max_concurrency = existing.map(|upstream| upstream.max_concurrency);
         Self {
@@ -624,11 +625,8 @@ mod tests {
 
     #[test]
     fn normalize_fetched_models_preserves_exact_model_names() {
-        let models = normalize_fetched_models(vec![
-            "GLM-5".into(),
-            "GLM-5".into(),
-            "GLM-5.1".into(),
-        ]);
+        let models =
+            normalize_fetched_models(vec!["GLM-5".into(), "GLM-5".into(), "GLM-5.1".into()]);
 
         assert_eq!(models, "GLM-5,GLM-5.1");
     }

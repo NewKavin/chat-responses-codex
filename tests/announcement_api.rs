@@ -48,7 +48,10 @@ fn create_test_state_without_announcement() -> (AppState, String) {
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
-    (AppState::new(state, unique_state_path(), config), portal_key)
+    (
+        AppState::new(state, unique_state_path(), config),
+        portal_key,
+    )
 }
 
 fn create_test_state_with_draft_announcement() -> (AppState, String) {
@@ -92,7 +95,10 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
-    (AppState::new(state, unique_state_path(), config), portal_key)
+    (
+        AppState::new(state, unique_state_path(), config),
+        portal_key,
+    )
 }
 
 async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> String {

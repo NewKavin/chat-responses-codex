@@ -2170,6 +2170,9 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
 
@@ -2192,6 +2195,9 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
 
@@ -2295,6 +2301,9 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["glm5.1".into(), "deepseek".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
 
@@ -2317,6 +2326,9 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["deepseek".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
 
@@ -2408,6 +2420,9 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["glm5.1".into(), "deepseek".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
 
@@ -2498,6 +2513,9 @@ async fn premium_only_model_routes_to_protected_upstream() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["deepseek".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
                     request_quota_requests: 600,
@@ -2648,6 +2666,9 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
                         request_quota_requests: 600,
@@ -2678,6 +2699,9 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["DeepSeek-V3".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
                         request_quota_requests: 600,
@@ -2777,6 +2801,9 @@ async fn routing_rebalances_when_models_overlap() {
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
                         request_quota_requests: 1,
@@ -2798,6 +2825,9 @@ async fn routing_rebalances_when_models_overlap() {
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
                         request_quota_requests: 600,
@@ -2905,6 +2935,9 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["gpt-4.1-mini".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
                         request_quota_requests: 600,
@@ -2926,6 +2959,9 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         protocol: UpstreamProtocol::ChatCompletions,
                         protocols: vec![UpstreamProtocol::ChatCompletions],
                         supported_models: vec!["gpt-4.1-mini".into()],
+
+                        default_model_context: None,
+
                         model_contexts: vec![],
                         request_quota_window_hours: 5,
                         request_quota_requests: 600,
@@ -3027,6 +3063,9 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 5,
 
@@ -3127,6 +3166,9 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
 
@@ -3152,6 +3194,9 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
 
@@ -3260,6 +3305,9 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 5,
 
@@ -3361,6 +3409,9 @@ async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 5,
                 request_quota_requests: 600,
@@ -3510,6 +3561,9 @@ async fn upstream_concurrency_full_429_retries_with_configured_attempts() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 5,
                 request_quota_requests: 600,
@@ -3658,6 +3712,9 @@ async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_mul
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 5,
                 request_quota_requests: 600,
@@ -4035,6 +4092,9 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![ModelContextConfig {
                         slug: "gpt-4.1-mini".into(),
                         context_limit: 400,
@@ -4184,6 +4244,9 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["MiniMax2.7".into(), "MiniMax2.7-Long".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![
                         ModelContextConfig {
                             slug: "MiniMax2.7".into(),
@@ -4324,6 +4387,9 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![ModelContextConfig {
                         slug: "gpt-4.1-mini".into(),
                         context_limit: 260,
@@ -4483,6 +4549,9 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
 
@@ -4505,6 +4574,9 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 5,
 
@@ -5456,6 +5528,9 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -7861,6 +7936,9 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8003,6 +8081,9 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8114,6 +8195,9 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8277,6 +8361,9 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8398,6 +8485,9 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8512,6 +8602,9 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8632,6 +8725,9 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8758,6 +8854,9 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -8935,6 +9034,9 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 24,
                     request_quota_requests: 1000,
@@ -8956,6 +9058,9 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4".into()],
+
+                    default_model_context: None,
+
                     model_contexts: vec![],
                     request_quota_window_hours: 24,
                     request_quota_requests: 1000,
@@ -9063,6 +9168,9 @@ async fn stream_disconnect_releases_runtime_state() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -9176,6 +9284,9 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -9306,6 +9417,9 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 protocol: UpstreamProtocol::Responses,
                 protocols: vec![UpstreamProtocol::Responses],
                 supported_models: vec!["claude-3-5-sonnet".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -9420,6 +9534,9 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 protocol: UpstreamProtocol::Responses,
                 protocols: vec![UpstreamProtocol::Responses],
                 supported_models: vec!["claude-3-5-sonnet".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -9561,6 +9678,9 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -9720,6 +9840,9 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -9882,6 +10005,9 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -10048,6 +10174,9 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -10176,6 +10305,9 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,
@@ -10294,6 +10426,9 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4".into()],
+
+                default_model_context: None,
+
                 model_contexts: vec![],
                 request_quota_window_hours: 24,
                 request_quota_requests: 1000,

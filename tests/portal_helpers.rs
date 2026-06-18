@@ -34,7 +34,11 @@ fn utc_month_start(timestamp: u64) -> u64 {
     let dt = UNIX_EPOCH + Duration::from_secs(timestamp);
     let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
     let first_of_month = datetime.date_naive().with_day(1).unwrap();
-    first_of_month.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64
+    first_of_month
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp() as u64
 }
 
 fn stable_today_noon() -> u64 {
@@ -73,7 +77,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             active: true,
         }],
         usage_logs: logs,
-    announcement: None,
+        announcement: None,
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -604,8 +608,14 @@ async fn test_compute_token_usage_matches_summary_path() {
     let summary = build_downstream_usage_summary(&snapshot, "downstream-1", now).unwrap();
     let quota = state.compute_token_usage("downstream-1", now).await;
 
-    assert_eq!(summary.today_tokens, quota.daily.map(|q| q.used).unwrap_or(0));
-    assert_eq!(summary.month_tokens, quota.monthly.map(|q| q.used).unwrap_or(0));
+    assert_eq!(
+        summary.today_tokens,
+        quota.daily.map(|q| q.used).unwrap_or(0)
+    );
+    assert_eq!(
+        summary.month_tokens,
+        quota.monthly.map(|q| q.used).unwrap_or(0)
+    );
 }
 
 #[tokio::test]
@@ -1314,7 +1324,7 @@ async fn test_compute_model_stats_empty_allowlist() {
             active: true,
         }],
         usage_logs: logs,
-    announcement: None,
+        announcement: None,
     };
 
     let app_state = chat_responses_codex::state::AppState::new(state, unique_state_path(), config);

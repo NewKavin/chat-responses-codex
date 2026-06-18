@@ -68,6 +68,7 @@ export interface UpstreamConfig {
   protocol: 'ChatCompletions' | 'Responses'
   protocols?: Array<'ChatCompletions' | 'Responses'>
   supported_models: string[]
+  default_model_context?: DefaultModelContext
   model_contexts?: ModelContextConfig[]
   request_quota_window_hours: number
   request_quota_requests: number
@@ -101,6 +102,12 @@ export interface ModelRequestCost {
 
 export interface ModelContextConfig {
   slug: string
+  context_limit: number
+  output_reserve: number
+  context_group: string
+}
+
+export interface DefaultModelContext {
   context_limit: number
   output_reserve: number
   context_group: string

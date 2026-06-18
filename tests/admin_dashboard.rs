@@ -375,8 +375,8 @@ async fn admin_dashboard_uses_cache_when_available() {
     let redis_url = match std::env::var("REDIS_TEST_URL").or_else(|_| std::env::var("REDIS_URL")) {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
         _ => {
-        eprintln!("skipping redis dashboard cache test: REDIS_TEST_URL is not set");
-        return;
+            eprintln!("skipping redis dashboard cache test: REDIS_TEST_URL is not set");
+            return;
         }
     };
 

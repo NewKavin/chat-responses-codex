@@ -47,10 +47,14 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         upstreams: vec![],
         downstreams: vec![downstream],
         usage_logs: vec![],
-    announcement: None,
+        announcement: None,
     };
 
-    (AppState::new(state, unique_state_path(), config), plaintext_key, "test-team-a".to_string())
+    (
+        AppState::new(state, unique_state_path(), config),
+        plaintext_key,
+        "test-team-a".to_string(),
+    )
 }
 
 #[tokio::test]

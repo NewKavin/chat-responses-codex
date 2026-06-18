@@ -1,5 +1,5 @@
-use chat_responses_codex::state::{AppConfig, AppState, PersistedState};
 use axum::Router;
+use chat_responses_codex::state::{AppConfig, AppState, PersistedState};
 use tempfile::TempDir;
 
 pub async fn setup_test_app() -> (Router, AppState, TempDir) {

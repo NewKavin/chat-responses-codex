@@ -31,7 +31,6 @@ fn create_test_state() -> AppState {
 }
 
 fn create_test_state_with_config(config: AppConfig) -> AppState {
-
     let now = chat_responses_codex::state::unix_seconds();
 
     let state = PersistedState {

@@ -22,7 +22,6 @@ FROM rust:1-bookworm AS backend-builder
 
 WORKDIR /app
 
-COPY .cargo .cargo
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY src ./src

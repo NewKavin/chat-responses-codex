@@ -1,7 +1,8 @@
 use super::log_queries::{current_month_start, enrich_usage_log, query_time_bounds};
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, DownstreamConfig, DownstreamUsageSummary,
-    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UpstreamProtocol,
+    DefaultModelContextConfig, ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
+    UpstreamProtocol,
     UsageLog, UsageLogPage, UsageLogQuery,
 };
 use bb8::Pool;
@@ -56,7 +57,7 @@ impl PostgresStateStore {
         for row in conn
             .query(
                 "SELECT id, name, base_url, api_key, protocol, protocols, \
-                 model_contexts, \
+                 model_contexts, default_model_context, \
                  COALESCE(request_quota_window_hours, 5), \
                  COALESCE(request_quota_requests, request_quota_5h, 600), \
                  requests_per_minute, max_concurrency, priority, premium_only, \
@@ -76,18 +77,19 @@ impl PostgresStateStore {
                 protocol,
                 protocols: decode_protocols(row.get::<_, Option<String>>(5), protocol)?,
                 model_contexts: decode_model_contexts(row.get::<_, Option<String>>(6))?,
+                default_model_context: decode_default_model_context(row.get::<_, Option<String>>(7))?,
                 supported_models: Vec::new(),
-                request_quota_window_hours: row.get::<_, i32>(7) as u32,
-                request_quota_requests: row.get::<_, i32>(8) as u32,
-                requests_per_minute: row.get::<_, i32>(9) as u32,
-                max_concurrency: row.get::<_, i32>(10) as u32,
-                priority: row.get::<_, i32>(11) as u32,
+                request_quota_window_hours: row.get::<_, i32>(8) as u32,
+                request_quota_requests: row.get::<_, i32>(9) as u32,
+                requests_per_minute: row.get::<_, i32>(10) as u32,
+                max_concurrency: row.get::<_, i32>(11) as u32,
+                priority: row.get::<_, i32>(12) as u32,
                 model_request_costs: Vec::new(),
                 premium_models: Vec::new(),
-                premium_only: row.get::<_, bool>(12),
-                protect_premium_quota: row.get::<_, bool>(13),
-                active: row.get::<_, bool>(14),
-                failure_count: row.get::<_, i32>(15) as u32,
+                premium_only: row.get::<_, bool>(13),
+                protect_premium_quota: row.get::<_, bool>(14),
+                active: row.get::<_, bool>(15),
+                failure_count: row.get::<_, i32>(16) as u32,
             });
         }
 
@@ -488,6 +490,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
         let protocol_text = format!("{:?}", primary_protocol);
         let protocols_json = encode_protocols(&protocols);
         let model_contexts_json = encode_model_contexts(&upstream.model_contexts);
+        let default_model_context_json =
+            encode_default_model_context(&upstream.default_model_context);
         let params: &[&(dyn ToSql + Sync)] = &[
             &upstream.id,
             &upstream.name,
@@ -497,6 +501,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &protocols_json,
             &model_contexts_json,
             &(upstream.request_quota_requests as i32),
+            &default_model_context_json,
             &(upstream.request_quota_window_hours as i32),
             &(upstream.request_quota_requests as i32),
             &(upstream.requests_per_minute as i32),
@@ -510,14 +515,14 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
         tx.execute(
             "INSERT INTO upstreams (
                 id, name, base_url, api_key, protocol, protocols, model_contexts,
-                request_quota_5h, request_quota_window_hours, request_quota_requests,
+                request_quota_5h, default_model_context, request_quota_window_hours, request_quota_requests,
                 requests_per_minute, max_concurrency, priority, premium_only,
                 protect_premium_quota, active, failure_count
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17
+                $15, $16, $17, $18
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -526,6 +531,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 protocol = EXCLUDED.protocol,
                 protocols = EXCLUDED.protocols,
                 model_contexts = EXCLUDED.model_contexts,
+                default_model_context = EXCLUDED.default_model_context,
                 request_quota_5h = EXCLUDED.request_quota_5h,
                 request_quota_window_hours = EXCLUDED.request_quota_window_hours,
                 request_quota_requests = EXCLUDED.request_quota_requests,
@@ -940,6 +946,29 @@ fn encode_model_contexts(values: &[ModelContextConfig]) -> String {
     serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
 }
 
+fn decode_default_model_context(
+    value: Option<String>,
+) -> io::Result<Option<DefaultModelContextConfig>> {
+    let Some(value) = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    serde_json::from_str::<DefaultModelContextConfig>(&value)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn encode_default_model_context(
+    value: &Option<DefaultModelContextConfig>,
+) -> Option<String> {
+    value
+        .as_ref()
+        .and_then(|context| serde_json::to_string(context).ok())
+}
+
 fn io_other<E>(error: E) -> io::Error
 where
     E: std::error::Error + Send + Sync + 'static,
@@ -1008,6 +1037,8 @@ ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS protocols TEXT NULL;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS model_contexts TEXT NULL;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS default_model_context TEXT NULL;
 
 CREATE TABLE IF NOT EXISTS downstreams (
     id TEXT PRIMARY KEY,

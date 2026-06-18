@@ -10,10 +10,10 @@ use common::*;
 #[tokio::test]
 async fn test_admin_upstreams_list_returns_all_upstreams() {
     let (app, _state, _temp_dir) = setup_test_app().await;
-    
+
     // 生成 JWT token
     let token = chat_responses_codex::auth::generate_admin_token("admin", "test_secret").unwrap();
-    
+
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -32,9 +32,9 @@ async fn test_admin_upstreams_list_returns_all_upstreams() {
 #[tokio::test]
 async fn test_admin_upstreams_create_adds_new_upstream() {
     let (app, _state, _temp_dir) = setup_test_app().await;
-    
+
     let token = chat_responses_codex::auth::generate_admin_token("admin", "test_secret").unwrap();
-    
+
     let response = app
         .oneshot(
             axum::http::Request::builder()

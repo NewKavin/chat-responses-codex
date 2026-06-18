@@ -153,7 +153,9 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should configure the upstream 429 retry window"
     );
     assert!(
-        compose.contains("UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS: ${UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS:-3}"),
+        compose.contains(
+            "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS: ${UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS:-3}"
+        ),
         "docker-compose.yml should configure the upstream rate limit retry attempts"
     );
     assert!(
@@ -161,11 +163,15 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should configure the upstream rate limit retry-after cap"
     );
     assert!(
-        compose.contains("UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS: ${UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS:-20}"),
+        compose.contains(
+            "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS: ${UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS:-20}"
+        ),
         "docker-compose.yml should configure the upstream concurrency retry attempts"
     );
     assert!(
-        compose.contains("UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS: ${UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS:-50}"),
+        compose.contains(
+            "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS: ${UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS:-50}"
+        ),
         "docker-compose.yml should configure the upstream concurrency retry backoff"
     );
     assert!(
@@ -179,7 +185,9 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should configure chat context retry token floor"
     );
     assert!(
-        compose.contains("CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES: ${CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES:-3}"),
+        compose.contains(
+            "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES: ${CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES:-3}"
+        ),
         "docker-compose.yml should configure responses context retry attempts"
     );
     assert!(
@@ -203,9 +211,8 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should configure routing affinity escape pressure"
     );
     assert!(
-        compose.contains(
-            "UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${UPSTREAM_CONNECT_TIMEOUT_SECONDS:-30}"
-        ),
+        compose
+            .contains("UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${UPSTREAM_CONNECT_TIMEOUT_SECONDS:-30}"),
         "docker-compose.yml should configure upstream connect timeout"
     );
     assert!(
@@ -307,10 +314,7 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS=",
         "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=",
     ] {
-        assert!(
-            dotenv.contains(key),
-            ".env.example should document {key}"
-        );
+        assert!(dotenv.contains(key), ".env.example should document {key}");
     }
 }
 

@@ -121,6 +121,8 @@ pub struct UpstreamConfig {
     pub supported_models: Vec<String>,
     #[serde(default)]
     pub model_contexts: Vec<ModelContextConfig>,
+    #[serde(default)]
+    pub default_model_context: Option<DefaultModelContextConfig>,
     #[serde(default = "default_upstream_request_quota_window_hours")]
     pub request_quota_window_hours: u32,
     #[serde(
@@ -159,6 +161,7 @@ impl Default for UpstreamConfig {
             protocols: vec![UpstreamProtocol::ChatCompletions],
             supported_models: Vec::new(),
             model_contexts: Vec::new(),
+            default_model_context: None,
             request_quota_window_hours: default_upstream_request_quota_window_hours(),
             request_quota_requests: default_upstream_request_quota_requests(),
             requests_per_minute: default_upstream_requests_per_minute(),
@@ -183,6 +186,15 @@ pub struct ModelRequestCostConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelContextConfig {
     pub slug: String,
+    pub context_limit: u32,
+    #[serde(default = "default_model_context_output_reserve")]
+    pub output_reserve: u32,
+    #[serde(default)]
+    pub context_group: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultModelContextConfig {
     pub context_limit: u32,
     #[serde(default = "default_model_context_output_reserve")]
     pub output_reserve: u32,
@@ -311,6 +323,8 @@ impl UpstreamConfig {
         self.model_request_costs =
             normalized_model_request_costs(std::mem::take(&mut self.model_request_costs));
         self.model_contexts = normalized_model_contexts(std::mem::take(&mut self.model_contexts));
+        self.default_model_context =
+            normalized_default_model_context(self.default_model_context.take());
     }
 
     pub fn validate_configuration(&self) -> Result<(), String> {
@@ -369,7 +383,13 @@ impl UpstreamConfig {
                 return Some(config.clone());
             }
         }
-        None
+
+        self.default_model_context.as_ref().map(|config| ModelContextConfig {
+            slug: model.trim().to_string(),
+            context_limit: config.context_limit,
+            output_reserve: config.output_reserve,
+            context_group: config.context_group.clone(),
+        })
     }
 
     pub fn context_fallback_model_for(
@@ -430,6 +450,14 @@ fn parse_upstream_protocols(values: &[Value]) -> Vec<UpstreamProtocol> {
         .filter_map(Value::as_str)
         .map(parse_upstream_protocol)
         .collect()
+}
+
+fn parse_u64_flexible(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+    })
 }
 
 fn dedup_protocols(values: Vec<UpstreamProtocol>) -> Vec<UpstreamProtocol> {
@@ -496,6 +524,31 @@ fn normalized_model_contexts(values: Vec<ModelContextConfig>) -> Vec<ModelContex
         });
     }
     normalized
+}
+
+fn normalized_default_model_context(
+    value: Option<DefaultModelContextConfig>,
+) -> Option<DefaultModelContextConfig> {
+    let Some(context) = value else {
+        return None;
+    };
+    if context.context_limit == 0 {
+        return None;
+    }
+
+    let context_limit = context.context_limit.max(2);
+    let mut output_reserve = if context.output_reserve == 0 {
+        default_model_context_output_reserve()
+    } else {
+        context.output_reserve
+    };
+    output_reserve = output_reserve.min(context_limit.saturating_sub(1).max(1));
+
+    Some(DefaultModelContextConfig {
+        context_limit,
+        output_reserve,
+        context_group: context.context_group.trim().to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2817,10 +2870,10 @@ impl AppState {
                         .filter_map(|value| {
                             let slug = value.get("slug").and_then(|v| v.as_str())?;
                             let context_limit =
-                                value.get("context_limit").and_then(|v| v.as_u64())?;
+                                value.get("context_limit").and_then(parse_u64_flexible)?;
                             let output_reserve = value
                                 .get("output_reserve")
-                                .and_then(|v| v.as_u64())
+                                .and_then(parse_u64_flexible)
                                 .unwrap_or(default_model_context_output_reserve() as u64);
                             let context_group = value
                                 .get("context_group")
@@ -2834,6 +2887,30 @@ impl AppState {
                             })
                         })
                         .collect();
+                }
+                if let Some(default_model_context_updates) = updates.get("default_model_context") {
+                    if default_model_context_updates.is_null() {
+                        upstream.default_model_context = None;
+                    } else {
+                        let context = {
+                            let context_limit =
+                                default_model_context_updates.get("context_limit").and_then(parse_u64_flexible);
+                            let output_reserve = default_model_context_updates
+                                .get("output_reserve")
+                                .and_then(parse_u64_flexible)
+                                .unwrap_or(default_model_context_output_reserve() as u64);
+                            Some(DefaultModelContextConfig {
+                                context_limit: context_limit.unwrap_or(0) as u32,
+                                output_reserve: output_reserve as u32,
+                                context_group: default_model_context_updates
+                                    .get("context_group")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            })
+                        };
+                        upstream.default_model_context = context;
+                    }
                 }
                 if let Some(request_quota_window_hours) = updates
                     .get("request_quota_window_hours")
@@ -3073,7 +3150,8 @@ impl AppState {
 mod tests {
     use super::{
         should_bypass_proxy_for_host, should_bypass_proxy_for_url, AppConfig, AppState,
-        ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
+        DefaultModelContextConfig, ModelContextConfig, ModelRequestCostConfig, PersistedState,
+        UpstreamConfig,
     };
 
     #[test]
@@ -3278,6 +3356,70 @@ mod tests {
         assert_eq!(
             upstream.context_fallback_model_for("MiniMax2.7", 150_000),
             Some("MiniMax2.7-Long".into())
+        );
+    }
+
+    #[test]
+    fn context_config_uses_default_when_model_override_missing() {
+        let mut upstream = UpstreamConfig {
+            supported_models: vec!["GLM-5".into(), "Qwen3.7-Plus".into()],
+            default_model_context: Some(DefaultModelContextConfig {
+                context_limit: 8192,
+                output_reserve: 512,
+                context_group: "shared".into(),
+            }),
+            model_contexts: vec![ModelContextConfig {
+                slug: "Qwen3.7-Plus".into(),
+                context_limit: 4096,
+                output_reserve: 128,
+                context_group: String::new(),
+            }],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+
+        assert_eq!(
+            upstream.context_config_for_model("GLM-5"),
+            Some(ModelContextConfig {
+                slug: "GLM-5".into(),
+                context_limit: 8192,
+                output_reserve: 512,
+                context_group: "shared".into(),
+            })
+        );
+        assert_eq!(
+            upstream.context_config_for_model("Qwen3.7-Plus"),
+            Some(ModelContextConfig {
+                slug: "Qwen3.7-Plus".into(),
+                context_limit: 4096,
+                output_reserve: 128,
+                context_group: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn context_fallback_uses_default_group_when_available() {
+        let mut upstream = UpstreamConfig {
+            supported_models: vec!["GLM-5".into(), "GLM-5-Long".into()],
+            default_model_context: Some(DefaultModelContextConfig {
+                context_limit: 4_000,
+                output_reserve: 256,
+                context_group: "glm-shared".into(),
+            }),
+            model_contexts: vec![ModelContextConfig {
+                slug: "GLM-5-Long".into(),
+                context_limit: 16_000,
+                output_reserve: 512,
+                context_group: "glm-shared".into(),
+            }],
+            ..Default::default()
+        };
+        upstream.normalize_for_storage();
+
+        assert_eq!(
+            upstream.context_fallback_model_for("GLM-5", 8_000),
+            Some("GLM-5-Long".into())
         );
     }
 

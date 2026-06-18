@@ -11,7 +11,10 @@ pub struct Claims {
     pub iat: u64,
 }
 
-pub fn generate_admin_token(username: &str, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
+pub fn generate_admin_token(
+    username: &str,
+    secret: &str,
+) -> Result<String, jsonwebtoken::errors::Error> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -30,7 +33,10 @@ pub fn generate_admin_token(username: &str, secret: &str) -> Result<String, json
     )
 }
 
-pub fn verify_admin_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+pub fn verify_admin_token(
+    token: &str,
+    secret: &str,
+) -> Result<Claims, jsonwebtoken::errors::Error> {
     let validation = Validation::default();
     let token_data = decode::<Claims>(
         token,

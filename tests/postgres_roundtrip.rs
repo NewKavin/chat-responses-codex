@@ -38,6 +38,8 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         protocol: UpstreamProtocol::Responses,
         protocols: vec![UpstreamProtocol::Responses],
         supported_models: vec!["GLM-4.1-mini".into()],
+        default_model_context: None,
+
         model_contexts: vec![],
         request_quota_window_hours: 5,
 
@@ -251,6 +253,8 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         protocol: UpstreamProtocol::Responses,
         protocols: vec![UpstreamProtocol::Responses],
         supported_models: vec!["GLM-4.1-mini".into()],
+        default_model_context: None,
+
         model_contexts: vec![],
         request_quota_window_hours: 5,
         request_quota_requests: 888,
@@ -369,6 +373,8 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         protocol: UpstreamProtocol::Responses,
         protocols: vec![UpstreamProtocol::Responses],
         supported_models: vec!["GLM-4.1-mini".into()],
+        default_model_context: None,
+
         model_contexts: vec![],
         request_quota_window_hours: 5,
         request_quota_requests: 888,

@@ -216,20 +216,30 @@ fn stream_usage_from_value(value: &Value) -> Option<(u64, u64, u64)> {
         .map(usage_from_usage_value)
 }
 
+fn parse_u64_token(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_i64().and_then(|value| u64::try_from(value).ok())),
+        Value::String(value) => value.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
 fn usage_from_usage_value(usage: &Value) -> (u64, u64, u64) {
     let prompt_tokens = usage
         .get("prompt_tokens")
         .or_else(|| usage.get("input_tokens"))
-        .and_then(Value::as_u64)
+        .and_then(parse_u64_token)
         .unwrap_or(0);
     let completion_tokens = usage
         .get("completion_tokens")
         .or_else(|| usage.get("output_tokens"))
-        .and_then(Value::as_u64)
+        .and_then(parse_u64_token)
         .unwrap_or(0);
     let total_tokens = usage
         .get("total_tokens")
-        .and_then(Value::as_u64)
+        .and_then(parse_u64_token)
         .unwrap_or(prompt_tokens + completion_tokens);
     (prompt_tokens, completion_tokens, total_tokens)
 }
@@ -3365,22 +3375,7 @@ fn extract_plain_text_from_content(content: Option<&Value>) -> String {
 }
 
 fn usage_from_body(body: &Value) -> (u64, u64, u64) {
-    let usage = body.get("usage").unwrap_or(&Value::Null);
-    let prompt_tokens = usage
-        .get("prompt_tokens")
-        .or_else(|| usage.get("input_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let completion_tokens = usage
-        .get("completion_tokens")
-        .or_else(|| usage.get("output_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let total_tokens = usage
-        .get("total_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(prompt_tokens + completion_tokens);
-    (prompt_tokens, completion_tokens, total_tokens)
+    usage_from_usage_value(body.get("usage").unwrap_or(&Value::Null))
 }
 
 fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
@@ -6275,4 +6270,39 @@ async fn extract_downstream_id_from_bearer(
         Json(json!({"error": {"message": "Invalid Bearer token"}})),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usage_from_usage_value;
+    use serde_json::json;
+
+    #[test]
+    fn usage_from_usage_value_supports_alias_fields() {
+        let usage = json!({
+            "input_tokens": 128,
+            "output_tokens": 64,
+            "total_tokens": 200
+        });
+        assert_eq!(usage_from_usage_value(&usage), (128, 64, 200));
+    }
+
+    #[test]
+    fn usage_from_usage_value_supports_string_tokens() {
+        let usage = json!({
+            "prompt_tokens": "300",
+            "completion_tokens": "120",
+            "total_tokens": "420"
+        });
+        assert_eq!(usage_from_usage_value(&usage), (300, 120, 420));
+    }
+
+    #[test]
+    fn usage_from_usage_value_falls_back_to_prompt_plus_completion_without_total() {
+        let usage = json!({
+            "prompt_tokens": "256",
+            "completion_tokens": 128,
+        });
+        assert_eq!(usage_from_usage_value(&usage), (256, 128, 384));
+    }
 }

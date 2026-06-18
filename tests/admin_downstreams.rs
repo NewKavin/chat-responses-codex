@@ -76,7 +76,7 @@ fn create_test_state() -> AppState {
             },
         ],
         usage_logs: vec![],
-    announcement: None,
+        announcement: None,
     };
 
     AppState::new(state, unique_state_path(), config)

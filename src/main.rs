@@ -43,23 +43,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             300,
         )
         .max(1),
-        upstream_rate_limit_retry_attempts: env_u32("UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS", 3)
-            .max(1),
+        upstream_rate_limit_retry_attempts: env_u32("UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS", 3).max(1),
         upstream_rate_limit_max_retry_after_seconds: env_u64(
             "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS",
             10,
         )
         .max(1),
-        upstream_concurrency_retry_attempts: env_u32(
-            "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
-            20,
-        )
-        .max(1),
-        upstream_concurrency_retry_backoff_ms: env_u64(
-            "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS",
-            50,
-        )
-        .max(1),
+        upstream_concurrency_retry_attempts: env_u32("UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS", 20)
+            .max(1),
+        upstream_concurrency_retry_backoff_ms: env_u64("UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS", 50)
+            .max(1),
         context_retry_max_attempts_chat: env_u32(
             "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT",
             context_retry_max_attempts_chat_default,
@@ -87,15 +80,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             1.5,
         )
         .max(1.0),
-        redis_url: env::var("REDIS_URL").ok().filter(|value| !value.trim().is_empty()),
+        redis_url: env::var("REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
         dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
         admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
-        upstream_http_pool_max_idle_per_host: env_usize(
-            "UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST",
-            32,
-        )
-        .max(8),
+        upstream_http_pool_max_idle_per_host: env_usize("UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST", 32)
+            .max(8),
         upstream_connect_timeout_seconds: env_u64("UPSTREAM_CONNECT_TIMEOUT_SECONDS", 30).max(1),
         upstream_response_header_timeout_seconds: env_u64(
             "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS",
@@ -279,10 +271,7 @@ fn init_tracing(log_path: &str) {
 struct BeijingTime;
 
 impl tracing_subscriber::fmt::time::FormatTime for BeijingTime {
-    fn format_time(
-        &self,
-        writer: &mut tracing_subscriber::fmt::format::Writer<'_>,
-    ) -> fmt::Result {
+    fn format_time(&self, writer: &mut tracing_subscriber::fmt::format::Writer<'_>) -> fmt::Result {
         let offset = FixedOffset::east_opt(8 * 3600).expect("valid Beijing offset");
         let now = Utc::now().with_timezone(&offset);
         write!(writer, "{}", now.format("%Y-%m-%dT%H:%M:%S%.3f%:z"))

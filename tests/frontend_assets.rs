@@ -26,7 +26,7 @@ fn create_test_state() -> AppState {
         upstreams: vec![],
         downstreams: vec![],
         usage_logs: vec![],
-    announcement: None,
+        announcement: None,
     };
     AppState::new(state, unique_state_path(), config)
 }
@@ -39,7 +39,7 @@ fn create_test_state() -> AppState {
 async fn test_serve_frontend_returns_index_html_for_root() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -51,9 +51,9 @@ async fn test_serve_frontend_returns_index_html_for_root() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("text/html"));
 }
@@ -62,7 +62,7 @@ async fn test_serve_frontend_returns_index_html_for_root() {
 async fn test_serve_frontend_returns_index_html_for_admin() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -74,9 +74,9 @@ async fn test_serve_frontend_returns_index_html_for_admin() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("text/html"));
 }
@@ -85,7 +85,7 @@ async fn test_serve_frontend_returns_index_html_for_admin() {
 async fn test_serve_frontend_returns_index_html_for_portal() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -97,9 +97,9 @@ async fn test_serve_frontend_returns_index_html_for_portal() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("text/html"));
 }
@@ -112,7 +112,7 @@ async fn test_serve_frontend_returns_index_html_for_portal() {
 async fn test_serve_frontend_returns_js_bundle() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // Note: This test assumes the frontend has been built
     // In a real scenario, you would need to build the frontend first
     // For now, we'll test that the route exists and returns appropriate status
@@ -127,19 +127,16 @@ async fn test_serve_frontend_returns_js_bundle() {
         )
         .await
         .unwrap();
-    
+
     // Should either return OK (if built) or fallback to index.html
-    assert!(
-        response.status() == StatusCode::OK || 
-        response.status() == StatusCode::NOT_FOUND
-    );
+    assert!(response.status() == StatusCode::OK || response.status() == StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn test_serve_frontend_returns_css_bundle() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -151,12 +148,9 @@ async fn test_serve_frontend_returns_css_bundle() {
         )
         .await
         .unwrap();
-    
+
     // Should either return OK (if built) or fallback to index.html
-    assert!(
-        response.status() == StatusCode::OK || 
-        response.status() == StatusCode::NOT_FOUND
-    );
+    assert!(response.status() == StatusCode::OK || response.status() == StatusCode::NOT_FOUND);
 }
 
 // ============================================================================
@@ -167,7 +161,7 @@ async fn test_serve_frontend_returns_css_bundle() {
 async fn test_serve_frontend_spa_fallback() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // Request a non-existent route (should fallback to index.html)
     let response = app
         .clone()
@@ -180,9 +174,9 @@ async fn test_serve_frontend_spa_fallback() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("text/html"));
 }
@@ -191,7 +185,7 @@ async fn test_serve_frontend_spa_fallback() {
 async fn test_serve_frontend_spa_fallback_for_portal_routes() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     let response = app
         .clone()
         .oneshot(
@@ -203,9 +197,9 @@ async fn test_serve_frontend_spa_fallback_for_portal_routes() {
         )
         .await
         .unwrap();
-    
+
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let content_type = response.headers().get("content-type").unwrap();
     assert!(content_type.to_str().unwrap().contains("text/html"));
 }
@@ -218,7 +212,7 @@ async fn test_serve_frontend_spa_fallback_for_portal_routes() {
 async fn test_api_routes_do_not_fallback_to_spa() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // API routes should return proper HTTP errors, not fallback to index.html
     let response = app
         .clone()
@@ -231,7 +225,7 @@ async fn test_api_routes_do_not_fallback_to_spa() {
         )
         .await
         .unwrap();
-    
+
     // Should return 401 (unauthorized) or 404 (not found), not 200 with HTML
     assert!(response.status() != StatusCode::OK);
 }
@@ -240,7 +234,7 @@ async fn test_api_routes_do_not_fallback_to_spa() {
 async fn test_v1_routes_do_not_fallback_to_spa() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
-    
+
     // /v1/* routes should return proper HTTP errors, not fallback to index.html
     let response = app
         .clone()
@@ -253,7 +247,7 @@ async fn test_v1_routes_do_not_fallback_to_spa() {
         )
         .await
         .unwrap();
-    
+
     // Should return 404 (not found), not 200 with HTML
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

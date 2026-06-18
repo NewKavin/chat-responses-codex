@@ -9,19 +9,26 @@ fn test_axios_validatestatus_accepts_204() {
     // - Accept 4xx (400-499) - client errors (treated as success by axios)
     // - Reject 5xx (500+) - server errors
 
-    let validate_status = |status: u16| -> bool {
-        status < 500
-    };
+    let validate_status = |status: u16| -> bool { status < 500 };
 
     // These should be accepted (not treated as errors by axios)
     assert!(validate_status(200), "Should accept 200 OK");
     assert!(validate_status(201), "Should accept 201 Created");
     assert!(validate_status(204), "Should accept 204 No Content");
-    assert!(validate_status(400), "Should accept 400 Bad Request (axios won't throw)");
-    assert!(validate_status(404), "Should accept 404 Not Found (axios won't throw)");
+    assert!(
+        validate_status(400),
+        "Should accept 400 Bad Request (axios won't throw)"
+    );
+    assert!(
+        validate_status(404),
+        "Should accept 404 Not Found (axios won't throw)"
+    );
 
     // These should be rejected (treated as errors by axios)
-    assert!(!validate_status(500), "Should reject 500 Internal Server Error");
+    assert!(
+        !validate_status(500),
+        "Should reject 500 Internal Server Error"
+    );
     assert!(!validate_status(502), "Should reject 502 Bad Gateway");
 }
 
@@ -46,5 +53,3 @@ fn test_update_response_handling() {
     let is_success = validate_status(status_code);
     assert!(is_success, "200 should be treated as success");
 }
-
-

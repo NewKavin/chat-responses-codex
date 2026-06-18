@@ -84,14 +84,13 @@ impl UpstreamCandidate {
 
     /// Check if this is a premium model for this upstream
     pub fn is_premium_model(&self, model: &str) -> bool {
-        !self.premium_models.is_empty() 
-            && self.premium_models.iter().any(|m| m == model)
+        !self.premium_models.is_empty() && self.premium_models.iter().any(|m| m == model)
     }
 
     /// Check if this upstream should be avoided for non-premium models
     pub fn should_avoid_for_non_premium(&self, model: &str) -> bool {
-        self.protect_premium_quota 
-            && !self.premium_models.is_empty() 
+        self.protect_premium_quota
+            && !self.premium_models.is_empty()
             && !self.is_premium_model(model)
     }
 }
@@ -103,7 +102,7 @@ pub enum RouteError {
 }
 
 /// Intelligent upstream selection algorithm with premium quota protection
-/// 
+///
 /// Algorithm:
 /// 1. Filter candidates by protocol and model support
 /// 2. Separate into preferred and fallback groups based on premium protection
@@ -137,7 +136,8 @@ pub fn select_upstream(
     if !preferred.is_empty() {
         // Sort by priority (higher first), then by failure count (lower first)
         preferred.sort_by(|a, b| {
-            b.priority.cmp(&a.priority)
+            b.priority
+                .cmp(&a.priority)
                 .then_with(|| a.failure_count.cmp(&b.failure_count))
         });
 
@@ -150,7 +150,8 @@ pub fn select_upstream(
     // Step 4: Fall back to protected upstreams if no preferred option
     if !fallback.is_empty() {
         fallback.sort_by(|a, b| {
-            b.priority.cmp(&a.priority)
+            b.priority
+                .cmp(&a.priority)
                 .then_with(|| a.failure_count.cmp(&b.failure_count))
         });
 
@@ -169,18 +170,29 @@ mod tests {
 
     #[test]
     fn test_avoid_premium_account_for_non_premium_model() {
-        let premium_account = UpstreamCandidate::new("premium", "Premium Account", UpstreamProtocol::ChatCompletions)
-            .with_models(vec!["gpt-4", "gpt-3.5-turbo", "glm-5.1"])
-            .with_premium_models(vec!["glm-5.1"])
-            .with_protect_premium_quota(true)
-            .with_priority(100);
+        let premium_account = UpstreamCandidate::new(
+            "premium",
+            "Premium Account",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .with_models(vec!["gpt-4", "gpt-3.5-turbo", "glm-5.1"])
+        .with_premium_models(vec!["glm-5.1"])
+        .with_protect_premium_quota(true)
+        .with_priority(100);
 
-        let regular_account = UpstreamCandidate::new("regular", "Regular Account", UpstreamProtocol::ChatCompletions)
-            .with_models(vec!["gpt-4", "gpt-3.5-turbo"])
-            .with_priority(50);
+        let regular_account = UpstreamCandidate::new(
+            "regular",
+            "Regular Account",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .with_models(vec!["gpt-4", "gpt-3.5-turbo"])
+        .with_priority(50);
 
         let request = RouteRequest::new("gpt-4", UpstreamProtocol::ChatCompletions, false);
-        let result = select_upstream(&request, &[premium_account.clone(), regular_account.clone()]);
+        let result = select_upstream(
+            &request,
+            &[premium_account.clone(), regular_account.clone()],
+        );
 
         // Should select regular account even though premium has higher priority
         assert!(result.is_ok());
@@ -189,18 +201,29 @@ mod tests {
 
     #[test]
     fn test_use_premium_account_for_premium_model() {
-        let premium_account = UpstreamCandidate::new("premium", "Premium Account", UpstreamProtocol::ChatCompletions)
-            .with_models(vec!["gpt-4", "glm-5.1"])
-            .with_premium_models(vec!["glm-5.1"])
-            .with_protect_premium_quota(true)
-            .with_priority(100);
+        let premium_account = UpstreamCandidate::new(
+            "premium",
+            "Premium Account",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .with_models(vec!["gpt-4", "glm-5.1"])
+        .with_premium_models(vec!["glm-5.1"])
+        .with_protect_premium_quota(true)
+        .with_priority(100);
 
-        let regular_account = UpstreamCandidate::new("regular", "Regular Account", UpstreamProtocol::ChatCompletions)
-            .with_models(vec!["gpt-4"])
-            .with_priority(50);
+        let regular_account = UpstreamCandidate::new(
+            "regular",
+            "Regular Account",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .with_models(vec!["gpt-4"])
+        .with_priority(50);
 
         let request = RouteRequest::new("glm-5.1", UpstreamProtocol::ChatCompletions, false);
-        let result = select_upstream(&request, &[premium_account.clone(), regular_account.clone()]);
+        let result = select_upstream(
+            &request,
+            &[premium_account.clone(), regular_account.clone()],
+        );
 
         // Should select premium account for premium model
         assert!(result.is_ok());
@@ -209,11 +232,15 @@ mod tests {
 
     #[test]
     fn test_fallback_to_premium_when_no_other_option() {
-        let premium_account = UpstreamCandidate::new("premium", "Premium Account", UpstreamProtocol::ChatCompletions)
-            .with_models(vec!["gpt-4", "glm-5.1"])
-            .with_premium_models(vec!["glm-5.1"])
-            .with_protect_premium_quota(true)
-            .with_priority(100);
+        let premium_account = UpstreamCandidate::new(
+            "premium",
+            "Premium Account",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .with_models(vec!["gpt-4", "glm-5.1"])
+        .with_premium_models(vec!["glm-5.1"])
+        .with_protect_premium_quota(true)
+        .with_priority(100);
 
         let request = RouteRequest::new("gpt-4", UpstreamProtocol::ChatCompletions, false);
         let result = select_upstream(&request, &[premium_account.clone()]);

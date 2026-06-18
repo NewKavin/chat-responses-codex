@@ -54,7 +54,7 @@ fn create_test_state() -> AppState {
         ],
         downstreams: vec![],
         usage_logs: vec![],
-    announcement: None,
+        announcement: None,
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -536,7 +536,10 @@ async fn test_upstreams_update_protocols_take_precedence_over_protocol() {
     assert_eq!(upstream.protocol, UpstreamProtocol::ChatCompletions);
     assert_eq!(
         upstream.protocols,
-        vec![UpstreamProtocol::ChatCompletions, UpstreamProtocol::Responses]
+        vec![
+            UpstreamProtocol::ChatCompletions,
+            UpstreamProtocol::Responses
+        ]
     );
 }
 

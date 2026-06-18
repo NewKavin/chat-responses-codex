@@ -1,7 +1,7 @@
+use chat_responses_codex::state::AppConfig;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
-use chat_responses_codex::state::AppConfig;
 
 #[test]
 fn template_files_live_under_templates_directory() {
@@ -12,10 +12,9 @@ fn template_files_live_under_templates_directory() {
 
 #[test]
 fn codex_model_catalog_preserves_upstream_model_slugs_exactly() {
-    let catalog: Value = serde_json::from_str(
-        &fs::read_to_string("templates/codex/model-catalog.json").unwrap(),
-    )
-    .unwrap();
+    let catalog: Value =
+        serde_json::from_str(&fs::read_to_string("templates/codex/model-catalog.json").unwrap())
+            .unwrap();
     let models = catalog["models"].as_array().expect("catalog models array");
     let slugs = models
         .iter()
@@ -33,8 +32,7 @@ fn codex_model_catalog_preserves_upstream_model_slugs_exactly() {
 
     for model in models {
         assert_eq!(
-            model["supports_search_tool"],
-            false,
+            model["supports_search_tool"], false,
             "template catalog should not overstate search tool support"
         );
     }
@@ -48,7 +46,8 @@ fn codex_config_example_uses_live_model_slug_exactly() {
     assert!(config.contains(r#"review_model = "ZhipuAI/GLM-5""#));
     assert!(!config.contains(r#"model = "glm-5""#));
     assert!(config.contains(r#"model_catalog_json = "model-catalog.json""#));
-    assert!(!config.contains("/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"));
+    assert!(!config
+        .contains("/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"));
 }
 
 #[test]

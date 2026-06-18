@@ -955,7 +955,9 @@ async fn test_portal_models_preserves_canonical_upstream_model_casing() {
 
     assert_eq!(models.len(), 2);
 
-    let glm5 = models.iter().find(|model| model["model"] == "ZhipuAI/GLM-5");
+    let glm5 = models
+        .iter()
+        .find(|model| model["model"] == "ZhipuAI/GLM-5");
     assert!(glm5.is_some());
     let glm5 = glm5.unwrap();
     assert_eq!(glm5["today_count"], 2);
@@ -969,9 +971,7 @@ async fn test_portal_models_preserves_canonical_upstream_model_casing() {
     assert_eq!(minimax["today_count"], 1);
     assert_eq!(minimax["month_count"], 1);
 
-    assert!(!models
-        .iter()
-        .any(|model| model["model"] == "zhipuai/glm-5"));
+    assert!(!models.iter().any(|model| model["model"] == "zhipuai/glm-5"));
     assert!(!models
         .iter()
         .any(|model| model["model"] == "legacy/lowercase-model"));
@@ -1134,7 +1134,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
             active: true,
         }],
         usage_logs: vec![],
-    announcement: None,
+        announcement: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

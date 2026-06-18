@@ -12,7 +12,8 @@ fn test_upstream_model_costs_with_float_values() {
     });
 
     // Verify float values are preserved in JSON
-    let costs = updates.get("model_request_costs")
+    let costs = updates
+        .get("model_request_costs")
         .and_then(|v| v.as_array())
         .unwrap();
 
@@ -41,5 +42,8 @@ fn test_model_costs_serialization_roundtrip() {
     let deserialized: serde_json::Value = serde_json::from_str(&serialized).unwrap();
 
     assert_eq!(original, deserialized);
-    assert_eq!(deserialized.get("cost").and_then(|v| v.as_f64()).unwrap(), 0.03);
+    assert_eq!(
+        deserialized.get("cost").and_then(|v| v.as_f64()).unwrap(),
+        0.03
+    );
 }

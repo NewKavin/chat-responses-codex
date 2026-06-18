@@ -14,23 +14,23 @@ fn test_admin_list_models_endpoint() {
     });
 
     // Verify models are sorted
-    let models = models_response.get("models")
+    let models = models_response
+        .get("models")
         .and_then(|v| v.as_array())
         .unwrap();
 
     assert_eq!(models.len(), 5);
 
     // Verify models are sorted alphabetically
-    let mut sorted_models = models.iter()
-        .filter_map(|v| v.as_str())
-        .collect::<Vec<_>>();
+    let mut sorted_models = models.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>();
     sorted_models.sort();
 
-    let original_models = models.iter()
-        .filter_map(|v| v.as_str())
-        .collect::<Vec<_>>();
+    let original_models = models.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>();
 
-    assert_eq!(original_models, sorted_models, "Models should be sorted alphabetically");
+    assert_eq!(
+        original_models, sorted_models,
+        "Models should be sorted alphabetically"
+    );
 }
 
 #[test]
@@ -41,14 +41,15 @@ fn test_admin_list_models_includes_upstream_models() {
         "glm-5",
         "gpt-3.5-turbo",
         "gpt-4",
-        "minimax-m2.7"
+        "minimax-m2.7",
     ];
 
     let models_response = json!({
         "models": expected_models.clone()
     });
 
-    let models = models_response.get("models")
+    let models = models_response
+        .get("models")
         .and_then(|v| v.as_array())
         .unwrap();
 
@@ -74,7 +75,8 @@ fn test_admin_list_models_no_duplicates() {
         ]
     });
 
-    let models = models_response.get("models")
+    let models = models_response
+        .get("models")
         .and_then(|v| v.as_array())
         .unwrap();
 

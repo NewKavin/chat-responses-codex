@@ -192,38 +192,57 @@
           <el-button @click="addModelCost" size="small">添加模型成本</el-button>
         </el-form-item>
 
-        <el-form-item label="模型上下文">
-          <el-table :data="form.model_contexts" style="width: 100%; margin-bottom: 10px">
-            <el-table-column label="模型" width="220">
-              <template #default="{ row }">
-                <el-select v-model="row.slug" placeholder="选择模型" filterable allow-create>
-                  <el-option v-for="model in availableModelsForCost" :key="model" :label="model" :value="model" />
-                </el-select>
-              </template>
-            </el-table-column>
-            <el-table-column label="上下文上限" width="160">
-              <template #default="{ row }">
-                <el-input-number v-model="row.context_limit" :min="1" :max="2000000" />
-              </template>
-            </el-table-column>
-            <el-table-column label="输出预留" width="160">
-              <template #default="{ row }">
-                <el-input-number v-model="row.output_reserve" :min="0" :max="2000000" />
-              </template>
-            </el-table-column>
-            <el-table-column label="上下文分组" min-width="180">
-              <template #default="{ row }">
-                <el-input v-model="row.context_group" placeholder="可选: 同组可自动切换更大上下文模型" />
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="100">
-              <template #default="{ row }">
-                <el-button size="small" type="danger" @click="removeModelContext(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-button @click="addModelContext" size="small">添加模型上下文</el-button>
-        </el-form-item>
+        <el-divider>模型上下文</el-divider>
+        <el-tabs v-model="contextConfigTab">
+          <el-tab-pane label="默认上下文" name="default">
+            <el-form-item label="上下文上限">
+              <el-input-number v-model="form.default_model_context!.context_limit" :min="0" :max="2000000" />
+              <span class="form-hint">留空或 0 表示不启用默认值，后续仅按模型覆盖配置生效</span>
+            </el-form-item>
+            <el-form-item label="输出预留">
+              <el-input-number v-model="form.default_model_context!.output_reserve" :min="0" :max="2000000" />
+              <span class="form-hint">输入 0 时自动回退到网关默认预留值</span>
+            </el-form-item>
+            <el-form-item label="上下文分组">
+              <el-input v-model="form.default_model_context!.context_group" placeholder="可选: 与模型分组一致时可自动切换更大上下文模型" />
+            </el-form-item>
+            <el-form-item>
+              <el-button v-if="dialogMode === 'edit'" size="small" @click="clearDefaultContextConfig">清空默认上下文</el-button>
+            </el-form-item>
+          </el-tab-pane>
+          <el-tab-pane label="模型覆盖" name="overrides">
+            <el-table :data="form.model_contexts" style="width: 100%; margin-bottom: 10px">
+              <el-table-column label="模型" width="220">
+                <template #default="{ row }">
+                  <el-select v-model="row.slug" placeholder="选择模型" filterable allow-create>
+                    <el-option v-for="model in availableModelsForCost" :key="model" :label="model" :value="model" />
+                  </el-select>
+                </template>
+              </el-table-column>
+              <el-table-column label="上下文上限" width="160">
+                <template #default="{ row }">
+                  <el-input-number v-model="row.context_limit" :min="1" :max="2000000" />
+                </template>
+              </el-table-column>
+              <el-table-column label="输出预留" width="160">
+                <template #default="{ row }">
+                  <el-input-number v-model="row.output_reserve" :min="0" :max="2000000" />
+                </template>
+              </el-table-column>
+              <el-table-column label="上下文分组" min-width="180">
+                <template #default="{ row }">
+                  <el-input v-model="row.context_group" placeholder="可选: 同组可自动切换更大上下文模型" />
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="100">
+                <template #default="{ row }">
+                  <el-button size="small" type="danger" @click="removeModelContext(row)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <el-button @click="addModelContext" size="small">添加模型上下文</el-button>
+          </el-tab-pane>
+        </el-tabs>
 
         <!-- 路由权重配置 -->
         <el-divider>智能路由配置</el-divider>
@@ -290,6 +309,8 @@ const dialogMode = ref<'create' | 'edit'>('create')
 const submitting = ref(false)
 const fetchingModels = ref(false)
 const formRef = ref()
+const contextConfigTab = ref<'default' | 'overrides'>('overrides')
+const clearDefaultContext = ref(false)
 
 // Auto-refresh timer
 let refreshTimer: number | null = null
@@ -302,6 +323,11 @@ const form = ref<Partial<UpstreamConfig>>({
   protocol: 'ChatCompletions',
   protocols: ['ChatCompletions'],
   supported_models: [],
+  default_model_context: {
+    context_limit: 0,
+    output_reserve: 0,
+    context_group: ''
+  },
   active: true,
   request_quota_window_hours: 5,
   request_quota_requests: 600,
@@ -344,6 +370,21 @@ const addModelContext = () => {
     output_reserve: 2048,
     context_group: ''
   })
+}
+
+const clearDefaultContextConfig = () => {
+  if (!form.value.default_model_context) {
+    form.value.default_model_context = {
+      context_limit: 0,
+      output_reserve: 0,
+      context_group: ''
+    }
+  } else {
+    form.value.default_model_context.context_limit = 0
+    form.value.default_model_context.output_reserve = 0
+    form.value.default_model_context.context_group = ''
+  }
+  clearDefaultContext.value = true
 }
 
 const removeModelContext = (row: any) => {
@@ -406,6 +447,8 @@ const displayProtocols = (value: UpstreamConfig) => resolveProtocols(value)
 
 const handleCreate = () => {
   dialogMode.value = 'create'
+  contextConfigTab.value = 'overrides'
+  clearDefaultContext.value = false
   form.value = {
     id: '',
     name: '',
@@ -414,6 +457,11 @@ const handleCreate = () => {
     protocol: 'ChatCompletions',
     protocols: ['ChatCompletions'],
     supported_models: [],
+    default_model_context: {
+      context_limit: 0,
+      output_reserve: 0,
+      context_group: ''
+    },
     active: true,
     request_quota_window_hours: 5,
     request_quota_requests: 600,
@@ -431,11 +479,22 @@ const handleCreate = () => {
 
 const handleEdit = (row: UpstreamConfig) => {
   dialogMode.value = 'edit'
+  contextConfigTab.value = 'default'
+  clearDefaultContext.value = false
   const protocols = resolveProtocols(row)
   form.value = {
     ...row,
     protocol: protocols[0] as UpstreamConfig['protocol'],
     protocols,
+    default_model_context: row.default_model_context
+      ? {
+          ...row.default_model_context
+        }
+      : {
+          context_limit: 0,
+          output_reserve: 0,
+          context_group: ''
+        },
     model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
     model_contexts: row.model_contexts ? [...row.model_contexts] : []
   }
@@ -458,6 +517,28 @@ const handleSubmit = async () => {
         context_group: String(item.context_group || '').trim()
       }))
       .filter(item => item.slug.length > 0 && item.context_limit > 0)
+    if (submitData.default_model_context) {
+      const context = submitData.default_model_context
+      const context_limit = Number(context.context_limit || 0)
+      const output_reserve = Number(context.output_reserve || 0)
+      const context_group = String(context.context_group || '').trim()
+      if (context_limit > 0) {
+        submitData.default_model_context = {
+          context_limit,
+          output_reserve,
+          context_group
+        }
+      } else {
+        submitData.default_model_context = {
+          context_limit: 0,
+          output_reserve: 0,
+          context_group: ''
+        }
+        if (!clearDefaultContext.value) {
+          delete submitData.default_model_context
+        }
+      }
+    }
     const protocols = resolveProtocols(submitData)
     submitData.protocols = protocols
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
@@ -480,6 +561,7 @@ const handleSubmit = async () => {
       ElMessage.error('操作失败')
     }
   } finally {
+    clearDefaultContext.value = false
     submitting.value = false
   }
 }
