@@ -1,7 +1,8 @@
 use super::log_queries::{current_month_start, enrich_usage_log, query_time_bounds};
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, DownstreamConfig, DownstreamUsageSummary,
-    DefaultModelContextConfig, ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
+    DefaultModelContextConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
+    PersistedState, UpstreamConfig,
     UpstreamProtocol,
     UsageLog, UsageLogPage, UsageLogQuery,
 };
@@ -219,6 +220,30 @@ impl PostgresStateStore {
             }
         }
 
+        let mut global_context_profiles = HashMap::new();
+        for row in conn
+            .query(
+                "SELECT upstream_base_url, model_contexts, default_model_context \
+                 FROM global_context_profiles ORDER BY upstream_base_url",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+        {
+            let base_url: String = row.get(0);
+            let base_url = base_url.trim().trim_end_matches('/').to_string();
+            if base_url.is_empty() {
+                continue;
+            }
+
+            let mut profile = GlobalContextProfile {
+                model_contexts: decode_model_contexts(row.get(1))?,
+                default_model_context: decode_default_model_context(row.get(2))?,
+            };
+            profile.normalize_for_storage();
+            global_context_profiles.insert(base_url, profile);
+        }
+
         let runtime_usage_start = runtime_usage_log_start(unix_seconds());
         let mut usage_logs = Vec::new();
         for row in conn
@@ -240,6 +265,7 @@ impl PostgresStateStore {
         Ok(PersistedState {
             upstreams,
             downstreams,
+            global_context_profiles,
             usage_logs,
             announcement,
         })
@@ -460,7 +486,56 @@ impl PostgresStateStore {
 async fn sync_config_tables(tx: &Transaction<'_>, state: &PersistedState) -> io::Result<()> {
     sync_upstreams(tx, &state.upstreams).await?;
     sync_downstreams(tx, &state.downstreams).await?;
+    sync_global_context_profiles(tx, &state.global_context_profiles).await?;
     sync_announcements(tx, &state.announcement).await
+}
+
+async fn sync_global_context_profiles(
+    tx: &Transaction<'_>,
+    profiles: &HashMap<String, GlobalContextProfile>,
+) -> io::Result<()> {
+    let desired_urls = profiles
+        .keys()
+        .map(|url| url.as_str())
+        .collect::<HashSet<_>>();
+    let existing_rows = tx
+        .query("SELECT upstream_base_url FROM global_context_profiles", &[])
+        .await
+        .map_err(io_other)?;
+    for row in existing_rows {
+        let upstream_base_url: String = row.get(0);
+        if !desired_urls.contains(upstream_base_url.as_str()) {
+            tx.execute(
+                "DELETE FROM global_context_profiles WHERE upstream_base_url = $1",
+                &[&upstream_base_url],
+            )
+            .await
+            .map_err(io_other)?;
+        }
+    }
+
+    for (upstream_base_url, profile) in profiles {
+        let params: &[&(dyn ToSql + Sync)] = &[
+            upstream_base_url,
+            &encode_model_contexts(&profile.model_contexts),
+            &encode_default_model_context(&profile.default_model_context),
+        ];
+        tx.execute(
+            "INSERT INTO global_context_profiles (
+                upstream_base_url, model_contexts, default_model_context
+            ) VALUES (
+                $1, $2, $3
+            )
+            ON CONFLICT (upstream_base_url) DO UPDATE SET
+                model_contexts = EXCLUDED.model_contexts,
+                default_model_context = EXCLUDED.default_model_context",
+            params,
+        )
+        .await
+        .map_err(io_other)?;
+    }
+
+    Ok(())
 }
 
 async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> io::Result<()> {
@@ -1077,6 +1152,12 @@ CREATE TABLE IF NOT EXISTS downstream_ip_allowlist (
     position INTEGER NOT NULL,
     ip_address TEXT NOT NULL,
     PRIMARY KEY (downstream_id, ip_address)
+);
+
+CREATE TABLE IF NOT EXISTS global_context_profiles (
+    upstream_base_url TEXT PRIMARY KEY,
+    model_contexts TEXT NULL,
+    default_model_context TEXT NULL
 );
 
 CREATE TABLE IF NOT EXISTS app_announcements (

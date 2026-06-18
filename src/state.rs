@@ -202,6 +202,22 @@ pub struct DefaultModelContextConfig {
     pub context_group: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalContextProfile {
+    #[serde(default)]
+    pub model_contexts: Vec<ModelContextConfig>,
+    #[serde(default)]
+    pub default_model_context: Option<DefaultModelContextConfig>,
+}
+
+impl GlobalContextProfile {
+    pub fn normalize_for_storage(&mut self) {
+        self.model_contexts = normalized_model_contexts(std::mem::take(&mut self.model_contexts));
+        self.default_model_context =
+            normalized_default_model_context(self.default_model_context.take());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpstreamMutationError {
     NotFound(String),
@@ -373,6 +389,14 @@ impl UpstreamConfig {
     }
 
     pub fn context_config_for_model(&self, model: &str) -> Option<ModelContextConfig> {
+        self.context_config_for_model_with_profile(model, None)
+    }
+
+    pub fn context_config_for_model_with_profile(
+        &self,
+        model: &str,
+        profile: Option<&GlobalContextProfile>,
+    ) -> Option<ModelContextConfig> {
         let candidate = self.resolved_model_name(model)?;
         for candidate in [candidate, model.trim().to_string()] {
             if let Some(config) = self
@@ -382,22 +406,62 @@ impl UpstreamConfig {
             {
                 return Some(config.clone());
             }
+
+            if let Some(profile) = profile {
+                if let Some(config) = profile
+                    .model_contexts
+                    .iter()
+                    .find(|config| config.slug.trim() == candidate)
+                {
+                    return Some(config.clone());
+                }
+            }
         }
 
-        self.default_model_context.as_ref().map(|config| ModelContextConfig {
-            slug: model.trim().to_string(),
-            context_limit: config.context_limit,
-            output_reserve: config.output_reserve,
-            context_group: config.context_group.clone(),
-        })
+        self.default_model_context
+            .as_ref()
+            .map(|config| ModelContextConfig {
+                slug: model.trim().to_string(),
+                context_limit: config.context_limit,
+                output_reserve: config.output_reserve,
+                context_group: config.context_group.clone(),
+            })
+            .or_else(|| {
+                profile
+                    .and_then(|profile| profile.default_model_context.as_ref())
+                    .map(|config| ModelContextConfig {
+                        slug: model.trim().to_string(),
+                        context_limit: config.context_limit,
+                        output_reserve: config.output_reserve,
+                        context_group: config.context_group.clone(),
+                    })
+            })
     }
 
-    pub fn context_fallback_model_for(
+    pub fn context_fallback_model_for(&self, model: &str, minimum_context_limit: u32) -> Option<String> {
+        self.context_fallback_model_for_with_profile(model, minimum_context_limit, None)
+    }
+
+    pub fn context_fallback_model_for_with_profile(
         &self,
         model: &str,
         minimum_context_limit: u32,
+        profile: Option<&GlobalContextProfile>,
     ) -> Option<String> {
-        let current = self.context_config_for_model(model)?;
+        let current = self.context_config_for_model_with_profile(model, profile)?;
+
+        let mut candidate_contexts = HashMap::new();
+
+        if let Some(profile) = profile {
+            for config in &profile.model_contexts {
+                candidate_contexts.insert(config.slug.trim().to_string(), config.clone());
+            }
+        }
+
+        for config in &self.model_contexts {
+            candidate_contexts.insert(config.slug.trim().to_string(), config.clone());
+        }
+
         let group = current.context_group.trim();
         if group.is_empty() {
             return None;
@@ -406,9 +470,8 @@ impl UpstreamConfig {
             .resolved_model_name(model)
             .unwrap_or_else(|| model.to_string());
 
-        let mut candidates = self
-            .model_contexts
-            .iter()
+        let mut candidates = candidate_contexts
+            .values()
             .filter(|config| {
                 config.context_group.trim() == group && config.context_limit > current.context_limit
             })
@@ -433,6 +496,7 @@ impl UpstreamConfig {
                 }
             }
         }
+
         None
     }
 }
@@ -549,6 +613,26 @@ fn normalized_default_model_context(
         output_reserve,
         context_group: context.context_group.trim().to_string(),
     })
+}
+
+fn normalize_context_profile_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn normalize_global_context_profiles_for_storage(
+    profiles: HashMap<String, GlobalContextProfile>,
+) -> HashMap<String, GlobalContextProfile> {
+    profiles
+        .into_iter()
+        .filter_map(|(base_url, mut profile)| {
+            let base_url = normalize_context_profile_base_url(&base_url);
+            if base_url.is_empty() {
+                return None;
+            }
+            profile.normalize_for_storage();
+            Some((base_url, profile))
+        })
+        .collect::<HashMap<_, _>>()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -672,6 +756,8 @@ pub struct PersistedState {
     pub usage_logs: Vec<UsageLog>,
     #[serde(default)]
     pub announcement: Option<AnnouncementConfig>,
+    #[serde(default)]
+    pub global_context_profiles: HashMap<String, GlobalContextProfile>,
 }
 
 #[derive(Clone)]
@@ -747,6 +833,9 @@ impl AppState {
         for upstream in &mut state.upstreams {
             upstream.normalize_for_storage();
         }
+        state.global_context_profiles = normalize_global_context_profiles_for_storage(
+            std::mem::take(&mut state.global_context_profiles),
+        );
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -793,6 +882,9 @@ impl AppState {
         for upstream in &mut state.upstreams {
             upstream.normalize_for_storage();
         }
+        state.global_context_profiles = normalize_global_context_profiles_for_storage(
+            std::mem::take(&mut state.global_context_profiles),
+        );
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -834,6 +926,9 @@ impl AppState {
         for upstream in &mut state.upstreams {
             upstream.normalize_for_storage();
         }
+        state.global_context_profiles = normalize_global_context_profiles_for_storage(
+            std::mem::take(&mut state.global_context_profiles),
+        );
         let downstream_usage_logs = state.usage_logs.clone();
         let postgres = Arc::new(postgres);
         let config_store: Arc<dyn StateStore> = postgres.clone();
@@ -1004,7 +1099,21 @@ impl AppState {
             downstreams: state.downstreams.clone(),
             usage_logs: Vec::new(),
             announcement: None,
+            global_context_profiles: state.global_context_profiles.clone(),
         }
+    }
+
+    pub async fn global_context_profile_for_upstream_base_url(
+        &self,
+        base_url: &str,
+    ) -> Option<GlobalContextProfile> {
+        let base_url = normalize_context_profile_base_url(base_url);
+        if base_url.is_empty() {
+            return None;
+        }
+
+        let state = self.inner.lock().await;
+        state.global_context_profiles.get(&base_url).cloned()
     }
 
     pub async fn load_from_path(path: impl AsRef<Path>, config: AppConfig) -> io::Result<Self> {
@@ -1082,6 +1191,20 @@ impl AppState {
     ) -> io::Result<()> {
         self.mutate_persisted_state_io(move |state| {
             state.announcement = announcement;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_global_context_profiles(
+        &self,
+        global_context_profiles: std::collections::HashMap<String, GlobalContextProfile>,
+    ) -> io::Result<()> {
+        let global_context_profiles =
+            normalize_global_context_profiles_for_storage(global_context_profiles);
+
+        self.mutate_persisted_state_io(move |state| {
+            state.global_context_profiles = global_context_profiles;
             Ok(())
         })
         .await
@@ -2003,6 +2126,7 @@ impl AppState {
         state.upstreams = candidate_state.upstreams;
         state.downstreams = candidate_state.downstreams;
         state.announcement = candidate_state.announcement;
+        state.global_context_profiles = candidate_state.global_context_profiles;
 
         Ok(result)
     }
@@ -3150,8 +3274,8 @@ impl AppState {
 mod tests {
     use super::{
         should_bypass_proxy_for_host, should_bypass_proxy_for_url, AppConfig, AppState,
-        DefaultModelContextConfig, ModelContextConfig, ModelRequestCostConfig, PersistedState,
-        UpstreamConfig,
+        DefaultModelContextConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
+        PersistedState, UpstreamConfig,
     };
 
     #[test]
@@ -3420,6 +3544,145 @@ mod tests {
         assert_eq!(
             upstream.context_fallback_model_for("GLM-5", 8_000),
             Some("GLM-5-Long".into())
+        );
+    }
+
+    #[test]
+    fn context_config_with_profile_uses_upstream_override_first() {
+        let upstream = UpstreamConfig {
+            supported_models: vec!["GLM-5".into()],
+            model_contexts: vec![ModelContextConfig {
+                slug: "GLM-5".into(),
+                context_limit: 4_096,
+                output_reserve: 256,
+                context_group: "upstream".into(),
+            }],
+            ..Default::default()
+        };
+        let profile = GlobalContextProfile {
+            model_contexts: vec![ModelContextConfig {
+                slug: "GLM-5".into(),
+                context_limit: 8_192,
+                output_reserve: 512,
+                context_group: "profile".into(),
+            }],
+            default_model_context: Some(DefaultModelContextConfig {
+                context_limit: 2_048,
+                output_reserve: 128,
+                context_group: "shared".into(),
+            }),
+        };
+
+        let config = upstream.context_config_for_model_with_profile("GLM-5", Some(&profile));
+        let Some(config) = config else {
+            panic!("missing config");
+        };
+        assert_eq!(config.context_limit, 4_096);
+        assert_eq!(config.context_group, "upstream");
+    }
+
+    #[test]
+    fn context_config_with_profile_falls_back_to_profile_when_upstream_missing() {
+        let upstream = UpstreamConfig {
+            supported_models: vec!["GLM-5".into()],
+            ..Default::default()
+        };
+        let profile = GlobalContextProfile {
+            model_contexts: vec![ModelContextConfig {
+                slug: "GLM-5".into(),
+                context_limit: 6_553,
+                output_reserve: 384,
+                context_group: "shared".into(),
+            }],
+            default_model_context: Some(DefaultModelContextConfig {
+                context_limit: 2_048,
+                output_reserve: 128,
+                context_group: "fallback".into(),
+            }),
+        };
+
+        assert_eq!(
+            upstream.context_config_for_model_with_profile("GLM-5", Some(&profile)),
+            Some(ModelContextConfig {
+                slug: "GLM-5".into(),
+                context_limit: 6_553,
+                output_reserve: 384,
+                context_group: "shared".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn context_fallback_with_profile_prefers_profile_wider_window() {
+        let upstream = UpstreamConfig {
+            supported_models: vec!["MiniMax2.7".into(), "MiniMax2.7-Long".into()],
+            model_contexts: vec![ModelContextConfig {
+                slug: "MiniMax2.7".into(),
+                context_limit: 4_000,
+                output_reserve: 512,
+                context_group: "shared".into(),
+            }],
+            ..Default::default()
+        };
+        let profile = GlobalContextProfile {
+            model_contexts: vec![ModelContextConfig {
+                slug: "MiniMax2.7-Long".into(),
+                context_limit: 32_000,
+                output_reserve: 2_048,
+                context_group: "shared".into(),
+            }],
+            default_model_context: None,
+        };
+
+        assert_eq!(
+            upstream.context_fallback_model_for_with_profile("MiniMax2.7", 30_000, Some(&profile)),
+            Some("MiniMax2.7-Long".into())
+        );
+    }
+
+    #[test]
+    fn normalize_global_context_profile_for_storage_trims_and_dedups() {
+        let mut profile = GlobalContextProfile {
+            model_contexts: vec![
+                ModelContextConfig {
+                    slug: " gpt-4.1 ".into(),
+                    context_limit: 0,
+                    output_reserve: 0,
+                    context_group: " Shared ".into(),
+                },
+                ModelContextConfig {
+                    slug: "gpt-4.1 ".into(),
+                    context_limit: 8_192,
+                    output_reserve: 256,
+                    context_group: "shared".into(),
+                },
+            ],
+            default_model_context: Some(DefaultModelContextConfig {
+                context_limit: 0,
+                output_reserve: 0,
+                context_group: " Shared ".into(),
+            }),
+        };
+
+        profile.normalize_for_storage();
+
+        assert_eq!(profile.model_contexts.len(), 1);
+        assert_eq!(
+            profile.model_contexts[0],
+            ModelContextConfig {
+                slug: "gpt-4.1".into(),
+                context_limit: 2,
+                output_reserve: 1,
+                context_group: "Shared".into(),
+            }
+        );
+        assert_eq!(
+            profile.default_model_context,
+            Some(DefaultModelContextConfig {
+                context_limit: 2,
+                output_reserve: 1,
+                context_group: "Shared".into(),
+            })
         );
     }
 

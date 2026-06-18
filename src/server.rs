@@ -6,7 +6,7 @@ use crate::protocol::{
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, AnnouncementConfig,
-    AnnouncementLevel, AppConfig, AppState, DownstreamConfig, UpstreamConfig,
+    AnnouncementLevel, AppConfig, AppState, DownstreamConfig, GlobalContextProfile, UpstreamConfig,
     UpstreamMutationError, UsageLog, UsageLogQuery,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
@@ -468,6 +468,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/announcement",
             get(admin_get_announcement)
                 .put(admin_update_announcement)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
+            "/api/admin/global-context-profiles",
+            get(admin_get_global_context_profiles)
+                .put(admin_set_global_context_profiles)
                 .route_layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     admin_auth_middleware,
@@ -1532,6 +1541,9 @@ async fn process_gateway_request(
                 if let Some(ref mut ctx) = stream_completion_context {
                     ctx.upstream_id = upstream.id.clone();
                 }
+                let global_context_profile = state
+                    .global_context_profile_for_upstream_base_url(&upstream.base_url)
+                    .await;
 
                 let result = send_to_upstream(
                     &state,
@@ -1550,6 +1562,7 @@ async fn process_gateway_request(
                     inference_strength.as_deref(),
                     user_agent.as_deref(),
                     fallback_to_chat,
+                    global_context_profile.as_ref(),
                     stream_completion_context.clone(),
                 )
                 .await;
@@ -2394,10 +2407,12 @@ fn trim_context_entries(payload: &mut Value, target_tokens: u64) -> ContextTrimS
 
 fn apply_context_budget_controls(
     upstream: &UpstreamConfig,
+    global_context_profile: Option<&GlobalContextProfile>,
     payload: &mut Value,
     model: &str,
 ) -> Option<ContextBudgetReport> {
-    let mut config = upstream.context_config_for_model(model)?;
+    let mut config =
+        upstream.context_config_for_model_with_profile(model, global_context_profile)?;
     let requested_output_tokens = requested_output_tokens_from_payload(payload);
     let mut baseline_tokens = estimate_payload_baseline_tokens(payload);
     let mut entry_tokens = estimate_context_entry_tokens(payload);
@@ -2431,13 +2446,19 @@ fn apply_context_budget_controls(
             .saturating_add(requested_output_tokens.max(u64::from(output_reserve)))
             .min(u64::from(u32::MAX)) as u32;
 
-        if let Some(switched_model) = upstream.context_fallback_model_for(model, required_limit) {
+        if let Some(switched_model) = upstream.context_fallback_model_for_with_profile(
+            model,
+            required_limit,
+            global_context_profile,
+        ) {
             if let Some(object) = payload.as_object_mut() {
                 object.insert("model".into(), Value::String(switched_model.clone()));
             }
             fallback_model = Some(switched_model.clone());
 
-            if let Some(next_config) = upstream.context_config_for_model(&switched_model) {
+            if let Some(next_config) = upstream
+                .context_config_for_model_with_profile(&switched_model, global_context_profile)
+            {
                 config = next_config;
                 context_limit = config.context_limit;
                 output_reserve = config.output_reserve;
@@ -2566,6 +2587,7 @@ async fn send_to_upstream(
     inference_strength: Option<&str>,
     user_agent: Option<&str>,
     chat_fallback_requested: bool,
+    global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
 ) -> Result<DispatchResult, GatewayError> {
     let upstream_body = match (endpoint, upstream_protocol) {
@@ -2669,8 +2691,12 @@ async fn send_to_upstream(
         }
     }
 
-    let context_budget_report =
-        apply_context_budget_controls(upstream, &mut upstream_body, &final_upstream_model);
+    let context_budget_report = apply_context_budget_controls(
+        upstream,
+        global_context_profile,
+        &mut upstream_body,
+        &final_upstream_model,
+    );
     if let Some(report) = context_budget_report.as_ref() {
         if let Some(switched_model) = report.fallback_model.as_ref() {
             final_upstream_model = switched_model.clone();
@@ -5159,6 +5185,45 @@ async fn admin_update_announcement(
 
     Json(json!({
         "announcement": announcement
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct GlobalContextProfilesPayload {
+    #[serde(default)]
+    global_context_profiles: std::collections::HashMap<String, GlobalContextProfile>,
+}
+
+async fn admin_get_global_context_profiles(State(state): State<AppState>) -> impl IntoResponse {
+    Json(json!({
+        "global_context_profiles": state.snapshot().await.global_context_profiles,
+    }))
+    .into_response()
+}
+
+async fn admin_set_global_context_profiles(
+    State(state): State<AppState>,
+    Json(payload): Json<GlobalContextProfilesPayload>,
+) -> impl IntoResponse {
+    if let Err(error) = state
+        .set_global_context_profiles(payload.global_context_profiles)
+        .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to save global context profiles: {error}")
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let snapshot = state.snapshot().await;
+    Json(json!({
+        "global_context_profiles": snapshot.global_context_profiles,
     }))
     .into_response()
 }

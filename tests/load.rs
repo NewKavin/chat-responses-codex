@@ -124,6 +124,7 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
             }],
             usage_logs: vec![],
             announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
         AppConfig::default(),

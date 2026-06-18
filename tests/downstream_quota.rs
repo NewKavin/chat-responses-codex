@@ -54,6 +54,7 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
                 latency_ms: 12,
                 created_at: now,
             }],
+            global_context_profiles: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -119,6 +120,7 @@ async fn request_quota_usage_remaining_calculation() {
                     created_at: now,
                 })
                 .collect(),
+            global_context_profiles: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -186,6 +188,7 @@ async fn request_quota_usage_remaining_when_exhausted() {
                     created_at: now,
                 })
                 .collect(),
+            global_context_profiles: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

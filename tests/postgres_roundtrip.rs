@@ -1,9 +1,11 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DownstreamConfig,
-    ModelRequestCostConfig, UpstreamConfig, UsageLog, UsageLogQuery,
+    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DefaultModelContextConfig,
+    DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
+    UpstreamConfig, UsageLog, UsageLogQuery,
 };
+use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -213,6 +215,75 @@ async fn postgres_roundtrip_preserves_announcement_state() {
     let snapshot = reloaded.snapshot().await;
 
     assert_eq!(snapshot.announcement, Some(announcement));
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_global_context_profiles() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    let mut global_context_profiles = HashMap::new();
+    global_context_profiles.insert(
+        "https://api.example.com/v1/".to_string(),
+        GlobalContextProfile {
+            model_contexts: vec![ModelContextConfig {
+                slug: "  glm-4.1-mini  ".to_string(),
+                context_limit: 8192,
+                output_reserve: 2048,
+                context_group: " glm ".to_string(),
+            }],
+            default_model_context: Some(DefaultModelContextConfig {
+                context_limit: 4096,
+                output_reserve: 1024,
+                context_group: " glm ".to_string(),
+            }),
+        },
+    );
+
+    state
+        .set_global_context_profiles(global_context_profiles)
+        .await
+        .expect("should persist global context profile rows");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL");
+    let snapshot = reloaded.snapshot().await;
+
+    assert_eq!(snapshot.global_context_profiles.len(), 1);
+    let profile = snapshot
+        .global_context_profiles
+        .get("https://api.example.com/v1")
+        .expect("should normalize and load global context profile");
+    assert_eq!(profile.model_contexts.len(), 1);
+    assert_eq!(profile.model_contexts[0].slug, "glm-4.1-mini");
+    assert_eq!(profile.model_contexts[0].context_group, "glm");
+    assert_eq!(
+        profile
+            .default_model_context
+            .as_ref()
+            .expect("default model context should be present")
+            .context_group,
+        "glm",
+    );
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
@@ -480,7 +551,7 @@ fn reset_test_database(database_url: &str) {
             "-v",
             "ON_ERROR_STOP=1",
             "-c",
-            "TRUNCATE TABLE usage_logs, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_model_request_costs, upstream_supported_models, upstreams RESTART IDENTITY",
+            "TRUNCATE TABLE usage_logs, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_model_request_costs, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
         ])
         .output()
         .expect("psql should run");

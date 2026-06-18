@@ -48,6 +48,7 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         downstreams: vec![downstream],
         usage_logs: vec![],
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     (

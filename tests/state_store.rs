@@ -48,6 +48,7 @@ async fn file_store_persists_announcement_payload() {
             downstreams: vec![],
             usage_logs: vec![],
             announcement: Some(announcement.clone()),
+            global_context_profiles: std::collections::HashMap::new(),
         },
         state_path.clone(),
         AppConfig::default(),
@@ -109,6 +110,7 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
                 usage_log("log-7", "downstream-1", "gpt-4", 200, 50, now - 8 * 86_400),
             ],
             announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
         },
         unique_state_path(),
         AppConfig::default(),
@@ -207,6 +209,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                 },
             ],
             announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
         },
         unique_state_path(),
         AppConfig::default(),
@@ -283,6 +286,7 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                 usage_log("log-c", "downstream-3", "gpt-4.1-mini", 200, 999, now - 60),
             ],
             announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
         },
         unique_state_path(),
         AppConfig::default(),
@@ -396,6 +400,7 @@ async fn routing_snapshot_does_not_block_behind_slow_config_persist() {
                 active: true,
                 ..UpstreamConfig::default()
             }],
+            global_context_profiles: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         unique_state_path(),
@@ -600,6 +605,7 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
                 active: true,
             }],
             usage_logs: vec![],
+            global_context_profiles: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         unique_state_path(),
@@ -662,6 +668,7 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
                 active: true,
             }],
             usage_logs: vec![],
+            global_context_profiles: std::collections::HashMap::new(),
             ..PersistedState::default()
         },
         unique_state_path(),

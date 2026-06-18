@@ -222,6 +222,7 @@ fn create_test_state() -> AppState {
             },
         ],
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     AppState::new(state, unique_state_path(), config)

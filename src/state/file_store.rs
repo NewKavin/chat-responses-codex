@@ -43,6 +43,7 @@ impl StateStore for FileStateStore {
                 downstreams: state.downstreams.clone(),
                 usage_logs: Vec::new(),
                 announcement: state.announcement.clone(),
+                global_context_profiles: state.global_context_profiles.clone(),
             })
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
 

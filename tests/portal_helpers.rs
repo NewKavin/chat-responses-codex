@@ -78,6 +78,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
         }],
         usage_logs: logs,
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -1325,6 +1326,7 @@ async fn test_compute_model_stats_empty_allowlist() {
         }],
         usage_logs: logs,
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     let app_state = chat_responses_codex::state::AppState::new(state, unique_state_path(), config);

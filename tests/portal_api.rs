@@ -158,6 +158,7 @@ fn canonical_upstream_state() -> (AppState, String) {
             },
         ],
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -241,6 +242,7 @@ fn create_test_state() -> (AppState, String) {
             },
         ],
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -320,6 +322,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             },
         ],
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -379,6 +382,7 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
         }],
         usage_logs,
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1135,6 +1139,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
         }],
         usage_logs: vec![],
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

@@ -149,6 +149,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
             },
         ],
         announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
     };
 
     AppState::new(state, unique_state_path(), config)

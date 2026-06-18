@@ -38,5 +38,28 @@
     }
   ],
   "downstreams": [],
-  "usage_logs": []
+  "usage_logs": [],
+  "global_context_profiles": {
+    "https://glm.example.com/v1": {
+      "model_contexts": [
+        {
+          "slug": "ZhipuAI/GLM-5",
+          "context_limit": 32768,
+          "output_reserve": 2048,
+          "context_group": "glm"
+        },
+        {
+          "slug": "ZhipuAI/GLM-5-Long",
+          "context_limit": 81920,
+          "output_reserve": 4096,
+          "context_group": "glm"
+        }
+      ],
+      "default_model_context": {
+        "context_limit": 8192,
+        "output_reserve": 1024,
+        "context_group": "glm"
+      }
+    }
+  }
 }
