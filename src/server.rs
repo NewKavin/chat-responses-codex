@@ -2532,13 +2532,120 @@ fn parse_u16_code(value: &Value) -> Option<u16> {
     None
 }
 
-fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
-    if let Ok(value) = serde_json::from_str::<Value>(error_text) {
-        let candidate_code = value.get("error").and_then(|error| error.get("code"));
-        let code = candidate_code.or_else(|| value.get("code"))?;
-        return parse_u16_code(code);
+#[derive(Debug, Clone, Default)]
+struct ParsedUpstreamError {
+    code: Option<String>,
+    message: Option<String>,
+}
+
+fn collect_upstream_error_fields(value: &Value, parsed: &mut ParsedUpstreamError, depth: u8) {
+    if depth == 0 {
+        return;
     }
 
+    match value {
+        Value::Object(object) => {
+            if parsed.code.is_none() {
+                if let Some(code) = object.get("code").or_else(|| object.get("error_code")) {
+                    parsed.code = code.as_str().map(|value| value.to_string());
+                    if parsed.code.is_none() {
+                        parsed.code = parse_u16_code(code).map(|code| code.to_string());
+                    }
+                }
+            }
+
+            if parsed.message.is_none() {
+                if let Some(message) = object
+                    .get("message")
+                    .or_else(|| object.get("error_message"))
+                    .or_else(|| object.get("error_msg"))
+                    .or_else(|| object.get("detail"))
+                {
+                    collect_upstream_error_fields(message, parsed, depth - 1);
+                }
+            }
+
+            if let Some(error_value) = object.get("error") {
+                collect_upstream_error_fields(error_value, parsed, depth - 1);
+            }
+
+            if let Some(errors) = object.get("errors").and_then(Value::as_array) {
+                for error_item in errors {
+                    if parsed.code.is_some() && parsed.message.is_some() {
+                        break;
+                    }
+                    collect_upstream_error_fields(error_item, parsed, depth - 1);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                if parsed.code.is_some() && parsed.message.is_some() {
+                    break;
+                }
+                collect_upstream_error_fields(value, parsed, depth - 1);
+            }
+        }
+        Value::String(message) => {
+            let message = message.trim();
+            if !(message.starts_with('{') || message.starts_with('[')) {
+                if parsed.message.is_none() && !message.is_empty() {
+                    parsed.message = Some(message.to_string());
+                }
+                return;
+            }
+
+            if let Ok(value) = serde_json::from_str::<Value>(message) {
+                collect_upstream_error_fields(&value, parsed, depth - 1);
+                return;
+            }
+
+            let message_with_escaped_quotes = message.replace("\\\"", "\"");
+            if let Ok(value) = serde_json::from_str::<Value>(&message_with_escaped_quotes) {
+                collect_upstream_error_fields(&value, parsed, depth - 1);
+                return;
+            }
+
+            if parsed.message.is_none() && !message.is_empty() {
+                parsed.message = Some(message.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_upstream_error_payload(error_text: &str) -> ParsedUpstreamError {
+    let mut parsed = ParsedUpstreamError::default();
+    let trimmed = error_text.trim();
+    if trimmed.is_empty() {
+        return parsed;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        collect_upstream_error_fields(&value, &mut parsed, 8);
+        return parsed;
+    }
+
+    parsed
+}
+
+fn extract_upstream_error_message(error_text: &str) -> String {
+    let parsed = parse_upstream_error_payload(error_text);
+
+    if let Some(code) = parsed.code.as_deref() {
+        if code.parse::<u16>().is_err() && !code.is_empty() {
+            return code.to_string();
+        }
+    }
+
+    if let Some(message) = parsed.message.filter(|message| !message.trim().is_empty()) {
+        return message;
+    }
+
+    error_text.to_string()
+}
+
+fn fallback_error_code_from_text(error_text: &str) -> Option<u16> {
     let normalized = error_text.to_ascii_lowercase();
     let mut tokens = normalized.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
     while let Some(token) = tokens.next() {
@@ -2548,9 +2655,36 @@ fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
                     return Some(code);
                 }
             }
+            continue;
+        }
+
+        if let Ok(code) = token.parse::<u16>() {
+            return Some(code);
         }
     }
     None
+}
+
+fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
+    let payload = parse_upstream_error_payload(error_text);
+    if let Some(code) = payload.code {
+        if let Ok(code) = code.parse::<u16>() {
+            return Some(code);
+        }
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(error_text) {
+        if let Some(candidate_code) = value
+            .get("code")
+            .or_else(|| value.get("error").and_then(|error| error.get("code")))
+        {
+            if let Some(code) = parse_u16_code(candidate_code) {
+                return Some(code);
+            }
+        }
+    }
+
+    fallback_error_code_from_text(error_text)
 }
 
 fn halve_generation_cap_for_context_retry(payload: &mut Value) -> Option<(&'static str, u64, u64)> {
@@ -2801,7 +2935,8 @@ async fn send_to_upstream(
         // Get headers before consuming response with .text()
         let headers = response.headers().clone();
         let error_text = response.text().await.unwrap_or_default();
-        let error_excerpt = error_text.chars().take(512).collect::<String>();
+        let upstream_error_message = extract_upstream_error_message(&error_text);
+        let error_excerpt = upstream_error_message.chars().take(512).collect::<String>();
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
         // Classify the upstream response to determine how to handle it
@@ -2877,16 +3012,18 @@ async fn send_to_upstream(
                         message: if error_excerpt.is_empty() {
                             format!("upstream rate limited (code {inner_code})")
                         } else {
-                            format!("upstream rate limited: {error_text}")
+                            format!("upstream rate limited: {error_excerpt}")
                         },
                         retry_after_seconds: Some(retry_after_seconds),
                     });
                 }
-                return Err(GatewayError::BadRequest(if error_text.is_empty() {
-                    format!("upstream rejected request with status {inner_code}")
-                } else {
-                    error_text
-                }));
+                return Err(GatewayError::BadRequest(
+                    if upstream_error_message.is_empty() {
+                        format!("upstream rejected request with status {inner_code}")
+                    } else {
+                        upstream_error_message
+                    },
+                ));
             }
         }
 
@@ -2940,19 +3077,21 @@ async fn send_to_upstream(
             UpstreamFeedbackClassification::Unknown => {
                 // Unknown error - pass through client errors (4xx) as BadRequest, server errors (5xx) as Upstream
                 if status.is_client_error() {
-                    return Err(GatewayError::BadRequest(if error_text.is_empty() {
-                        format!("upstream rejected request with status {}", status.as_u16())
-                    } else {
-                        error_text
-                    }));
+                    return Err(GatewayError::BadRequest(
+                        if upstream_error_message.is_empty() {
+                            format!("upstream rejected request with status {}", status.as_u16())
+                        } else {
+                            upstream_error_message
+                        },
+                    ));
                 } else {
                     return Err(GatewayError::Upstream(format!(
                         "upstream responded with status {}{}",
                         status,
-                        if error_text.is_empty() {
+                        if upstream_error_message.is_empty() {
                             String::new()
                         } else {
-                            format!(": {error_text}")
+                            format!(": {upstream_error_message}")
                         }
                     )));
                 }
@@ -6369,5 +6508,52 @@ mod tests {
             "completion_tokens": 128,
         });
         assert_eq!(usage_from_usage_value(&usage), (256, 128, 384));
+    }
+
+    #[test]
+    fn parse_upstream_error_payload_unwraps_nested_error_message() {
+        let payload = json!({
+            "error": {
+                "message": "{\\\"error\\\":{\\\"message\\\":\\\"openai_error\\\",\\\"type\\\":\\\"bad_response_status_code\\\",\\\"param\\\":\\\"\\\",\\\"code\\\":\\\"bad_response_status_code\\\"}}"
+            }
+        })
+        .to_string();
+        let parsed = super::parse_upstream_error_payload(&payload);
+
+        assert_eq!(parsed.code, Some("bad_response_status_code".to_string()));
+        assert_eq!(parsed.message, Some("openai_error".to_string()));
+    }
+
+    #[test]
+    fn extract_upstream_error_message_prefers_symbolic_code_if_non_numeric() {
+        let payload = json!({
+            "error": {
+                "message": "{\\\"error\\\":{\\\"message\\\":\\\"openai_error\\\",\\\"type\\\":\\\"bad_response_status_code\\\",\\\"param\\\":\\\"\\\",\\\"code\\\":\\\"bad_response_status_code\\\"}}"
+            }
+        })
+        .to_string();
+        assert_eq!(
+            super::extract_upstream_error_message(&payload),
+            "bad_response_status_code"
+        );
+    }
+
+    #[test]
+    fn extract_upstream_error_code_handles_nested_numeric_string() {
+        let payload = r#"{"error":{"code":"429","message":"quota exceeded"}}"#;
+
+        assert_eq!(super::extract_upstream_error_code(payload), Some(429));
+    }
+
+    #[test]
+    fn extract_upstream_error_code_falls_back_to_plaintext() {
+        assert_eq!(
+            super::extract_upstream_error_code("error code 413 payload"),
+            Some(413)
+        );
+        assert_eq!(
+            super::extract_upstream_error_code("unexpected code 404 error"),
+            Some(404)
+        );
     }
 }

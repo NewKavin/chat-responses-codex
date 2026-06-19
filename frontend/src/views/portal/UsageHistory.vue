@@ -239,7 +239,21 @@ const updateTokenChart = () => {
   tokenChart.clear()
   tokenChart.resize()
   tokenChart.setOption({
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        if (!Array.isArray(params) || params.length === 0) {
+          return ''
+        }
+
+        return `${params[0].axisValue}<br/>${params
+          .map(item => {
+            const value = Number(item.value ?? 0)
+            return `${item.marker}${item.seriesName}: ${formatCompactNumber(value)}`
+          })
+          .join('<br/>')}`
+      }
+    },
     grid: { left: 40, right: 20, top: 24, bottom: 24 },
     xAxis: {
       type: 'category',
@@ -247,7 +261,7 @@ const updateTokenChart = () => {
     },
     yAxis: {
       type: 'value',
-      name: 'Token',
+      name: 'Token（K/M）',
       axisLabel: {
         formatter: (value: number) => formatCompactNumber(value)
       }

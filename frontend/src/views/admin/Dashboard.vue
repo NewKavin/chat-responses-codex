@@ -293,7 +293,26 @@ const updateOverviewChart = (series: DashboardAnalyticsRange['daily_series']) =>
   })
 
   overviewChart.setOption({
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        if (!Array.isArray(params) || params.length === 0) {
+          return ''
+        }
+
+        return `${params[0].axisValue}<br/>${params
+          .map(item => {
+            const value = Number(item.value ?? 0)
+            const formattedValue =
+              item.seriesName === 'Token 总量'
+                ? formatCompactToken(value)
+                : value.toLocaleString('zh-CN')
+
+            return `${item.marker}${item.seriesName}: ${formattedValue}`
+          })
+          .join('<br/>')}`
+      }
+    },
     legend: { data: ['请求次数', 'Token 总量', '平均耗时'] },
     grid: { left: 40, right: 40, top: 40, bottom: 30 },
     xAxis: {
@@ -303,11 +322,29 @@ const updateOverviewChart = (series: DashboardAnalyticsRange['daily_series']) =>
     yAxis: [
       {
         type: 'value',
-        name: '请求/Token'
+        name: '请求次数',
+        position: 'left',
+        axisLabel: {
+          formatter: (value: number) => value.toLocaleString('zh-CN')
+        }
       },
       {
         type: 'value',
-        name: '耗时(ms)'
+        name: '耗时(ms)',
+        position: 'right',
+        offset: 0,
+        axisLabel: {
+          formatter: (value: number) => value.toLocaleString('zh-CN')
+        }
+      },
+      {
+        type: 'value',
+        name: 'Token（K/M）',
+        position: 'right',
+        offset: 52,
+        axisLabel: {
+          formatter: (value: number) => formatCompactToken(value)
+        }
       }
     ],
     series: [
@@ -322,6 +359,7 @@ const updateOverviewChart = (series: DashboardAnalyticsRange['daily_series']) =>
       {
         name: 'Token 总量',
         type: 'bar',
+        yAxisIndex: 2,
         data: tokenSeries,
         itemStyle: { color: '#67C23A' }
       },
