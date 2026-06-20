@@ -44,6 +44,9 @@
           <el-tab-pane label="集成示例" name="integration" lazy>
             <Integration />
           </el-tab-pane>
+          <el-tab-pane label="模型操练场" name="playground" lazy>
+            <Playground />
+          </el-tab-pane>
           <el-tab-pane label="秘钥管理" name="key" lazy>
             <KeyManagement />
           </el-tab-pane>
@@ -61,6 +64,7 @@ import QuotaDetails from './QuotaDetails.vue'
 import UsageHistory from './UsageHistory.vue'
 import Integration from './Integration.vue'
 import KeyManagement from './KeyManagement.vue'
+import Playground from './Playground.vue'
 import { portalApi } from '@/api/portal'
 import { buildAnnouncementSeenKey, shouldShowAnnouncement } from '@/utils/announcement'
 import type { Announcement } from '@/types'
