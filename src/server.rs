@@ -6,8 +6,9 @@ use crate::protocol::{
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, AnnouncementConfig,
-    AnnouncementLevel, AppConfig, AppState, DownstreamConfig, GlobalContextProfile, UpstreamConfig,
-    UpstreamMutationError, UsageLog, UsageLogQuery,
+    AnnouncementLevel, AppConfig, AppState, DownstreamConfig, FreekeySyncItem,
+    GlobalContextProfile, UpstreamConfig, UpstreamMutationError, UsageLog,
+    UsageLogQuery,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::Body;
@@ -458,6 +459,13 @@ pub fn build_router(state: AppState) -> Router {
                 )),
         )
         .route(
+            "/api/admin/upstreams/batch",
+            post(admin_create_upstreams_batch).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
             "/api/admin/models",
             get(admin_list_models).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -481,6 +489,13 @@ pub fn build_router(state: AppState) -> Router {
                     state.clone(),
                     admin_auth_middleware,
                 )),
+        )
+        .route(
+            "/api/admin/integrations/freekey/sync",
+            post(admin_sync_freekey_upstreams).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
         )
         .route(
             "/api/admin/upstreams/{id}",
@@ -1548,6 +1563,7 @@ async fn process_gateway_request(
                 let result = send_to_upstream(
                     &state,
                     &upstream,
+                    &upstream.api_key,
                     protocol,
                     &body,
                     endpoint,
@@ -1828,7 +1844,7 @@ async fn process_gateway_request(
                         last_error = Some(GatewayError::TemporaryUpstreamUnavailable(message));
                         last_failure_upstream =
                             Some((upstream.id.clone(), Some(upstream.name.clone())));
-                        break;
+                        continue;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -1987,9 +2003,18 @@ fn responses_request_to_chat_payload_with_fallback(body: &Value) -> Result<Value
     let mut sanitized = body.clone();
 
     if let Some(object) = sanitized.as_object_mut() {
+        let mut retained_function_tool_names: Vec<String> = Vec::new();
         let (had_tools_array, has_supported_tools) = match object.get_mut("tools") {
             Some(Value::Array(tools)) => {
-                tools.retain(|tool| !responses_tool_requires_responses_upstream(tool));
+                tools.retain(|tool| {
+                    let keep_tool = !responses_tool_requires_responses_upstream(tool);
+                    if keep_tool {
+                        if let Some(name) = responses_function_tool_name(tool) {
+                            retained_function_tool_names.push(name);
+                        }
+                    }
+                    keep_tool
+                });
                 (true, !tools.is_empty())
             }
             _ => (false, false),
@@ -2000,7 +2025,11 @@ fn responses_request_to_chat_payload_with_fallback(body: &Value) -> Result<Value
         }
 
         if let Some(tool_choice) = object.get("tool_choice").cloned() {
-            if responses_tool_choice_requires_chat_fallback(&tool_choice, has_supported_tools) {
+            if responses_tool_choice_requires_chat_fallback(
+                &tool_choice,
+                has_supported_tools,
+                &retained_function_tool_names,
+            ) {
                 object.remove("tool_choice");
             }
         }
@@ -2019,6 +2048,7 @@ struct ResponsesChatFallbackReport {
 
 fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallbackReport {
     let mut report = ResponsesChatFallbackReport::default();
+    let mut retained_function_tool_names = Vec::new();
 
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {
         for tool in tools {
@@ -2027,6 +2057,9 @@ fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallback
                 report.stripped_tools.push(summary);
             } else {
                 report.retained_tools.push(summary);
+                if let Some(name) = responses_function_tool_name(tool) {
+                    retained_function_tool_names.push(name);
+                }
             }
         }
     }
@@ -2036,6 +2069,7 @@ fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallback
         report.tool_choice_dropped = responses_tool_choice_requires_chat_fallback(
             tool_choice,
             !report.retained_tools.is_empty(),
+            &retained_function_tool_names,
         );
     }
 
@@ -2095,9 +2129,24 @@ fn responses_tool_choice_summary(tool_choice: &Value) -> String {
     }
 }
 
+fn responses_function_tool_name(tool: &Value) -> Option<String> {
+    let object = tool.as_object()?;
+
+    if let Some(function) = object.get("function").and_then(Value::as_object) {
+        return function.get("name").and_then(Value::as_str).map(str::to_string);
+    }
+
+    if object.get("type").and_then(Value::as_str) == Some("function") {
+        return object.get("name").and_then(Value::as_str).map(str::to_string);
+    }
+
+    None
+}
+
 fn responses_tool_choice_requires_chat_fallback(
     tool_choice: &Value,
     has_supported_tools: bool,
+    supported_function_names: &[String],
 ) -> bool {
     match tool_choice {
         Value::String(choice) => match choice.as_str() {
@@ -2114,12 +2163,18 @@ fn responses_tool_choice_requires_chat_fallback(
                 return true;
             }
 
-            object
+            let Some(name) = object
                 .get("function")
                 .and_then(Value::as_object)
                 .and_then(|function| function.get("name").and_then(Value::as_str))
                 .or_else(|| object.get("name").and_then(Value::as_str))
-                .is_none()
+            else {
+                return true;
+            };
+
+            !supported_function_names
+                .iter()
+                .any(|supported_name| supported_name == name)
         }
         _ => true,
     }
@@ -2707,6 +2762,7 @@ fn halve_generation_cap_for_context_retry(payload: &mut Value) -> Option<(&'stat
 async fn send_to_upstream(
     state: &AppState,
     upstream: &UpstreamConfig,
+    api_key: &str,
     upstream_protocol: UpstreamProtocol,
     body: &Value,
     endpoint: EndpointKind,
@@ -2876,6 +2932,7 @@ async fn send_to_upstream(
         "dispatching request to upstream service"
     );
     let mut context_retry_attempted = false;
+    let mut tool_choice_tool_retry_attempted = false;
     let response_header_timeout =
         Duration::from_secs(state.config.upstream_response_header_timeout_seconds.max(1));
     let response = loop {
@@ -2884,7 +2941,7 @@ async fn send_to_upstream(
             .post(url.clone())
             .header(
                 header::AUTHORIZATION,
-                format!("Bearer {}", upstream.api_key),
+                format!("Bearer {}", api_key),
             )
             .json(&upstream_body)
             .send();
@@ -2936,6 +2993,8 @@ async fn send_to_upstream(
         let headers = response.headers().clone();
         let error_text = response.text().await.unwrap_or_default();
         let upstream_error_message = extract_upstream_error_message(&error_text);
+        let upstream_error_is_bad_response_status_code =
+            upstream_error_message == "bad_response_status_code";
         let error_excerpt = upstream_error_message.chars().take(512).collect::<String>();
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
@@ -2998,6 +3057,42 @@ async fn send_to_upstream(
                 upstream.name,
                 status.as_u16(),
                 error_excerpt
+            )));
+        }
+
+        if !tool_choice_tool_retry_attempted
+            && protocol_path == "responses_to_chat"
+            && upstream_error_is_bad_response_status_code
+            && (upstream_body.get("tools").is_some() || upstream_body.get("tool_choice").is_some())
+        {
+            if let Some(object) = upstream_body.as_object_mut() {
+                object.remove("tools");
+                object.remove("tool_choice");
+            }
+            tool_choice_tool_retry_attempted = true;
+            tracing::warn!(
+                request_id = %request_id,
+                downstream_key_id = %downstream_key_id,
+                path = %endpoint.path(),
+                original_model = %model,
+                normalized_model = %normalized_model,
+                selected_upstream_id = %upstream.id,
+                selected_upstream_name = %upstream.name,
+                selected_upstream_protocol = ?upstream_protocol,
+                protocol_transition = %protocol_path,
+                status = status.as_u16(),
+                "responses_to_chat retrying without tools/tool_choice after bad_response_status_code (status={})",
+                status.as_u16()
+            );
+            continue;
+        }
+
+        // If we already retried without tools/tool_choice and still get bad_response_status_code,
+        // the upstream simply doesn't support this model/request. Try next upstream.
+        if tool_choice_tool_retry_attempted && upstream_error_is_bad_response_status_code {
+            return Err(GatewayError::TemporaryUpstreamUnavailable(format!(
+                "upstream rejected request (status {})",
+                status.as_u16()
             )));
         }
 
@@ -5367,6 +5462,360 @@ async fn admin_set_global_context_profiles(
     .into_response()
 }
 
+#[derive(Debug, Deserialize)]
+struct FreekeySyncPayload {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub keys: Vec<FreekeySyncKeyPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FreekeySyncKeyPayload {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+fn freekey_key_valid(item: &FreekeySyncKeyPayload) -> bool {
+    item.status
+        .as_deref()
+        .map(|status| status.eq_ignore_ascii_case("valid"))
+        .unwrap_or(false)
+}
+
+/// Sync freekey upstream keys from external script.
+async fn admin_sync_freekey_upstreams(
+    State(state): State<AppState>,
+    Json(payload): Json<FreekeySyncPayload>,
+) -> impl IntoResponse {
+    let source = payload.source.unwrap_or_else(|| "freekey".to_string());
+    let base_url = payload.base_url.unwrap_or_default().trim().to_string();
+    let mut imports = Vec::new();
+
+    for item in payload.keys {
+        if !freekey_key_valid(&item) {
+            continue;
+        }
+
+        let Some(key) = item.key.map(|value| value.trim().to_string()) else {
+            continue;
+        };
+        let Some(model) = item.model.map(|value| value.trim().to_string()) else {
+            continue;
+        };
+        if key.is_empty() || model.is_empty() {
+            continue;
+        }
+
+        let item_base_url = item
+            .base_url
+            .unwrap_or_else(|| base_url.clone())
+            .trim()
+            .to_string();
+        if item_base_url.is_empty() {
+            continue;
+        }
+
+        let name = item
+            .name
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| model.clone())
+            .trim()
+            .to_string();
+
+        if name.is_empty() {
+            continue;
+        }
+
+        imports.push(FreekeySyncItem {
+            name,
+            base_url: item_base_url,
+            api_key: key,
+            model,
+        });
+    }
+
+    match state
+        .sync_freekey_upstreams(source.clone(), imports, unix_seconds())
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({
+                "created": result.created,
+                "updated": result.updated,
+                "skipped": result.skipped,
+                "source": source,
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to sync freekey upstreams: {}", error)
+                }
+            })),
+        )
+            .into_response(),
+    }
+}
+
+
+
+// ============================================================================
+// Batch create upstreams with auto model discovery
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct BatchCreateUpstreamPayload {
+    name: String,
+    base_url: String,
+    keys: Vec<String>,
+    #[serde(default)]
+    protocol: Option<String>,
+    #[serde(default)]
+    protocols: Option<Vec<String>>,
+    #[serde(default = "default_batch_requests_per_minute")]
+    requests_per_minute: u32,
+    #[serde(default = "default_batch_request_quota_window_hours")]
+    request_quota_window_hours: u32,
+    #[serde(default = "default_batch_request_quota_requests")]
+    request_quota_requests: u32,
+    #[serde(default = "default_batch_max_concurrency")]
+    max_concurrency: u32,
+    #[serde(default = "default_batch_active")]
+    active: bool,
+}
+
+fn default_batch_requests_per_minute() -> u32 { 60 }
+fn default_batch_request_quota_window_hours() -> u32 { 5 }
+fn default_batch_request_quota_requests() -> u32 { 500 }
+fn default_batch_max_concurrency() -> u32 { 10 }
+fn default_batch_active() -> bool { true }
+
+fn key_prefix(key: &str) -> String {
+    let key = key.trim();
+    if key.len() <= 8 {
+        key.to_string()
+    } else {
+        format!("{}...", &key[..8])
+    }
+}
+
+async fn fetch_models_from_upstream(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, String> {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("请求 {} 失败: {}", url, e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("{} 返回 {}: {}", url, status.as_u16(), body));
+    }
+
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("解析 {} 响应失败: {}", url, e))?;
+
+    let data = payload
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("{} 响应缺少 data 字段", url))?;
+
+    let mut models: Vec<String> = data
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    models.sort();
+    models.dedup();
+
+    if models.is_empty() {
+        return Err(format!("{} 未返回任何模型", url));
+    }
+
+    Ok(models)
+}
+
+async fn admin_create_upstreams_batch(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchCreateUpstreamPayload>,
+) -> impl IntoResponse {
+    if payload.keys.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "keys 不能为空"}})),
+        )
+            .into_response();
+    }
+
+    if payload.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "name 不能为空"}})),
+        )
+            .into_response();
+    }
+
+    if payload.base_url.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "base_url 不能为空"}})),
+        )
+            .into_response();
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+
+    let protocol_str = payload.protocol.unwrap_or_else(|| "ChatCompletions".to_string());
+    let protocol: UpstreamProtocol = match protocol_str.as_str() {
+        "Responses" => UpstreamProtocol::Responses,
+        _ => UpstreamProtocol::ChatCompletions,
+    };
+    let protocols = payload.protocols.unwrap_or_else(|| vec![protocol_str]);
+    let protocols: Vec<UpstreamProtocol> = protocols
+        .into_iter()
+        .filter_map(|p| match p.as_str() {
+            "Responses" => Some(UpstreamProtocol::Responses),
+            "ChatCompletions" => Some(UpstreamProtocol::ChatCompletions),
+            _ => None,
+        })
+        .collect();
+    let protocols = if protocols.is_empty() {
+        vec![protocol]
+    } else {
+        protocols
+    };
+
+    let now = unix_seconds();
+    let mut valid_keys: Vec<String> = Vec::new();
+    let mut all_models: Vec<String> = Vec::new();
+    let mut key_results: Vec<Value> = Vec::new();
+    let mut failed = 0usize;
+
+    // 并行获取每个 key 的模型列表
+    for key in &payload.keys {
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            failed += 1;
+            key_results.push(json!({"key_prefix": "", "error": "key 为空"}));
+            continue;
+        }
+
+        let models = match fetch_models_from_upstream(&client, &payload.base_url, &key).await {
+            Ok(m) => m,
+            Err(e) => {
+                failed += 1;
+                key_results.push(json!({"key_prefix": key_prefix(&key), "error": e}));
+                continue;
+            }
+        };
+
+        valid_keys.push(key.clone());
+        all_models.extend(models.iter().cloned());
+        key_results.push(json!({
+            "key_prefix": key_prefix(&key),
+            "models": models.len(),
+            "model_list": models,
+        }));
+    }
+
+    // 合并并去重模型列表
+    all_models.sort();
+    all_models.dedup();
+
+    if valid_keys.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "created": 0,
+                "failed": failed,
+                "total": payload.keys.len(),
+                "results": key_results,
+                "message": "所有 key 都无法获取模型列表",
+            })),
+        )
+            .into_response();
+    }
+
+    // 创建单个上游记录，包含多个 key
+    let primary_key = valid_keys.first().cloned().unwrap_or_default();
+    let mut upstream = UpstreamConfig {
+        id: Uuid::new_v4().to_string(),
+        name: payload.name.trim().to_string(),
+        base_url: payload.base_url.trim().to_string(),
+        api_key: primary_key.clone(),
+        api_keys: valid_keys.clone(),
+        protocol,
+        protocols: protocols.clone(),
+        supported_models: all_models.clone(),
+        requests_per_minute: payload.requests_per_minute,
+        request_quota_window_hours: payload.request_quota_window_hours,
+        request_quota_requests: payload.request_quota_requests,
+        max_concurrency: payload.max_concurrency,
+        active: payload.active,
+        auto_managed: true,
+        managed_source: Some("batch".to_string()),
+        last_synced_at: now,
+        ..Default::default()
+    };
+    upstream.normalize_for_storage();
+
+    match state.insert_upstream(upstream.clone()).await {
+        Ok(()) => {
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "created": 1,
+                    "failed": failed,
+                    "total": payload.keys.len(),
+                    "id": upstream.id,
+                    "name": upstream.name,
+                    "keys_count": valid_keys.len(),
+                    "models_count": all_models.len(),
+                    "results": key_results,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {"message": format!("保存失败: {}", e)},
+                    "results": key_results,
+                })),
+            )
+                .into_response()
+        }
+    }
+}
 /// Create a new upstream
 async fn admin_create_upstream(
     State(state): State<AppState>,

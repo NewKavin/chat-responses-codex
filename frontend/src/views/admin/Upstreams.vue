@@ -95,9 +95,10 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="操作" width="250" fixed="right">
+        <el-table-column label="操作" width="340" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click="handleEdit(row)">编辑</el-button>
+            <el-button size="small" @click="handleCopy(row)">复制</el-button>
             <el-button size="small" @click="handleToggle(row)">
               {{ row.active ? '禁用' : '启用' }}
             </el-button>
@@ -124,7 +125,13 @@
           <el-input v-model="form.base_url" placeholder="https://api.openai.com" />
         </el-form-item>
         <el-form-item label="API Key" prop="api_key">
-          <el-input v-model="form.api_key" type="password" show-password placeholder="sk-..." />
+          <el-input
+            v-model="form.api_key"
+            type="textarea"
+            :rows="3"
+            placeholder="每行一个 Key&#10;支持多 Key 快速创建多个同名上游"
+          />
+          <span class="form-hint">多行输入多个 Key，每行一个；单 Key 时不影响原有行为</span>
         </el-form-item>
         <el-form-item label="协议" prop="protocols">
           <el-select v-model="form.protocols" multiple>
@@ -299,7 +306,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { adminApi } from '@/api/admin'
+import { adminApi, type BatchCreateUpstreamPayload } from '@/api/admin'
 import type { UpstreamConfig } from '@/types'
 
 const loading = ref(false)
@@ -366,8 +373,8 @@ const addModelContext = () => {
   }
   form.value.model_contexts.push({
     slug: '',
-    context_limit: 131072,
-    output_reserve: 2048,
+    context_limit: 200000,
+    output_reserve: 4096,
     context_group: ''
   })
 }
@@ -477,6 +484,37 @@ const handleCreate = () => {
   dialogVisible.value = true
 }
 
+const handleCopy = (row: UpstreamConfig) => {
+  dialogMode.value = 'create'
+  contextConfigTab.value = 'overrides'
+  clearDefaultContext.value = false
+  const protocols = resolveProtocols(row)
+  form.value = {
+    id: '',
+    name: row.name + ' (副本)',
+    base_url: row.base_url,
+    api_key: '',
+    protocol: protocols[0] as UpstreamConfig['protocol'],
+    protocols,
+    supported_models: [...(row.supported_models || [])],
+    default_model_context: row.default_model_context
+      ? { ...row.default_model_context }
+      : { context_limit: 0, output_reserve: 0, context_group: '' },
+    active: row.active,
+    request_quota_window_hours: row.request_quota_window_hours,
+    request_quota_requests: row.request_quota_requests,
+    requests_per_minute: row.requests_per_minute,
+    max_concurrency: row.max_concurrency,
+    model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
+    model_contexts: row.model_contexts ? [...row.model_contexts] : [],
+    priority: row.priority,
+    premium_models: [...(row.premium_models || [])],
+    protect_premium_quota: row.protect_premium_quota,
+    failure_count: 0
+  }
+  dialogVisible.value = true
+}
+
 const handleEdit = (row: UpstreamConfig) => {
   dialogMode.value = 'edit'
   contextConfigTab.value = 'default'
@@ -545,8 +583,50 @@ const handleSubmit = async () => {
     
     if (dialogMode.value === 'create') {
       submitData.id = ''
-      await adminApi.createUpstream(submitData)
-      ElMessage.success('创建成功')
+      // 将 API Key 按换行分割，每行一个 key 创建一个上游
+      const apiKeys = (form.value.api_key || '')
+        .split('\n')
+        .map(k => k.trim())
+        .filter(k => k.length > 0)
+      
+      if (apiKeys.length === 0) {
+        ElMessage.error('请输入至少一个 API Key')
+        submitting.value = false
+        return
+      }
+      
+      if (apiKeys.length === 1) {
+        // 单 key：保持原有行为
+        submitData.api_key = apiKeys[0]
+        await adminApi.createUpstream(submitData)
+        ElMessage.success('创建成功')
+      } else {
+        // 多 key：改用 batch 接口自动获取模型
+        const batchPayload: BatchCreateUpstreamPayload = {
+          name: form.value.name!,
+          base_url: form.value.base_url!,
+          keys: apiKeys,
+          protocol: protocols[0] ? String(protocols[0]) : 'ChatCompletions',
+          protocols: protocols.map(p => String(p)),
+          requests_per_minute: submitData.requests_per_minute,
+          request_quota_window_hours: submitData.request_quota_window_hours,
+          request_quota_requests: submitData.request_quota_requests,
+          max_concurrency: submitData.max_concurrency,
+          active: submitData.active
+        }
+
+        const response = await adminApi.createUpstreamsBatch(batchPayload)
+        const result = response.data
+
+        if (result.failed > 0 && result.created > 0) {
+          ElMessage.success(`创建成功 ${result.created} 个，${result.failed} 个失败`)
+        } else if (result.created > 0) {
+          ElMessage.success(`创建成功 ${result.created} 个`)
+        } else {
+          const errors = result.results.filter(r => r.error).map(r => r.error).join('；')
+          ElMessage.error(`创建失败：${errors || '全部失败'}`)
+        }
+      }
     } else {
       await adminApi.updateUpstream(form.value.id!, submitData)
       ElMessage.success('更新成功')
@@ -598,44 +678,82 @@ const fetchModels = async () => {
     return
   }
 
+  // 取所有有效 Key
+  const apiKeys = (form.value.api_key || '')
+    .split('\n')
+    .map(k => k.trim())
+    .filter(k => k.length > 0)
+
+  if (apiKeys.length === 0) {
+    ElMessage.warning('请输入至少一个有效的 API Key')
+    return
+  }
+
+  // 取 base_url 第一行（多行粘贴时取第一行有效 URL）
+  const baseUrl = (form.value.base_url || '')
+    .split('\n')
+    .map(u => u.trim())
+    .filter(u => u.length > 0)[0] || form.value.base_url
+
   try {
     fetchingModels.value = true
-    const response = await fetch(`${form.value.base_url}/v1/models`, {
-      headers: {
-        'Authorization': `Bearer ${form.value.api_key}`
-      }
-    })
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
+    const allModels = new Set<string>()
+    let successCount = 0
+    let failCount = 0
+
+    for (const key of apiKeys) {
+      try {
+        const response = await fetch(baseUrl + '/v1/models', {
+          headers: {
+            'Authorization': 'Bearer ' + key
+          }
+        })
+
+        if (!response.ok) {
+          failCount++
+          continue
+        }
+
+        const data = await response.json()
+        const models: string[] = (data.data || [])
+          .map((m: any) => (typeof m?.id === 'string' ? m.id : ''))
+          .filter((id: string) => id.length > 0)
+
+        for (const model of models) {
+          const trimmed = typeof model === 'string' ? model.trim() : ''
+          if (trimmed) {
+            allModels.add(trimmed)
+          }
+        }
+        successCount++
+      } catch {
+        failCount++
+      }
     }
 
-    const data = await response.json()
-    const models: string[] = (data.data || [])
-      .map((m: any) => (typeof m?.id === 'string' ? m.id : ''))
-      .filter((id: string) => id.length > 0)
-
-    if (models.length === 0) {
-      ElMessage.warning('未获取到模型列表')
+    if (allModels.size === 0) {
+      ElMessage.error('所有 Key 获取模型均失败')
       return
     }
 
-    const normalizedModels: string[] = Array.from(
-      new Set(
-        models
-          .map((m: string) => (typeof m === 'string' ? m.trim() : ''))
-          .filter(Boolean)
-      )
-    )
-    form.value.supported_models = normalizedModels
+    form.value.supported_models = Array.from(allModels).sort()
 
-    ElMessage.success(`成功获取 ${models.length} 个模型`)
+    const parts: string[] = ['成功获取 ' + allModels.size + ' 个模型']
+    if (successCount > 1) {
+      parts.push('用了 ' + successCount + ' 个 Key')
+    }
+    if (failCount > 0) {
+      parts.push(failCount + ' 个 Key 获取失败')
+    }
+    ElMessage.success(parts.join('，'))
   } catch (error: any) {
-    ElMessage.error(`获取模型失败: ${error.message}`)
+    ElMessage.error('获取模型失败: ' + error.message)
   } finally {
     fetchingModels.value = false
   }
 }
+
 
 onMounted(() => {
   loadData()

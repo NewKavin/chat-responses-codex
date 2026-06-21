@@ -62,7 +62,8 @@ impl PostgresStateStore {
                  COALESCE(request_quota_window_hours, 5), \
                  COALESCE(request_quota_requests, request_quota_5h, 600), \
                  requests_per_minute, max_concurrency, priority, premium_only, \
-                 protect_premium_quota, active, failure_count \
+                 protect_premium_quota, active, failure_count, \
+                 auto_managed, managed_source, last_synced_at \
                  FROM upstreams ORDER BY id",
                 &[],
             )
@@ -75,6 +76,7 @@ impl PostgresStateStore {
                 name: row.get::<_, String>(1),
                 base_url: row.get::<_, String>(2),
                 api_key: row.get::<_, String>(3),
+                api_keys: Vec::new(),
                 protocol,
                 protocols: decode_protocols(row.get::<_, Option<String>>(5), protocol)?,
                 model_contexts: decode_model_contexts(row.get::<_, Option<String>>(6))?,
@@ -91,6 +93,9 @@ impl PostgresStateStore {
                 protect_premium_quota: row.get::<_, bool>(14),
                 active: row.get::<_, bool>(15),
                 failure_count: row.get::<_, i32>(16) as u32,
+                auto_managed: row.get::<_, bool>(17),
+                managed_source: row.get::<_, Option<String>>(18),
+                last_synced_at: row.get::<_, i64>(19) as u64,
             });
         }
 
@@ -586,18 +591,22 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &upstream.protect_premium_quota,
             &upstream.active,
             &(upstream.failure_count as i32),
+            &upstream.auto_managed,
+            &upstream.managed_source,
+            &(upstream.last_synced_at as i64),
         ];
         tx.execute(
             "INSERT INTO upstreams (
                 id, name, base_url, api_key, protocol, protocols, model_contexts,
                 request_quota_5h, default_model_context, request_quota_window_hours, request_quota_requests,
                 requests_per_minute, max_concurrency, priority, premium_only,
-                protect_premium_quota, active, failure_count
+                protect_premium_quota, active, failure_count,
+                auto_managed, managed_source, last_synced_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17, $18
+                $15, $16, $17, $18, $19, $20, $21
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -616,7 +625,10 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 premium_only = EXCLUDED.premium_only,
                 protect_premium_quota = EXCLUDED.protect_premium_quota,
                 active = EXCLUDED.active,
-                failure_count = EXCLUDED.failure_count",
+                failure_count = EXCLUDED.failure_count,
+                auto_managed = EXCLUDED.auto_managed,
+                managed_source = EXCLUDED.managed_source,
+                last_synced_at = EXCLUDED.last_synced_at",
             params,
         )
         .await
@@ -1114,6 +1126,12 @@ ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS model_contexts TEXT NULL;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS default_model_context TEXT NULL;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS auto_managed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS managed_source TEXT NULL;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS last_synced_at BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS downstreams (
     id TEXT PRIMARY KEY,

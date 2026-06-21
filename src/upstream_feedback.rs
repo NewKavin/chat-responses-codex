@@ -35,6 +35,11 @@ impl UpstreamFeedbackClassification {
                 if body_lower.contains("rate limit")
                     || body_lower.contains("rate_limit")
                     || body_lower.contains("too many requests")
+                    || body_lower.contains("token_quota")
+                    || body_lower.contains("token quota")
+                    || body_lower.contains("quota_failed")
+                    || body_lower.contains("quota exceeded")
+                    || body_lower.contains("quota_exceeded")
                 {
                     return Self::RateLimited;
                 }
@@ -89,6 +94,11 @@ impl UpstreamFeedbackClassification {
             if body_lower.contains("rate limit")
                 || body_lower.contains("rate_limit")
                 || body_lower.contains("too many requests")
+                || body_lower.contains("token_quota")
+                || body_lower.contains("token quota")
+                || body_lower.contains("quota_failed")
+                || body_lower.contains("quota exceeded")
+                || body_lower.contains("quota_exceeded")
             {
                 return Self::RateLimited;
             }

@@ -2200,6 +2200,7 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-b".into(),
@@ -2225,6 +2226,7 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -2332,6 +2334,7 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         protect_premium_quota: true,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                     UpstreamConfig {
                         id: "general".into(),
@@ -2357,6 +2360,7 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -2452,6 +2456,7 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                     protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 }],
                 downstreams: vec![DownstreamConfig {
                     id: "down-1".into(),
@@ -2545,6 +2550,7 @@ async fn premium_only_model_routes_to_protected_upstream() {
                     protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 }],
                 downstreams: vec![DownstreamConfig {
                     id: "down-1".into(),
@@ -2708,6 +2714,7 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         protect_premium_quota: true,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                     UpstreamConfig {
                         id: "normal".into(),
@@ -2732,6 +2739,7 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -2835,6 +2843,7 @@ async fn routing_rebalances_when_models_overlap() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                     UpstreamConfig {
                         id: "up-b".into(),
@@ -2859,6 +2868,7 @@ async fn routing_rebalances_when_models_overlap() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -2970,6 +2980,7 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                     UpstreamConfig {
                         id: "up-b".into(),
@@ -2994,6 +3005,7 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
+                    ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -3100,6 +3112,7 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -3207,6 +3220,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-b".into(),
@@ -3235,6 +3249,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -3347,6 +3362,7 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -3448,6 +3464,7 @@ async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -3601,6 +3618,7 @@ async fn upstream_concurrency_full_429_retries_with_configured_attempts() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -3753,6 +3771,7 @@ async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_mul
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -4597,6 +4616,7 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-b".into(),
@@ -4622,6 +4642,7 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -5581,6 +5602,7 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -7210,6 +7232,339 @@ async fn downstream_responses_request_with_unknown_string_tool_choice_falls_back
 }
 
 #[tokio::test]
+async fn downstream_responses_request_with_unknown_function_tool_choice_drops_tool_choice() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        if lock.request_body.as_ref().is_some_and(|body| body.get("tool_choice").is_some()) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                axum::Json(json!({
+                                    "error": {
+                                        "message": "Tool 'multi_agent' not found in the tools list."
+                                    }
+                                })),
+                            );
+                        }
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "input": "Need weather",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get the weather",
+                        "parameters": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {
+                        "name": "multi_agent"
+                    }
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["output"][0]["type"], "message");
+    assert_eq!(payload["output"][0]["role"], "assistant");
+    assert_eq!(payload["output"][0]["content"][0]["type"], "output_text");
+    assert_eq!(payload["output"][0]["content"][0]["text"], "Hi");
+
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.path, "/v1/chat/completions");
+    assert!(captured.request_body.is_some());
+    let request_body = captured.request_body.unwrap();
+    assert_eq!(request_body["messages"][0]["content"], "Need weather");
+    assert!(request_body.get("tool_choice").is_none());
+    assert_eq!(request_body["tools"][0]["type"], "function");
+    assert_eq!(request_body["tools"][0]["function"]["name"], "get_weather");
+}
+
+#[tokio::test]
+async fn downstream_responses_request_with_bad_response_status_tool_choice_retry_strips_tools_and_choic() {
+    let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_clone = attempts.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<Vec<RequestCapture>>>>,
+                          request: Request<Body>| {
+                        let capture = capture.clone();
+                        let attempts = attempts_clone.clone();
+                        async move {
+                            let (parts, body) = request.into_parts();
+                            let body = to_bytes(body, usize::MAX).await.unwrap();
+                            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+
+                            {
+                                let mut lock = capture.lock().unwrap();
+                                lock.push(RequestCapture {
+                                    path: parts.uri.path().to_string(),
+                                    authorization: parts
+                                        .headers
+                                        .get(header::AUTHORIZATION)
+                                        .and_then(|value| value.to_str().ok())
+                                        .map(str::to_string),
+                                    request_body: Some(payload.clone()),
+                                });
+                            }
+
+                            if attempt == 0 {
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    axum::Json(json!({
+                                        "error": {
+                                            "message": "{\\\"error\\\":{\\\"message\\\":\\\"openai_error\\\",\\\"type\\\":\\\"bad_response_status_code\\\",\\\"param\\\":\\\"\\\",\\\"code\\\":\\\"bad_response_status_code\\\"}}"
+                                        }
+                                    })),
+                                );
+                            }
+
+                            (
+                                StatusCode::OK,
+                                axum::Json(json!({
+                                    "id": "chatcmpl-test",
+                                    "object": "chat.completion",
+                                    "created": 1,
+                                    "model": "gpt-4.1-mini",
+                                    "choices": [{
+                                        "index": 0,
+                                        "message": {"role": "assistant", "content": "Hi"},
+                                        "finish_reason": "stop"
+                                    }],
+                                    "usage": {
+                                        "prompt_tokens": 1,
+                                        "completion_tokens": 1,
+                                        "total_tokens": 2
+                                    }
+                                })),
+                            )
+                        }
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "input": "Need weather",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get the weather",
+                        "parameters": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "tool_choice": "required"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["output"][0]["type"], "message");
+    assert_eq!(payload["output"][0]["role"], "assistant");
+    assert_eq!(payload["output"][0]["content"][0]["type"], "output_text");
+    assert_eq!(payload["output"][0]["content"][0]["text"], "Hi");
+
+    let captures = capture.lock().unwrap().clone();
+    assert_eq!(captures.len(), 2);
+    assert_eq!(captures[0].request_body.as_ref().unwrap()["tools"].as_array().unwrap().len(), 1);
+    assert!(captures[0].request_body.as_ref().unwrap().get("tool_choice").is_some());
+    assert!(captures[1].request_body.as_ref().unwrap().get("tools").is_none());
+    assert!(captures[1].request_body.as_ref().unwrap().get("tool_choice").is_none());
+}
+
+#[tokio::test]
 async fn admin_upstreams_page_mentions_protocol_capabilities() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -8003,6 +8358,7 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -8149,6 +8505,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -8267,6 +8624,7 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -8431,6 +8789,7 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -8556,6 +8915,7 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -8674,6 +9034,7 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -8798,6 +9159,7 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -8928,6 +9290,7 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -9109,6 +9472,7 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-2".into(),
@@ -9133,6 +9497,7 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
+                ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -9244,6 +9609,7 @@ async fn stream_disconnect_releases_runtime_state() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -9361,6 +9727,7 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -9495,6 +9862,7 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -9613,6 +9981,7 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -9758,6 +10127,7 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -9921,6 +10291,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -10087,6 +10458,7 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -10257,6 +10629,7 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -10389,6 +10762,7 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -10511,6 +10885,7 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+            ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),

@@ -64,6 +64,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         protect_premium_quota: false,
         active: true,
         failure_count: 2,
+        ..Default::default()
     };
     let downstream = DownstreamConfig {
         id: "down-1".into(),
@@ -341,6 +342,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         protect_premium_quota: false,
         active: true,
         failure_count: 0,
+        ..Default::default()
     };
     let upstream_id = upstream.id.clone();
     let downstream = DownstreamConfig {
@@ -461,6 +463,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         protect_premium_quota: false,
         active: true,
         failure_count: 0,
+        ..Default::default()
     };
     let upstream_id = upstream.id.clone();
     let downstream = DownstreamConfig {

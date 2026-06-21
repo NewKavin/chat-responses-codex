@@ -6,12 +6,17 @@
 //! - Upstream toggle (enable/disable)
 //! - Input validation and error handling
 
-use axum::body::Body;
+use axum::body::{Body, to_bytes};
 use axum::http::{header, Request, StatusCode};
+use axum::Json;
+use axum::Router;
+use axum::routing::get;
 use chat_responses_codex::routing::UpstreamProtocol;
+use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use tempfile::tempdir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -52,6 +57,25 @@ fn create_test_state() -> AppState {
                 ..Default::default()
             },
         ],
+        downstreams: vec![],
+        usage_logs: vec![],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+
+    AppState::new(state, unique_state_path(), config)
+}
+
+fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState {
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+
+    let state = PersistedState {
+        upstreams,
         downstreams: vec![],
         usage_logs: vec![],
         announcement: None,
@@ -630,6 +654,306 @@ async fn test_upstreams_delete_rejects_nonexistent_id() {
 }
 
 // ============================================================================
+// External Sync Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_admin_freekey_sync_creates_new_upstream() {
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.example.com/v1",
+        "keys": [
+            {
+                "name": "gpt-sync-new",
+                "key": "new-key",
+                "model": "gpt-4",
+                "status": "valid"
+            }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["created"].as_u64().unwrap(), 1);
+    assert_eq!(result["updated"].as_u64().unwrap(), 0);
+    assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.name == "gpt-sync-new")
+        .expect("upstream should exist");
+    assert_eq!(upstream.api_key, "new-key");
+    assert!(upstream.auto_managed);
+    assert_eq!(upstream.managed_source.as_deref(), Some("freekey"));
+    assert!(upstream.last_synced_at > 0);
+}
+
+#[tokio::test]
+async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_name() {
+    let existing = vec![UpstreamConfig {
+        id: "existing-id".to_string(),
+        name: "gpt-sync-old".to_string(),
+        base_url: "https://api.old.example.com".to_string(),
+        api_key: "old-key".to_string(),
+        auto_managed: true,
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.sync.example.com/v1",
+        "keys": [
+            {
+                "name": "gpt-sync-old",
+                "key": "new-key",
+                "model": "gpt-4",
+                "status": "valid"
+            }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["created"].as_u64().unwrap(), 0);
+    assert_eq!(result["updated"].as_u64().unwrap(), 1);
+    assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "existing-id")
+        .expect("upstream should exist");
+    assert_eq!(upstream.api_key, "new-key");
+    assert_eq!(upstream.base_url, "https://api.sync.example.com/v1");
+}
+
+#[tokio::test]
+async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_url_and_model() {
+    let existing = vec![UpstreamConfig {
+        id: "legacy-id".to_string(),
+        name: "legacy-name".to_string(),
+        base_url: "https://api.example.com/v1".to_string(),
+        api_key: "legacy-key".to_string(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["model-a".to_string()],
+        auto_managed: true,
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.example.com/v1",
+        "keys": [
+            {
+                "key": "replaced-key",
+                "model": "model-a",
+                "status": "valid"
+            }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["created"].as_u64().unwrap(), 0);
+    assert_eq!(result["updated"].as_u64().unwrap(), 1);
+    assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "legacy-id")
+        .expect("upstream should exist");
+    assert_eq!(upstream.name, "model-a");
+    assert_eq!(upstream.api_key, "replaced-key");
+}
+
+#[tokio::test]
+async fn test_admin_freekey_sync_skips_non_auto_managed_upstream_match() {
+    let existing = vec![UpstreamConfig {
+        id: "manual-id".to_string(),
+        name: "manual-freekey-name".to_string(),
+        base_url: "https://api.manual.example.com/v1".to_string(),
+        api_key: "old-key".to_string(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        auto_managed: false,
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.manual.example.com/v1",
+        "keys": [
+            {
+                "name": "manual-freekey-name",
+                "key": "new-key",
+                "model": "gpt-4",
+                "status": "valid"
+            }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["created"].as_u64().unwrap(), 0);
+    assert_eq!(result["updated"].as_u64().unwrap(), 0);
+    assert_eq!(result["skipped"].as_u64().unwrap(), 1);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "manual-id")
+        .expect("upstream should exist");
+    assert_eq!(upstream.api_key, "old-key");
+    assert!(!upstream.auto_managed);
+}
+
+#[tokio::test]
+async fn test_admin_freekey_sync_only_imports_valid_status() {
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.example.com/v1",
+        "keys": [
+            {
+                "name": "invalid-status",
+                "key": "invalid-key",
+                "model": "gpt-4",
+                "status": "invalid"
+            },
+            {
+                "name": "valid-status",
+                "key": "valid-key",
+                "model": "gpt-4",
+                "status": "valid"
+            }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["created"].as_u64().unwrap(), 1);
+    assert_eq!(result["updated"].as_u64().unwrap(), 0);
+    assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+}
+
+// ============================================================================
 // Upstream Toggle Tests
 // ============================================================================
 
@@ -671,4 +995,86 @@ async fn test_upstreams_toggle_changes_active_status() {
         .find(|u| u.id == "upstream-1")
         .unwrap();
     assert!(!upstream.active);
+}
+
+// ============================================================================
+// Multi-key upstream tests
+// ============================================================================
+
+#[test]
+fn upstream_config_available_keys_includes_legacy_and_new_keys() {
+    let mut upstream = UpstreamConfig {
+        id: "test-1".to_string(),
+        name: "Test Upstream".to_string(),
+        base_url: "https://api.example.com".to_string(),
+        api_key: "sk-legacy-key".to_string(),
+        api_keys: vec!["sk-new-key-1".to_string(), "sk-new-key-2".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        active: true,
+        ..Default::default()
+    };
+
+    let keys = upstream.available_keys();
+    assert_eq!(keys.len(), 3);
+    assert!(keys.contains(&"sk-legacy-key".to_string()));
+    assert!(keys.contains(&"sk-new-key-1".to_string()));
+    assert!(keys.contains(&"sk-new-key-2".to_string()));
+}
+
+#[test]
+fn upstream_config_available_keys_dedups_legacy_key() {
+    let mut upstream = UpstreamConfig {
+        id: "test-2".to_string(),
+        name: "Test Upstream".to_string(),
+        base_url: "https://api.example.com".to_string(),
+        api_key: "sk-same-key".to_string(),
+        api_keys: vec!["sk-same-key".to_string(), "sk-other-key".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        active: true,
+        ..Default::default()
+    };
+
+    let keys = upstream.available_keys();
+    assert_eq!(keys.len(), 2); // deduped
+    assert!(keys.contains(&"sk-same-key".to_string()));
+    assert!(keys.contains(&"sk-other-key".to_string()));
+}
+
+#[test]
+fn upstream_config_available_keys_empty_when_no_keys() {
+    let upstream = UpstreamConfig {
+        id: "test-3".to_string(),
+        name: "Test Upstream".to_string(),
+        base_url: "https://api.example.com".to_string(),
+        api_key: "".to_string(),
+        api_keys: vec!["".to_string(), "   ".to_string()], // empty/whitespace
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        active: true,
+        ..Default::default()
+    };
+
+    let keys = upstream.available_keys();
+    assert_eq!(keys.len(), 0);
+}
+
+#[test]
+fn upstream_config_keys_for_model_returns_all_keys() {
+    let upstream = UpstreamConfig {
+        id: "test-4".to_string(),
+        name: "Test Upstream".to_string(),
+        base_url: "https://api.example.com".to_string(),
+        api_key: "sk-key1".to_string(),
+        api_keys: vec!["sk-key2".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        active: true,
+        ..Default::default()
+    };
+
+    // Currently returns all keys since model support is at upstream level
+    let keys = upstream.keys_for_model("gpt-4");
+    assert_eq!(keys.len(), 2);
 }

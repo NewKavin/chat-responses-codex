@@ -254,11 +254,41 @@ const safeGetText = async (response: Response) => {
   return text
 }
 
-const loadModels = async (authorizationKey: string) => {
+const loadModels = async () => {
+  // Step 1: 优先使用当前门户的模型白名单
+  const modelAllowlist = await fetchPortalModelAllowlist()
+
+  if (modelAllowlist.length > 0) {
+    modelOptions.value = modelAllowlist
+    setStatus('模型列表已加载（来自门户白名单）', 'success')
+    return
+  }
+
+  // Step 2: 白名单为空，尝试从网关 /v1/models 获取
+  await loadGatewayModels()
+
+  // Step 3: 网关失败，回退到统计模型
+  if (modelOptions.value.length === 0) {
+    await fallbackToPortalModelStats()
+  }
+}
+
+const fetchPortalModelAllowlist = async (): Promise<string[]> => {
+  try {
+    const { data } = await portalApi.getQuota()
+    const allowlist = (data.model_allowlist ?? []).map(s => s.trim()).filter(Boolean)
+    return [...new Set(allowlist)]
+  } catch {
+    console.warn('获取门户白名单失败')
+    return []
+  }
+}
+
+const loadGatewayModels = async () => {
   try {
     const response = await fetch(buildGatewayModelsEndpoint(gatewayBaseUrl.value), {
       headers: {
-        Authorization: `Bearer ${authorizationKey}`
+        Authorization: `Bearer ${downstreamKey.value}`
       }
     })
 
@@ -267,6 +297,7 @@ const loadModels = async (authorizationKey: string) => {
       const models = parseGatewayModels(payload)
       if (models.length > 0) {
         modelOptions.value = models
+        setStatus('模型列表已加载（来自网关）', 'success')
         return
       }
     } else {
@@ -276,8 +307,6 @@ const loadModels = async (authorizationKey: string) => {
   } catch (error) {
     console.warn('通过 /v1/models 读取失败，准备回退到门户统计模型', error)
   }
-
-  await fallbackToPortalModelStats()
 }
 
 const fallbackToPortalModelStats = async () => {
@@ -569,7 +598,7 @@ const loadInitialData = async () => {
   }
 
   downstreamKey.value = portalDownstreamKey
-  await loadModels(portalDownstreamKey)
+  await loadModels()
 
   if (modelOptions.value.length > 0) {
     selectedModel.value = modelOptions.value[0]

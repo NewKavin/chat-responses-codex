@@ -101,6 +101,7 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),

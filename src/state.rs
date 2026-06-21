@@ -115,6 +115,8 @@ pub struct UpstreamConfig {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
+    #[serde(default)]
+    pub api_keys: Vec<String>,
     pub protocol: UpstreamProtocol,
     #[serde(default)]
     pub protocols: Vec<UpstreamProtocol>,
@@ -148,6 +150,12 @@ pub struct UpstreamConfig {
     pub active: bool,
     #[serde(default)]
     pub failure_count: u32,
+    #[serde(default)]
+    pub auto_managed: bool,
+    #[serde(default)]
+    pub managed_source: Option<String>,
+    #[serde(default)]
+    pub last_synced_at: u64,
 }
 
 impl Default for UpstreamConfig {
@@ -157,6 +165,7 @@ impl Default for UpstreamConfig {
             name: String::new(),
             base_url: String::new(),
             api_key: String::new(),
+            api_keys: Vec::new(),
             protocol: UpstreamProtocol::ChatCompletions,
             protocols: vec![UpstreamProtocol::ChatCompletions],
             supported_models: Vec::new(),
@@ -173,8 +182,26 @@ impl Default for UpstreamConfig {
             protect_premium_quota: false,
             active: false,
             failure_count: 0,
+            auto_managed: false,
+            managed_source: None,
+            last_synced_at: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FreekeySyncSummary {
+    pub created: usize,
+    pub updated: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct FreekeySyncItem {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -499,6 +526,30 @@ impl UpstreamConfig {
 
         None
     }
+
+    /// Returns all available API keys for this upstream.
+    /// Includes the legacy `api_key` if non-empty and not already in `api_keys`.
+    pub fn available_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.api_keys
+            .iter()
+            .filter(|k| !k.trim().is_empty())
+            .map(|k| k.trim().to_string())
+            .collect();
+        if !self.api_key.trim().is_empty() {
+            let legacy = self.api_key.trim().to_string();
+            if !keys.contains(&legacy) {
+                keys.push(legacy);
+            }
+        }
+        keys
+    }
+
+    /// Select keys that can serve a given model.
+    /// Currently returns all available keys since model support is at upstream level.
+    pub fn keys_for_model(&self, _model: &str) -> Vec<String> {
+        self.available_keys()
+    }
+
 }
 
 fn parse_upstream_protocol(value: &str) -> UpstreamProtocol {
@@ -2946,6 +2997,120 @@ impl AppState {
         }
         inner.upstreams.push(upstream);
         Ok(())
+    }
+
+    /// Synchronize upstreams from an external key source.
+    ///
+    /// Existing upstreams that match by name first, then by base_url, are updated only when
+    /// they are marked as auto-managed.
+    pub async fn sync_freekey_upstreams(
+        &self,
+        source: String,
+        imports: Vec<FreekeySyncItem>,
+        synced_at: u64,
+    ) -> Result<FreekeySyncSummary, String> {
+        let source = source.trim().to_string();
+        let imports = imports
+            .into_iter()
+            .filter_map(|item| {
+                let name = item.name.trim().to_string();
+                let base_url = item.base_url.trim().to_string();
+                let api_key = item.api_key.trim().to_string();
+                let model = item.model.trim().to_string();
+
+                if name.is_empty()
+                    || base_url.is_empty()
+                    || api_key.is_empty()
+                    || model.is_empty()
+                {
+                    return None;
+                }
+
+                Some(FreekeySyncItem {
+                    name,
+                    base_url,
+                    api_key,
+                    model,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if imports.is_empty() {
+            return Ok(FreekeySyncSummary::default());
+        }
+
+        self.mutate_persisted_state(
+            |candidate_state| {
+                let mut result = FreekeySyncSummary::default();
+                let find_match = |state: &[UpstreamConfig], name: &str, base_url: &str, model: &str| {
+                    state
+                        .iter()
+                        .position(|upstream| upstream.name == name)
+                        .or_else(|| {
+                            state
+                                .iter()
+                                .position(|upstream| {
+                                    upstream.base_url == base_url
+                                        && upstream
+                                            .supported_models
+                                            .iter()
+                                            .any(|item| item == model)
+                                })
+                        })
+                        .or_else(|| {
+                            state.iter().position(|upstream| upstream.base_url == base_url)
+                        })
+                };
+
+                for item in imports.iter() {
+                    let name = &item.name;
+                    let base_url = &item.base_url;
+                    let model = &item.model;
+                    let api_key = &item.api_key;
+                    let match_by_base_url = find_match(&candidate_state.upstreams, name, base_url, model);
+
+                    if let Some(index) = match_by_base_url {
+                        let upstream = &mut candidate_state.upstreams[index];
+                        if !upstream.auto_managed {
+                            result.skipped = result.skipped.saturating_add(1);
+                            continue;
+                        }
+
+                        upstream.name = name.clone();
+                        upstream.base_url = base_url.clone();
+                        upstream.api_key = api_key.clone();
+                        upstream.supported_models = vec![model.clone()];
+                        upstream.auto_managed = true;
+                        upstream.managed_source = Some(source.clone());
+                        upstream.last_synced_at = synced_at;
+                        upstream.normalize_for_storage();
+
+                        result.updated = result.updated.saturating_add(1);
+                        continue;
+                    }
+
+                    let mut upstream = UpstreamConfig {
+                        id: Uuid::new_v4().to_string(),
+                        name: name.clone(),
+                        base_url: base_url.clone(),
+                        api_key: api_key.clone(),
+                        supported_models: vec![model.clone()],
+                        auto_managed: true,
+                        managed_source: Some(source.clone()),
+                        last_synced_at: synced_at,
+                        active: true,
+                        ..Default::default()
+                    };
+                    upstream.normalize_for_storage();
+                    candidate_state.upstreams.push(upstream);
+                    result.created = result.created.saturating_add(1);
+                }
+
+                Ok(result)
+            },
+            |error| format!("Failed to persist state: {}", error),
+        )
+        .await
     }
 
     /// Update an existing upstream

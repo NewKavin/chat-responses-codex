@@ -12,6 +12,33 @@ import type {
   UpstreamConfig
 } from '@/types'
 
+
+export interface BatchCreateUpstreamPayload {
+  name: string
+  base_url: string
+  keys: string[]
+  protocol?: string
+  protocols?: string[]
+  requests_per_minute?: number
+  request_quota_window_hours?: number
+  request_quota_requests?: number
+  max_concurrency?: number
+  active?: boolean
+}
+
+export interface BatchCreateUpstreamResult {
+  created: number
+  failed: number
+  total: number
+  results: Array<{
+    id?: string
+    name?: string
+    key_prefix?: string
+    models?: number
+    model_list?: string[]
+    error?: string
+  }>
+}
 export interface DashboardViewResponse {
   dashboard: DashboardData
   analytics: DashboardAnalyticsRange
@@ -89,6 +116,8 @@ export const adminApi = {
   getUpstreams: () => adminHttp.get<UpstreamConfig[]>('/admin/upstreams'),
   createUpstream: (data: Partial<UpstreamConfig>) =>
     adminHttp.post<UpstreamConfig>('/admin/upstreams', data),
+  createUpstreamsBatch: (data: BatchCreateUpstreamPayload) =>
+    adminHttp.post<BatchCreateUpstreamResult>('/admin/upstreams/batch', data),
   getUpstream: (id: string) => adminHttp.get<UpstreamConfig>(`/admin/upstreams/${id}`),
   updateUpstream: (id: string, data: Partial<UpstreamConfig>) =>
     adminHttp.put<UpstreamConfig>(`/admin/upstreams/${id}`, data),

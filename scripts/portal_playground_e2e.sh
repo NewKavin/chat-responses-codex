@@ -5,7 +5,7 @@ BASE_URL="${BASE_URL:-http://127.0.0.1:3000}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 DOWNSTREAM_ID="${DOWNSTREAM_ID:-test}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-60}"
-DOTENV_PATH="${DOTENV_PATH:-/home/kavin/docker/chat-responses-codex/.env}"
+DOTENV_PATH="${DOTENV_PATH:-${HOME}/docker/chat-responses-codex/.env}"
 
 action_status=0
 
