@@ -2295,6 +2295,292 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
     assert_eq!(snapshot.usage_logs.len(), 2);
 }
 
+#[tokio::test]
+async fn downstream_chat_request_uses_key_mapped_to_requested_model() {
+    with_proxy_env_cleared(|| async move {
+        let attempts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts_clone = attempts.clone();
+
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let attempts_clone = attempts_clone.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let auth = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    attempts_clone.lock().unwrap().push(auth.clone());
+
+                    assert_eq!(payload["model"], "claude-3");
+                    assert_eq!(auth, "Bearer sk-claude");
+
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "claude-3",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Hi"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let upstream: UpstreamConfig = serde_json::from_value(json!({
+            "id": "up-1",
+            "name": "primary",
+            "base_url": format!("http://{}", address),
+            "api_key": "sk-gpt",
+            "api_keys": ["sk-claude"],
+            "api_key_models": [
+                {
+                    "api_key": "sk-gpt",
+                    "supported_models": ["gpt-4"]
+                },
+                {
+                    "api_key": "sk-claude",
+                    "supported_models": ["claude-3"]
+                }
+            ],
+            "protocol": "ChatCompletions",
+            "supported_models": ["gpt-4", "claude-3"],
+            "active": true
+        }))
+        .unwrap();
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![upstream],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["claude-3".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "claude-3",
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(attempts.lock().unwrap().as_slice(), &["Bearer sk-claude"]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorized() {
+    with_proxy_env_cleared(|| async move {
+        let attempts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts_clone = attempts.clone();
+
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let attempts_clone = attempts_clone.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let auth = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    attempts_clone.lock().unwrap().push(auth.clone());
+
+                    assert_eq!(payload["model"], "gpt-4");
+
+                    if auth == "Bearer sk-bad" {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            axum::Json(json!({
+                                "error": {
+                                    "message": "invalid api key"
+                                }
+                            })),
+                        );
+                    }
+
+                    assert_eq!(auth, "Bearer sk-good");
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "gpt-4",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Hi"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let upstream: UpstreamConfig = serde_json::from_value(json!({
+            "id": "up-1",
+            "name": "primary",
+            "base_url": format!("http://{}", address),
+            "api_key": "sk-bad",
+            "api_keys": ["sk-good"],
+            "api_key_models": [
+                {
+                    "api_key": "sk-bad",
+                    "supported_models": ["gpt-4"]
+                },
+                {
+                    "api_key": "sk-good",
+                    "supported_models": ["gpt-4"]
+                }
+            ],
+            "protocol": "ChatCompletions",
+            "supported_models": ["gpt-4"],
+            "active": true
+        }))
+        .unwrap();
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![upstream],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "gpt-4",
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            attempts.lock().unwrap().as_slice(),
+            &["Bearer sk-bad", "Bearer sk-good"]
+        );
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_exists() {
     with_proxy_env_cleared(|| async move {

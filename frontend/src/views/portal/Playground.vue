@@ -1,171 +1,177 @@
 <template>
-  <div class="playground-page">
-    <el-card class="playground-card">
-      <template #header>
-        <div class="playground-header">
-          <h2>模型操练场</h2>
-          <el-text type="info">使用当前门户凭证实时验证模型可用性与返回内容</el-text>
-        </div>
-      </template>
-
-      <el-alert
-        v-if="statusMessage"
-        :type="statusType"
-        :closable="false"
-        show-icon
-        class="status-alert"
-      >
-        {{ statusMessage }}
-      </el-alert>
-
-      <el-form label-position="top" class="playground-form">
-        <el-row :gutter="16">
-          <el-col :xs="24" :sm="12" :md="12" :lg="8">
-            <el-form-item label="模型（必选）">
-              <el-select
-                v-model="selectedModel"
-                placeholder="先读取可用模型"
-                filterable
-                clearable
-                style="width: 100%"
-                :disabled="isBusy || !modelOptions.length"
-              >
-                <el-option
-                  v-for="model in modelOptions"
-                  :key="model"
-                  :label="model"
-                  :value="model"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-
-          <el-col :xs="12" :sm="6" :md="6" :lg="4">
-            <el-form-item label="温度">
-              <el-input-number
-                v-model="temperature"
-                :min="0"
-                :max="2"
-                :step="0.1"
-                :disabled="isBusy"
-                controls-position="right"
-                :precision="1"
-                style="width: 100%"
-              />
-            </el-form-item>
-          </el-col>
-
-          <el-col :xs="12" :sm="6" :md="6" :lg="4">
-            <el-form-item label="max_tokens">
-              <el-input-number
-                v-model="maxTokens"
-                :min="1"
-                :max="8192"
-                :step="128"
-                :disabled="isBusy"
-                controls-position="right"
-                style="width: 100%"
-              />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <el-form-item label="问题">
-          <el-input
-            v-model="question"
-            type="textarea"
-            :rows="4"
-            :maxlength="4000"
-            show-word-limit
-            placeholder="在这里输入你要测试的问题"
-            :disabled="isBusy"
-          />
-        </el-form-item>
-
-        <el-form-item label="上传文件（可选）">
-          <div class="upload-control">
-            <el-button type="primary" plain :disabled="isBusy" @click="openFileDialog">选择文件</el-button>
-            <el-text size="small" type="info" class="upload-tip">支持文本文件内联提问；当前支持最大 1MB 文件。</el-text>
-          </div>
-
-          <input
-            ref="fileInputRef"
-            type="file"
-            multiple
-            class="hidden-file-input"
-            @change="onFileInputChange"
-          />
-
-          <div class="upload-list" v-if="uploadedFiles.length">
-            <div v-for="file in uploadedFiles" :key="file.uid" class="upload-item">
-              <div>
-                <div class="upload-name">{{ file.name }}</div>
-                <div class="upload-meta">{{ formatFileSize(file.size) }} · {{ file.type || 'application/octet-stream' }}</div>
-                <div class="upload-status" v-if="file.isError">解析失败：{{ file.errorMessage }}</div>
-              </div>
-              <el-button text size="small" type="danger" @click="removeUploadedFile(file.uid)">移除</el-button>
-            </div>
-          </div>
-        </el-form-item>
-
-        <el-form-item>
-          <el-button
-            type="primary"
-            :loading="isSending"
-            :disabled="sendDisabled"
-            @click="sendQuestion"
-          >
-            发送测试请求
-          </el-button>
-
-          <el-button :disabled="isBusy" @click="clearConversation">清空记录</el-button>
-          <el-button v-if="rawResponse" :disabled="isBusy" @click="copyResponse">复制原始响应</el-button>
-        </el-form-item>
-      </el-form>
-    </el-card>
-
-    <el-card class="history-card" v-loading="isSending">
-      <template #header>
-        <div class="history-head">
-          <h3>会话记录</h3>
-          <el-text size="small" type="info">当前密钥仅用于当前门户会话，不会持久保存</el-text>
-        </div>
-      </template>
-
-      <div class="conversation-list" v-if="messages.length">
-          <div
-            v-for="(message, index) in messages"
-            :key="`${message.role}-${index}`"
-            :class="['conversation-item', `conversation-item--${message.role}`, message.isError ? 'conversation-item--error' : '']"
-          >
-            <div class="conversation-role">{{ message.role === 'user' ? '你' : '模型' }}</div>
-            <pre class="conversation-content">{{ message.content }}</pre>
-            <div class="conversation-file" v-if="message.uploadedFiles?.length">
-              <div>已附加文件：</div>
-              <ul class="conversation-file-list">
-                <li v-for="(file, index) in message.uploadedFiles" :key="`${file.name}-${index}`">
-                  {{ file.name }}（{{ formatFileSize(file.size) }}）
-                </li>
-              </ul>
-            </div>
-            <div class="conversation-meta" v-if="message.usageText">{{ message.usageText }}</div>
-          </div>
+  <div class="playground-layout">
+    <div :class="['sidebar', { 'sidebar--collapsed': sidebarCollapsed }]">
+      <div class="sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed">
+        <span v-if="sidebarCollapsed">▶</span>
+        <span v-else>◀</span>
       </div>
-      <el-empty v-else description="发送问题后这里会显示对话记录" />
-    </el-card>
 
-    <el-card v-if="rawResponse" class="raw-card">
-      <template #header>
-        <h3>原始响应</h3>
-      </template>
-      <pre class="raw-code">{{ rawResponse }}</pre>
-    </el-card>
+      <div v-show="!sidebarCollapsed" class="sidebar-content">
+        <h3 class="sidebar-title">模型操练场</h3>
+
+        <el-alert
+          v-if="statusMessage"
+          :type="statusType"
+          :closable="false"
+          show-icon
+          class="status-alert"
+        >
+          {{ statusMessage }}
+        </el-alert>
+
+        <div class="sidebar-section">
+          <label class="sidebar-label">模型</label>
+          <el-select
+            v-model="selectedModel"
+            placeholder="选择模型"
+            filterable
+            clearable
+            style="width: 100%"
+            :disabled="isBusy || !modelOptions.length"
+            size="default"
+          >
+            <el-option
+              v-for="model in modelOptions"
+              :key="model"
+              :label="model"
+              :value="model"
+            />
+          </el-select>
+        </div>
+
+        <div class="sidebar-section">
+          <label class="sidebar-label">温度 {{ temperature.toFixed(1) }}</label>
+          <el-slider
+            v-model="temperature"
+            :min="0"
+            :max="2"
+            :step="0.1"
+            :disabled="isBusy"
+            :show-tooltip="false"
+          />
+        </div>
+
+        <div class="sidebar-section">
+          <label class="sidebar-label">max_tokens</label>
+          <el-input-number
+            v-model="maxTokens"
+            :min="1"
+            :max="999999"
+            :step="1024"
+            :disabled="isBusy"
+            controls-position="right"
+            style="width: 100%"
+            size="default"
+          />
+        </div>
+
+
+
+        <div class="sidebar-section sidebar-actions">
+          <el-button size="small" :disabled="isBusy" @click="clearConversation">
+            <el-icon :size="14" style="margin-right: 4px"><Delete /></el-icon>
+            清空对话
+          </el-button>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-area">
+      <div class="chat-messages" ref="messagesContainerRef">
+        <div v-if="!messages.length" class="chat-empty">
+          <div class="chat-empty-icon">
+            <el-icon :size="48" color="#c0c4cc"><ChatDotRound /></el-icon>
+          </div>
+          <p>选择模型后开始对话</p>
+        </div>
+
+        <div
+          v-for="(message, index) in messages"
+          :key="`${message.role}-${index}`"
+          :class="['chat-message', `chat-message--${message.role}`, message.isError ? 'chat-message--error' : '']"
+        >
+          <div class="chat-message-avatar">
+            <el-icon v-if="message.role === 'user'" :size="20"><User /></el-icon>
+            <el-icon v-else :size="20"><MagicStick /></el-icon>
+          </div>
+          <div class="chat-message-body">
+            <div v-if="message.role === 'assistant' && !message.isError" class="chat-message-content markdown-body" v-html="renderMarkdown(message.content)"></div>
+            <pre v-else class="chat-message-content chat-message-content--plain">{{ message.content }}</pre>
+            <div class="chat-message-file" v-if="message.uploadedFiles?.length">
+              <span v-for="file in message.uploadedFiles" :key="file.name" class="file-tag">
+                {{ file.name }}
+              </span>
+            </div>
+            <div class="chat-message-meta" v-if="message.usageText">{{ message.usageText }}</div>
+          </div>
+        </div>
+
+        <div v-if="isSending" class="chat-message chat-message--assistant">
+          <div class="chat-message-avatar">
+            <el-icon :size="20"><MagicStick /></el-icon>
+          </div>
+          <div class="chat-message-body">
+            <div class="chat-message-content markdown-body" v-html="renderMarkdown(streamingContent)"></div>
+            <span class="typing-cursor"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div class="chat-input-wrapper">
+          <div class="chat-input-inner">
+            <el-input
+              v-model="question"
+              type="textarea"
+              :autosize="{ minRows: 1, maxRows: 6 }"
+              :maxlength="4000"
+              placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
+              :disabled="isBusy"
+              @keydown="handleInputKeydown"
+            />
+            <el-button
+              type="primary"
+              circle
+              :loading="isSending"
+              :disabled="sendDisabled"
+              @click="sendQuestion"
+              class="send-button"
+            >
+              <el-icon v-if="!isSending" :size="18"><Promotion /></el-icon>
+            </el-button>
+          </div>
+          <div class="chat-input-footer">
+            <div class="chat-upload-area">
+              <el-button size="small" text :disabled="isBusy" @click="openFileDialog">
+                <el-icon :size="16" style="margin-right: 4px"><Link /></el-icon>
+                添加附件
+              </el-button>
+              <input
+                ref="fileInputRef"
+                type="file"
+                multiple
+                class="hidden-file-input"
+                @change="onFileInputChange"
+              />
+              <div class="upload-inline-list" v-if="uploadedFiles.length">
+                <span v-for="file in uploadedFiles" :key="file.uid" class="upload-inline-tag">
+                  {{ file.name }}
+                  <el-icon :size="12" class="upload-inline-remove" @click="removeUploadedFile(file.uid)"><Close /></el-icon>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { ChatDotRound, Close, Delete, Link, MagicStick, Promotion, User } from '@element-plus/icons-vue'
+import { Marked } from 'marked'
+import hljs from 'highlight.js'
 import { portalApi } from '@/api/portal'
 import { buildGatewayModelsEndpoint } from '@/utils/integration'
 import {
@@ -173,9 +179,20 @@ import {
   extractChatCompletionText,
   extractChatCompletionUsage,
   parseGatewayModels,
+  parseSSELine,
   type PlaygroundMessage,
   type UploadedFileContext
 } from '@/utils/playground'
+
+const marked = new Marked({
+  renderer: {
+    code({ text, lang }: { text: string; lang?: string }) {
+      const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext'
+      const highlighted = hljs.highlight(text, { language }).value
+      return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`
+    }
+  }
+})
 
 interface UploadedFile {
   uid: string
@@ -200,15 +217,17 @@ const isLoading = ref(true)
 const question = ref('')
 const selectedModel = ref('')
 const temperature = ref(0.7)
-const maxTokens = ref(1024)
+const maxTokens = ref(200000)
 const modelOptions = ref<string[]>([])
 const downstreamKey = ref('')
-const rawResponse = ref('')
 const statusMessage = ref('')
 const statusType = ref<'success' | 'info' | 'warning' | 'error'>('info')
 const messages = ref<ConversationMessage[]>([])
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const uploadedFiles = ref<UploadedFile[]>([])
+const messagesContainerRef = ref<HTMLElement | null>(null)
+const sidebarCollapsed = ref(false)
+const streamingContent = ref('')
 
 const MAX_FILE_SIZE_BYTES = 1024 * 1024
 
@@ -224,24 +243,32 @@ const sendDisabled = computed(() => {
   return false
 })
 
+const renderMarkdown = (text: string): string => {
+  if (!text) return ''
+  return marked.parse(text, { async: false }) as string
+}
+
+const scrollToBottom = () => {
+  nextTick(() => {
+    const container = messagesContainerRef.value
+    if (container) {
+      container.scrollTop = container.scrollHeight
+    }
+  })
+}
+
+watch(() => messages.value.length, scrollToBottom)
+watch(streamingContent, scrollToBottom)
+
 const formatFileSize = (size: number) => {
-  if (size < 1024) {
-    return `${size} B`
-  }
-
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(1)} KB`
-  }
-
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
 const safeGetText = async (response: Response) => {
   const text = await response.text()
-  if (!text) {
-    return `${response.status} ${response.statusText}`
-  }
-
+  if (!text) return `${response.status} ${response.statusText}`
   try {
     const payload = JSON.parse(text) as { error?: { message?: string } }
     if (typeof payload?.error?.message === 'string' && payload.error.message.trim()) {
@@ -250,24 +277,17 @@ const safeGetText = async (response: Response) => {
   } catch {
     // keep plain text
   }
-
   return text
 }
 
 const loadModels = async () => {
-  // Step 1: 优先使用当前门户的模型白名单
   const modelAllowlist = await fetchPortalModelAllowlist()
-
   if (modelAllowlist.length > 0) {
     modelOptions.value = modelAllowlist
-    setStatus('模型列表已加载（来自门户白名单）', 'success')
+    setStatus('模型列表已加载', 'success')
     return
   }
-
-  // Step 2: 白名单为空，尝试从网关 /v1/models 获取
   await loadGatewayModels()
-
-  // Step 3: 网关失败，回退到统计模型
   if (modelOptions.value.length === 0) {
     await fallbackToPortalModelStats()
   }
@@ -279,7 +299,6 @@ const fetchPortalModelAllowlist = async (): Promise<string[]> => {
     const allowlist = (data.model_allowlist ?? []).map(s => s.trim()).filter(Boolean)
     return [...new Set(allowlist)]
   } catch {
-    console.warn('获取门户白名单失败')
     return []
   }
 }
@@ -287,25 +306,19 @@ const fetchPortalModelAllowlist = async (): Promise<string[]> => {
 const loadGatewayModels = async () => {
   try {
     const response = await fetch(buildGatewayModelsEndpoint(gatewayBaseUrl.value), {
-      headers: {
-        Authorization: `Bearer ${downstreamKey.value}`
-      }
+      headers: { Authorization: `Bearer ${downstreamKey.value}` }
     })
-
     if (response.ok) {
       const payload = await response.json()
       const models = parseGatewayModels(payload)
       if (models.length > 0) {
         modelOptions.value = models
-        setStatus('模型列表已加载（来自网关）', 'success')
+        setStatus('模型列表已加载', 'success')
         return
       }
-    } else {
-      const message = await safeGetText(response)
-      throw new Error(`模型列表请求失败：${message}`)
     }
-  } catch (error) {
-    console.warn('通过 /v1/models 读取失败，准备回退到门户统计模型', error)
+  } catch {
+    // fall through
   }
 }
 
@@ -313,20 +326,16 @@ const fallbackToPortalModelStats = async () => {
   try {
     const { data } = await portalApi.getModels()
     const fallback = [...new Set((data ?? []).map(item => item.model.trim()).filter(Boolean))]
-
     if (fallback.length) {
       modelOptions.value = fallback
-      statusMessage.value = '网关 /v1/models 暂不可用，已使用 portal/model 统计模型兜底。'
-      statusType.value = 'warning'
+      setStatus('使用统计模型兜底', 'warning')
       return
     }
-
-    throw new Error('无法读取任何模型信息')
   } catch {
-    statusMessage.value = '当前未能读取任何模型，暂时无法发起测试请求。请先在门户管理员为当前 key 配置可用上游模型。'
-    statusType.value = 'error'
-    modelOptions.value = []
+    // fall through
   }
+  setStatus('无法读取模型，请配置上游', 'error')
+  modelOptions.value = []
 }
 
 const setStatus = (message: string, type: 'success' | 'info' | 'warning' | 'error' = 'info') => {
@@ -347,21 +356,15 @@ const buildUploadedPayload = (files: UploadedFile[]): UploadedFileContext[] => {
 
 const toDisplayMessageContent = (questionText: string, files: UploadedFileContext[]) => {
   const trimmedQuestion = questionText.trim()
-  if (!files.length) {
-    return trimmedQuestion
-  }
-
-  if (!trimmedQuestion) {
-    return '（仅基于附件提问）'
-  }
-
+  if (!files.length) return trimmedQuestion
+  if (!trimmedQuestion) return '（仅基于附件提问）'
   return trimmedQuestion
 }
 
-const toHistoryMessages = () => {
+const toHistoryMessages = (): PlaygroundMessage[] => {
   return messages.value
     .filter(item => !item.isError)
-    .map<PlaygroundMessage>(item => {
+    .map(item => {
       if (item.role === 'user' && item.uploadedFiles?.length) {
         return {
           role: item.role,
@@ -374,19 +377,12 @@ const toHistoryMessages = () => {
           ]
         }
       }
-
-      return {
-        role: item.role,
-        content: item.content
-      }
+      return { role: item.role, content: item.content }
     })
 }
 
 const openFileDialog = () => {
-  if (isBusy.value) {
-    return
-  }
-
+  if (isBusy.value) return
   fileInputRef.value?.click()
 }
 
@@ -402,26 +398,21 @@ const handleUploadedFileReadError = (file: File): UploadedFile => {
     type: file.type,
     content: '',
     isError: true,
-    errorMessage: '无法读取文件内容，请上传可读文本文件'
+    errorMessage: '无法读取文件内容'
   }
 }
 
 const trimUploadedContent = (content: string) => {
   const trimmed = content.trim()
   const maxLength = 12000
-  if (trimmed.length <= maxLength) {
-    return trimmed
-  }
-
+  if (trimmed.length <= maxLength) return trimmed
   return `${trimmed.slice(0, maxLength)}\n\n[内容已截断，文件原始长度 ${trimmed.length} 字符]`
 }
 
 const onFileInputChange = async (event: Event) => {
   const target = event.target as HTMLInputElement
   const files = Array.from(target.files ?? [])
-  if (!files.length) {
-    return
-  }
+  if (!files.length) return
 
   const newUploads = await Promise.all(
     files.map(async file => {
@@ -436,7 +427,6 @@ const onFileInputChange = async (event: Event) => {
           errorMessage: `文件超出限制，最大支持 ${formatFileSize(MAX_FILE_SIZE_BYTES)}。`
         }
       }
-
       try {
         const text = trimUploadedContent(await file.text())
         return {
@@ -454,9 +444,7 @@ const onFileInputChange = async (event: Event) => {
   )
 
   uploadedFiles.value = [...uploadedFiles.value, ...newUploads]
-  if (target.value) {
-    target.value = ''
-  }
+  if (target.value) target.value = ''
 }
 
 const formatUsage = (usage: ReturnType<typeof extractChatCompletionUsage>) => {
@@ -464,17 +452,22 @@ const formatUsage = (usage: ReturnType<typeof extractChatCompletionUsage>) => {
   return `tokens: in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens}`
 }
 
-const sendQuestion = async () => {
-  if (sendDisabled.value) {
-    return
+const handleInputKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    sendQuestion()
   }
+}
+
+const sendQuestion = async () => {
+  if (sendDisabled.value) return
 
   const prompt = question.value.trim()
   const uploadedPayload = buildUploadedPayload(uploadedFiles.value)
   const requestPrompt = prompt || '请基于上述附件内容作答。'
   const requestKey = downstreamKey.value
   if (!requestKey) {
-    setStatus('未找到门户 key，可在“秘钥管理”查看后重试。', 'error')
+    setStatus('未找到门户 key', 'error')
     return
   }
 
@@ -490,6 +483,8 @@ const sendQuestion = async () => {
     uploadedFiles: uploadedPayload
   })
   question.value = ''
+  uploadedFiles.value = []
+  streamingContent.value = ''
 
   try {
     const payload = buildPlaygroundChatPayload({
@@ -498,7 +493,8 @@ const sendQuestion = async () => {
       history,
       temperature: temperature.value,
       maxTokens: maxTokens.value,
-      uploadedFiles: uploadedPayload
+      uploadedFiles: uploadedPayload,
+      stream: true
     })
 
     const response = await fetch(`${gatewayBaseUrl.value}/v1/chat/completions`, {
@@ -515,28 +511,74 @@ const sendQuestion = async () => {
       throw new Error(`请求失败：${message}`)
     }
 
-    const json = await response.json()
-    rawResponse.value = JSON.stringify(json, null, 2)
-    const content = extractChatCompletionText(json)
-    const usage = extractChatCompletionUsage(json)
+    const contentType = response.headers.get('content-type') || ''
+    let finalContent = ''
+    let finalUsage: ReturnType<typeof extractChatCompletionUsage> = null
 
+    if (contentType.includes('text/event-stream') || contentType.includes('application/octet-stream')) {
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('无法读取流式响应')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          const chunk = parseSSELine(line)
+          if (!chunk) continue
+          if (chunk.done) continue
+          if (chunk.content) {
+            streamingContent.value += chunk.content
+            finalContent = streamingContent.value
+          }
+          if (chunk.usage) {
+            finalUsage = chunk.usage
+          }
+        }
+      }
+
+      for (const line of buffer.split('\n')) {
+        const chunk = parseSSELine(line)
+        if (!chunk) continue
+        if (chunk.content) {
+          streamingContent.value += chunk.content
+          finalContent = streamingContent.value
+        }
+        if (chunk.usage) {
+          finalUsage = chunk.usage
+        }
+      }
+    } else {
+      const json = await response.json()
+      finalContent = extractChatCompletionText(json) || '（模型返回空内容）'
+      finalUsage = extractChatCompletionUsage(json)
+    }
+
+    streamingContent.value = ''
     messages.value.push({
       role: 'assistant',
-      content: content || '（模型返回空内容）',
-      usageText: formatUsage(usage)
+      content: finalContent || '（模型返回空内容）',
+      usageText: formatUsage(finalUsage)
     })
 
     setStatus('请求已完成', 'success')
   } catch (error) {
     uploadedFiles.value = pendingUploads
     const message = error instanceof Error ? error.message : '未知错误'
+    streamingContent.value = ''
     messages.value.push({
       role: 'assistant',
       content: message,
       isError: true
     })
     setStatus(message, 'error')
-    rawResponse.value = ''
   } finally {
     isSending.value = false
   }
@@ -545,37 +587,9 @@ const sendQuestion = async () => {
 const clearConversation = () => {
   messages.value = []
   uploadedFiles.value = []
-  rawResponse.value = ''
+  streamingContent.value = ''
   statusMessage.value = ''
   statusType.value = 'info'
-}
-
-const copyResponse = async () => {
-  if (!rawResponse.value) {
-    ElMessage.warning('当前没有可复制的原始响应')
-    return
-  }
-
-  try {
-    await navigator.clipboard.writeText(rawResponse.value)
-    ElMessage.success('已复制原始响应')
-  } catch {
-    const fallbackInput = document.createElement('textarea')
-    fallbackInput.value = rawResponse.value
-    fallbackInput.style.position = 'fixed'
-    fallbackInput.style.opacity = '0'
-    document.body.appendChild(fallbackInput)
-    fallbackInput.select()
-
-    try {
-      document.execCommand('copy')
-      ElMessage.success('已复制原始响应')
-    } catch {
-      ElMessage.error('复制失败，请手动复制')
-    } finally {
-      document.body.removeChild(fallbackInput)
-    }
-  }
 }
 
 const loadInitialData = async () => {
@@ -592,7 +606,7 @@ const loadInitialData = async () => {
   }
 
   if (!portalDownstreamKey) {
-    setStatus('当前门户没有可用 key，不能进行模型测试', 'error')
+    setStatus('当前门户没有可用 key', 'error')
     isLoading.value = false
     return
   }
@@ -603,7 +617,7 @@ const loadInitialData = async () => {
   if (modelOptions.value.length > 0) {
     selectedModel.value = modelOptions.value[0]
     if (!statusMessage.value) {
-      setStatus('已就绪，可开始提问测试。', 'success')
+      setStatus('已就绪', 'success')
     }
   }
 
@@ -616,107 +630,85 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.playground-page {
-  padding: 20px;
+.playground-layout {
+  display: flex;
+  height: 100%;
+  background: #f5f7fa;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 280px;
+  min-width: 280px;
+  background: #fff;
+  border-right: 1px solid #e4e7ed;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  background: linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
-  min-height: 100%;
+  transition: width 0.2s, min-width 0.2s;
+  position: relative;
 }
 
-.playground-card,
-.history-card,
-.raw-card {
-  border-radius: 14px;
+.sidebar--collapsed {
+  width: 40px;
+  min-width: 40px;
 }
 
-.playground-header {
+.sidebar-toggle {
+  position: absolute;
+  top: 12px;
+  right: -14px;
+  width: 28px;
+  height: 28px;
+  background: #fff;
+  border: 1px solid #dcdfe6;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  transition: background 0.15s;
+}
+
+.sidebar-toggle:hover {
+  background: #ecf5ff;
+}
+
+.sidebar-content {
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  overflow-y: auto;
+  height: 100%;
 }
 
-.playground-header h2 {
-  margin: 0;
-  font-size: 20px;
+.sidebar-title {
+  margin: 0 0 4px 0;
+  font-size: 16px;
   color: #1f2d3d;
 }
 
 .status-alert {
-  margin-bottom: 16px;
+  margin-bottom: 0;
 }
 
-.playground-form {
+.sidebar-section {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 6px;
 }
 
-.history-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+.sidebar-label {
+  font-size: 12px;
+  color: #909399;
+  font-weight: 500;
 }
 
-.history-head h3 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.conversation-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.conversation-item {
-  border: 1px solid #e4e7ed;
-  border-radius: 12px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: #fff;
-}
-
-.conversation-item--user {
-  border-color: #d9ecff;
-  background: #f0f8ff;
-}
-
-.conversation-item--assistant {
-  border-color: #ecf5e8;
-  background: #f8fff3;
-}
-
-.conversation-item--error {
-  border-color: #fde2e2;
-  background: #fff5f5;
-}
-
-.conversation-role {
-  font-weight: 600;
-  color: #1f2d3d;
-}
-
-.conversation-content {
-  margin: 0;
-  white-space: pre-wrap;
-  line-height: 1.6;
-  color: #303133;
-}
-
-.upload-control {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.upload-tip {
-  margin-top: 4px;
+.sidebar-actions {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid #f0f0f0;
 }
 
 .hidden-file-input {
@@ -727,84 +719,328 @@ onMounted(() => {
   pointer-events: none;
 }
 
-.upload-list {
+.chat-area {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-top: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.upload-item {
-  border: 1px dashed #dcdfe6;
-  border-radius: 8px;
-  padding: 8px 10px;
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+.chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   align-items: center;
+  justify-content: center;
+  color: #c0c4cc;
   gap: 12px;
 }
 
-.upload-name {
-  font-size: 13px;
-  color: #1f2d3d;
-  font-weight: 600;
+.chat-empty p {
+  margin: 0;
+  font-size: 14px;
 }
 
-.upload-meta,
-.upload-status {
-  font-size: 12px;
-  color: #909399;
+.chat-message {
+  display: flex;
+  gap: 12px;
+  max-width: 85%;
+}
+
+.chat-message--user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.chat-message--assistant {
+  align-self: flex-start;
+}
+
+.chat-message--error {
+  align-self: flex-start;
+}
+
+.chat-message-avatar {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e8eaed;
+  color: #606266;
   margin-top: 2px;
 }
 
-.upload-status {
-  color: #e6a23c;
+.chat-message--user .chat-message-avatar {
+  background: #409eff;
+  color: #fff;
 }
 
-.conversation-file {
-  border-left: 3px solid #d9ecff;
-  padding-left: 8px;
-  color: #606266;
-  font-size: 12px;
-  line-height: 1.6;
+.chat-message--assistant .chat-message-avatar {
+  background: #67c23a;
+  color: #fff;
 }
 
-.conversation-file-list {
+.chat-message-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-message-content {
   margin: 0;
-  padding-left: 18px;
+  line-height: 1.7;
+  color: #303133;
+  font-size: 14px;
 }
 
-.conversation-meta {
+.chat-message-content--plain {
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+
+.chat-message--user .chat-message-content {
+  background: #409eff;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 12px 12px 2px 12px;
+  white-space: pre-wrap;
+}
+
+.chat-message--assistant .chat-message-content {
+  background: #fff;
+  padding: 10px 14px;
+  border-radius: 12px 12px 12px 2px;
+  border: 1px solid #e4e7ed;
+}
+
+.chat-message--error .chat-message-content {
+  background: #fef0f0;
+  color: #f56c6c;
+  padding: 10px 14px;
+  border-radius: 12px 12px 12px 2px;
+  border: 1px solid #fde2e2;
+  white-space: pre-wrap;
+}
+
+.chat-message-file {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.file-tag {
+  font-size: 11px;
+  background: #ecf5ff;
+  color: #409eff;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.chat-message-meta {
   color: #909399;
-  font-size: 12px;
+  font-size: 11px;
 }
 
-.raw-code {
-  margin: 0;
-  border-radius: 10px;
-  background: #0b1220;
-  color: #e5e7eb;
-  padding: 14px;
-  max-height: 360px;
-  overflow: auto;
-  line-height: 1.6;
-  font-family:
-    'SFMono-Regular',
-    Consolas,
-    'Liberation Mono',
-    Menlo,
-    monospace;
+.typing-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 16px;
+  background: #409eff;
+  margin-left: 2px;
+  animation: blink 0.8s infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.chat-input-area {
+  padding: 12px 24px 16px;
+  background: #fff;
+  border-top: 1px solid #e4e7ed;
+  z-index: 5;
+}
+
+.chat-input-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.chat-input-inner {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.chat-input-inner :deep(.el-textarea__inner) {
+  border-radius: 12px;
+  padding: 10px 14px;
+  resize: none;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.chat-input-inner :deep(.el-textarea) {
+  flex: 1;
+}
+
+.send-button {
+  min-width: 36px;
+  min-height: 36px;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.chat-input-footer {
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+}
+
+.chat-upload-area {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.upload-inline-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.upload-inline-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: #ecf5ff;
+  color: #409eff;
+  border-radius: 4px;
   font-size: 12px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-inline-remove {
+  cursor: pointer;
+  color: #909399;
+  flex-shrink: 0;
+}
+
+.upload-inline-remove:hover {
+  color: #f56c6c;
+}
+
+.markdown-body :deep(pre) {
+  background: #1e1e2e;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.markdown-body :deep(code) {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 13px;
+}
+
+.markdown-body :deep(pre code) {
+  background: none;
+  padding: 0;
+  color: #cdd6f4;
+}
+
+.markdown-body :deep(:not(pre) > code) {
+  background: #f0f2f5;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #c7254e;
+  font-size: 0.9em;
+}
+
+.markdown-body :deep(p) {
+  margin: 0 0 8px 0;
+}
+
+.markdown-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.markdown-body :deep(blockquote) {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid #dcdfe6;
+  color: #606266;
+}
+
+.markdown-body :deep(table) {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  border: 1px solid #dcdfe6;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.markdown-body :deep(th) {
+  background: #f5f7fa;
 }
 
 @media (max-width: 768px) {
-  .playground-page {
-    padding: 12px;
-    gap: 12px;
+  .sidebar {
+    width: 40px;
+    min-width: 40px;
   }
 
-  .playground-form :deep(.el-col) {
-    width: 100% !important;
+  .sidebar--collapsed {
+    width: 0;
+    min-width: 0;
+  }
+
+  .chat-messages {
+    padding: 12px;
+  }
+
+  .chat-input-area {
+    padding: 8px 12px 12px;
+  }
+
+  .chat-message {
+    max-width: 95%;
   }
 }
 </style>

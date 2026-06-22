@@ -2,7 +2,7 @@ use super::log_queries::{current_month_start, enrich_usage_log, query_time_bound
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, DownstreamConfig, DownstreamUsageSummary,
     DefaultModelContextConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
-    PersistedState, UpstreamConfig,
+    PersistedState, UpstreamConfig, ApiKeyModelConfig,
     UpstreamProtocol,
     UsageLog, UsageLogPage, UsageLogQuery,
 };
@@ -63,7 +63,7 @@ impl PostgresStateStore {
                  COALESCE(request_quota_requests, request_quota_5h, 600), \
                  requests_per_minute, max_concurrency, priority, premium_only, \
                  protect_premium_quota, active, failure_count, \
-                 auto_managed, managed_source, last_synced_at \
+                 auto_managed, managed_source, last_synced_at, api_keys, api_key_models \
                  FROM upstreams ORDER BY id",
                 &[],
             )
@@ -71,12 +71,19 @@ impl PostgresStateStore {
             .map_err(io_other)?
         {
             let protocol = decode_protocol(row.get::<_, String>(4))?;
+            let api_keys: Vec<String> = row.get::<_, Option<String>>(20)
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let api_key_models: Vec<ApiKeyModelConfig> = row.get::<_, Option<String>>(21)
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
             upstreams.push(UpstreamConfig {
                 id: row.get::<_, String>(0),
                 name: row.get::<_, String>(1),
                 base_url: row.get::<_, String>(2),
                 api_key: row.get::<_, String>(3),
-                api_keys: Vec::new(),
+                api_keys,
+                api_key_models,
                 protocol,
                 protocols: decode_protocols(row.get::<_, Option<String>>(5), protocol)?,
                 model_contexts: decode_model_contexts(row.get::<_, Option<String>>(6))?,
@@ -152,8 +159,12 @@ impl PostgresStateStore {
                     .push(ModelRequestCostConfig {
                         slug: row.get::<_, String>(1),
                         cost: row.get::<_, i32>(2) as f64,
-                    });
+                });
             }
+        }
+
+        for upstream in &mut upstreams {
+            upstream.normalize_for_storage();
         }
 
         let mut downstreams = Vec::new();
@@ -572,6 +583,9 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
         let model_contexts_json = encode_model_contexts(&upstream.model_contexts);
         let default_model_context_json =
             encode_default_model_context(&upstream.default_model_context);
+        let api_keys_json = serde_json::to_string(&upstream.api_keys).unwrap_or("[]".to_string());
+        let api_key_models_json =
+            serde_json::to_string(&upstream.api_key_models).unwrap_or("[]".to_string());
         let params: &[&(dyn ToSql + Sync)] = &[
             &upstream.id,
             &upstream.name,
@@ -594,6 +608,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &upstream.auto_managed,
             &upstream.managed_source,
             &(upstream.last_synced_at as i64),
+            &api_keys_json,
+            &api_key_models_json,
         ];
         tx.execute(
             "INSERT INTO upstreams (
@@ -601,12 +617,12 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 request_quota_5h, default_model_context, request_quota_window_hours, request_quota_requests,
                 requests_per_minute, max_concurrency, priority, premium_only,
                 protect_premium_quota, active, failure_count,
-                auto_managed, managed_source, last_synced_at
+                auto_managed, managed_source, last_synced_at, api_keys, api_key_models
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21
+                $15, $16, $17, $18, $19, $20, $21, $22, $23
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -628,7 +644,9 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 failure_count = EXCLUDED.failure_count,
                 auto_managed = EXCLUDED.auto_managed,
                 managed_source = EXCLUDED.managed_source,
-                last_synced_at = EXCLUDED.last_synced_at",
+                last_synced_at = EXCLUDED.last_synced_at,
+                api_keys = EXCLUDED.api_keys,
+                api_key_models = EXCLUDED.api_key_models",
             params,
         )
         .await
@@ -1132,6 +1150,10 @@ ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS managed_source TEXT NULL;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS last_synced_at BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS api_keys TEXT NULL;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS api_key_models TEXT NULL;
 
 CREATE TABLE IF NOT EXISTS downstreams (
     id TEXT PRIMARY KEY,

@@ -3,14 +3,66 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
     AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DefaultModelContextConfig,
     DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
-    UpstreamConfig, UsageLog, UsageLogQuery,
+    PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
 };
+use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+#[test]
+fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
+    let state_json = json!({
+        "upstreams": [
+            {
+                "id": "up-1",
+                "name": "primary",
+                "base_url": "https://upstream.example",
+                "api_key": "upstream-secret-a",
+                "api_keys": ["upstream-secret-b"],
+                "api_key_models": [
+                    {
+                        "api_key": "upstream-secret-a",
+                        "supported_models": ["GLM-4.1-mini"]
+                    },
+                    {
+                        "api_key": "upstream-secret-b",
+                        "supported_models": ["GLM-4.1-mini", "GLM-4.1-mini-Long"]
+                    }
+                ],
+                "protocol": "Responses",
+                "protocols": ["Responses"],
+                "supported_models": ["GLM-4.1-mini", "GLM-4.1-mini-Long"],
+                "request_quota_window_hours": 5,
+                "request_quota_requests": 888,
+                "requests_per_minute": 33,
+                "max_concurrency": 7,
+                "model_request_costs": [],
+                "model_contexts": [],
+                "priority": 0,
+                "premium_models": [],
+                "premium_only": false,
+                "protect_premium_quota": false,
+                "active": true,
+                "failure_count": 0,
+                "default_model_context": null,
+                "auto_managed": false,
+                "managed_source": null,
+                "last_synced_at": 0
+            }
+        ],
+        "downstreams": [],
+        "usage_logs": [],
+        "announcement": null,
+        "global_context_profiles": {}
+    });
+
+    let state: PersistedState = serde_json::from_value(state_json.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&state).unwrap(), state_json);
+}
 
 #[tokio::test]
 async fn postgres_roundtrip_preserves_normalized_state() {
@@ -171,6 +223,83 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         .expect("PostgreSQL store-backed summary should read persisted usage logs");
     assert_eq!(summary.total_models, 1);
     assert_eq!(summary.active_models, 1);
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_api_key_model_mapping() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    let upstream_json = json!({
+        "id": "up-2",
+        "name": "multi-key",
+        "base_url": "https://upstream.example",
+        "api_key": "upstream-secret-a",
+        "api_keys": ["upstream-secret-b"],
+        "api_key_models": [
+            {
+                "api_key": "upstream-secret-a",
+                "supported_models": ["GLM-4.1-mini"]
+            },
+            {
+                "api_key": "upstream-secret-b",
+                "supported_models": ["GLM-4.1-mini", "GLM-4.1-mini-Long"]
+            }
+        ],
+        "protocol": "Responses",
+        "protocols": ["Responses"],
+        "supported_models": ["GLM-4.1-mini", "GLM-4.1-mini-Long"],
+        "default_model_context": null,
+        "model_contexts": [],
+        "request_quota_window_hours": 5,
+        "request_quota_requests": 888,
+        "requests_per_minute": 33,
+        "max_concurrency": 7,
+        "model_request_costs": [],
+        "priority": 0,
+        "premium_models": [],
+        "premium_only": false,
+        "protect_premium_quota": false,
+        "active": true,
+        "failure_count": 0
+    });
+    let upstream: UpstreamConfig = serde_json::from_value(upstream_json.clone()).unwrap();
+
+    state
+        .insert_upstream(upstream.clone())
+        .await
+        .expect("should persist upstream rows");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL");
+    let snapshot = reloaded.snapshot().await;
+
+    assert_eq!(snapshot.upstreams.len(), 1);
+    let mut expected = serde_json::to_value(&upstream).unwrap();
+    expected.as_object_mut().unwrap().insert(
+        "api_key_models".to_string(),
+        upstream_json.get("api_key_models").cloned().unwrap(),
+    );
+    assert_eq!(serde_json::to_value(&snapshot.upstreams[0]).unwrap(), expected);
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");

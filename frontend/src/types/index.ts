@@ -56,15 +56,22 @@ export interface DashboardAnalyticsRange {
   }>
 }
 
-// ============================================================================
+// ============================================================================ 
 // Upstream Types
 // ============================================================================
+
+export interface ApiKeyModelConfig {
+  api_key: string
+  supported_models: string[]
+}
 
 export interface UpstreamConfig {
   id: string
   name: string
   base_url: string
   api_key: string
+  api_keys?: string[]
+  api_key_models?: ApiKeyModelConfig[]
   protocol: 'ChatCompletions' | 'Responses'
   protocols?: Array<'ChatCompletions' | 'Responses'>
   supported_models: string[]
@@ -80,6 +87,9 @@ export interface UpstreamConfig {
   protect_premium_quota: boolean
   active: boolean
   failure_count: number
+  auto_managed?: boolean
+  managed_source?: string | null
+  last_synced_at?: number
   runtime_state?: UpstreamRuntimeState
 }
 

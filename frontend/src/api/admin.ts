@@ -19,14 +19,11 @@ export interface BatchCreateUpstreamPayload {
   keys: string[]
   protocol?: string
   protocols?: string[]
-  requests_per_minute?: number
-  request_quota_window_hours?: number
-  request_quota_requests?: number
-  max_concurrency?: number
   active?: boolean
 }
 
 export interface BatchCreateUpstreamResult {
+  keys_count?: number
   created: number
   failed: number
   total: number
@@ -38,6 +35,24 @@ export interface BatchCreateUpstreamResult {
     model_list?: string[]
     error?: string
   }>
+}
+
+export interface DiscoverUpstreamModelsPayload {
+  base_url: string
+  keys: string[]
+}
+
+export interface DiscoverUpstreamModelsResult {
+  models: string[]
+  failed: number
+  total: number
+  results: Array<{
+    key_prefix?: string
+    models?: number
+    model_list?: string[]
+    error?: string
+  }>
+  message?: string
 }
 export interface DashboardViewResponse {
   dashboard: DashboardData
@@ -118,6 +133,8 @@ export const adminApi = {
     adminHttp.post<UpstreamConfig>('/admin/upstreams', data),
   createUpstreamsBatch: (data: BatchCreateUpstreamPayload) =>
     adminHttp.post<BatchCreateUpstreamResult>('/admin/upstreams/batch', data),
+  discoverUpstreamModels: (data: DiscoverUpstreamModelsPayload) =>
+    adminHttp.post<DiscoverUpstreamModelsResult>('/admin/upstreams/discover-models', data),
   getUpstream: (id: string) => adminHttp.get<UpstreamConfig>(`/admin/upstreams/${id}`),
   updateUpstream: (id: string, data: Partial<UpstreamConfig>) =>
     adminHttp.put<UpstreamConfig>(`/admin/upstreams/${id}`, data),

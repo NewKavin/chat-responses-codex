@@ -251,6 +251,7 @@ import {
   rankModelSlugsByUsage,
   sortPortalModelStats
 } from '@/utils/integration'
+import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
 
 type GatewayModelsResponse = {
   data?: Array<{
@@ -263,6 +264,7 @@ const loading = ref(true)
 const gatewayBaseUrl = ref('')
 const portalKey = ref('')
 const portalModelStats = ref<PortalModelStat[]>([])
+const modelAllowlist = ref<string[]>([])
 const gatewayModelSlugs = ref<string[]>([])
 const loadWarnings = ref<string[]>([])
 const fatalError = ref('')
@@ -271,16 +273,22 @@ const gatewayApiBaseUrl = computed(() =>
   gatewayBaseUrl.value ? `${gatewayBaseUrl.value}/v1` : ''
 )
 
-const allModelSlugs = computed(() =>
-  gatewayModelSlugs.value.length
+const allModelSlugs = computed(() => {
+  const unfiltered = gatewayModelSlugs.value.length
     ? rankModelSlugsByUsage(gatewayModelSlugs.value, portalModelStats.value)
     : sortPortalModelStats(portalModelStats.value).map(stat => stat.model)
-)
+  return resolvePortalQuotaModelSlugs(modelAllowlist.value, unfiltered)
+})
+
 
 const primaryModelSlug = computed(() => allModelSlugs.value[0] ?? '')
-const sortedModelStats = computed(() =>
-  buildModelUsageStats(gatewayModelSlugs.value, portalModelStats.value)
-)
+const sortedModelStats = computed(() => {
+  const stats = buildModelUsageStats(gatewayModelSlugs.value, portalModelStats.value)
+  if (!modelAllowlist.value.length) return stats
+  const allowed = new Set(modelAllowlist.value.map(s => s.trim()).filter(Boolean))
+  return stats.filter(stat => allowed.has(stat.model))
+})
+
 const hasConfigContent = computed(
   () => Boolean(portalKey.value.trim()) && allModelSlugs.value.length > 0 && !fatalError.value
 )
@@ -339,14 +347,16 @@ const loadIntegrationData = async () => {
   loadWarnings.value = []
   portalKey.value = ''
   portalModelStats.value = []
+  modelAllowlist.value = []
   gatewayModelSlugs.value = []
 
   try {
     gatewayBaseUrl.value = buildGatewayBaseUrl(window.location.origin)
 
-    const [keyResult, modelsResult] = await Promise.allSettled([
+    const [keyResult, modelsResult, quotaResult] = await Promise.allSettled([
       portalApi.getKey(),
-      portalApi.getModels()
+      portalApi.getModels(),
+      portalApi.getQuota()
     ])
 
     if (keyResult.status === 'rejected') {
@@ -358,6 +368,10 @@ const loadIntegrationData = async () => {
     if (!portalKey.value) {
       fatalError.value = '当前门户没有可用的下游 key，请先到“秘钥管理”生成或轮换一次。'
       return
+    }
+
+    if (quotaResult.status === 'fulfilled') {
+      modelAllowlist.value = quotaResult.value.data.model_allowlist ?? []
     }
 
     if (modelsResult.status === 'fulfilled') {
@@ -590,6 +604,8 @@ p {
   background: #111827;
   color: #e5e7eb;
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 420px;
   white-space: pre;
   line-height: 1.7;
   font-size: 13px;

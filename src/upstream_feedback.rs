@@ -127,6 +127,12 @@ impl UpstreamFeedbackClassification {
                 || body_lower.contains("endpoint not supported")
                 || body_lower.contains("streaming not supported")
                 || body_lower.contains("stream not supported")
+                || body_lower.contains("model not supported")
+                || body_lower.contains("unsupported model")
+                || body_lower.contains("model unsupported")
+                || body_lower.contains("model not found")
+                || body_lower.contains("model_not_found")
+                || body_lower.contains("no such model")
                 || (body_lower.contains("unsupported") && body_lower.contains("tool"))
                 || (body_lower.contains("not supported") && body_lower.contains("feature"))
             {
@@ -212,6 +218,20 @@ mod tests {
     fn test_404_is_protocol_unsupported() {
         let headers = reqwest::header::HeaderMap::new();
         let classification = UpstreamFeedbackClassification::from_response(404, &headers, None);
+        assert_eq!(
+            classification,
+            UpstreamFeedbackClassification::ProtocolUnsupported
+        );
+    }
+
+    #[test]
+    fn test_model_not_supported_is_protocol_unsupported() {
+        let headers = reqwest::header::HeaderMap::new();
+        let classification = UpstreamFeedbackClassification::from_response(
+            400,
+            &headers,
+            Some(r#"{"error": {"message": "model not supported"}}"#),
+        );
         assert_eq!(
             classification,
             UpstreamFeedbackClassification::ProtocolUnsupported

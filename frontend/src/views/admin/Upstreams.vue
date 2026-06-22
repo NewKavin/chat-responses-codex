@@ -29,48 +29,9 @@
             {{ row.supported_models.length }}
           </template>
         </el-table-column>
-        
-        <!-- 运行时状态显示 -->
-        <el-table-column label="并发数" width="100">
+        <el-table-column label="Key 数量" width="100">
           <template #default="{ row }">
-            <span v-if="row.runtime_state">
-              {{ row.runtime_state.in_flight }} / {{ row.max_concurrency }}
-            </span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        
-        <el-table-column label="每分钟请求" width="180">
-          <template #default="{ row }">
-            <div v-if="row.runtime_state" class="quota-cell">
-              <el-progress 
-                :percentage="row.runtime_state.minute_percentage" 
-                :color="getProgressColor(row.runtime_state.minute_percentage)"
-                :show-text="false"
-                style="width: 70px; margin-right: 8px;"
-              />
-              <span class="quota-text">
-                {{ row.runtime_state.minute_cost }} / {{ row.runtime_state.minute_limit }}
-              </span>
-            </div>
-            <span v-else class="quota-text-static">{{ row.requests_per_minute }}</span>
-          </template>
-        </el-table-column>
-        
-        <el-table-column label="窗口配额" width="220">
-          <template #default="{ row }">
-            <div v-if="row.runtime_state" class="quota-cell">
-              <el-progress 
-                :percentage="row.runtime_state.five_hour_percentage" 
-                :color="getProgressColor(row.runtime_state.five_hour_percentage)"
-                :show-text="false"
-                style="width: 70px; margin-right: 8px;"
-              />
-              <span class="quota-text">
-                {{ row.request_quota_window_hours }}小时 {{ row.runtime_state.five_hour_cost }} / {{ row.runtime_state.five_hour_limit }}
-              </span>
-            </div>
-            <span v-else class="quota-text-static">{{ row.request_quota_window_hours }}小时 {{ row.request_quota_requests }}</span>
+            {{ displayKeyCount(row) }} 个
           </template>
         </el-table-column>
         
@@ -108,13 +69,16 @@
       </el-table>
     </el-card>
     
-    <!-- Create/Edit Dialog -->
-    <el-dialog
+    <!-- Create/Edit Drawer -->
+    <el-drawer
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建上游' : '编辑上游'"
-      width="700px"
+      direction="rtl"
+      size="100%"
+      :destroy-on-close="false"
+      class="form-drawer"
     >
-      <el-form :model="form" :rules="rules" ref="formRef" label-width="140px">
+      <el-form :model="form" :rules="rules" ref="formRef" label-width="140px" class="drawer-form">
         <el-form-item v-if="dialogMode === 'edit'" label="ID">
           <el-input v-model="form.id" disabled />
         </el-form-item>
@@ -138,25 +102,6 @@
             <el-option label="ChatCompletions" value="ChatCompletions" />
             <el-option label="Responses" value="Responses" />
           </el-select>
-        </el-form-item>
-
-        <!-- 限额配置 -->
-        <el-divider>限额配置 (仅显示,不做实际校验)</el-divider>
-        <el-form-item label="每分钟请求数">
-          <el-input-number v-model="form.requests_per_minute" :min="1" :max="10000" />
-          <span class="form-hint">用于显示和监控,不做强制限制</span>
-        </el-form-item>
-        <el-form-item label="配额窗口（小时）">
-          <el-input-number v-model="form.request_quota_window_hours" :min="1" :max="168" />
-          <span class="form-hint">用于显示和监控,不做强制限制</span>
-        </el-form-item>
-        <el-form-item label="窗口请求次数">
-          <el-input-number v-model="form.request_quota_requests" :min="1" :max="1000000" />
-          <span class="form-hint">用于显示和监控,不做强制限制</span>
-        </el-form-item>
-        <el-form-item label="最大并发数">
-          <el-input-number v-model="form.max_concurrency" :min="1" :max="1000" />
-          <span class="form-hint">用于显示和监控,不做强制限制</span>
         </el-form-item>
 
         <!-- 模型配置 -->
@@ -296,10 +241,12 @@
       </el-form>
       
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleSubmit" :loading="submitting">确定</el-button>
+        <div class="drawer-footer">
+          <el-button @click="dialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="handleSubmit" :loading="submitting">确定</el-button>
+        </div>
       </template>
-    </el-dialog>
+    </el-drawer>
   </div>
 </template>
 
@@ -307,7 +254,7 @@
 import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi, type BatchCreateUpstreamPayload } from '@/api/admin'
-import type { UpstreamConfig } from '@/types'
+import type { ApiKeyModelConfig, UpstreamConfig } from '@/types'
 
 const loading = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
@@ -329,17 +276,14 @@ const form = ref<Partial<UpstreamConfig>>({
   api_key: '',
   protocol: 'ChatCompletions',
   protocols: ['ChatCompletions'],
+  api_key_models: [],
   supported_models: [],
   default_model_context: {
-    context_limit: 0,
-    output_reserve: 0,
+    context_limit: 200000,
+    output_reserve: 4096,
     context_group: ''
   },
   active: true,
-  request_quota_window_hours: 5,
-  request_quota_requests: 600,
-  requests_per_minute: 100,
-  max_concurrency: 10,
   model_request_costs: [],
   model_contexts: [],
   priority: 0,
@@ -408,12 +352,6 @@ const rules = {
   protocols: [{ required: true, message: '请选择协议', trigger: 'change' }]
 }
 
-const getProgressColor = (percentage: number) => {
-  if (percentage < 60) return '#67c23a'
-  if (percentage < 80) return '#e6a23c'
-  return '#f56c6c'
-}
-
 const loadData = async () => {
   try {
     loading.value = true
@@ -452,6 +390,18 @@ const resolveProtocols = (value: Partial<UpstreamConfig>): UpstreamConfig['proto
 
 const displayProtocols = (value: UpstreamConfig) => resolveProtocols(value)
 
+const displayKeyCount = (value: UpstreamConfig) => {
+  const keys = [
+    value.api_key,
+    ...(value.api_keys || []),
+    ...(value.api_key_models || []).map(item => item.api_key)
+  ]
+    .map(key => String(key || '').trim())
+    .filter(Boolean)
+
+  return new Set(keys).size
+}
+
 const handleCreate = () => {
   dialogMode.value = 'create'
   contextConfigTab.value = 'overrides'
@@ -463,17 +413,14 @@ const handleCreate = () => {
     api_key: '',
     protocol: 'ChatCompletions',
     protocols: ['ChatCompletions'],
+    api_key_models: [],
     supported_models: [],
     default_model_context: {
-      context_limit: 0,
-      output_reserve: 0,
+      context_limit: 200000,
+      output_reserve: 4096,
       context_group: ''
     },
     active: true,
-    request_quota_window_hours: 5,
-    request_quota_requests: 600,
-    requests_per_minute: 100,
-    max_concurrency: 10,
     model_request_costs: [],
     model_contexts: [],
     priority: 0,
@@ -496,15 +443,12 @@ const handleCopy = (row: UpstreamConfig) => {
     api_key: '',
     protocol: protocols[0] as UpstreamConfig['protocol'],
     protocols,
+    api_key_models: [],
     supported_models: [...(row.supported_models || [])],
     default_model_context: row.default_model_context
       ? { ...row.default_model_context }
-      : { context_limit: 0, output_reserve: 0, context_group: '' },
+      : { context_limit: 200000, output_reserve: 4096, context_group: '' },
     active: row.active,
-    request_quota_window_hours: row.request_quota_window_hours,
-    request_quota_requests: row.request_quota_requests,
-    requests_per_minute: row.requests_per_minute,
-    max_concurrency: row.max_concurrency,
     model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
     model_contexts: row.model_contexts ? [...row.model_contexts] : [],
     priority: row.priority,
@@ -520,8 +464,21 @@ const handleEdit = (row: UpstreamConfig) => {
   contextConfigTab.value = 'default'
   clearDefaultContext.value = false
   const protocols = resolveProtocols(row)
+  const allKeys = [
+    row.api_key,
+    ...(row.api_keys || []),
+    ...(row.api_key_models || []).map(item => item.api_key)
+  ]
+    .map(key => String(key || '').trim())
+    .filter((v, i, a) => a.indexOf(v) === i)
   form.value = {
     ...row,
+    api_key: allKeys.join('\n'),
+    api_keys: [...(row.api_keys || [])],
+    api_key_models: (row.api_key_models || []).map((item: ApiKeyModelConfig) => ({
+      api_key: item.api_key,
+      supported_models: [...item.supported_models]
+    })),
     protocol: protocols[0] as UpstreamConfig['protocol'],
     protocols,
     default_model_context: row.default_model_context
@@ -529,8 +486,8 @@ const handleEdit = (row: UpstreamConfig) => {
           ...row.default_model_context
         }
       : {
-          context_limit: 0,
-          output_reserve: 0,
+          context_limit: 200000,
+          output_reserve: 4096,
           context_group: ''
         },
     model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
@@ -547,6 +504,10 @@ const handleSubmit = async () => {
     const submitData: Partial<UpstreamConfig> = {
       ...form.value
     }
+    delete submitData.requests_per_minute
+    delete submitData.request_quota_window_hours
+    delete submitData.request_quota_requests
+    delete submitData.max_concurrency
     submitData.model_contexts = (submitData.model_contexts || [])
       .map((item: any) => ({
         slug: String(item.slug || '').trim(),
@@ -608,28 +569,40 @@ const handleSubmit = async () => {
           keys: apiKeys,
           protocol: protocols[0] ? String(protocols[0]) : 'ChatCompletions',
           protocols: protocols.map(p => String(p)),
-          requests_per_minute: submitData.requests_per_minute,
-          request_quota_window_hours: submitData.request_quota_window_hours,
-          request_quota_requests: submitData.request_quota_requests,
-          max_concurrency: submitData.max_concurrency,
           active: submitData.active
         }
 
         const response = await adminApi.createUpstreamsBatch(batchPayload)
         const result = response.data
 
-        if (result.failed > 0 && result.created > 0) {
-          ElMessage.success(`创建成功 ${result.created} 个，${result.failed} 个失败`)
-        } else if (result.created > 0) {
-          ElMessage.success(`创建成功 ${result.created} 个`)
+        const keysCount = result.keys_count || 0
+        const failedKeys = result.failed || 0
+
+        if (failedKeys > 0 && keysCount > 0) {
+          ElMessage.success(`保存了 ${keysCount} 个有效 Key，${failedKeys} 个无效 Key 已剔除`)
+        } else if (keysCount > 0) {
+          ElMessage.success(`保存了 ${keysCount} 个有效 Key`)
         } else {
-          const errors = result.results.filter(r => r.error).map(r => r.error).join('；')
-          ElMessage.error(`创建失败：${errors || '全部失败'}`)
+          const errors = result.results.filter(r => r.error).map(r => r.error).join("；")
+          ElMessage.error(`所有 Key 均无效：${errors || "无法验证"}`)
         }
       }
     } else {
+      const editKeys = (submitData.api_key || '')
+        .split('\n')
+        .map(k => k.trim())
+        .filter(k => k.length > 0)
+      if (editKeys.length > 0) {
+        submitData.api_key = editKeys[0]
+        submitData.api_keys = editKeys.slice(1)
+      }
       await adminApi.updateUpstream(form.value.id!, submitData)
-      ElMessage.success('更新成功')
+      const editTotalKeys = [submitData.api_key, ...(submitData.api_keys || [])].filter(Boolean).length
+      if (editTotalKeys > 1) {
+        ElMessage.success('更新成功，保存了 ' + editTotalKeys + ' 个 Key')
+      } else {
+        ElMessage.success('更新成功')
+      }
     }
     
     dialogVisible.value = false
@@ -697,54 +670,30 @@ const fetchModels = async () => {
 
   try {
     fetchingModels.value = true
+    const response = await adminApi.discoverUpstreamModels({
+      base_url: baseUrl,
+      keys: apiKeys
+    })
+    const result = response.data
 
-    const allModels = new Set<string>()
-    let successCount = 0
-    let failCount = 0
-
-    for (const key of apiKeys) {
-      try {
-        const response = await fetch(baseUrl + '/v1/models', {
-          headers: {
-            'Authorization': 'Bearer ' + key
-          }
-        })
-
-        if (!response.ok) {
-          failCount++
-          continue
-        }
-
-        const data = await response.json()
-        const models: string[] = (data.data || [])
-          .map((m: any) => (typeof m?.id === 'string' ? m.id : ''))
-          .filter((id: string) => id.length > 0)
-
-        for (const model of models) {
-          const trimmed = typeof model === 'string' ? model.trim() : ''
-          if (trimmed) {
-            allModels.add(trimmed)
-          }
-        }
-        successCount++
-      } catch {
-        failCount++
-      }
-    }
-
-    if (allModels.size === 0) {
-      ElMessage.error('所有 Key 获取模型均失败')
+    if (!result.models || result.models.length === 0) {
+      const errorDetails = (result.results || [])
+        .filter(item => item.error)
+        .map(item => item.error)
+        .join('；')
+      ElMessage.error(result.message || `所有 Key 获取模型均失败${errorDetails ? `：${errorDetails}` : ''}`)
       return
     }
 
-    form.value.supported_models = Array.from(allModels).sort()
+    form.value.supported_models = [...result.models].sort()
 
-    const parts: string[] = ['成功获取 ' + allModels.size + ' 个模型']
+    const successCount = (result.total || 0) - (result.failed || 0)
+    const parts: string[] = ['成功获取 ' + result.models.length + ' 个模型']
     if (successCount > 1) {
       parts.push('用了 ' + successCount + ' 个 Key')
     }
-    if (failCount > 0) {
-      parts.push(failCount + ' 个 Key 获取失败')
+    if (result.failed > 0) {
+      parts.push(result.failed + ' 个 Key 获取失败')
     }
     ElMessage.success(parts.join('，'))
   } catch (error: any) {
@@ -780,22 +729,6 @@ onUnmounted(() => {
   margin: 0;
 }
 
-.quota-cell {
-  display: flex;
-  align-items: center;
-}
-
-.quota-text {
-  font-size: 12px;
-  color: #606266;
-  white-space: nowrap;
-}
-
-.quota-text-static {
-  font-size: 13px;
-  color: #909399;
-}
-
 .model-input-group {
   display: flex;
   gap: 10px;
@@ -819,5 +752,29 @@ onUnmounted(() => {
   margin-left: 10px;
   font-size: 12px;
   color: #909399;
+}
+
+/* Drawer-based create/edit form */
+.form-drawer :deep(.el-drawer__header) {
+  margin-bottom: 0;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+.form-drawer :deep(.el-drawer__body) {
+  padding: 24px 32px;
+  overflow-y: auto;
+}
+.form-drawer :deep(.el-drawer__footer) {
+  border-top: 1px solid var(--el-border-color-light);
+  padding: 12px 24px;
+}
+.drawer-form {
+  width: 100%;
+  padding: 0 40px;
+}
+.drawer-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

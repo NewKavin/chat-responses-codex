@@ -6,9 +6,9 @@ use crate::protocol::{
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, AnnouncementConfig,
-    AnnouncementLevel, AppConfig, AppState, DownstreamConfig, FreekeySyncItem,
-    GlobalContextProfile, UpstreamConfig, UpstreamMutationError, UsageLog,
-    UsageLogQuery,
+    AnnouncementLevel, AppConfig, AppState, ApiKeyModelConfig, DefaultModelContextConfig,
+    DownstreamConfig, FreekeySyncItem, GlobalContextProfile, UpstreamConfig,
+    UpstreamMutationError, UsageLog, UsageLogQuery,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::Body;
@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -461,6 +461,13 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/admin/upstreams/batch",
             post(admin_create_upstreams_batch).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/upstreams/discover-models",
+            post(admin_discover_upstream_models).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 admin_auth_middleware,
             )),
@@ -967,6 +974,7 @@ async fn wait_for_upstream_chunk(
     }
 }
 
+#[allow(unused_assignments)]
 async fn process_gateway_request(
     state: AppState,
     headers: HeaderMap,
@@ -1513,6 +1521,14 @@ async fn process_gateway_request(
             let request_cost = upstream.request_cost_for_model(model);
             let minute_cost = runtime.minute_cost + request_cost;
             let five_hour_cost = runtime.five_hour_cost + request_cost;
+            let candidate_keys = {
+                let keys = upstream.keys_for_model(model);
+                if keys.is_empty() {
+                    vec![upstream.api_key.clone()]
+                } else {
+                    keys
+                }
+            };
             tracing::info!(
                 request_id = %request_id,
                 downstream_key_id = %downstream.id,
@@ -1531,168 +1547,134 @@ async fn process_gateway_request(
                 five_hour_cost,
                 five_hour_quota = upstream.request_quota_requests,
                 failure_count = upstream.failure_count,
+                candidate_key_count = candidate_keys.len(),
                 "considering upstream candidate"
             );
 
-            let mut concurrency_retry_attempts_used = 0u32;
-            let mut attempt_stream = request_stream;
-            loop {
-                let _ = state.try_reserve_upstream_request(&upstream, model).await;
+            for (key_index, api_key) in candidate_keys.iter().enumerate() {
+                let mut concurrency_retry_attempts_used = 0u32;
+                let mut rate_limit_retry_attempts_used = 0u32;
+                let mut attempt_stream = request_stream;
+                loop {
+                    let _ = state.try_reserve_upstream_request(&upstream, model).await;
 
-                tracing::info!(
-                    request_id = %request_id,
-                    downstream_key_id = %downstream.id,
-                    path = %request_path,
-                    original_model = %model,
-                    normalized_model = %normalized_model,
-                    selected_upstream_id = %upstream.id,
-                    selected_upstream_protocol = ?protocol,
-                    attempt_stream,
-                    request_cost,
-                    "reserved upstream capacity"
-                );
+                    tracing::info!(
+                        request_id = %request_id,
+                        downstream_key_id = %downstream.id,
+                        path = %request_path,
+                        original_model = %model,
+                        normalized_model = %normalized_model,
+                        selected_upstream_id = %upstream.id,
+                        selected_upstream_protocol = ?protocol,
+                        selected_upstream_key_prefix = %key_prefix(api_key),
+                        attempt_stream,
+                        request_cost,
+                        "reserved upstream capacity"
+                    );
 
-                let mut stream_completion_context = stream_completion_context.clone();
-                if let Some(ref mut ctx) = stream_completion_context {
-                    ctx.upstream_id = upstream.id.clone();
-                }
-                let global_context_profile = state
-                    .global_context_profile_for_upstream_base_url(&upstream.base_url)
+                    let mut stream_completion_context = stream_completion_context.clone();
+                    if let Some(ref mut ctx) = stream_completion_context {
+                        ctx.upstream_id = upstream.id.clone();
+                    }
+                    let global_context_profile = state
+                        .global_context_profile_for_upstream_base_url(&upstream.base_url)
+                        .await;
+
+                    let result = send_to_upstream(
+                        &state,
+                        &upstream,
+                        api_key,
+                        protocol,
+                        &body,
+                        endpoint,
+                        request_stream,
+                        attempt_stream,
+                        started,
+                        &request_id,
+                        model,
+                        normalized_model,
+                        &downstream.id,
+                        &downstream.name,
+                        inference_strength.as_deref(),
+                        user_agent.as_deref(),
+                        fallback_to_chat,
+                        global_context_profile.as_ref(),
+                        stream_completion_context.clone(),
+                    )
                     .await;
 
-                let result = send_to_upstream(
-                    &state,
-                    &upstream,
-                    &upstream.api_key,
-                    protocol,
-                    &body,
-                    endpoint,
-                    request_stream,
-                    attempt_stream,
-                    started,
-                    &request_id,
-                    model,
-                    normalized_model,
-                    &downstream.id,
-                    &downstream.name,
-                    inference_strength.as_deref(),
-                    user_agent.as_deref(),
-                    fallback_to_chat,
-                    global_context_profile.as_ref(),
-                    stream_completion_context.clone(),
-                )
-                .await;
-
-                // Non-streaming requests and failed streaming attempts should
-                // release upstream capacity immediately because no long-lived
-                // stream body is handed to the caller.
-                if !request_stream || result.is_err() {
-                    state.release_upstream_request(&upstream.id).await;
-                }
-
-                match result {
-                    Ok(mut result) => {
-                        // stream=true but upstream returned a non-SSE response:
-                        // the gateway synthesizes a finite stream body locally,
-                        // so release runtime slots right away.
-                        if request_stream
-                            && matches!(result.usage_log_timing, UsageLogTiming::Immediate)
-                        {
-                            state.release_upstream_request(&upstream.id).await;
-                            state.release_downstream_concurrency(&downstream.id);
-                        }
-
-                        result.request_id = request_id.clone();
-                        let completed_after_stream_fallback = request_stream && !attempt_stream;
-                        state.mark_upstream_success(&upstream.id).await.ok();
-                        if use_routing_affinity {
-                            state.set_affinity_upstream(
-                                &downstream.id,
-                                normalized_model,
-                                &upstream.id,
-                            );
-                        }
-                        tracing::info!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?protocol,
-                            status = result.status.as_u16(),
-                            latency_ms = started.elapsed().as_millis() as u64,
-                            attempt_stream,
-                            completed_after_stream_fallback,
-                            "upstream request completed"
-                        );
-                        if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
-                            let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
-                            append_gateway_usage_log(
-                                &state,
-                                &request_id,
-                                &downstream.id,
-                                &downstream.name,
-                                &upstream.id,
-                                Some(&upstream.name),
-                                request_path,
-                                model,
-                                inference_strength.as_deref(),
-                                user_agent.as_deref(),
-                                result.status,
-                                None,
-                                None,
-                                prompt_tokens,
-                                completion_tokens,
-                                total_tokens,
-                                started,
-                            )
-                            .await;
-                        }
-                        return Ok(result);
+                    // Non-streaming requests and failed streaming attempts should
+                    // release upstream capacity immediately because no long-lived
+                    // stream body is handed to the caller.
+                    if !request_stream || result.is_err() {
+                        state.release_upstream_request(&upstream.id).await;
                     }
-                    Err(GatewayError::ConcurrencyFull {
-                        message,
-                        retry_after_seconds,
-                    }) => {
-                        let backoff_ms = state.config.upstream_concurrency_retry_backoff_ms.max(1);
-                        let configured_retry_after_seconds =
-                            (backoff_ms.saturating_add(999) / 1000).max(1);
-                        let retry_after_seconds = retry_after_seconds
-                            .unwrap_or(configured_retry_after_seconds)
-                            .max(1);
-                        tracing::warn!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_name = %upstream.name,
-                            selected_upstream_protocol = ?protocol,
-                            error = %message,
-                            retry_after_seconds,
-                            "upstream concurrency full"
-                        );
-                        if state.config.routing_affinity_enabled {
-                            state.clear_affinity_upstream(&downstream.id, normalized_model);
-                        }
-                        state
-                            .mark_upstream_concurrency_full(&upstream.id, backoff_ms)
-                            .await;
-                        last_error = Some(GatewayError::ConcurrencyFull {
-                            message,
-                            retry_after_seconds: Some(retry_after_seconds),
-                        });
-                        last_failure_upstream =
-                            Some((upstream.id.clone(), Some(upstream.name.clone())));
 
-                        if concurrency_retry_attempts_used
-                            < state.config.upstream_concurrency_retry_attempts.max(1)
-                        {
-                            concurrency_retry_attempts_used =
-                                concurrency_retry_attempts_used.saturating_add(1);
+                    match result {
+                        Ok(mut result) => {
+                            // stream=true but upstream returned a non-SSE response:
+                            // the gateway synthesizes a finite stream body locally,
+                            // so release runtime slots right away.
+                            if request_stream
+                                && matches!(result.usage_log_timing, UsageLogTiming::Immediate)
+                            {
+                                state.release_upstream_request(&upstream.id).await;
+                                state.release_downstream_concurrency(&downstream.id);
+                            }
+
+                            result.request_id = request_id.clone();
+                            let completed_after_stream_fallback = request_stream && !attempt_stream;
+                            state.mark_upstream_success(&upstream.id).await.ok();
+                            if use_routing_affinity {
+                                state.set_affinity_upstream(
+                                    &downstream.id,
+                                    normalized_model,
+                                    &upstream.id,
+                                );
+                            }
                             tracing::info!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                status = result.status.as_u16(),
+                                latency_ms = started.elapsed().as_millis() as u64,
+                                attempt_stream,
+                                completed_after_stream_fallback,
+                                "upstream request completed"
+                            );
+                            if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
+                                let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
+                                append_gateway_usage_log(
+                                    &state,
+                                    &request_id,
+                                    &downstream.id,
+                                    &downstream.name,
+                                    &upstream.id,
+                                    Some(&upstream.name),
+                                    request_path,
+                                    model,
+                                    inference_strength.as_deref(),
+                                    user_agent.as_deref(),
+                                    result.status,
+                                    None,
+                                    None,
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    total_tokens,
+                                    started,
+                                )
+                                .await;
+                            }
+                            return Ok(result);
+                        }
+                        Err(error)
+                            if key_index + 1 < candidate_keys.len() && should_try_next_key(&error) =>
+                        {
+                            tracing::warn!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
                                 path = %request_path,
@@ -1701,80 +1683,92 @@ async fn process_gateway_request(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
-                                retry_after_seconds,
-                                concurrency_retry_attempts_used,
-                                concurrency_retry_attempts_limit = state
-                                    .config
-                                    .upstream_concurrency_retry_attempts,
-                                "waiting for upstream concurrency slot before retrying"
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                error = %error,
+                                "upstream key failed; trying next key"
                             );
-                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            continue;
+                            last_error = Some(error);
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+                            break;
                         }
-
-                        break;
-                    }
-                    Err(GatewayError::TooManyRequests {
-                        message,
-                        retry_after_seconds,
-                    }) => {
-                        let retry_after_seconds = retry_after_seconds.unwrap_or(
+                        Err(GatewayError::ConcurrencyFull {
+                            message,
+                            retry_after_seconds,
+                        }) => {
+                            let backoff_ms =
+                                state.config.upstream_concurrency_retry_backoff_ms.max(1);
+                            let configured_retry_after_seconds =
+                                (backoff_ms.saturating_add(999) / 1000).max(1);
+                            let retry_after_seconds = retry_after_seconds
+                                .unwrap_or(configured_retry_after_seconds)
+                                .max(1);
+                            tracing::warn!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_name = %upstream.name,
+                                selected_upstream_protocol = ?protocol,
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                error = %message,
+                                retry_after_seconds,
+                                "upstream concurrency full"
+                            );
+                            if state.config.routing_affinity_enabled {
+                                state.clear_affinity_upstream(&downstream.id, normalized_model);
+                            }
                             state
-                                .config
-                                .upstream_rate_limit_default_retry_seconds
-                                .max(1),
-                        );
-                        tracing::warn!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_name = %upstream.name,
-                            selected_upstream_protocol = ?protocol,
-                            error = %message,
-                            retry_after_seconds,
-                            "upstream rate limited"
-                        );
-                        if state.config.routing_affinity_enabled {
-                            state.clear_affinity_upstream(&downstream.id, normalized_model);
-                        }
-                        state
-                            .mark_upstream_rate_limited(&upstream.id, retry_after_seconds)
-                            .await;
-                        last_error = Some(GatewayError::TooManyRequests {
-                            message,
-                            retry_after_seconds: Some(retry_after_seconds),
-                        });
-                        last_failure_upstream =
-                            Some((upstream.id.clone(), Some(upstream.name.clone())));
-
-                        let has_available_alternative =
-                            upstreams_for_retry.iter().any(|candidate| {
-                                candidate.id != upstream.id
-                                    && upstream_runtime_snapshots
-                                        .get(&candidate.id)
-                                        .map(|runtime| !runtime.is_in_cooldown(now))
-                                        .unwrap_or(true)
+                                .mark_upstream_concurrency_full(&upstream.id, backoff_ms)
+                                .await;
+                            last_error = Some(GatewayError::ConcurrencyFull {
+                                message,
+                                retry_after_seconds: Some(retry_after_seconds),
                             });
-                        // If every other candidate is currently unavailable, retry the
-                        // same upstream after its cooldown so single-candidate models
-                        // can still recover instead of failing immediately.
-                        if !has_available_alternative
-                            && rate_limit_retry_attempts_used
-                                < state.config.upstream_rate_limit_retry_attempts.max(1)
-                            && retry_after_seconds
-                                <= state.config.upstream_rate_limit_retry_window_seconds.max(1)
-                            && retry_after_seconds
-                                <= state
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+
+                            if concurrency_retry_attempts_used
+                                < state.config.upstream_concurrency_retry_attempts.max(1)
+                            {
+                                concurrency_retry_attempts_used =
+                                    concurrency_retry_attempts_used.saturating_add(1);
+                                tracing::info!(
+                                    request_id = %request_id,
+                                    downstream_key_id = %downstream.id,
+                                    path = %request_path,
+                                    original_model = %model,
+                                    normalized_model = %normalized_model,
+                                    selected_upstream_id = %upstream.id,
+                                    selected_upstream_name = %upstream.name,
+                                    selected_upstream_protocol = ?protocol,
+                                    selected_upstream_key_prefix = %key_prefix(api_key),
+                                    retry_after_seconds,
+                                    concurrency_retry_attempts_used,
+                                    concurrency_retry_attempts_limit = state
+                                        .config
+                                        .upstream_concurrency_retry_attempts,
+                                    "waiting for upstream concurrency slot before retrying"
+                                );
+                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                continue;
+                            }
+
+                            break;
+                        }
+                        Err(GatewayError::TooManyRequests {
+                            message,
+                            retry_after_seconds,
+                        }) => {
+                            let retry_after_seconds = retry_after_seconds.unwrap_or(
+                                state
                                     .config
-                                    .upstream_rate_limit_max_retry_after_seconds
-                                    .max(1)
-                        {
-                            rate_limit_retry_attempts_used =
-                                rate_limit_retry_attempts_used.saturating_add(1);
-                            tracing::info!(
+                                    .upstream_rate_limit_default_retry_seconds
+                                    .max(1),
+                            );
+                            tracing::warn!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
                                 path = %request_path,
@@ -1783,86 +1777,144 @@ async fn process_gateway_request(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                error = %message,
                                 retry_after_seconds,
-                                rate_limit_retry_attempts_used,
-                                rate_limit_retry_attempts_limit = state
-                                    .config
-                                    .upstream_rate_limit_retry_attempts,
-                                "waiting for upstream rate limit cooldown before retrying"
+                                "upstream rate limited"
                             );
-                            tokio::time::sleep(Duration::from_secs(retry_after_seconds)).await;
+                            if state.config.routing_affinity_enabled {
+                                state.clear_affinity_upstream(&downstream.id, normalized_model);
+                            }
+                            state
+                                .mark_upstream_rate_limited(&upstream.id, retry_after_seconds)
+                                .await;
+                            last_error = Some(GatewayError::TooManyRequests {
+                                message,
+                                retry_after_seconds: Some(retry_after_seconds),
+                            });
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+
+                            let has_available_alternative =
+                                upstreams_for_retry.iter().any(|candidate| {
+                                    candidate.id != upstream.id
+                                        && upstream_runtime_snapshots
+                                            .get(&candidate.id)
+                                            .map(|runtime| !runtime.is_in_cooldown(now))
+                                            .unwrap_or(true)
+                                });
+                            // If every other candidate is currently unavailable, retry the
+                            // same upstream after its cooldown so single-candidate models
+                            // can still recover instead of failing immediately.
+                            if !has_available_alternative
+                                && rate_limit_retry_attempts_used
+                                    < state.config.upstream_rate_limit_retry_attempts.max(1)
+                                && retry_after_seconds
+                                    <= state.config.upstream_rate_limit_retry_window_seconds.max(1)
+                                && retry_after_seconds
+                                    <= state
+                                        .config
+                                        .upstream_rate_limit_max_retry_after_seconds
+                                        .max(1)
+                            {
+                                rate_limit_retry_attempts_used =
+                                    rate_limit_retry_attempts_used.saturating_add(1);
+                                tracing::info!(
+                                    request_id = %request_id,
+                                    downstream_key_id = %downstream.id,
+                                    path = %request_path,
+                                    original_model = %model,
+                                    normalized_model = %normalized_model,
+                                    selected_upstream_id = %upstream.id,
+                                    selected_upstream_name = %upstream.name,
+                                    selected_upstream_protocol = ?protocol,
+                                    selected_upstream_key_prefix = %key_prefix(api_key),
+                                    retry_after_seconds,
+                                    rate_limit_retry_attempts_used,
+                                    rate_limit_retry_attempts_limit = state
+                                        .config
+                                        .upstream_rate_limit_retry_attempts,
+                                    "waiting for upstream rate limit cooldown before retrying"
+                                );
+                                tokio::time::sleep(Duration::from_secs(retry_after_seconds)).await;
+                                continue;
+                            }
+
+                            break;
+                        }
+                        Err(GatewayError::BadRequest(error)) => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                error = %error,
+                                "upstream rejected request payload"
+                            );
+                            last_error = Some(GatewayError::BadRequest(error));
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+                            break;
+                        }
+                        Err(error) if attempt_stream && should_retry_without_stream(&error) => {
+                            tracing::debug!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                attempt_stream,
+                                error = %error,
+                                "streaming upstream attempt failed; retrying without stream"
+                            );
+                            attempt_stream = false;
                             continue;
                         }
-
-                        break;
-                    }
-                    Err(GatewayError::BadRequest(error)) => {
-                        tracing::warn!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?protocol,
-                            error = %error,
-                            "upstream rejected request payload"
-                        );
-                        last_error = Some(GatewayError::BadRequest(error));
-                        last_failure_upstream =
-                            Some((upstream.id.clone(), Some(upstream.name.clone())));
-                        break;
-                    }
-                    Err(error) if attempt_stream => {
-                        tracing::debug!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?protocol,
-                            attempt_stream,
-                            error = %error,
-                            "streaming upstream attempt failed; retrying without stream"
-                        );
-                        attempt_stream = false;
-                        continue;
-                    }
-                    Err(GatewayError::TemporaryUpstreamUnavailable(message)) => {
-                        tracing::warn!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?protocol,
-                            error = %message,
-                            "upstream temporarily unavailable, trying next candidate"
-                        );
-                        last_error = Some(GatewayError::TemporaryUpstreamUnavailable(message));
-                        last_failure_upstream =
-                            Some((upstream.id.clone(), Some(upstream.name.clone())));
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream.id,
-                            path = %request_path,
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_protocol = ?protocol,
-                            error = %error,
-                            "upstream request failed"
-                        );
-                        state.mark_upstream_failure(&upstream.id).await.ok();
-                        last_error = Some(error);
-                        last_failure_upstream =
-                            Some((upstream.id.clone(), Some(upstream.name.clone())));
-                        break;
+                        Err(GatewayError::TemporaryUpstreamUnavailable(message)) => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                error = %message,
+                                "upstream temporarily unavailable, trying next candidate"
+                            );
+                            state.mark_upstream_failure(&upstream.id).await.ok();
+                            last_error = Some(GatewayError::TemporaryUpstreamUnavailable(message));
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                error = %error,
+                                "upstream request failed"
+                            );
+                            state.mark_upstream_failure(&upstream.id).await.ok();
+                            last_error = Some(error);
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+                            break;
+                        }
                     }
                 }
             }
@@ -2758,6 +2810,27 @@ fn halve_generation_cap_for_context_retry(payload: &mut Value) -> Option<(&'stat
     None
 }
 
+fn should_try_next_key(error: &GatewayError) -> bool {
+    matches!(
+        error,
+        GatewayError::Unauthorized(_)
+            | GatewayError::TooManyRequests { .. }
+            | GatewayError::ConcurrencyFull { .. }
+            | GatewayError::GatewayTimeout(_)
+            | GatewayError::Upstream(_)
+            | GatewayError::TemporaryUpstreamUnavailable(_)
+    )
+}
+
+fn should_retry_without_stream(error: &GatewayError) -> bool {
+    matches!(
+        error,
+        GatewayError::GatewayTimeout(_)
+            | GatewayError::Upstream(_)
+            | GatewayError::TemporaryUpstreamUnavailable(_)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_to_upstream(
     state: &AppState,
@@ -3094,6 +3167,25 @@ async fn send_to_upstream(
                 "upstream rejected request (status {})",
                 status.as_u16()
             )));
+        }
+
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(GatewayError::Unauthorized(if error_excerpt.is_empty() {
+                format!("upstream rejected request with status {}", status.as_u16())
+            } else {
+                format!("upstream rejected request: {error_excerpt}")
+            }));
+        }
+
+        if matches!(feedback, UpstreamFeedbackClassification::ProtocolUnsupported) {
+            return Err(GatewayError::TemporaryUpstreamUnavailable(if error_excerpt.is_empty() {
+                format!(
+                    "upstream does not support this model or endpoint (status {})",
+                    status.as_u16()
+                )
+            } else {
+                format!("upstream does not support this model or endpoint: {error_excerpt}")
+            }));
         }
 
         if let Some(inner_code) = upstream_error_code {
@@ -5526,16 +5618,14 @@ async fn admin_sync_freekey_upstreams(
             continue;
         }
 
-        let name = item
-            .name
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| model.clone())
-            .trim()
-            .to_string();
-
-        if name.is_empty() {
-            continue;
-        }
+        let name = item.name.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
 
         imports.push(FreekeySyncItem {
             name,
@@ -5604,6 +5694,12 @@ fn default_batch_request_quota_requests() -> u32 { 500 }
 fn default_batch_max_concurrency() -> u32 { 10 }
 fn default_batch_active() -> bool { true }
 
+#[derive(Debug, Deserialize)]
+struct DiscoverUpstreamModelsPayload {
+    base_url: String,
+    keys: Vec<String>,
+}
+
 fn key_prefix(key: &str) -> String {
     let key = key.trim();
     if key.len() <= 8 {
@@ -5658,6 +5754,69 @@ async fn fetch_models_from_upstream(
     }
 
     Ok(models)
+}
+
+#[derive(Debug, Clone)]
+struct KeyModelDiscoveryResult {
+    index: usize,
+    key: String,
+    key_prefix: String,
+    models: Vec<String>,
+    error: Option<String>,
+}
+
+async fn fetch_models_from_upstream_keys_concurrently(
+    client: &reqwest::Client,
+    base_url: &str,
+    keys: &[String],
+) -> Vec<KeyModelDiscoveryResult> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+
+    let base_url = base_url.trim().to_string();
+    let concurrency = keys.len().max(1);
+    let mut results = stream::iter(keys.iter().cloned().enumerate().map(|(index, key)| {
+        let client = client.clone();
+        let base_url = base_url.clone();
+        let key = key.trim().to_string();
+        let key_prefix = key_prefix(&key);
+
+        async move {
+            if key.is_empty() {
+                return KeyModelDiscoveryResult {
+                    index,
+                    key,
+                    key_prefix,
+                    models: Vec::new(),
+                    error: Some("key 为空".to_string()),
+                };
+            }
+
+            match fetch_models_from_upstream(&client, &base_url, &key).await {
+                Ok(models) => KeyModelDiscoveryResult {
+                    index,
+                    key,
+                    key_prefix,
+                    models,
+                    error: None,
+                },
+                Err(error) => KeyModelDiscoveryResult {
+                    index,
+                    key,
+                    key_prefix,
+                    models: Vec::new(),
+                    error: Some(error),
+                },
+            }
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .collect::<Vec<_>>()
+    .await;
+
+    results.sort_by_key(|item| item.index);
+    results
 }
 
 async fn admin_create_upstreams_batch(
@@ -5716,39 +5875,54 @@ async fn admin_create_upstreams_batch(
     let now = unix_seconds();
     let mut valid_keys: Vec<String> = Vec::new();
     let mut all_models: Vec<String> = Vec::new();
+    let mut api_key_models: Vec<ApiKeyModelConfig> = Vec::new();
     let mut key_results: Vec<Value> = Vec::new();
     let mut failed = 0usize;
 
-    // 并行获取每个 key 的模型列表
-    for key in &payload.keys {
-        let key = key.trim().to_string();
-        if key.is_empty() {
-            failed += 1;
-            key_results.push(json!({"key_prefix": "", "error": "key 为空"}));
+    // 并发获取每个 key 的模型列表
+    let discovery_results =
+        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys)
+            .await;
+    for result in discovery_results {
+        if let Some(error) = result.error {
+            failed = failed.saturating_add(1);
+            key_results.push(json!({
+                "key_prefix": result.key_prefix,
+                "error": error
+            }));
             continue;
         }
 
-        let models = match fetch_models_from_upstream(&client, &payload.base_url, &key).await {
-            Ok(m) => m,
-            Err(e) => {
-                failed += 1;
-                key_results.push(json!({"key_prefix": key_prefix(&key), "error": e}));
-                continue;
-            }
-        };
-
-        valid_keys.push(key.clone());
-        all_models.extend(models.iter().cloned());
+        valid_keys.push(result.key.clone());
+        all_models.extend(result.models.iter().cloned());
+        api_key_models.push(ApiKeyModelConfig {
+            api_key: result.key.clone(),
+            supported_models: result.models.clone(),
+        });
         key_results.push(json!({
-            "key_prefix": key_prefix(&key),
-            "models": models.len(),
-            "model_list": models,
+            "key_prefix": result.key_prefix,
+            "models": result.models.len(),
+            "model_list": result.models,
         }));
     }
 
     // 合并并去重模型列表
     all_models.sort();
     all_models.dedup();
+
+    // Even if no key could be verified, save all non-empty keys.
+    // The upstream might not support /v1/models or be temporarily unavailable.
+    // Keys will be validated at runtime when requests are actually made.
+    if valid_keys.is_empty() && !payload.keys.is_empty() {
+        let fallback_keys: Vec<String> = payload.keys
+            .iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+        if !fallback_keys.is_empty() {
+            valid_keys = fallback_keys;
+        }
+    }
 
     if valid_keys.is_empty() {
         return (
@@ -5772,6 +5946,7 @@ async fn admin_create_upstreams_batch(
         base_url: payload.base_url.trim().to_string(),
         api_key: primary_key.clone(),
         api_keys: valid_keys.clone(),
+        api_key_models,
         protocol,
         protocols: protocols.clone(),
         supported_models: all_models.clone(),
@@ -5783,6 +5958,11 @@ async fn admin_create_upstreams_batch(
         auto_managed: true,
         managed_source: Some("batch".to_string()),
         last_synced_at: now,
+        default_model_context: Some(DefaultModelContextConfig {
+            context_limit: 200_000,
+            output_reserve: 4096,
+            context_group: "".to_string(),
+        }),
         ..Default::default()
     };
     upstream.normalize_for_storage();
@@ -5815,6 +5995,72 @@ async fn admin_create_upstreams_batch(
                 .into_response()
         }
     }
+}
+
+async fn admin_discover_upstream_models(
+    State(_state): State<AppState>,
+    Json(payload): Json<DiscoverUpstreamModelsPayload>,
+) -> impl IntoResponse {
+    if payload.keys.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "keys 不能为空"}})),
+        )
+            .into_response();
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+
+    let discovery_results =
+        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys)
+            .await;
+
+    let mut all_models: Vec<String> = Vec::new();
+    let mut key_results: Vec<Value> = Vec::new();
+    let mut failed = 0usize;
+
+    for result in discovery_results {
+        if let Some(error) = result.error {
+            failed = failed.saturating_add(1);
+            key_results.push(json!({
+                "key_prefix": result.key_prefix,
+                "error": error
+            }));
+            continue;
+        }
+
+        all_models.extend(result.models.iter().cloned());
+        key_results.push(json!({
+            "key_prefix": result.key_prefix,
+            "models": result.models.len(),
+            "model_list": result.models,
+        }));
+    }
+
+    all_models.sort();
+    all_models.dedup();
+
+    let response = if all_models.is_empty() {
+        json!({
+            "models": all_models,
+            "failed": failed,
+            "total": payload.keys.len(),
+            "results": key_results,
+            "message": "所有 key 都无法获取模型列表",
+        })
+    } else {
+        json!({
+            "models": all_models,
+            "failed": failed,
+            "total": payload.keys.len(),
+            "results": key_results,
+        })
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 /// Create a new upstream
 async fn admin_create_upstream(

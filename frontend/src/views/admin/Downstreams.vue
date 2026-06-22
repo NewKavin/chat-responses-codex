@@ -97,13 +97,16 @@
       </el-alert>
     </el-card>
     
-    <!-- Create/Edit Dialog -->
-    <el-dialog
+    <!-- Create/Edit Drawer -->
+    <el-drawer
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建下游' : '编辑下游'"
-      width="600px"
+      direction="rtl"
+      size="100%"
+      :destroy-on-close="false"
+      class="form-drawer"
     >
-      <el-form :model="form" :rules="rules" ref="formRef" label-width="150px">
+      <el-form :model="form" :rules="rules" ref="formRef" label-width="150px" class="drawer-form">
         <el-form-item label="ID" prop="id">
           <el-input 
             v-model="form.id" 
@@ -181,10 +184,12 @@
       </el-form>
       
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleSubmit" :loading="submitting">确定</el-button>
+        <div class="drawer-footer">
+          <el-button @click="dialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="handleSubmit" :loading="submitting">确定</el-button>
+        </div>
       </template>
-    </el-dialog>
+    </el-drawer>
     
     <!-- Rotate Key Dialog -->
     <el-dialog v-model="rotateDialogVisible" title="密钥轮换成功" width="500px">
@@ -518,5 +523,29 @@ code {
 
 .helper-text {
   margin-top: 8px;
+}
+
+/* Drawer-based create/edit form */
+.form-drawer :deep(.el-drawer__header) {
+  margin-bottom: 0;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+.form-drawer :deep(.el-drawer__body) {
+  padding: 24px 32px;
+  overflow-y: auto;
+}
+.form-drawer :deep(.el-drawer__footer) {
+  border-top: 1px solid var(--el-border-color-light);
+  padding: 12px 24px;
+}
+.drawer-form {
+  width: 100%;
+  padding: 0 40px;
+}
+.drawer-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

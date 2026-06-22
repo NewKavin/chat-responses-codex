@@ -138,11 +138,12 @@ export const buildPlaygroundChatPayload = ({
   history = [],
   uploadedFiles,
   temperature,
-  maxTokens
-}: BuildPlaygroundChatRequestInput): {
+  maxTokens,
+  stream = false
+}: BuildPlaygroundChatRequestInput & { stream?: boolean }): {
   model: string
   messages: PlaygroundMessage[]
-  stream: false
+  stream: boolean
   temperature?: number
   max_tokens?: number
 } => {
@@ -160,13 +161,13 @@ export const buildPlaygroundChatPayload = ({
   const payload: {
     model: string
     messages: PlaygroundMessage[]
-    stream: false
+    stream: boolean
     temperature?: number
     max_tokens?: number
   } = {
     model,
     messages: [...normalizedHistory, { role: 'user', content: userContent }],
-    stream: false
+    stream
   }
 
   if (typeof temperature === 'number' && temperature >= 0 && temperature <= 2) {
@@ -227,5 +228,48 @@ export const extractChatCompletionUsage = (body: unknown) => {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: totalTokens
+  }
+}
+
+export interface StreamChunk {
+  content: string
+  usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+  }
+  done: boolean
+}
+
+export const parseSSELine = (line: string): StreamChunk | null => {
+  const trimmed = line.trim()
+  if (!trimmed || !trimmed.startsWith('data:')) {
+    return null
+  }
+
+  const data = trimmed.slice(5).trim()
+  if (data === '[DONE]') {
+    return { content: '', done: true }
+  }
+
+  try {
+    const parsed = JSON.parse(data)
+    const delta = parsed.choices?.[0]?.delta
+    const content = typeof delta?.content === 'string' ? delta.content : ''
+    const usage = parsed.usage
+    let usageResult: StreamChunk['usage'] | undefined
+
+    if (usage && typeof usage === 'object') {
+      const pt = Number(usage.prompt_tokens)
+      const ct = Number(usage.completion_tokens)
+      const tt = Number(usage.total_tokens)
+      if (![pt, ct, tt].some(Number.isNaN)) {
+        usageResult = { prompt_tokens: pt, completion_tokens: ct, total_tokens: tt }
+      }
+    }
+
+    return { content, usage: usageResult, done: false }
+  } catch {
+    return null
   }
 }

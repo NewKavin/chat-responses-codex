@@ -179,8 +179,11 @@ provide('portalToken', () => safeLocalStorageGet('portal_token'))
 
 <style scoped>
 .portal-layout {
+  display: flex;
+  flex-direction: column;
   height: 100vh;
   background: #f5f7fa;
+  overflow: hidden;
 }
 
 .portal-header {
@@ -189,6 +192,7 @@ provide('portalToken', () => safeLocalStorageGet('portal_token'))
   display: flex;
   align-items: center;
   padding: 0 20px;
+  flex-shrink: 0;
 }
 
 .header-content {
@@ -217,6 +221,21 @@ provide('portalToken', () => safeLocalStorageGet('portal_token'))
 
 .portal-main {
   padding: 0;
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+:deep(.el-container) {
+  height: 100%;
+  flex: 1;
+  overflow: hidden;
+}
+
+:deep(.el-main) {
+  height: 100%;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .announcement-dialog {
@@ -240,13 +259,28 @@ provide('portalToken', () => safeLocalStorageGet('portal_token'))
 :deep(.el-tabs) {
   background: white;
   padding: 0 20px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+:deep(.el-tabs__header) {
+  flex-shrink: 0;
 }
 
 :deep(.el-tabs__content) {
   padding: 0;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
 }
 
 :deep(.el-tab-pane) {
   background: #f5f7fa;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 </style>

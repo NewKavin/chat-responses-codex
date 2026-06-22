@@ -117,6 +117,8 @@ pub struct UpstreamConfig {
     pub api_key: String,
     #[serde(default)]
     pub api_keys: Vec<String>,
+    #[serde(default)]
+    pub api_key_models: Vec<ApiKeyModelConfig>,
     pub protocol: UpstreamProtocol,
     #[serde(default)]
     pub protocols: Vec<UpstreamProtocol>,
@@ -166,6 +168,7 @@ impl Default for UpstreamConfig {
             base_url: String::new(),
             api_key: String::new(),
             api_keys: Vec::new(),
+            api_key_models: Vec::new(),
             protocol: UpstreamProtocol::ChatCompletions,
             protocols: vec![UpstreamProtocol::ChatCompletions],
             supported_models: Vec::new(),
@@ -198,10 +201,18 @@ pub struct FreekeySyncSummary {
 
 #[derive(Debug, Clone)]
 pub struct FreekeySyncItem {
-    pub name: String,
+    pub name: Option<String>,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiKeyModelConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub supported_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,7 +372,23 @@ impl UpstreamConfig {
             .first()
             .copied()
             .unwrap_or(UpstreamProtocol::ChatCompletions);
+        self.api_keys = normalized_string_list(std::mem::take(&mut self.api_keys));
+        self.api_key_models = normalized_api_key_models(std::mem::take(&mut self.api_key_models));
         self.supported_models = normalized_string_list(std::mem::take(&mut self.supported_models));
+        if !self.api_key_models.is_empty() {
+            let mut seen = self
+                .supported_models
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            for mapping in &self.api_key_models {
+                for model in &mapping.supported_models {
+                    if seen.insert(model.clone()) {
+                        self.supported_models.push(model.clone());
+                    }
+                }
+            }
+        }
         self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
         self.model_request_costs =
             normalized_model_request_costs(std::mem::take(&mut self.model_request_costs));
@@ -530,24 +557,61 @@ impl UpstreamConfig {
     /// Returns all available API keys for this upstream.
     /// Includes the legacy `api_key` if non-empty and not already in `api_keys`.
     pub fn available_keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self.api_keys
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        for key in self
+            .api_keys
             .iter()
-            .filter(|k| !k.trim().is_empty())
-            .map(|k| k.trim().to_string())
-            .collect();
-        if !self.api_key.trim().is_empty() {
-            let legacy = self.api_key.trim().to_string();
-            if !keys.contains(&legacy) {
-                keys.push(legacy);
+            .chain(std::iter::once(&self.api_key))
+            .chain(self.api_key_models.iter().map(|item| &item.api_key))
+        {
+            let key = key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let key = key.to_string();
+            if seen.insert(key.clone()) {
+                keys.push(key);
             }
         }
         keys
     }
 
     /// Select keys that can serve a given model.
-    /// Currently returns all available keys since model support is at upstream level.
-    pub fn keys_for_model(&self, _model: &str) -> Vec<String> {
-        self.available_keys()
+    /// If model-specific affinity is configured, return the matching keys first.
+    /// Otherwise fall back to all available keys for legacy compatibility.
+    pub fn keys_for_model(&self, model: &str) -> Vec<String> {
+        let model = model.trim();
+        if model.is_empty() || self.api_key_models.is_empty() {
+            return self.available_keys();
+        }
+
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        for mapping in &self.api_key_models {
+            if !mapping
+                .supported_models
+                .iter()
+                .any(|candidate| candidate.trim() == model)
+            {
+                continue;
+            }
+
+            let key = mapping.api_key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let key = key.to_string();
+            if seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+
+        if keys.is_empty() {
+            self.available_keys()
+        } else {
+            keys
+        }
     }
 
 }
@@ -594,6 +658,26 @@ fn normalized_string_list(values: Vec<String>) -> Vec<String> {
             continue;
         }
         normalized.push(value);
+    }
+    normalized
+}
+
+fn normalized_api_key_models(values: Vec<ApiKeyModelConfig>) -> Vec<ApiKeyModelConfig> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for mut value in values {
+        let api_key = value.api_key.trim().to_string();
+        if api_key.is_empty() || !seen.insert(api_key.clone()) {
+            continue;
+        }
+        let supported_models = normalized_string_list(std::mem::take(&mut value.supported_models));
+        if supported_models.is_empty() {
+            continue;
+        }
+        normalized.push(ApiKeyModelConfig {
+            api_key,
+            supported_models,
+        });
     }
     normalized
 }
@@ -3013,16 +3097,19 @@ impl AppState {
         let imports = imports
             .into_iter()
             .filter_map(|item| {
-                let name = item.name.trim().to_string();
                 let base_url = item.base_url.trim().to_string();
                 let api_key = item.api_key.trim().to_string();
                 let model = item.model.trim().to_string();
+                let name = item.name.and_then(|value| {
+                    let trimmed = value.trim().to_string();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                });
 
-                if name.is_empty()
-                    || base_url.is_empty()
-                    || api_key.is_empty()
-                    || model.is_empty()
-                {
+                if base_url.is_empty() || api_key.is_empty() || model.is_empty() {
                     return None;
                 }
 
@@ -3042,45 +3129,81 @@ impl AppState {
         self.mutate_persisted_state(
             |candidate_state| {
                 let mut result = FreekeySyncSummary::default();
-                let find_match = |state: &[UpstreamConfig], name: &str, base_url: &str, model: &str| {
+                // 匹配策略：base_url + auto_managed
+                // 同 base_url + auto_managed=true → 更新（追加 key 和模型）
+                // 同 base_url + auto_managed=false → skip（手动管理的不动）
+                // 不同 base_url → 创建新上游
+                //
+                // 同一个 base_url 下只维护一个自动管理的上游，
+                // 多次同步的 key 和模型都追加到这一个上游里。
+                // 不按 name 或 model 匹配，因为每次同步可能变化。
+
+                let find_auto_upstream = |state: &[UpstreamConfig], base_url: &str| {
                     state
                         .iter()
-                        .position(|upstream| upstream.name == name)
-                        .or_else(|| {
-                            state
-                                .iter()
-                                .position(|upstream| {
-                                    upstream.base_url == base_url
-                                        && upstream
-                                            .supported_models
-                                            .iter()
-                                            .any(|item| item == model)
-                                })
-                        })
-                        .or_else(|| {
-                            state.iter().position(|upstream| upstream.base_url == base_url)
-                        })
+                        .position(|upstream| upstream.base_url == base_url && upstream.auto_managed)
+                };
+
+                let has_manual_upstream = |state: &[UpstreamConfig], base_url: &str| {
+                    state
+                        .iter()
+                        .any(|upstream| upstream.base_url == base_url && !upstream.auto_managed)
                 };
 
                 for item in imports.iter() {
-                    let name = &item.name;
                     let base_url = &item.base_url;
                     let model = &item.model;
                     let api_key = &item.api_key;
-                    let match_by_base_url = find_match(&candidate_state.upstreams, name, base_url, model);
 
-                    if let Some(index) = match_by_base_url {
+                    // 同 base_url 但手动管理 → skip
+                    if has_manual_upstream(&candidate_state.upstreams, base_url) {
+                        result.skipped = result.skipped.saturating_add(1);
+                        continue;
+                    }
+
+                    // 同 base_url + auto_managed → 更新（追加 key 和模型）
+                    if let Some(index) = find_auto_upstream(&candidate_state.upstreams, base_url) {
                         let upstream = &mut candidate_state.upstreams[index];
-                        if !upstream.auto_managed {
-                            result.skipped = result.skipped.saturating_add(1);
-                            continue;
+                        // 追加 key 到 api_keys（不重复）
+                        let trimmed_key = api_key.trim().to_string();
+                        if !trimmed_key.is_empty()
+                            && upstream
+                                .api_keys
+                                .iter()
+                                .all(|existing| existing.trim() != trimmed_key)
+                            && upstream.api_key.trim() != trimmed_key
+                        {
+                            upstream.api_keys.push(trimmed_key.clone());
                         }
-
-                        upstream.name = name.clone();
-                        upstream.base_url = base_url.clone();
-                        upstream.api_key = api_key.clone();
-                        upstream.supported_models = vec![model.clone()];
-                        upstream.auto_managed = true;
+                        // 追加模型（不替换，保留已有模型）
+                        let trimmed_model = model.trim().to_string();
+                        if !upstream.supported_models.iter().any(|m| m == &trimmed_model) {
+                            upstream.supported_models.push(trimmed_model.clone());
+                        }
+                        if !trimmed_key.is_empty() && !trimmed_model.is_empty() {
+                            if let Some(entry) = upstream
+                                .api_key_models
+                                .iter_mut()
+                                .find(|entry| entry.api_key.trim() == trimmed_key)
+                            {
+                                if entry
+                                    .supported_models
+                                    .iter()
+                                    .all(|existing| existing.trim() != trimmed_model)
+                                {
+                                    entry.supported_models.push(trimmed_model.clone());
+                                }
+                            } else {
+                                upstream.api_key_models.push(ApiKeyModelConfig {
+                                    api_key: trimmed_key.clone(),
+                                    supported_models: vec![trimmed_model.clone()],
+                                });
+                            }
+                        }
+                        // 只有显式提供 name 时才更新；缺省 name 保留现有名称。
+                        if let Some(name) = &item.name {
+                            upstream.name = name.clone();
+                        }
                         upstream.managed_source = Some(source.clone());
                         upstream.last_synced_at = synced_at;
                         upstream.normalize_for_storage();
@@ -3089,9 +3212,10 @@ impl AppState {
                         continue;
                     }
 
+                    // 新 base_url → 创建新上游
                     let mut upstream = UpstreamConfig {
                         id: Uuid::new_v4().to_string(),
-                        name: name.clone(),
+                        name: item.name.clone().unwrap_or_else(|| model.clone()),
                         base_url: base_url.clone(),
                         api_key: api_key.clone(),
                         supported_models: vec![model.clone()],
@@ -3137,6 +3261,32 @@ impl AppState {
                 }
                 if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
                     upstream.api_key = api_key.to_string();
+                }
+                if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
+                    upstream.api_keys = api_keys
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+                if let Some(api_key_models) =
+                    updates.get("api_key_models").and_then(|v| v.as_array())
+                {
+                    upstream.api_key_models = api_key_models
+                        .iter()
+                        .filter_map(|value| {
+                            let api_key = value.get("api_key").and_then(|v| v.as_str())?;
+                            let supported_models = value
+                                .get("supported_models")
+                                .and_then(|v| v.as_array())?
+                                .iter()
+                                .filter_map(|model| model.as_str().map(|s| s.to_string()))
+                                .collect::<Vec<_>>();
+                            Some(ApiKeyModelConfig {
+                                api_key: api_key.to_string(),
+                                supported_models,
+                            })
+                        })
+                        .collect();
                 }
                 if let Some(supported_models) =
                     updates.get("supported_models").and_then(|v| v.as_array())
