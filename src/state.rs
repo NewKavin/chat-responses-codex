@@ -682,6 +682,78 @@ fn normalized_api_key_models(values: Vec<ApiKeyModelConfig>) -> Vec<ApiKeyModelC
     normalized
 }
 
+
+/// Merge incoming api_keys into existing ones, preserving all unique keys.
+/// Existing keys keep their order; new keys are appended.
+fn merge_api_keys(existing: &[String], incoming: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = existing.iter().cloned().collect();
+    let mut seen: HashSet<String> = existing.iter().cloned().collect();
+    for key in incoming {
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        if seen.insert(key.clone()) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// Merge incoming api_key_models into existing ones.
+/// - Same api_key → merge supported_models (dedup)
+/// - New api_key → append
+/// - Old api_key absent from incoming → keep
+fn merge_api_key_models(
+    existing: &[ApiKeyModelConfig],
+    incoming: &[ApiKeyModelConfig],
+) -> Vec<ApiKeyModelConfig> {
+    let mut merged: Vec<ApiKeyModelConfig> = existing.to_vec();
+    for new_item in incoming {
+        let new_key = new_item.api_key.trim().to_string();
+        if new_key.is_empty() {
+            continue;
+        }
+        if let Some(existing_item) = merged.iter_mut().find(|e| e.api_key.trim() == new_key) {
+            for model in &new_item.supported_models {
+                let model = model.trim().to_string();
+                if !model.is_empty() && !existing_item.supported_models.iter().any(|m| m.trim() == model) {
+                    existing_item.supported_models.push(model);
+                }
+            }
+        } else {
+            let supported_models: Vec<String> = new_item
+                .supported_models
+                .iter()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect();
+            if !supported_models.is_empty() || !new_key.is_empty() {
+                merged.push(ApiKeyModelConfig {
+                    api_key: new_key,
+                    supported_models,
+                });
+            }
+        }
+    }
+    merged
+}
+
+/// Re-derive supported_models from api_key_models (all unique models across all keys).
+fn derive_supported_models(key_models: &[ApiKeyModelConfig]) -> Vec<String> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for item in key_models {
+        for model in &item.supported_models {
+            let model = model.trim().to_string();
+            if !model.is_empty() && seen.insert(model.clone()) {
+                models.push(model);
+            }
+        }
+    }
+    models
+}
+
 fn normalized_model_request_costs(
     values: Vec<ModelRequestCostConfig>,
 ) -> Vec<ModelRequestCostConfig> {
@@ -3302,15 +3374,22 @@ impl AppState {
                         continue;
                     }
 
-                    // 同 base_url + auto_managed → 整体替换 key/model
+                    // 同 base_url + auto_managed → 合并 key/model（保留已有 keys）
                     if let Some(index) = find_auto_upstream(&candidate_state.upstreams, base_url) {
                         let upstream = &mut candidate_state.upstreams[index];
-                        // 用载荷的第一把 key 覆盖 legacy 字段，剩余 key 进 api_keys。
-                        upstream.api_key = keys.first().cloned().unwrap_or_default();
-                        upstream.api_keys = keys.iter().skip(1).cloned().collect();
-                        upstream.api_key_models = key_models;
-                        upstream.supported_models = models;
-                        // 只有显式提供 name 时才更新；缺省 name 保留现有名称。
+                        // Merge incoming keys into existing ones.
+                        upstream.api_keys = merge_api_keys(&upstream.api_keys, &keys);
+                        upstream.api_key_models = merge_api_key_models(&upstream.api_key_models, &key_models);
+                        // Merge: start from api_key_models derivation, then add old supported_models + payload models.
+                        let mut merged_models: Vec<String> = derive_supported_models(&upstream.api_key_models);
+                        for model in upstream.supported_models.iter().chain(models.iter()) {
+                            let model = model.trim().to_string();
+                            if !model.is_empty() && !merged_models.iter().any(|m| m == &model) {
+                                merged_models.push(model);
+                            }
+                        }
+                        upstream.supported_models = merged_models;
+                        // Only update name when explicitly provided; otherwise keep existing.
                         if let Some(name) = last_name {
                             upstream.name = name;
                         }
@@ -3375,18 +3454,28 @@ impl AppState {
                     upstream.base_url = base_url.to_string();
                 }
                 if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
-                    upstream.api_key = api_key.to_string();
+                    let new_key = api_key.to_string();
+                    if !new_key.is_empty() {
+                        // Merge into api_keys (dedup), including against legacy api_key.
+                        let mut merged = merge_api_keys(&upstream.api_keys, &[new_key.clone()]);
+                        // Also treat legacy api_key as a source key.
+                        if !upstream.api_key.is_empty() && !merged.iter().any(|k| k == &upstream.api_key) {
+                            merged.insert(0, upstream.api_key.clone());
+                        }
+                        upstream.api_keys = merged;
+                    }
                 }
                 if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
-                    upstream.api_keys = api_keys
+                    let incoming: Vec<String> = api_keys
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
+                    upstream.api_keys = merge_api_keys(&upstream.api_keys, &incoming);
                 }
                 if let Some(api_key_models) =
                     updates.get("api_key_models").and_then(|v| v.as_array())
                 {
-                    upstream.api_key_models = api_key_models
+                    let incoming: Vec<ApiKeyModelConfig> = api_key_models
                         .iter()
                         .filter_map(|value| {
                             let api_key = value.get("api_key").and_then(|v| v.as_str())?;
@@ -3402,14 +3491,20 @@ impl AppState {
                             })
                         })
                         .collect();
+                    upstream.api_key_models = merge_api_key_models(&upstream.api_key_models, &incoming);
+                    upstream.supported_models = derive_supported_models(&upstream.api_key_models);
                 }
-                if let Some(supported_models) =
-                    updates.get("supported_models").and_then(|v| v.as_array())
-                {
-                    upstream.supported_models = supported_models
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
+                // Only override supported_models explicitly when api_key_models is NOT
+                // also being updated (otherwise derive_supported_models already did it).
+                if updates.get("api_key_models").is_none() {
+                    if let Some(supported_models) =
+                        updates.get("supported_models").and_then(|v| v.as_array())
+                    {
+                        upstream.supported_models = supported_models
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                    }
                 }
                 if let Some(protocols) = updates.get("protocols").and_then(Value::as_array) {
                     upstream.protocols = parse_upstream_protocols(protocols);

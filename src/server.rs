@@ -5634,20 +5634,69 @@ async fn admin_sync_freekey_upstreams(
         });
     }
 
+    // Concurrently validate all keys against their respective base_urls.
+    let mut invalid_keys: Vec<Value> = Vec::new();
+    if !imports.is_empty() {
+        // Group keys by base_url for validation.
+        let mut by_base_url: HashMap<String, Vec<String>> = HashMap::new();
+        for item in &imports {
+            by_base_url
+                .entry(item.base_url.clone())
+                .or_default()
+                .push(item.api_key.clone());
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+
+        let mut valid_key_set: HashSet<String> = HashSet::new();
+        for (base_url, keys) in &by_base_url {
+            // Dedup keys per base_url.
+            let mut unique_keys: Vec<String> = keys.clone();
+            {
+                let mut seen = HashSet::new();
+                unique_keys.retain(|k| seen.insert(k.clone()));
+            }
+            let results = fetch_models_from_upstream_keys_concurrently(&client, base_url, &unique_keys).await;
+            for result in &results {
+                if result.error.is_none() {
+                    valid_key_set.insert(result.key.clone());
+                } else {
+                    invalid_keys.push(json!({
+                        "base_url": base_url,
+                        "key_prefix": result.key_prefix,
+                        "error": result.error,
+                    }));
+                }
+            }
+        }
+
+        // Only filter invalid keys when at least one key validated successfully.
+        // If ALL keys failed, keep them all (upstream may be temporarily unreachable).
+        if !valid_key_set.is_empty() {
+            imports.retain(|item| valid_key_set.contains(&item.api_key));
+        }
+    }
+
+    let synced_at = unix_seconds();
     match state
-        .sync_freekey_upstreams(source.clone(), imports, unix_seconds())
+        .sync_freekey_upstreams(source.clone(), imports, synced_at)
         .await
     {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(json!({
+        Ok(result) => {
+            let mut response = json!({
                 "created": result.created,
                 "updated": result.updated,
                 "skipped": result.skipped,
                 "source": source,
-            })),
-        )
-            .into_response(),
+            });
+            if !invalid_keys.is_empty() {
+                response["invalid_keys"] = json!(invalid_keys);
+            }
+            (StatusCode::OK, Json(response)).into_response()
+        }
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -6164,10 +6213,103 @@ async fn admin_get_upstream(
 async fn admin_update_upstream(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(updates): Json<serde_json::Value>,
+    Json(mut updates): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Collect new keys from the payload for concurrent validation.
+    let mut new_keys: Vec<String> = Vec::new();
+    if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
+        for v in api_keys {
+            if let Some(key) = v.as_str() {
+                let key = key.trim().to_string();
+                if !key.is_empty() {
+                    new_keys.push(key);
+                }
+            }
+        }
+    }
+    if let Some(key) = updates.get("api_key").and_then(|v| v.as_str()) {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            new_keys.push(key);
+        }
+    }
+    if let Some(api_key_models) = updates.get("api_key_models").and_then(|v| v.as_array()) {
+        for entry in api_key_models {
+            if let Some(key) = entry.get("api_key").and_then(|v| v.as_str()) {
+                let key = key.trim().to_string();
+                if !key.is_empty() {
+                    new_keys.push(key);
+                }
+            }
+        }
+    }
+    // Dedup.
+    {
+        let mut seen = HashSet::new();
+        new_keys.retain(|k| seen.insert(k.clone()));
+    }
+
+    // Concurrently validate new keys if we have a base_url to validate against.
+    let mut invalid_keys: Vec<Value> = Vec::new();
+    if !new_keys.is_empty() {
+        let snapshot = state.snapshot().await;
+        if let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == id) {
+            let base_url = upstream.base_url.clone();
+            drop(snapshot);
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default();
+
+            let results = fetch_models_from_upstream_keys_concurrently(&client, &base_url, &new_keys).await;
+            let mut valid_keys: HashSet<String> = HashSet::new();
+            for result in &results {
+                if result.error.is_none() {
+                    valid_keys.insert(result.key.clone());
+                } else {
+                    invalid_keys.push(json!({
+                        "key_prefix": result.key_prefix,
+                        "error": result.error,
+                    }));
+                }
+            }
+
+            // Only filter invalid keys when at least one key validated successfully.
+            // If ALL keys failed (e.g. upstream temporarily unreachable), keep them all.
+            if !valid_keys.is_empty() {
+                if let Some(api_keys_arr) = updates.get_mut("api_keys").and_then(|v| v.as_array_mut()) {
+                    api_keys_arr.retain(|v| {
+                        v.as_str()
+                            .map(|s| valid_keys.contains(s.trim()))
+                            .unwrap_or(false)
+                    });
+                }
+                if let Some(key) = updates.get("api_key").and_then(|v| v.as_str()) {
+                    if !valid_keys.contains(key.trim()) {
+                        updates.as_object_mut().unwrap().remove("api_key");
+                    }
+                }
+                if let Some(api_key_models_arr) = updates.get_mut("api_key_models").and_then(|v| v.as_array_mut()) {
+                    api_key_models_arr.retain(|v| {
+                        v.get("api_key")
+                            .and_then(|k| k.as_str())
+                            .map(|s| valid_keys.contains(s.trim()))
+                            .unwrap_or(false)
+                    });
+                }
+            }
+        }
+    }
+
     match state.update_upstream_by_id(&id, updates).await {
-        Ok(updated_upstream) => Json(updated_upstream).into_response(),
+        Ok(updated_upstream) => {
+            let mut response = json!(updated_upstream);
+            if !invalid_keys.is_empty() {
+                response["invalid_keys"] = json!(invalid_keys);
+            }
+            Json(response).into_response()
+        }
         Err(UpstreamMutationError::NotFound(message)) => (
             StatusCode::NOT_FOUND,
             Json(json!({
