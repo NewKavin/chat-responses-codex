@@ -6,3 +6,4 @@ pub use gateway_core::protocol;
 pub use gateway_core::routing;
 pub use gateway_core::state;
 pub mod auth;
+pub mod util;

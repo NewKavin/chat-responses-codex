@@ -2,8 +2,6 @@ use crate::keys::verify_downstream_key;
 use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 
 #[path = "state/file_store.rs"]
 mod file_store;
@@ -27,18 +25,17 @@ mod freekey_sync;
 
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
-use reqwest::{Client, Url};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::fs;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -70,6 +67,14 @@ use usage::{
     DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS, DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
 };
 use context_profile::{normalize_context_profile_base_url, normalize_global_context_profiles_for_storage};
+
+pub use crate::util::{
+    unix_seconds, new_id, encode_secret_suffix, join_upstream_url,
+    should_bypass_proxy_for_url, should_bypass_proxy_for_host,
+    build_upstream_http_client,
+    prune_expired_admin_sessions,
+};
+
 
 
 
@@ -1566,9 +1571,9 @@ struct RoutingAffinityEntry {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct QuotaEvent {
-    created_at: u64,
-    cost: f64,
+pub(crate) struct QuotaEvent {
+    pub(crate) created_at: u64,
+    pub(crate) cost: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1586,6 +1591,17 @@ impl UpstreamAdmissionError {
     }
 }
 
+
+
+
+
+
+
+
+
+
+
+
 fn quota_event_cost(events: &VecDeque<QuotaEvent>) -> f64 {
     events.iter().map(|event| event.cost).sum()
 }
@@ -1600,77 +1616,6 @@ fn prune_quota_events(events: &mut VecDeque<QuotaEvent>, now: u64, window_second
         }
     }
 }
-fn build_upstream_http_client(config: &AppConfig, no_proxy: bool) -> Client {
-    let mut builder = Client::builder().connect_timeout(Duration::from_secs(
-        config.upstream_connect_timeout_seconds.max(1),
-    ));
-    builder = builder.pool_max_idle_per_host(config.upstream_http_pool_max_idle_per_host);
-    if no_proxy {
-        builder = builder.no_proxy();
-    }
-
-    builder.build().unwrap_or_else(|error| {
-        tracing::warn!(%error, no_proxy, "failed to build upstream HTTP client, falling back");
-        Client::new()
-    })
-}
-fn prune_expired_admin_sessions(sessions: &mut HashMap<String, u64>) {
-    let now = unix_seconds();
-    sessions.retain(|_, expires_at| *expires_at > now);
-}
-
-pub fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-pub fn new_id(prefix: &str) -> String {
-    format!("{}_{}", prefix, Uuid::new_v4())
-}
-
-pub fn encode_secret_suffix(bytes: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-pub fn join_upstream_url(base_url: &str, endpoint_path: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    let path = endpoint_path.trim_start_matches('/');
-
-    if let Some((version, remainder)) = path.split_once('/') {
-        if base.ends_with(&format!("/{version}")) {
-            return format!("{base}/{}", remainder);
-        }
-    }
-
-    format!("{base}/{}", path)
-}
-
-fn should_bypass_proxy_for_url(url: &str) -> bool {
-    Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(should_bypass_proxy_for_host))
-        .unwrap_or(false)
-}
-
-fn should_bypass_proxy_for_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false)
-}
-
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // Public methods for managing upstreams and downstreams
 // ============================================================================
@@ -1851,454 +1796,4 @@ impl AppState {
         Ok(())
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::{
-        should_bypass_proxy_for_host, should_bypass_proxy_for_url, AppConfig, AppState,
-        DefaultModelContextConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
-        PersistedState, UpstreamConfig,
-    };
 
-    #[test]
-    fn normalize_for_storage_preserves_exact_model_names_and_clears_aliases() {
-        let mut upstream = UpstreamConfig {
-            supported_models: vec![" GLM-5 ".into(), "MiniMax2.7".into(), "GLM-5".into()],
-            ..Default::default()
-        };
-
-        upstream.normalize_for_storage();
-
-        assert_eq!(
-            upstream.supported_models,
-            vec!["GLM-5".into(), "MiniMax2.7".into()]
-        );
-    }
-
-    #[test]
-    fn validate_configuration_rejects_invalid_premium_models() {
-        let mut upstream = UpstreamConfig {
-            supported_models: vec!["GLM-5".into()],
-            premium_models: vec!["glm-5.1".into()],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-
-        let error = upstream.validate_configuration().unwrap_err();
-        assert!(error.contains("invalid premium_models"));
-        assert!(error.contains("glm-5.1"));
-    }
-
-    #[test]
-    fn exact_model_request_resolves_to_premium_model_and_cost_rule() {
-        let mut upstream = UpstreamConfig {
-            supported_models: vec!["GLM-5.1".into()],
-            premium_models: vec!["GLM-5.1".into()],
-            model_request_costs: vec![ModelRequestCostConfig {
-                slug: "GLM-5.1".into(),
-                cost: 2.0,
-            }],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-
-        assert!(upstream.supports_model("GLM-5.1"));
-        assert!(!upstream.supports_model("glm-5.1"));
-        assert_eq!(
-            upstream.resolved_model_name("GLM-5.1").as_deref(),
-            Some("GLM-5.1")
-        );
-        assert_eq!(upstream.resolved_model_name("glm-5.1"), None);
-        assert!(upstream.is_premium_model_request("GLM-5.1"));
-        assert!(!upstream.is_premium_model_request("glm-5.1"));
-        assert_eq!(upstream.request_cost_for_model("GLM-5.1"), 2.0);
-        assert_eq!(upstream.request_cost_for_model("glm-5.1"), 1.0);
-    }
-
-    #[test]
-    fn bypasses_proxy_for_loopback_hosts_only() {
-        assert!(should_bypass_proxy_for_host("localhost"));
-        assert!(should_bypass_proxy_for_host("127.0.0.1"));
-        assert!(should_bypass_proxy_for_host("::1"));
-        assert!(!should_bypass_proxy_for_host("api.openai.com"));
-    }
-
-    #[test]
-    fn bypasses_proxy_for_loopback_urls_only() {
-        assert!(should_bypass_proxy_for_url(
-            "http://127.0.0.1:8080/v1/chat/completions"
-        ));
-        assert!(should_bypass_proxy_for_url(
-            "http://localhost:8080/v1/chat/completions"
-        ));
-        assert!(!should_bypass_proxy_for_url(
-            "https://api.openai.com/v1/chat/completions"
-        ));
-        assert!(!should_bypass_proxy_for_url("not-a-url"));
-    }
-
-    #[test]
-    fn model_resolution_is_exact_and_preserves_upstream_model_case() {
-        let mut upstream = UpstreamConfig {
-            supported_models: vec!["MiniMax2.7".into(), "DeepSeek-V3".into()],
-            premium_models: vec!["MiniMax2.7".into()],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-
-        assert!(upstream.supports_model("MiniMax2.7"));
-        assert!(!upstream.supports_model("minimax2.7"));
-        assert_eq!(
-            upstream.resolved_model_name("MiniMax2.7").as_deref(),
-            Some("MiniMax2.7")
-        );
-        assert_eq!(upstream.resolved_model_name("minimax2.7"), None);
-        assert!(upstream.is_premium_model_request("MiniMax2.7"));
-        assert!(!upstream.is_premium_model_request("minimax2.7"));
-        assert_eq!(upstream.request_cost_for_model("MiniMax2.7"), 1.0);
-        assert_eq!(upstream.request_cost_for_model("minimax2.7"), 1.0);
-    }
-
-    #[test]
-    fn normalize_for_storage_backfills_and_dedups_protocols() {
-        let mut upstream = UpstreamConfig {
-            protocol: crate::routing::UpstreamProtocol::Responses,
-            protocols: vec![
-                crate::routing::UpstreamProtocol::Responses,
-                crate::routing::UpstreamProtocol::ChatCompletions,
-                crate::routing::UpstreamProtocol::Responses,
-            ],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-        assert_eq!(
-            upstream.protocols,
-            vec![
-                crate::routing::UpstreamProtocol::Responses,
-                crate::routing::UpstreamProtocol::ChatCompletions,
-            ]
-        );
-        assert_eq!(
-            upstream.protocol,
-            crate::routing::UpstreamProtocol::Responses
-        );
-
-        let mut legacy_only = UpstreamConfig {
-            protocol: crate::routing::UpstreamProtocol::ChatCompletions,
-            protocols: vec![],
-            ..Default::default()
-        };
-        legacy_only.normalize_for_storage();
-        assert_eq!(
-            legacy_only.protocols,
-            vec![crate::routing::UpstreamProtocol::ChatCompletions]
-        );
-        assert_eq!(
-            legacy_only.supported_protocols(),
-            vec![crate::routing::UpstreamProtocol::ChatCompletions]
-        );
-    }
-
-    #[test]
-    fn normalize_for_storage_normalizes_model_contexts() {
-        let mut upstream = UpstreamConfig {
-            model_contexts: vec![
-                ModelContextConfig {
-                    slug: " GPT-4.1 ".into(),
-                    context_limit: 0,
-                    output_reserve: 0,
-                    context_group: " High-End ".into(),
-                },
-                ModelContextConfig {
-                    slug: "gpt-4.1".into(),
-                    context_limit: 200_000,
-                    output_reserve: 16_000,
-                    context_group: "high-end".into(),
-                },
-            ],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-
-        assert_eq!(
-            upstream.model_contexts,
-            vec![ModelContextConfig {
-                slug: "GPT-4.1".into(),
-                context_limit: 2,
-                output_reserve: 1,
-                context_group: "High-End".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn context_fallback_model_prefers_same_group_larger_window_model() {
-        let mut upstream = UpstreamConfig {
-            supported_models: vec!["MiniMax2.7".into(), "MiniMax2.7-Long".into()],
-            model_contexts: vec![
-                ModelContextConfig {
-                    slug: "MiniMax2.7".into(),
-                    context_limit: 128_000,
-                    output_reserve: 8_000,
-                    context_group: "minimax".into(),
-                },
-                ModelContextConfig {
-                    slug: "MiniMax2.7-Long".into(),
-                    context_limit: 256_000,
-                    output_reserve: 8_000,
-                    context_group: "minimax".into(),
-                },
-            ],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-
-        assert_eq!(
-            upstream
-                .context_config_for_model("MiniMax2.7")
-                .map(|config| config.context_limit),
-            Some(128_000)
-        );
-        assert_eq!(
-            upstream.context_fallback_model_for("MiniMax2.7", 150_000),
-            Some("MiniMax2.7-Long".into())
-        );
-    }
-
-    #[test]
-    fn context_config_uses_default_when_model_override_missing() {
-        let mut upstream = UpstreamConfig {
-            supported_models: vec!["GLM-5".into(), "Qwen3.7-Plus".into()],
-            default_model_context: Some(DefaultModelContextConfig {
-                context_limit: 8192,
-                output_reserve: 512,
-                context_group: "shared".into(),
-            }),
-            model_contexts: vec![ModelContextConfig {
-                slug: "Qwen3.7-Plus".into(),
-                context_limit: 4096,
-                output_reserve: 128,
-                context_group: String::new(),
-            }],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-
-        assert_eq!(
-            upstream.context_config_for_model("GLM-5"),
-            Some(ModelContextConfig {
-                slug: "GLM-5".into(),
-                context_limit: 8192,
-                output_reserve: 512,
-                context_group: "shared".into(),
-            })
-        );
-        assert_eq!(
-            upstream.context_config_for_model("Qwen3.7-Plus"),
-            Some(ModelContextConfig {
-                slug: "Qwen3.7-Plus".into(),
-                context_limit: 4096,
-                output_reserve: 128,
-                context_group: String::new(),
-            })
-        );
-    }
-
-    #[test]
-    fn context_fallback_uses_default_group_when_available() {
-        let mut upstream = UpstreamConfig {
-            supported_models: vec!["GLM-5".into(), "GLM-5-Long".into()],
-            default_model_context: Some(DefaultModelContextConfig {
-                context_limit: 4_000,
-                output_reserve: 256,
-                context_group: "glm-shared".into(),
-            }),
-            model_contexts: vec![ModelContextConfig {
-                slug: "GLM-5-Long".into(),
-                context_limit: 16_000,
-                output_reserve: 512,
-                context_group: "glm-shared".into(),
-            }],
-            ..Default::default()
-        };
-        upstream.normalize_for_storage();
-
-        assert_eq!(
-            upstream.context_fallback_model_for("GLM-5", 8_000),
-            Some("GLM-5-Long".into())
-        );
-    }
-
-    #[test]
-    fn context_config_with_profile_uses_upstream_override_first() {
-        let upstream = UpstreamConfig {
-            supported_models: vec!["GLM-5".into()],
-            model_contexts: vec![ModelContextConfig {
-                slug: "GLM-5".into(),
-                context_limit: 4_096,
-                output_reserve: 256,
-                context_group: "upstream".into(),
-            }],
-            ..Default::default()
-        };
-        let profile = GlobalContextProfile {
-            model_contexts: vec![ModelContextConfig {
-                slug: "GLM-5".into(),
-                context_limit: 8_192,
-                output_reserve: 512,
-                context_group: "profile".into(),
-            }],
-            default_model_context: Some(DefaultModelContextConfig {
-                context_limit: 2_048,
-                output_reserve: 128,
-                context_group: "shared".into(),
-            }),
-        };
-
-        let config = upstream.context_config_for_model_with_profile("GLM-5", Some(&profile));
-        let Some(config) = config else {
-            panic!("missing config");
-        };
-        assert_eq!(config.context_limit, 4_096);
-        assert_eq!(config.context_group, "upstream");
-    }
-
-    #[test]
-    fn context_config_with_profile_falls_back_to_profile_when_upstream_missing() {
-        let upstream = UpstreamConfig {
-            supported_models: vec!["GLM-5".into()],
-            ..Default::default()
-        };
-        let profile = GlobalContextProfile {
-            model_contexts: vec![ModelContextConfig {
-                slug: "GLM-5".into(),
-                context_limit: 6_553,
-                output_reserve: 384,
-                context_group: "shared".into(),
-            }],
-            default_model_context: Some(DefaultModelContextConfig {
-                context_limit: 2_048,
-                output_reserve: 128,
-                context_group: "fallback".into(),
-            }),
-        };
-
-        assert_eq!(
-            upstream.context_config_for_model_with_profile("GLM-5", Some(&profile)),
-            Some(ModelContextConfig {
-                slug: "GLM-5".into(),
-                context_limit: 6_553,
-                output_reserve: 384,
-                context_group: "shared".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn context_fallback_with_profile_prefers_profile_wider_window() {
-        let upstream = UpstreamConfig {
-            supported_models: vec!["MiniMax2.7".into(), "MiniMax2.7-Long".into()],
-            model_contexts: vec![ModelContextConfig {
-                slug: "MiniMax2.7".into(),
-                context_limit: 4_000,
-                output_reserve: 512,
-                context_group: "shared".into(),
-            }],
-            ..Default::default()
-        };
-        let profile = GlobalContextProfile {
-            model_contexts: vec![ModelContextConfig {
-                slug: "MiniMax2.7-Long".into(),
-                context_limit: 32_000,
-                output_reserve: 2_048,
-                context_group: "shared".into(),
-            }],
-            default_model_context: None,
-        };
-
-        assert_eq!(
-            upstream.context_fallback_model_for_with_profile("MiniMax2.7", 30_000, Some(&profile)),
-            Some("MiniMax2.7-Long".into())
-        );
-    }
-
-    #[test]
-    fn normalize_global_context_profile_for_storage_trims_and_dedups() {
-        let mut profile = GlobalContextProfile {
-            model_contexts: vec![
-                ModelContextConfig {
-                    slug: " gpt-4.1 ".into(),
-                    context_limit: 0,
-                    output_reserve: 0,
-                    context_group: " Shared ".into(),
-                },
-                ModelContextConfig {
-                    slug: "gpt-4.1 ".into(),
-                    context_limit: 8_192,
-                    output_reserve: 256,
-                    context_group: "shared".into(),
-                },
-            ],
-            default_model_context: Some(DefaultModelContextConfig {
-                context_limit: 0,
-                output_reserve: 0,
-                context_group: " Shared ".into(),
-            }),
-        };
-
-        profile.normalize_for_storage();
-
-        assert_eq!(profile.model_contexts.len(), 1);
-        assert_eq!(
-            profile.model_contexts[0],
-            ModelContextConfig {
-                slug: "gpt-4.1".into(),
-                context_limit: 2,
-                output_reserve: 1,
-                context_group: "Shared".into(),
-            }
-        );
-        assert_eq!(
-            profile.default_model_context,
-            Some(DefaultModelContextConfig {
-                context_limit: 2,
-                output_reserve: 1,
-                context_group: "Shared".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn routing_affinity_is_scoped_by_model_and_case_insensitive() {
-        let state = AppState::new(
-            PersistedState::default(),
-            "affinity-state-test.json",
-            AppConfig::default(),
-        );
-
-        state.set_affinity_upstream("down-1", "MiniMax2.7", "up-a");
-        state.set_affinity_upstream("down-1", "deepseek-v3", "up-b");
-
-        assert_eq!(
-            state
-                .get_affinity_upstream("down-1", "minimax2.7")
-                .as_deref(),
-            Some("up-a")
-        );
-        assert_eq!(
-            state
-                .get_affinity_upstream("down-1", "DEEPSEEK-V3")
-                .as_deref(),
-            Some("up-b")
-        );
-        assert_eq!(state.get_affinity_upstream("down-1", "glm-5.1"), None);
-
-        state.clear_affinity_upstream("down-1", "MINIMAX2.7");
-        assert_eq!(state.get_affinity_upstream("down-1", "minimax2.7"), None);
-        assert_eq!(
-            state
-                .get_affinity_upstream("down-1", "deepseek-v3")
-                .as_deref(),
-            Some("up-b")
-        );
-    }
-}

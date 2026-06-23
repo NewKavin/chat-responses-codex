@@ -7,3 +7,5 @@ pub mod protocol;
 pub mod routing;
 #[path = "../../../src/state.rs"]
 pub mod state;
+#[path = "../../../src/util.rs"]
+pub mod util;
