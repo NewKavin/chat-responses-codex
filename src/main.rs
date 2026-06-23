@@ -49,6 +49,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             10,
         )
         .max(1),
+        upstream_rate_limit_force_retry_enabled: env_bool(
+            "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED",
+            true,
+        ),
         upstream_concurrency_retry_attempts: env_u32("UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS", 20)
             .max(1),
         upstream_concurrency_retry_backoff_ms: env_u64("UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS", 50)

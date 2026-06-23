@@ -1822,27 +1822,34 @@ async fn process_gateway_request(
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
 
+                            // Check if there's an alternative upstream that:
+                            // 1. Is not the current upstream
+                            // 2. Supports the current model
+                            // 3. Is not in cooldown
                             let has_available_alternative =
                                 upstreams_for_retry.iter().any(|candidate| {
                                     candidate.id != upstream.id
+                                        && candidate.supports_model(model)
                                         && upstream_runtime_snapshots
                                             .get(&candidate.id)
                                             .map(|runtime| !runtime.is_in_cooldown(now))
                                             .unwrap_or(true)
                                 });
-                            // If every other candidate is currently unavailable, retry the
-                            // same upstream after its cooldown so single-candidate models
-                            // can still recover instead of failing immediately.
+                            // Retry conditions:
+                            // 1. No alternative upstream that supports this model AND not in cooldown
+                            // 2. Force retry enabled (allows waiting even when Retry-After > max_retry_after_seconds)
+                            // 3. OR Retry-After is within acceptable bounds
+                            // This ensures single-model upstreams get proper retry behavior
+                            let can_force_retry = state.config.upstream_rate_limit_force_retry_enabled
+                                && retry_after_seconds
+                                    <= state.config.upstream_rate_limit_retry_window_seconds.max(1);
+                            let within_retry_bounds = retry_after_seconds
+                                <= state.config.upstream_rate_limit_max_retry_after_seconds.max(1);
+
                             if !has_available_alternative
                                 && rate_limit_retry_attempts_used
                                     < state.config.upstream_rate_limit_retry_attempts.max(1)
-                                && retry_after_seconds
-                                    <= state.config.upstream_rate_limit_retry_window_seconds.max(1)
-                                && retry_after_seconds
-                                    <= state
-                                        .config
-                                        .upstream_rate_limit_max_retry_after_seconds
-                                        .max(1)
+                                && (can_force_retry || within_retry_bounds)
                             {
                                 rate_limit_retry_attempts_used =
                                     rate_limit_retry_attempts_used.saturating_add(1);
@@ -1861,7 +1868,9 @@ async fn process_gateway_request(
                                     rate_limit_retry_attempts_limit = state
                                         .config
                                         .upstream_rate_limit_retry_attempts,
-                                    "waiting for upstream rate limit cooldown before retrying"
+                                    force_retry_enabled = state.config.upstream_rate_limit_force_retry_enabled,
+                                    has_available_alternative = has_available_alternative,
+                                    "waiting for upstream rate limit cooldown before retrying (no alternative upstream supports this model)"
                                 );
                                 tokio::time::sleep(Duration::from_secs(retry_after_seconds)).await;
                                 continue;
