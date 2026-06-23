@@ -327,13 +327,15 @@ async fn test_upstreams_create_preserves_raw_model_names() {
 }
 
 #[tokio::test]
-async fn test_upstreams_create_rejects_invalid_premium_models() {
+async fn test_upstreams_create_accepts_premium_models_not_in_supported() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
 
     let token = get_admin_token(&app, "admin", "admin").await;
 
-    let invalid_upstream = json!({
+    // premium_models containing models not yet in supported_models is now allowed.
+    // This supports configuring premium protection before model discovery.
+    let upstream = json!({
         "id": "upstream-4",
         "name": "Premium Upstream",
         "base_url": "https://api.premium.com",
@@ -341,6 +343,7 @@ async fn test_upstreams_create_rejects_invalid_premium_models() {
         "protocol": "ChatCompletions",
         "supported_models": ["GLM-5"],
         "premium_models": ["glm-5.1"],
+        "protect_premium_quota": true,
         "active": true
     });
 
@@ -353,21 +356,15 @@ async fn test_upstreams_create_rejects_invalid_premium_models() {
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::to_string(&invalid_upstream).unwrap(),
+                    serde_json::to_string(&upstream).unwrap(),
                 ))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: Value = serde_json::from_slice(&body).unwrap();
-    let message = payload["error"]["message"].as_str().unwrap();
-    assert!(message.contains("invalid premium_models"));
-    assert!(message.contains("glm-5.1"));
+    // Now accepted (201) instead of BAD_REQUEST.
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]

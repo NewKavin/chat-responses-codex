@@ -171,9 +171,9 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ChatDotRound, Close, Delete, Link, MagicStick, Promotion, User } from '@element-plus/icons-vue'
 import { Marked } from 'marked'
-import hljs from 'highlight.js'
 import { portalApi } from '@/api/portal'
 import { buildGatewayModelsEndpoint } from '@/utils/integration'
+import { createHighlightedCodeRenderer } from '@/utils/highlight'
 import {
   buildPlaygroundChatPayload,
   extractChatCompletionText,
@@ -186,11 +186,7 @@ import {
 
 const marked = new Marked({
   renderer: {
-    code({ text, lang }: { text: string; lang?: string }) {
-      const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext'
-      const highlighted = hljs.highlight(text, { language }).value
-      return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`
-    }
+    code: createHighlightedCodeRenderer()
   }
 })
 

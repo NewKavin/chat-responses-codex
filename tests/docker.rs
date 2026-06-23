@@ -51,6 +51,30 @@ fn dockerfile_builds_frontend_and_backend_inside_the_image() {
 }
 
 #[test]
+fn dockerfile_runs_the_application_as_a_non_root_user_with_writable_runtime_directories() {
+    let dockerfile = fs::read_to_string("Dockerfile").expect("Dockerfile should be readable");
+
+    assert!(
+        dockerfile.contains("useradd")
+            || dockerfile.contains("adduser")
+            || dockerfile.contains("addgroup"),
+        "Dockerfile should create a dedicated non-root runtime user"
+    );
+    assert!(
+        dockerfile.contains("USER "),
+        "Dockerfile should switch to a non-root runtime user"
+    );
+    assert!(
+        dockerfile.contains("chown") || dockerfile.contains("chmod"),
+        "Dockerfile should adjust ownership or permissions for runtime directories"
+    );
+    assert!(
+        dockerfile.contains("/data") && dockerfile.contains("/logs"),
+        "Dockerfile should mention both /data and /logs when preparing writable runtime directories"
+    );
+}
+
+#[test]
 fn dockerignore_keeps_the_build_context_small_for_multistage_images() {
     let dockerignore =
         fs::read_to_string(".dockerignore").expect(".dockerignore should be readable");

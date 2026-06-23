@@ -36,6 +36,11 @@ WORKDIR /app
 
 COPY --from=backend-builder /app/target/release/chat-responses-codex /usr/local/bin/chat-responses-codex
 
+RUN groupadd --system app \
+    && useradd --system --uid 10001 --gid app --create-home --home-dir /home/app --shell /usr/sbin/nologin app \
+    && mkdir -p /data /logs \
+    && chown -R app:app /data /logs /home/app
+
 ENV BIND_ADDR=0.0.0.0:3001
 ENV STATE_PATH=/data/state.json
 ENV LOG_PATH=/logs/chat-responses-codex.log
@@ -46,5 +51,7 @@ EXPOSE 3001
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/chat-responses-codex", "--healthcheck"]
+
+USER app
 
 ENTRYPOINT ["/usr/local/bin/chat-responses-codex"]

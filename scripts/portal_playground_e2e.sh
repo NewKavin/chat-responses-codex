@@ -7,6 +7,11 @@ DOWNSTREAM_ID="${DOWNSTREAM_ID:-test}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-60}"
 DOTENV_PATH="${DOTENV_PATH:-${HOME}/docker/chat-responses-codex/.env}"
 
+# Retry configuration for 429 errors
+MAX_RETRIES="${MAX_RETRIES:-3}"
+RETRY_BASE_DELAY_SEC="${RETRY_BASE_DELAY_SEC:-5}"
+RETRY_MAX_DELAY_SEC="${RETRY_MAX_DELAY_SEC:-60}"
+
 action_status=0
 
 need_cmd() {
@@ -47,6 +52,49 @@ require_or_exit() {
 
 now_ms() {
   date +%s%3N
+}
+
+# Calculate delay with exponential backoff and jitter
+calc_retry_delay() {
+  local attempt="$1"
+  local base_delay="$RETRY_BASE_DELAY_SEC"
+  local max_delay="$RETRY_MAX_DELAY_SEC"
+  
+  # Exponential backoff: base * 2^(attempt-1)
+  local delay=$((base_delay * (2 ** (attempt - 1))))
+  
+  # Cap at max delay
+  if [[ $delay -gt $max_delay ]]; then
+    delay=$max_delay
+  fi
+  
+  # Add jitter: random 0-50% of delay
+  local jitter=$((RANDOM % (delay / 2 + 1)))
+  echo $((delay + jitter))
+}
+
+# Retry wrapper for commands that may hit 429
+# Usage: with_retry <max_attempts> <cmd...>
+with_retry() {
+  local max_attempts="$1"
+  shift
+  local attempt=1
+  
+  while [[ $attempt -le $max_attempts ]]; do
+    if "$@"; then
+      return 0
+    fi
+    
+    if [[ $attempt -lt $max_attempts ]]; then
+      local delay
+      delay=$(calc_retry_delay "$attempt")
+      log_warn "Attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
+      sleep "$delay"
+    fi
+    ((attempt++))
+  done
+  
+  return 1
 }
 
 ADMIN_PASSWORD=$(awk -F= '$1=="ADMIN_PASSWORD" {print $2}' "$DOTENV_PATH")
@@ -184,6 +232,54 @@ gateway_models() {
   log_pass "GATEWAY_MODELS 200 count=$MODEL_COUNT"
 }
 
+chat_completion_single() {
+  local model="$1"
+  local payload
+  local code
+  local body_file
+  local start end elapsed
+
+  payload=$(jq -nc --arg model "$model" '{model:$model,messages:[{role:"user",content:"请返回字符串 \"ok\""}],stream:false}')
+  body_file=$(mktemp)
+  
+  start=$(now_ms)
+  code=$(curl -ks -m "$TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
+    -X POST "$BASE_URL/v1/chat/completions" \
+    -H "Authorization: Bearer $PORTAL_DOWNSTREAM_KEY" \
+    -H 'Content-Type: application/json' \
+    -d "$payload")
+  end=$(now_ms)
+  elapsed=$((end - start))
+
+  # Handle 429 specially - return code for retry logic
+  if [[ "$code" == "429" ]]; then
+    local retry_after
+    retry_after=$(grep -i '^retry-after:' "$body_file" 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || echo "")
+    local error_body
+    error_body=$(cat "$body_file" | tr '\n' ' ' | head -c 120)
+    rm -f "$body_file"
+    log_warn "CHAT_COMPLETION model=$model status=429 (rate limited) elapsed=${elapsed}ms retry_after=${retry_after:-N/A} error=$error_body"
+    echo "429"
+    return 0  # Return success but echo "429" for caller to handle
+  fi
+
+  if [[ "$code" == "200" ]]; then
+    local assistant
+    assistant=$(jq -r '.choices[0].message.content // empty' "$body_file")
+    log_pass "CHAT_COMPLETION status=200 model=$model elapsed=${elapsed}ms response_prefix=$(echo "$assistant" | head -c 30)"
+    rm -f "$body_file"
+    echo "200"
+    return 0
+  fi
+
+  local error_body
+  error_body=$(cat "$body_file" | tr '\n' ' ' | head -c 120)
+  log_warn "CHAT_COMPLETION model=$model status=$code elapsed=${elapsed}ms error=$error_body"
+  rm -f "$body_file"
+  echo "$code"
+  return 0
+}
+
 chat_completion() {
   local candidate=()
   local extra_default
@@ -212,44 +308,49 @@ chat_completion() {
     fi
   done
 
-  local payload
-  local code
-  local body_file
-  local assistant
-  local error_body
   local model
+  local attempt
+  local result
+  local delay
 
   for model in "${candidate[@]}"; do
-    payload=$(jq -nc --arg model "$model" '{model:$model,messages:[{role:"user",content:"请返回字符串 \"ok\""}],stream:false}')
-    body_file=$(mktemp)
-    local start end elapsed
-    start=$(now_ms)
-    code=$(curl -ks -m "$TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
-      -X POST "$BASE_URL/v1/chat/completions" \
-      -H "Authorization: Bearer $PORTAL_DOWNSTREAM_KEY" \
-      -H 'Content-Type: application/json' \
-      -d "$payload")
-    end=$(now_ms)
-    elapsed=$((end - start))
-
-    if [[ "$code" == "200" ]]; then
-      assistant=$(jq -r '.choices[0].message.content // empty' "$body_file")
-      log_pass "CHAT_COMPLETION status=200 model=$model elapsed=${elapsed}ms response_prefix=$(echo "$assistant" | head -c 30)"
-      rm -f "$body_file"
-      return 0
-    fi
-
-    error_body=$(cat "$body_file" | tr '\n' ' ' | head -c 120)
-    log_warn "CHAT_COMPLETION model=$model status=$code elapsed=${elapsed}ms error=$error_body"
-    rm -f "$body_file"
+    attempt=1
+    while [[ $attempt -le $MAX_RETRIES ]]; do
+      result=$(chat_completion_single "$model")
+      
+      case "$result" in
+        "200")
+          # Success!
+          return 0
+          ;;
+        "429")
+          # Rate limited - wait and retry same model
+          if [[ $attempt -lt $MAX_RETRIES ]]; then
+            delay=$(calc_retry_delay "$attempt")
+            log_warn "Rate limited on model=$model, attempt $attempt/$MAX_RETRIES, waiting ${delay}s before retry..."
+            sleep "$delay"
+            ((attempt++))
+            continue
+          else
+            log_warn "Rate limited on model=$model after $MAX_RETRIES attempts, trying next model..."
+            break  # Exit retry loop, move to next model
+          fi
+          ;;
+        *)
+          # Other error - try next model
+          break
+          ;;
+      esac
+    done
   done
 
-  log_fail "CHAT_COMPLETION all candidates failed"
+  log_fail "CHAT_COMPLETION all candidates failed after retries"
   return 1
 }
 
 main() {
   print_section "Portal Playground E2E"
+  log_info "Retry config: MAX_RETRIES=$MAX_RETRIES, BASE_DELAY=${RETRY_BASE_DELAY_SEC}s, MAX_DELAY=${RETRY_MAX_DELAY_SEC}s"
   healthz
   require_or_exit admin_login
   require_or_exit rotate_downstream_key

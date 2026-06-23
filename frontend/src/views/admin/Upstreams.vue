@@ -210,8 +210,8 @@
           </el-alert>
         </el-form-item>
         <el-form-item label="高端模型列表">
-          <el-select v-model="form.premium_models" multiple filterable allow-create placeholder="选择此账号的高端模型">
-            <el-option v-for="model in form.supported_models" :key="model" :label="model" :value="model" />
+          <el-select v-model="form.premium_models" multiple filterable allow-create placeholder="选择此账号的高端模型（可手动输入）">
+            <el-option v-for="model in premiumModelOptions" :key="model" :label="model" :value="model" />
           </el-select>
           <el-alert
             title="说明"
@@ -295,6 +295,13 @@ const form = ref<Partial<UpstreamConfig>>({
 const availableModelsForCost = computed(() => {
   const supported = form.value.supported_models || []
   return Array.from(new Set(supported)).sort()
+})
+
+const premiumModelOptions = computed(() => {
+  const supported = form.value.supported_models || []
+  const premium = form.value.premium_models || []
+  const combined = [...supported, ...premium]
+  return Array.from(new Set(combined)).sort()
 })
 
 const addModelCost = () => {

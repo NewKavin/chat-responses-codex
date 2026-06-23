@@ -1296,24 +1296,41 @@ pub(super) async fn admin_update_upstream(
         new_keys.retain(|k| seen.insert(k.clone()));
     }
 
-    // Concurrently validate new keys if we have a base_url to validate against.
+    // Collect existing keys from the stored upstream and validate them together.
     let mut invalid_keys: Vec<Value> = Vec::new();
-    if !new_keys.is_empty() {
-        let snapshot = state.snapshot().await;
-        if let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == id) {
-            let base_url = upstream.base_url.clone();
-            drop(snapshot);
+    let snapshot = state.snapshot().await;
+    if let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == id) {
+        let base_url = upstream.base_url.clone();
+        // Gather existing keys from the upstream record.
+        let existing_keys = upstream.available_keys();
+        drop(snapshot);
 
+        // Merge existing + new keys and dedup.
+        let mut all_keys: Vec<String> = existing_keys.clone();
+        {
+            let mut seen: HashSet<String> = existing_keys.iter().cloned().collect();
+            for key in new_keys {
+                if seen.insert(key.clone()) {
+                    all_keys.push(key);
+                }
+            }
+        }
+
+        if !all_keys.is_empty() {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_default();
 
-            let results = fetch_models_from_upstream_keys_concurrently(&client, &base_url, &new_keys).await;
+            let results = fetch_models_from_upstream_keys_concurrently(&client, &base_url, &all_keys).await;
             let mut valid_keys: HashSet<String> = HashSet::new();
+            let mut valid_key_models: HashMap<String, Vec<String>> = HashMap::new();
             for result in &results {
                 if result.error.is_none() {
                     valid_keys.insert(result.key.clone());
+                    if !result.models.is_empty() {
+                        valid_key_models.insert(result.key.clone(), result.models.clone());
+                    }
                 } else {
                     invalid_keys.push(json!({
                         "key_prefix": result.key_prefix,
@@ -1325,26 +1342,25 @@ pub(super) async fn admin_update_upstream(
             // Only filter invalid keys when at least one key validated successfully.
             // If ALL keys failed (e.g. upstream temporarily unreachable), keep them all.
             if !valid_keys.is_empty() {
-                if let Some(api_keys_arr) = updates.get_mut("api_keys").and_then(|v| v.as_array_mut()) {
-                    api_keys_arr.retain(|v| {
-                        v.as_str()
-                            .map(|s| valid_keys.contains(s.trim()))
-                            .unwrap_or(false)
-                    });
+                // Build replacement arrays for api_keys and api_key_models.
+                let mut replacement_api_keys: Vec<String> = valid_keys.iter().cloned().collect();
+                replacement_api_keys.sort();
+                
+                let mut replacement_api_key_models: Vec<Value> = Vec::new();
+                for key in &replacement_api_keys {
+                    let models = valid_key_models.get(key).cloned().unwrap_or_default();
+                    replacement_api_key_models.push(json!({
+                        "api_key": key,
+                        "supported_models": models,
+                    }));
                 }
-                if let Some(key) = updates.get("api_key").and_then(|v| v.as_str()) {
-                    if !valid_keys.contains(key.trim()) {
-                        updates.as_object_mut().unwrap().remove("api_key");
-                    }
-                }
-                if let Some(api_key_models_arr) = updates.get_mut("api_key_models").and_then(|v| v.as_array_mut()) {
-                    api_key_models_arr.retain(|v| {
-                        v.get("api_key")
-                            .and_then(|k| k.as_str())
-                            .map(|s| valid_keys.contains(s.trim()))
-                            .unwrap_or(false)
-                    });
-                }
+
+                // Use _replace_api_keys flag to tell update_upstream_by_id to replace instead of merge.
+                updates["api_keys"] = json!(replacement_api_keys);
+                updates["api_key_models"] = json!(replacement_api_key_models);
+                // Clear the legacy api_key field to avoid duplication.
+                updates.as_object_mut().unwrap().remove("api_key");
+                updates["_replace_api_keys"] = json!(true);
             }
         }
     }

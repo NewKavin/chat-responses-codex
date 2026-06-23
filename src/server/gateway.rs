@@ -900,6 +900,36 @@ fn spawn_stream_interruption_cleanup(
     }
 }
 
+/// When a stream finished normally (received [DONE]) but the downstream client
+/// disconnected before all pending frames were delivered, finalize as success
+/// rather than recording a spurious "stream disconnected" error.
+fn spawn_stream_normal_completion_cleanup(
+    completion_context: Option<StreamCompletionContext>,
+    log_context: Option<StreamUsageLogContext>,
+    usage: Option<(u64, u64, u64)>,
+) {
+    if completion_context.is_none() && log_context.is_none() {
+        return;
+    }
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            if let Some(context) = completion_context {
+                context.release_all().await;
+                context.mark_success().await;
+            }
+            if let Some(mut ctx) = log_context {
+                ctx.status = StatusCode::OK;
+                ctx.error_message = None;
+                ctx.error_category = None;
+                ctx.emit(usage.unwrap_or((0, 0, 0))).await;
+            }
+        });
+    } else {
+        tracing::warn!("stream cleanup dropped outside runtime; cleanup skipped");
+    }
+}
+
 enum StreamReadOutcome {
     Chunk(Result<Option<Bytes>, reqwest::Error>),
     Heartbeat,
@@ -3185,8 +3215,30 @@ async fn send_to_upstream(
             }));
         }
 
+        // When the upstream HTTP status is 5xx, the upstream itself is failing.
+        // A nested 4xx inner_code in the body (e.g. 400 "bad request") does not mean
+        // the *gateway* client request was bad; treat as temporary so we try another upstream.
+        let upstream_is_server_error = status.is_server_error();
+
         if let Some(inner_code) = upstream_error_code {
             if (400..=499).contains(&inner_code) {
+                if upstream_is_server_error {
+                    return Err(GatewayError::TemporaryUpstreamUnavailable(
+                        if error_excerpt.is_empty() {
+                            format!(
+                                "upstream server error (status {}) with nested client code {}",
+                                status.as_u16(),
+                                inner_code
+                            )
+                        } else {
+                            format!(
+                                "upstream server error (status {}): {error_excerpt}",
+                                status.as_u16()
+                            )
+                        },
+                    ));
+                }
+
                 if inner_code == 429 {
                     let retry_after_seconds = parse_retry_after_seconds(
                         &headers,
@@ -4571,12 +4623,19 @@ impl Drop for ProxiedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        spawn_stream_interruption_cleanup(
-            completion_context,
-            log_context,
-            usage,
-            "stream disconnected before completion".to_string(),
-        );
+
+        if self.finished {
+            // Stream completed normally (received [DONE]) but client disconnected
+            // before consuming all remaining chunks. Log as success, not error.
+            spawn_stream_normal_completion_cleanup(completion_context, log_context, usage);
+        } else {
+            spawn_stream_interruption_cleanup(
+                completion_context,
+                log_context,
+                usage,
+                "stream disconnected before completion".to_string(),
+            );
+        }
     }
 }
 
@@ -4777,12 +4836,19 @@ impl Drop for TranslatedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        spawn_stream_interruption_cleanup(
-            completion_context,
-            log_context,
-            usage,
-            "stream disconnected before completion".to_string(),
-        );
+
+        if self.finished {
+            // Stream completed normally (received [DONE]) but client disconnected
+            // before consuming all pending translated frames. Log as success.
+            spawn_stream_normal_completion_cleanup(completion_context, log_context, usage);
+        } else {
+            spawn_stream_interruption_cleanup(
+                completion_context,
+                log_context,
+                usage,
+                "stream disconnected before completion".to_string(),
+            );
+        }
     }
 }
 

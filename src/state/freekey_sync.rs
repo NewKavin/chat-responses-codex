@@ -280,24 +280,57 @@ impl AppState {
                 if let Some(base_url) = updates.get("base_url").and_then(|v| v.as_str()) {
                     upstream.base_url = base_url.to_string();
                 }
-                if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
-                    let new_key = api_key.to_string();
-                    if !new_key.is_empty() {
-                        let mut merged = merge_api_keys(&upstream.api_keys, &[new_key.clone()]);
-                        if !upstream.api_key.is_empty()
-                            && !merged.iter().any(|k| k == &upstream.api_key)
-                        {
-                            merged.insert(0, upstream.api_key.clone());
-                        }
-                        upstream.api_keys = merged;
+                // Check for replace mode flag from admin_update_upstream key validation.
+                let replace_api_keys = updates.get("_replace_api_keys").and_then(|v| v.as_bool()) == Some(true);
+                
+                if replace_api_keys {
+                    // Directly replace api_keys and api_key_models with validated keys.
+                    if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
+                        upstream.api_keys = api_keys
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
                     }
-                }
-                if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
-                    let incoming: Vec<String> = api_keys
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    upstream.api_keys = merge_api_keys(&upstream.api_keys, &incoming);
+                    if let Some(api_key_models) = updates.get("api_key_models").and_then(|v| v.as_array()) {
+                        upstream.api_key_models = api_key_models
+                            .iter()
+                            .filter_map(|value| {
+                                let api_key = value.get("api_key").and_then(|v| v.as_str())?;
+                                let supported_models = value
+                                    .get("supported_models")
+                                    .and_then(|v| v.as_array())?
+                                    .iter()
+                                    .filter_map(|model| model.as_str().map(|s| s.to_string()))
+                                    .collect::<Vec<_>>();
+                                Some(ApiKeyModelConfig {
+                                    api_key: api_key.to_string(),
+                                    supported_models,
+                                })
+                            })
+                            .collect();
+                        upstream.supported_models = derive_supported_models(&upstream.api_key_models);
+                    }
+                } else {
+                    // Legacy merge behavior (only adds, never removes).
+                    if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
+                        let new_key = api_key.to_string();
+                        if !new_key.is_empty() {
+                            let mut merged = merge_api_keys(&upstream.api_keys, &[new_key.clone()]);
+                            if !upstream.api_key.is_empty()
+                                && !merged.iter().any(|k| k == &upstream.api_key)
+                            {
+                                merged.insert(0, upstream.api_key.clone());
+                            }
+                            upstream.api_keys = merged;
+                        }
+                    }
+                    if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
+                        let incoming: Vec<String> = api_keys
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                        upstream.api_keys = merge_api_keys(&upstream.api_keys, &incoming);
+                    }
                 }
                 if let Some(api_key_models) =
                     updates.get("api_key_models").and_then(|v| v.as_array())

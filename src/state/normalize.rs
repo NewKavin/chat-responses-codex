@@ -271,21 +271,24 @@ impl UpstreamConfig {
             .iter()
             .cloned()
             .collect::<HashSet<_>>();
-        let invalid = self
+        let unknown = self
             .premium_models
             .iter()
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty() && !routable.contains(model))
             .collect::<Vec<_>>();
 
-        if invalid.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "invalid premium_models: {}; each premium model must exist in supported_models",
-                invalid.join(", ")
-            ))
+        // Allow premium_models that are not yet in supported_models.
+        // The upstream may be configured with premium models before model discovery,
+        // or the premium model might match upstream route patterns.
+        if !unknown.is_empty() {
+            tracing::warn!(
+                "premium_models contain models not yet in supported_models: {}",
+                unknown.join(", ")
+            );
         }
+
+        Ok(())
     }
 
     fn canonical_route_model(&self, model: &str) -> Option<String> {

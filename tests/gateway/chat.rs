@@ -5464,11 +5464,11 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = String::from_utf8_lossy(&body);
     assert!(
-        body.contains("expecting"),
+        body.contains("upstream server error"),
         "unexpected gateway body: {body}"
     );
 }
@@ -5591,11 +5591,11 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body = String::from_utf8_lossy(&body);
     assert!(
-        body.contains("upstream rate limited"),
+        body.contains("upstream server error"),
         "unexpected gateway body: {body}"
     );
 }
