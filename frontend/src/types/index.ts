@@ -239,6 +239,11 @@ export interface PortalModelStat {
   success_rate: number
 }
 
+export interface ModelContextEntry {
+  context_window: number
+  output_reserve: number
+}
+
 export interface PortalQuota {
   request_quota?: RequestQuotaUsage
   token_quota?: {
@@ -247,6 +252,9 @@ export interface PortalQuota {
   }
   model_allowlist: string[]
   ip_allowlist: string[]
+  /// Per-model context window resolved from the upstream admin configuration.
+  /// Keyed by canonical model slug. Optional: older gateways omit this.
+  model_contexts?: Record<string, ModelContextEntry>
 }
 
 export interface PortalUsageHistory {

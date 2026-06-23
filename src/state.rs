@@ -2988,6 +2988,95 @@ impl AppState {
 
         stats
     }
+
+    /// For a portal downstream, compute the per-model context window in tokens
+    /// that is safe to advertise to Codex.
+    ///
+    /// For each model in the downstream's allowlist, we look at every **active**
+    /// upstream that exposes the model and resolve its `context_limit` through
+    /// the upstream-specific `model_contexts` / `default_model_context`, falling
+    /// back to the matching `GlobalContextProfile`. The smallest non-zero limit
+    /// across active upstreams wins: this is the largest window every routable
+    /// upstream is guaranteed to accept.
+    ///
+    /// Models that no active upstream actually exposes (or whose
+    /// `context_limit` is unconfigured / zero everywhere) are omitted, so
+    /// callers can safely fall back to Codex's built-in defaults.
+    pub async fn compute_portal_model_context_limits(
+        &self,
+        downstream: &DownstreamConfig,
+    ) -> HashMap<String, ModelContextConfig> {
+        let snapshot = self.snapshot().await;
+        let canonical_models = build_active_upstream_model_catalog(&snapshot);
+
+        let mut result: HashMap<String, ModelContextConfig> = HashMap::new();
+
+        let allowlist: Vec<String> = if downstream.model_allowlist.is_empty() {
+            // Empty allowlist == "all models", use the catalog.
+            canonical_models
+                .values()
+                .flat_map(|slugs| slugs.iter().cloned())
+                .collect()
+        } else {
+            downstream
+                .model_allowlist
+                .iter()
+                .map(|slug| slug.trim().to_string())
+                .filter(|slug| !slug.is_empty())
+                .collect()
+        };
+
+        for model in allowlist {
+            if !portal_model_is_allowed(&downstream.model_allowlist, &model) {
+                continue;
+            }
+
+            for upstream in snapshot.upstreams.iter().filter(|u| u.active) {
+                // Only consider upstreams that actually expose this model.
+                let exposes = upstream
+                    .route_models()
+                    .iter()
+                    .any(|candidate| candidate.trim().eq_ignore_ascii_case(model.trim()));
+                if !exposes {
+                    continue;
+                }
+
+                let base_url =
+                    normalize_context_profile_base_url(&upstream.base_url);
+                let profile = if base_url.is_empty() {
+                    None
+                } else {
+                    snapshot.global_context_profiles.get(&base_url)
+                };
+
+                let Some(cfg) =
+                    upstream.context_config_for_model_with_profile(&model, profile)
+                else {
+                    continue;
+                };
+                if cfg.context_limit == 0 {
+                    continue;
+                }
+
+                result
+                    .entry(model.clone())
+                    .and_modify(|existing| {
+                        if cfg.context_limit < existing.context_limit {
+                            existing.context_limit = cfg.context_limit;
+                            existing.output_reserve = cfg.output_reserve;
+                        }
+                    })
+                    .or_insert(ModelContextConfig {
+                        slug: model.clone(),
+                        context_limit: cfg.context_limit,
+                        output_reserve: cfg.output_reserve,
+                        context_group: cfg.context_group.clone(),
+                    });
+            }
+        }
+
+        result
+    }
 }
 
 fn build_active_upstream_model_catalog(snapshot: &PersistedState) -> HashMap<String, Vec<String>> {
@@ -3126,17 +3215,31 @@ impl AppState {
             return Ok(FreekeySyncSummary::default());
         }
 
+        // 按 base_url 分组，保留首次出现顺序。
+        // 每次同步以载荷为权威：同 base_url 的所有 key/model 整体替换到自动管理的上游里。
+        let mut grouped: Vec<(String, Vec<FreekeySyncItem>)> = Vec::new();
+        for item in imports.into_iter() {
+            if let Some(group) = grouped
+                .iter_mut()
+                .find(|(base_url, _)| base_url == &item.base_url)
+            {
+                group.1.push(item);
+            } else {
+                grouped.push((item.base_url.clone(), vec![item]));
+            }
+        }
+
         self.mutate_persisted_state(
             |candidate_state| {
                 let mut result = FreekeySyncSummary::default();
                 // 匹配策略：base_url + auto_managed
-                // 同 base_url + auto_managed=true → 更新（追加 key 和模型）
+                // 同 base_url + auto_managed=true → 整体替换 key 和模型（以本次同步为准）
                 // 同 base_url + auto_managed=false → skip（手动管理的不动）
                 // 不同 base_url → 创建新上游
                 //
                 // 同一个 base_url 下只维护一个自动管理的上游，
-                // 多次同步的 key 和模型都追加到这一个上游里。
-                // 不按 name 或 model 匹配，因为每次同步可能变化。
+                // 该上游的 api_keys / api_key_models / supported_models 都以本次同步为权威，
+                // 不在本次载荷里的旧 key/model 会被移除。
 
                 let find_auto_upstream = |state: &[UpstreamConfig], base_url: &str| {
                     state
@@ -3150,75 +3253,87 @@ impl AppState {
                         .any(|upstream| upstream.base_url == base_url && !upstream.auto_managed)
                 };
 
-                for item in imports.iter() {
-                    let base_url = &item.base_url;
-                    let model = &item.model;
-                    let api_key = &item.api_key;
-
-                    // 同 base_url 但手动管理 → skip
-                    if has_manual_upstream(&candidate_state.upstreams, base_url) {
-                        result.skipped = result.skipped.saturating_add(1);
-                        continue;
-                    }
-
-                    // 同 base_url + auto_managed → 更新（追加 key 和模型）
-                    if let Some(index) = find_auto_upstream(&candidate_state.upstreams, base_url) {
-                        let upstream = &mut candidate_state.upstreams[index];
-                        // 追加 key 到 api_keys（不重复）
-                        let trimmed_key = api_key.trim().to_string();
-                        if !trimmed_key.is_empty()
-                            && upstream
-                                .api_keys
-                                .iter()
-                                .all(|existing| existing.trim() != trimmed_key)
-                            && upstream.api_key.trim() != trimmed_key
-                        {
-                            upstream.api_keys.push(trimmed_key.clone());
+                // 把同 base_url 的 items 折叠为：去重且保序的 keys、models、api_key_models。
+                let fold_group = |items: &[FreekeySyncItem]| {
+                    let mut keys: Vec<String> = Vec::new();
+                    let mut models: Vec<String> = Vec::new();
+                    let mut key_models: Vec<ApiKeyModelConfig> = Vec::new();
+                    let mut last_name: Option<String> = None;
+                    for item in items {
+                        let key = item.api_key.trim().to_string();
+                        let model = item.model.trim().to_string();
+                        if !key.is_empty() && !keys.iter().any(|k| k == &key) {
+                            keys.push(key.clone());
                         }
-                        // 追加模型（不替换，保留已有模型）
-                        let trimmed_model = model.trim().to_string();
-                        if !upstream.supported_models.iter().any(|m| m == &trimmed_model) {
-                            upstream.supported_models.push(trimmed_model.clone());
+                        if !model.is_empty() && !models.iter().any(|m| m == &model) {
+                            models.push(model.clone());
                         }
-                        if !trimmed_key.is_empty() && !trimmed_model.is_empty() {
-                            if let Some(entry) = upstream
-                                .api_key_models
-                                .iter_mut()
-                                .find(|entry| entry.api_key.trim() == trimmed_key)
+                        if !key.is_empty() && !model.is_empty() {
+                            if let Some(entry) =
+                                key_models.iter_mut().find(|entry| entry.api_key == key)
                             {
-                                if entry
-                                    .supported_models
-                                    .iter()
-                                    .all(|existing| existing.trim() != trimmed_model)
-                                {
-                                    entry.supported_models.push(trimmed_model.clone());
+                                if !entry.supported_models.iter().any(|m| m == &model) {
+                                    entry.supported_models.push(model.clone());
                                 }
                             } else {
-                                upstream.api_key_models.push(ApiKeyModelConfig {
-                                    api_key: trimmed_key.clone(),
-                                    supported_models: vec![trimmed_model.clone()],
+                                key_models.push(ApiKeyModelConfig {
+                                    api_key: key.clone(),
+                                    supported_models: vec![model.clone()],
                                 });
                             }
                         }
-                        // 只有显式提供 name 时才更新；缺省 name 保留现有名称。
                         if let Some(name) = &item.name {
-                            upstream.name = name.clone();
+                            last_name = Some(name.clone());
+                        }
+                    }
+                    (keys, models, key_models, last_name)
+                };
+
+                for (base_url, items) in grouped.iter() {
+                    // 同 base_url 但手动管理 → 全部 skip
+                    if has_manual_upstream(&candidate_state.upstreams, base_url) {
+                        result.skipped = result.skipped.saturating_add(items.len());
+                        continue;
+                    }
+
+                    let (keys, models, key_models, last_name) = fold_group(items);
+                    if keys.is_empty() || models.is_empty() {
+                        result.skipped = result.skipped.saturating_add(items.len());
+                        continue;
+                    }
+
+                    // 同 base_url + auto_managed → 整体替换 key/model
+                    if let Some(index) = find_auto_upstream(&candidate_state.upstreams, base_url) {
+                        let upstream = &mut candidate_state.upstreams[index];
+                        // 用载荷的第一把 key 覆盖 legacy 字段，剩余 key 进 api_keys。
+                        upstream.api_key = keys.first().cloned().unwrap_or_default();
+                        upstream.api_keys = keys.iter().skip(1).cloned().collect();
+                        upstream.api_key_models = key_models;
+                        upstream.supported_models = models;
+                        // 只有显式提供 name 时才更新；缺省 name 保留现有名称。
+                        if let Some(name) = last_name {
+                            upstream.name = name;
                         }
                         upstream.managed_source = Some(source.clone());
                         upstream.last_synced_at = synced_at;
                         upstream.normalize_for_storage();
 
-                        result.updated = result.updated.saturating_add(1);
+                        result.updated = result.updated.saturating_add(items.len());
                         continue;
                     }
 
-                    // 新 base_url → 创建新上游
+                    // 新 base_url → 创建新上游（单个上游承载本组所有 key/model）
+                    let primary_key = keys.first().cloned().unwrap_or_default();
+                    let extra_keys: Vec<String> = keys.iter().skip(1).cloned().collect();
+                    let primary_model = models.first().cloned().unwrap_or_default();
                     let mut upstream = UpstreamConfig {
                         id: Uuid::new_v4().to_string(),
-                        name: item.name.clone().unwrap_or_else(|| model.clone()),
+                        name: last_name.unwrap_or(primary_model),
                         base_url: base_url.clone(),
-                        api_key: api_key.clone(),
-                        supported_models: vec![model.clone()],
+                        api_key: primary_key,
+                        api_keys: extra_keys,
+                        api_key_models: key_models,
+                        supported_models: models,
                         auto_managed: true,
                         managed_source: Some(source.clone()),
                         last_synced_at: synced_at,
@@ -3227,7 +3342,7 @@ impl AppState {
                     };
                     upstream.normalize_for_storage();
                     candidate_state.upstreams.push(upstream);
-                    result.created = result.created.saturating_add(1);
+                    result.created = result.created.saturating_add(items.len());
                 }
 
                 Ok(result)

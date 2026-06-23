@@ -1252,7 +1252,6 @@ async fn process_gateway_request(
 
     let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
     let now = unix_seconds();
-    let mut rate_limit_retry_attempts_used = 0u32;
     let mut last_failure_upstream: Option<(String, Option<String>)> = None;
     let candidate_protocols = if requires_responses_tooling {
         if fallback_to_chat {
@@ -5714,7 +5713,7 @@ async fn fetch_models_from_upstream(
     base_url: &str,
     api_key: &str,
 ) -> Result<Vec<String>, String> {
-    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let url = join_upstream_url(base_url, "/v1/models");
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -6913,6 +6912,21 @@ async fn portal_quota(State(state): State<AppState>, headers: HeaderMap) -> impl
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let now = unix_seconds();
     let token_usage = state.compute_token_usage(&downstream_id, now).await;
+    let model_contexts = state
+        .compute_portal_model_context_limits(downstream)
+        .await;
+    let model_contexts_json: serde_json::Map<String, Value> = model_contexts
+        .into_iter()
+        .map(|(slug, cfg)| {
+            (
+                slug,
+                json!({
+                    "context_window": cfg.context_limit,
+                    "output_reserve": cfg.output_reserve,
+                }),
+            )
+        })
+        .collect();
 
     Json(json!({
         "per_minute_limit": per_minute_limit,
@@ -6923,6 +6937,7 @@ async fn portal_quota(State(state): State<AppState>, headers: HeaderMap) -> impl
         },
         "model_allowlist": downstream.model_allowlist,
         "ip_allowlist": downstream.ip_allowlist,
+        "model_contexts": model_contexts_json,
     }))
     .into_response()
 }

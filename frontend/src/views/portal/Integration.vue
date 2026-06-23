@@ -129,7 +129,11 @@
                 <div>
                   <h4>步骤 2: 写入 `~/.codex/model-catalog.json`</h4>
                   <p>
-                    这个文件按门户统计排序，优先展示最近一个月最常用的模型。
+                    这个文件按门户统计排序，优先展示最近一个月最常用的模型。每个模型的
+                    <code>context_window</code> 字段直接取自网关上游配置，
+                    Codex 默认会在累计 token 达到该窗口的
+                    <strong>90%</strong> 时自动压缩历史，无需在 <code>config.toml</code>
+                    再设全局阈值；切换模型时压缩点会跟着模型的实际窗口变。
                   </p>
                 </div>
                 <el-button size="small" @click="copyCode(codexModelCatalogJson)">复制</el-button>
@@ -237,7 +241,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { portalApi } from '@/api/portal'
-import type { PortalModelStat } from '@/types'
+import type { ModelContextEntry, PortalModelStat } from '@/types'
 import {
   buildClaudeCodeSettingsJson,
   buildCodexAuthLoginCommand,
@@ -266,6 +270,7 @@ const portalKey = ref('')
 const portalModelStats = ref<PortalModelStat[]>([])
 const modelAllowlist = ref<string[]>([])
 const gatewayModelSlugs = ref<string[]>([])
+const modelContexts = ref<Record<string, ModelContextEntry>>({})
 const loadWarnings = ref<string[]>([])
 const fatalError = ref('')
 
@@ -302,7 +307,7 @@ const codexConfigToml = computed(() =>
     : ''
 )
 
-const codexModelCatalogJson = computed(() => buildCodexModelCatalogJson(allModelSlugs.value))
+const codexModelCatalogJson = computed(() => buildCodexModelCatalogJson(allModelSlugs.value, modelContexts.value))
 
 const codexAuthLoginCommand = computed(() =>
   portalKey.value ? buildCodexAuthLoginCommand(portalKey.value) : ''
@@ -349,6 +354,7 @@ const loadIntegrationData = async () => {
   portalModelStats.value = []
   modelAllowlist.value = []
   gatewayModelSlugs.value = []
+  modelContexts.value = {}
 
   try {
     gatewayBaseUrl.value = buildGatewayBaseUrl(window.location.origin)
@@ -372,6 +378,7 @@ const loadIntegrationData = async () => {
 
     if (quotaResult.status === 'fulfilled') {
       modelAllowlist.value = quotaResult.value.data.model_allowlist ?? []
+      modelContexts.value = quotaResult.value.data.model_contexts ?? {}
     }
 
     if (modelsResult.status === 'fulfilled') {

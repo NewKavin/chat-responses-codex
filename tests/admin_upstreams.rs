@@ -13,7 +13,7 @@ use axum::Router;
 use axum::routing::get;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
-use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
+use chat_responses_codex::state::{ApiKeyModelConfig, AppConfig, AppState, PersistedState, UpstreamConfig};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -776,12 +776,13 @@ async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_base_url() {
         .iter()
         .find(|upstream| upstream.id == "existing-id")
         .expect("upstream should exist");
-    // 原 api_key 不变，新 key 追加到 api_keys
-    assert_eq!(upstream.api_key, "old-key");
-    assert!(upstream.available_keys().contains(&"new-key".to_string()));
-    // 新模型追加，不替换已有模型
-    assert!(upstream.supported_models.contains(&"gpt-4".to_string()));
-    assert!(upstream.supported_models.contains(&"gpt-4o".to_string()));
+    // 整体替换：旧 key 被移除，载荷里的 key 成为权威。
+    assert_eq!(upstream.api_key, "new-key");
+    assert_eq!(upstream.available_keys(), vec!["new-key".to_string()]);
+    // 模型同样以载荷为权威：旧 gpt-4 被移除，仅保留 gpt-4o。
+    assert_eq!(upstream.supported_models, vec!["gpt-4o".to_string()]);
+    // name 由载荷显式提供则更新。
+    assert_eq!(upstream.name, "gpt-sync-new-name");
 }
 
 #[tokio::test]
@@ -843,11 +844,12 @@ async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_url_and_model(
         .iter()
         .find(|upstream| upstream.id == "legacy-id")
         .expect("upstream should exist");
-    // name 不变，新 key 追加到 api_keys，新 model 追加到 supported_models
+    // 载荷未显式提供 name 时保留原名。
     assert_eq!(upstream.name, "legacy-name");
-    assert_eq!(upstream.api_key, "legacy-key");
-    assert!(upstream.available_keys().contains(&"replaced-key".to_string()));
-    assert!(upstream.supported_models.contains(&"model-a".to_string()));
+    // key 整体被替换为载荷里的新 key。
+    assert_eq!(upstream.api_key, "replaced-key");
+    assert_eq!(upstream.available_keys(), vec!["replaced-key".to_string()]);
+    assert_eq!(upstream.supported_models, vec!["model-a".to_string()]);
 }
 
 #[tokio::test]
@@ -962,6 +964,159 @@ async fn test_admin_freekey_sync_only_imports_valid_status() {
     assert_eq!(result["created"].as_u64().unwrap(), 1);
     assert_eq!(result["updated"].as_u64().unwrap(), 0);
     assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_admin_freekey_sync_replaces_stale_keys_and_models() {
+    // 自动管理上游已有若干旧 key/model，新一次同步只携带其中一部分；
+    // 期望：未在本次载荷里的旧 key/model 都被移除。
+    let existing = vec![UpstreamConfig {
+        id: "auto-id".to_string(),
+        name: "auto-name".to_string(),
+        base_url: "https://api.replace.example.com/v1".to_string(),
+        api_key: "stale-key-1".to_string(),
+        api_keys: vec!["stale-key-2".to_string(), "stale-key-3".to_string()],
+        api_key_models: vec![
+            ApiKeyModelConfig {
+                api_key: "stale-key-1".to_string(),
+                supported_models: vec!["old-model".to_string()],
+            },
+            ApiKeyModelConfig {
+                api_key: "stale-key-2".to_string(),
+                supported_models: vec!["old-model".to_string()],
+            },
+        ],
+        supported_models: vec!["old-model".to_string(), "another-old-model".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        auto_managed: true,
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // 本次同步只带 fresh-key-a / fresh-key-b 两把 key 和 model-x。
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.replace.example.com/v1",
+        "keys": [
+            { "key": "fresh-key-a", "model": "model-x", "status": "valid" },
+            { "key": "fresh-key-b", "model": "model-x", "status": "valid" }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["created"].as_u64().unwrap(), 0);
+    assert_eq!(result["updated"].as_u64().unwrap(), 2);
+    assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "auto-id")
+        .expect("upstream should exist");
+
+    // 全部旧 key 都应被清除，available_keys 与载荷完全对齐。
+    let mut available = upstream.available_keys();
+    available.sort();
+    assert_eq!(
+        available,
+        vec!["fresh-key-a".to_string(), "fresh-key-b".to_string()]
+    );
+    assert!(
+        !upstream
+            .api_keys
+            .iter()
+            .chain(std::iter::once(&upstream.api_key))
+            .any(|k| k.starts_with("stale-key")),
+        "stale keys must not survive the sync"
+    );
+    // api_key_models 不应再引用任何 stale key 或 old model。
+    for entry in &upstream.api_key_models {
+        assert!(!entry.api_key.starts_with("stale-key"));
+        assert!(entry.supported_models.iter().all(|m| m == "model-x"));
+    }
+    // supported_models 整体替换为载荷里的 model。
+    assert_eq!(upstream.supported_models, vec!["model-x".to_string()]);
+    // 身份字段保留。
+    assert_eq!(upstream.id, "auto-id");
+    assert!(upstream.auto_managed);
+}
+
+#[tokio::test]
+async fn test_admin_freekey_sync_groups_multiple_keys_into_single_upstream() {
+    // 全新 base_url，载荷一次带两把 key + 两个 model；
+    // 期望：只创建一个上游，并把所有 key/model 都放进去。
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.group.example.com/v1",
+        "keys": [
+            { "name": "grouped", "key": "key-1", "model": "m1", "status": "valid" },
+            { "name": "grouped", "key": "key-2", "model": "m2", "status": "valid" }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["created"].as_u64().unwrap(), 2);
+    assert_eq!(result["updated"].as_u64().unwrap(), 0);
+    assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+
+    let snapshot = state.snapshot().await;
+    let matched: Vec<_> = snapshot
+        .upstreams
+        .iter()
+        .filter(|u| u.base_url == "https://api.group.example.com/v1")
+        .collect();
+    assert_eq!(matched.len(), 1, "同 base_url 应只有一个上游");
+    let upstream = matched[0];
+    let mut keys = upstream.available_keys();
+    keys.sort();
+    assert_eq!(keys, vec!["key-1".to_string(), "key-2".to_string()]);
+    let mut models = upstream.supported_models.clone();
+    models.sort();
+    assert_eq!(models, vec!["m1".to_string(), "m2".to_string()]);
 }
 
 // ============================================================================
@@ -1431,6 +1586,75 @@ async fn test_admin_discover_upstream_models_reports_all_failures() {
         "所有 key 都无法获取模型列表"
     );
     assert_eq!(result["results"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_admin_discover_upstream_models_handles_base_url_with_v1_suffix() {
+    // 回归：base_url 已经以 /v1 结尾时，不应拼成 /v1/v1/models。
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/models",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "data": [{ "id": "gpt-4o" }, { "id": "gpt-4o-mini" }]
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/v1/v1/models",
+            get(|| async {
+                // 一旦走到这里就说明 URL 拼错了。
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": { "message": "double /v1 prefix" }
+                    })),
+                )
+            }),
+        );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let payload = json!({
+        "base_url": format!("http://{}/v1", address),
+        "keys": ["key-a"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["failed"].as_u64().unwrap(), 0);
+    assert_eq!(result["total"].as_u64().unwrap(), 1);
+    assert_eq!(result["models"], json!(["gpt-4o", "gpt-4o-mini"]));
 }
 
 #[tokio::test]

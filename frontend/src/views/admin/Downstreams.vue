@@ -102,7 +102,7 @@
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建下游' : '编辑下游'"
       direction="rtl"
-      size="100%"
+      size="70%"
       :destroy-on-close="false"
       class="form-drawer"
     >
@@ -547,5 +547,10 @@ code {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+@media (max-width: 1024px) {
+  .form-drawer :deep(.el-drawer.rtl) {
+    width: 100% !important;
+  }
 }
 </style>

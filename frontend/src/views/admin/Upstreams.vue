@@ -74,7 +74,7 @@
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建上游' : '编辑上游'"
       direction="rtl"
-      size="100%"
+      size="70%"
       :destroy-on-close="false"
       class="form-drawer"
     >
@@ -776,5 +776,10 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+@media (max-width: 1024px) {
+  .form-drawer :deep(.el-drawer.rtl) {
+    width: 100% !important;
+  }
 }
 </style>

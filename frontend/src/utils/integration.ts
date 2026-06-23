@@ -161,46 +161,72 @@ export const buildModelUsageStats = (modelSlugs: string[], stats: PortalModelSta
   })
 }
 
-export const buildCodexModelCatalogJson = (modelSlugs: string[]) => {
+export interface CodexModelContextEntry {
+  context_window: number
+  /// Currently unused when emitting the catalog: Codex automatically derives
+  /// the auto-compaction threshold as 90% of `context_window`, which lines up
+  /// with the upstream admin's `output_reserve` default (10%). We still accept
+  /// `output_reserve` so callers can pass the full upstream config without
+  /// massaging it; in the future we may emit `auto_compact_token_limit`
+  /// when the operator configured a non-default reserve.
+  output_reserve?: number
+}
+
+export const buildCodexModelCatalogJson = (
+  modelSlugs: string[],
+  contexts?: Record<string, CodexModelContextEntry>
+) => {
   const catalog = {
-    models: modelSlugs.map((slug, index) => ({
-      slug,
-      display_name: slug,
-      default_reasoning_level: 'high',
-      supported_reasoning_levels: [
-        {
-          effort: 'low',
-          description: 'Fast responses with lighter reasoning'
+    models: modelSlugs.map((slug, index) => {
+      const entry: Record<string, unknown> = {
+        slug,
+        display_name: slug,
+        default_reasoning_level: 'high',
+        supported_reasoning_levels: [
+          {
+            effort: 'low',
+            description: 'Fast responses with lighter reasoning'
+          },
+          {
+            effort: 'medium',
+            description: 'Balances speed and reasoning depth for everyday tasks'
+          },
+          {
+            effort: 'high',
+            description: 'Greater reasoning depth for complex problems'
+          },
+          {
+            effort: 'xhigh',
+            description: 'Extra high reasoning depth for complex problems'
+          }
+        ],
+        shell_type: 'shell_command',
+        visibility: 'list',
+        supported_in_api: true,
+        priority: index,
+        base_instructions: 'You are Codex, a coding agent.',
+        supports_reasoning_summaries: false,
+        support_verbosity: false,
+        truncation_policy: {
+          mode: 'tokens',
+          limit: 10000
         },
-        {
-          effort: 'medium',
-          description: 'Balances speed and reasoning depth for everyday tasks'
-        },
-        {
-          effort: 'high',
-          description: 'Greater reasoning depth for complex problems'
-        },
-        {
-          effort: 'xhigh',
-          description: 'Extra high reasoning depth for complex problems'
+        supports_parallel_tool_calls: true,
+        experimental_supported_tools: [],
+        input_modalities: ['text'],
+        supports_search_tool: false
+      }
+
+      const ctx = contexts?.[slug]
+      if (ctx) {
+        const window = Number(ctx.context_window)
+        if (Number.isFinite(window) && window > 0) {
+          entry.context_window = Math.floor(window)
         }
-      ],
-      shell_type: 'shell_command',
-      visibility: 'list',
-      supported_in_api: true,
-      priority: index,
-      base_instructions: 'You are Codex, a coding agent.',
-      supports_reasoning_summaries: false,
-      support_verbosity: false,
-      truncation_policy: {
-        mode: 'tokens',
-        limit: 10000
-      },
-      supports_parallel_tool_calls: true,
-      experimental_supported_tools: [],
-      input_modalities: ['text'],
-      supports_search_tool: false
-    }))
+      }
+
+      return entry
+    })
   }
 
   return `${jsonStringify(catalog)}\n`

@@ -195,6 +195,58 @@ describe('integration config generators', () => {
     })
   })
 
+  it('omits context_window when no per-model context limits are supplied', () => {
+    const catalog = JSON.parse(buildCodexModelCatalogJson(['MiniMax/MiniMax-M2.7']))
+    expect(catalog.models[0]).not.toHaveProperty('context_window')
+    expect(catalog.models[0]).not.toHaveProperty('auto_compact_token_limit')
+  })
+
+  it('writes per-model context_window from upstream-resolved limits', () => {
+    const catalog = JSON.parse(
+      buildCodexModelCatalogJson(
+        ['ZhipuAI/GLM-5', 'MiniMax/MiniMax-M2.7', 'unknown/model'],
+        {
+          'ZhipuAI/GLM-5': { context_window: 128000, output_reserve: 16000 },
+          'MiniMax/MiniMax-M2.7': { context_window: 200000, output_reserve: 20000 }
+        }
+      )
+    )
+
+    // GLM-5 picks up the explicit window.
+    expect(catalog.models[0]).toMatchObject({
+      slug: 'ZhipuAI/GLM-5',
+      context_window: 128000
+    })
+    // No auto_compact_token_limit field: let Codex apply its 90% default.
+    expect(catalog.models[0]).not.toHaveProperty('auto_compact_token_limit')
+
+    // MiniMax also configured.
+    expect(catalog.models[1]).toMatchObject({
+      slug: 'MiniMax/MiniMax-M2.7',
+      context_window: 200000
+    })
+
+    // Unknown model has no upstream context info -> field omitted.
+    expect(catalog.models[2].slug).toBe('unknown/model')
+    expect(catalog.models[2]).not.toHaveProperty('context_window')
+  })
+
+  it('skips invalid or non-positive context_window entries', () => {
+    const catalog = JSON.parse(
+      buildCodexModelCatalogJson(
+        ['a', 'b', 'c'],
+        {
+          a: { context_window: 0, output_reserve: 0 },
+          b: { context_window: -100, output_reserve: 0 } as never,
+          c: { context_window: 64000, output_reserve: 0 }
+        }
+      )
+    )
+    expect(catalog.models[0]).not.toHaveProperty('context_window')
+    expect(catalog.models[1]).not.toHaveProperty('context_window')
+    expect(catalog.models[2].context_window).toBe(64000)
+  })
+
   it('builds a codex login command that seeds auth.json', () => {
     expect(buildCodexAuthLoginCommand('sk-downstream-123')).toBe(
       `printf '%s' 'sk-downstream-123' | codex login --with-api-key`

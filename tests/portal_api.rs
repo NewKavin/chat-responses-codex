@@ -11,7 +11,8 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig, UsageLog,
+    AppConfig, AppState, DefaultModelContextConfig, DownstreamConfig, ModelContextConfig,
+    PersistedState, UpstreamConfig, UsageLog,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -1380,4 +1381,153 @@ async fn test_portal_rotate_key_old_key_invalid_after_rotation() {
         .unwrap();
 
     assert_eq!(response2.status(), StatusCode::UNAUTHORIZED);
+}
+
+
+fn create_state_with_context_limits() -> (AppState, String) {
+    let config = AppConfig::default();
+    let generated = generate_downstream_key("sk");
+
+    let state = PersistedState {
+        upstreams: vec![
+            UpstreamConfig {
+                id: "upstream-large".to_string(),
+                name: "Large Window".to_string(),
+                base_url: "https://large.example.invalid".to_string(),
+                api_key: "test-key".to_string(),
+                supported_models: vec![
+                    "ZhipuAI/GLM-5".to_string(),
+                    "MiniMax/MiniMax-M2.7".to_string(),
+                ],
+                model_contexts: vec![
+                    ModelContextConfig {
+                        slug: "ZhipuAI/GLM-5".to_string(),
+                        context_limit: 400_000,
+                        output_reserve: 40_000,
+                        context_group: "glm".to_string(),
+                    },
+                ],
+                default_model_context: Some(DefaultModelContextConfig {
+                    context_limit: 200_000,
+                    output_reserve: 20_000,
+                    context_group: String::new(),
+                }),
+                active: true,
+                ..UpstreamConfig::default()
+            },
+            UpstreamConfig {
+                id: "upstream-small".to_string(),
+                name: "Small Window".to_string(),
+                base_url: "https://small.example.invalid".to_string(),
+                api_key: "test-key-2".to_string(),
+                supported_models: vec!["ZhipuAI/GLM-5".to_string()],
+                model_contexts: vec![
+                    ModelContextConfig {
+                        slug: "ZhipuAI/GLM-5".to_string(),
+                        context_limit: 128_000,
+                        output_reserve: 16_000,
+                        context_group: "glm".to_string(),
+                    },
+                ],
+                default_model_context: None,
+                active: true,
+                ..UpstreamConfig::default()
+            },
+            // inactive upstream must be ignored even if it has a tiny window
+            UpstreamConfig {
+                id: "upstream-inactive".to_string(),
+                name: "Inactive".to_string(),
+                base_url: "https://inactive.example.invalid".to_string(),
+                api_key: "test-key-3".to_string(),
+                supported_models: vec!["ZhipuAI/GLM-5".to_string()],
+                model_contexts: vec![ModelContextConfig {
+                    slug: "ZhipuAI/GLM-5".to_string(),
+                    context_limit: 8_000,
+                    output_reserve: 1_000,
+                    context_group: String::new(),
+                }],
+                default_model_context: None,
+                active: false,
+                ..UpstreamConfig::default()
+            },
+        ],
+        downstreams: vec![DownstreamConfig {
+            id: "downstream-ctx".to_string(),
+            name: "Ctx Test Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec![
+                "ZhipuAI/GLM-5".to_string(),
+                "MiniMax/MiniMax-M2.7".to_string(),
+            ],
+            per_minute_limit: 100,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        usage_logs: vec![],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+
+    let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
+    let app_state = AppState::new(state, unique_state_path(), config);
+    (app_state, portal_key)
+}
+
+#[tokio::test]
+async fn test_portal_quota_exposes_per_model_context_limits() {
+    let (state, portal_key) = create_state_with_context_limits();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/quota")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let contexts = result
+        .get("model_contexts")
+        .expect("model_contexts field must be present");
+    assert!(contexts.is_object(), "model_contexts should be an object");
+
+    // GLM-5 is on two active upstreams (400k and 128k) and one inactive (8k).
+    // We take the min across active upstreams to be safe (smallest window wins).
+    let glm = contexts
+        .get("ZhipuAI/GLM-5")
+        .expect("GLM-5 context entry must be present");
+    assert_eq!(
+        glm.get("context_window").and_then(Value::as_u64),
+        Some(128_000),
+        "context_window should be the min of active upstream limits"
+    );
+
+    // MiniMax is only on the large upstream and resolves via default_model_context.
+    let minimax = contexts
+        .get("MiniMax/MiniMax-M2.7")
+        .expect("MiniMax context entry must be present");
+    assert_eq!(
+        minimax.get("context_window").and_then(Value::as_u64),
+        Some(200_000),
+        "context_window should fall back to default_model_context.context_limit"
+    );
 }
