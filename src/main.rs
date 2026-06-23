@@ -113,6 +113,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             86_400,
         )
         .max(1),
+        admin_upstream_timeout_seconds: env_u64(
+            "ADMIN_UPSTREAM_TIMEOUT_SECONDS",
+            30,
+        )
+        .max(1),
     };
 
     init_tracing(&log_path);

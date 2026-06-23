@@ -636,6 +636,7 @@ pub(super) async fn admin_sync_freekey_upstreams(
     State(state): State<AppState>,
     Json(payload): Json<FreekeySyncPayload>,
 ) -> impl IntoResponse {
+    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
     let source = payload.source.unwrap_or_else(|| "freekey".to_string());
     let base_url = payload.base_url.unwrap_or_default().trim().to_string();
     let mut imports = Vec::new();
@@ -694,7 +695,7 @@ pub(super) async fn admin_sync_freekey_upstreams(
         }
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(admin_timeout))
             .build()
             .unwrap_or_default();
 
@@ -706,7 +707,7 @@ pub(super) async fn admin_sync_freekey_upstreams(
                 let mut seen = HashSet::new();
                 unique_keys.retain(|k| seen.insert(k.clone()));
             }
-            let results = fetch_models_from_upstream_keys_concurrently(&client, base_url, &unique_keys).await;
+            let results = fetch_models_from_upstream_keys_concurrently(&client, base_url, &unique_keys, admin_timeout).await;
             for result in &results {
                 if result.error.is_none() {
                     valid_key_set.insert(result.key.clone());
@@ -808,12 +809,13 @@ async fn fetch_models_from_upstream(
     client: &reqwest::Client,
     base_url: &str,
     api_key: &str,
+    timeout_seconds: u64,
 ) -> Result<Vec<String>, String> {
     let url = join_upstream_url(base_url, "/v1/models");
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(timeout_seconds.max(1)))
         .send()
         .await
         .map_err(|e| format!("请求 {} 失败: {}", url, e))?;
@@ -864,6 +866,7 @@ async fn fetch_models_from_upstream_keys_concurrently(
     client: &reqwest::Client,
     base_url: &str,
     keys: &[String],
+    timeout_seconds: u64,
 ) -> Vec<KeyModelDiscoveryResult> {
     if keys.is_empty() {
         return Vec::new();
@@ -888,7 +891,7 @@ async fn fetch_models_from_upstream_keys_concurrently(
                 };
             }
 
-            match fetch_models_from_upstream(&client, &base_url, &key).await {
+            match fetch_models_from_upstream(&client, &base_url, &key, timeout_seconds).await {
                 Ok(models) => KeyModelDiscoveryResult {
                     index,
                     key,
@@ -918,6 +921,7 @@ pub(super) async fn admin_create_upstreams_batch(
     State(state): State<AppState>,
     Json(payload): Json<BatchCreateUpstreamPayload>,
 ) -> impl IntoResponse {
+    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
     if payload.keys.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -943,7 +947,7 @@ pub(super) async fn admin_create_upstreams_batch(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(admin_timeout))
         .build()
         .unwrap_or_default();
 
@@ -976,7 +980,7 @@ pub(super) async fn admin_create_upstreams_batch(
 
     // 并发获取每个 key 的模型列表
     let discovery_results =
-        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys)
+        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys, admin_timeout)
             .await;
     for result in discovery_results {
         if let Some(error) = result.error {
@@ -1093,9 +1097,10 @@ pub(super) async fn admin_create_upstreams_batch(
 }
 
 pub(super) async fn admin_discover_upstream_models(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(payload): Json<DiscoverUpstreamModelsPayload>,
 ) -> impl IntoResponse {
+    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
     if payload.keys.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1105,12 +1110,12 @@ pub(super) async fn admin_discover_upstream_models(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(admin_timeout))
         .build()
         .unwrap_or_default();
 
     let discovery_results =
-        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys)
+        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys, admin_timeout)
             .await;
 
     let mut all_models: Vec<String> = Vec::new();
@@ -1262,6 +1267,7 @@ pub(super) async fn admin_update_upstream(
     Path(id): Path<String>,
     Json(mut updates): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
     // Collect new keys from the payload for concurrent validation.
     let mut new_keys: Vec<String> = Vec::new();
     if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
@@ -1318,11 +1324,11 @@ pub(super) async fn admin_update_upstream(
 
         if !all_keys.is_empty() {
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(admin_timeout))
                 .build()
                 .unwrap_or_default();
 
-            let results = fetch_models_from_upstream_keys_concurrently(&client, &base_url, &all_keys).await;
+            let results = fetch_models_from_upstream_keys_concurrently(&client, &base_url, &all_keys, admin_timeout).await;
             let mut valid_keys: HashSet<String> = HashSet::new();
             let mut valid_key_models: HashMap<String, Vec<String>> = HashMap::new();
             for result in &results {
