@@ -2855,11 +2855,13 @@ fn halve_generation_cap_for_context_retry(payload: &mut Value) -> Option<(&'stat
 }
 
 fn should_try_next_key(error: &GatewayError) -> bool {
+    // Key rotation is only useful for failures that may be credential-specific.
+    // Shared upstream concurrency pressure should stay on the same key long
+    // enough for the account-level backoff loop to retry first.
     matches!(
         error,
         GatewayError::Unauthorized(_)
             | GatewayError::TooManyRequests { .. }
-            | GatewayError::ConcurrencyFull { .. }
             | GatewayError::GatewayTimeout(_)
             | GatewayError::Upstream(_)
             | GatewayError::TemporaryUpstreamUnavailable(_)

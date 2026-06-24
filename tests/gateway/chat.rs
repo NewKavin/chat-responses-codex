@@ -2338,6 +2338,171 @@ async fn upstream_concurrency_full_429_retries_with_configured_attempts() {
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
 
+#[tokio::test]
+async fn upstream_concurrency_full_retries_same_key_before_switching_keys() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let auth_headers = Arc::new(Mutex::new(Vec::new()));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let attempts_clone = attempts.clone();
+    let auth_headers_clone = auth_headers.clone();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let attempts = attempts_clone.clone();
+            let auth_headers = auth_headers_clone.clone();
+            async move {
+                let (parts, _body) = request.into_parts();
+                let authorization = parts
+                    .headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                auth_headers.lock().unwrap().push(authorization);
+
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+
+                if attempt == 0 {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        headers,
+                        axum::Json(json!({
+                            "error": {
+                                "message": "concurrency limit exceeded"
+                            }
+                        })),
+                    );
+                }
+
+                (
+                    StatusCode::OK,
+                    headers,
+                    axum::Json(json!({
+                        "id": "chatcmpl-test",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "Hi"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    })),
+                )
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-account".into(),
+                name: "primary-account".into(),
+                base_url: format!("http://{}", address),
+                api_key: "backup-secret".into(),
+                api_keys: vec!["primary-secret".into()],
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+
+                default_model_context: None,
+
+                model_contexts: vec![],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                model_request_costs: vec![],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig {
+            upstream_concurrency_retry_attempts: 2,
+            upstream_concurrency_retry_backoff_ms: 1,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(request))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let auth_headers = auth_headers.lock().unwrap().clone();
+    assert_eq!(auth_headers.len(), 2);
+    assert_eq!(auth_headers[0], "Bearer primary-secret");
+    assert_eq!(auth_headers[1], "Bearer primary-secret");
+}
+
 
 
 #[tokio::test]
