@@ -287,6 +287,42 @@
           </div>
         </el-tab-pane>
 
+
+        <el-tab-pane label="Anthropic / Messages 兼容" name="anthropic">
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="所有支持 Anthropic Messages 协议的客户端共用同一个配置格式：只需要 `baseURL`、`apiKey` 和默认模型。网关同时暴露 `/v1/messages` 和 `/v1/messages/count_tokens`，客户端直接指向网关即可。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 配置 Anthropic 兼容客户端</h4>
+                  <p>
+                    复制下面的 JSON，在客户端里填入 <code>Base URL</code>、<code>API Key</code>
+                    和 <code>Model</code> 即可。请求发到网关的
+                    <code>/v1/messages</code>，模型列表可以从
+                    <code>/v1/models</code> 实时获取。
+                  </p>
+                </div>
+                <el-button size="small" @click="copyCode(anthropicCompatibleConfig)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ anthropicCompatibleConfig }}</pre>
+            </div>
+
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="保存后重新打开客户端即可。模型名、网关 URL 和 key 都已经按当前门户的最新值写好了。"
+            />
+          </div>
+        </el-tab-pane>
         <el-tab-pane label="Claude Code" name="claude">
           <div class="tab-body">
             <el-alert
@@ -338,6 +374,7 @@ import {
   buildModelUsageStats,
   buildGatewayBaseUrl,
   buildGatewayModelsEndpoint,
+  buildAnthropicCompatibleConfig,
   buildOpenAiCompatibleConfig,
   buildOpenCodeConfig,
   extractGatewayModelSlugs,
@@ -413,6 +450,15 @@ const opencodeConfig = computed(() =>
 
 const claudeCodeSettingsJson = computed(() =>
   buildClaudeCodeSettingsJson({
+    gatewayBaseUrl: gatewayBaseUrl.value,
+    portalKey: portalKey.value,
+    modelSlugs: allModelSlugs.value,
+    selectedModelSlug: primaryModelSlug.value
+  })
+)
+
+const anthropicCompatibleConfig = computed(() =>
+  buildAnthropicCompatibleConfig({
     gatewayBaseUrl: gatewayBaseUrl.value,
     portalKey: portalKey.value,
     modelSlugs: allModelSlugs.value,
