@@ -5,6 +5,7 @@ import {
   buildCodexConfigToml,
   buildCodexModelCatalogJson,
   buildGatewayBaseUrl,
+  buildOpenAiCompatibleConfig,
   buildGatewayModelsEndpoint,
   buildModelUsageStats,
   buildOpenCodeConfig,
@@ -297,4 +298,21 @@ describe('integration config generators', () => {
     expect(settings.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME).toBe('MiniMax/MiniMax-M2.7')
     expect(settings.env.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION).toContain('portal')
   })
+
+  it('builds an openai-compatible config for Cline and other generic clients', () => {
+    const config = JSON.parse(
+      buildOpenAiCompatibleConfig({
+        gatewayBaseUrl: 'https://portal.example.com',
+        portalKey: 'sk-downstream-123',
+        modelSlugs: ['MiniMax/MiniMax-M2.7', 'DeepSeek/DeepSeek-V3'],
+        selectedModelSlug: 'MiniMax/MiniMax-M2.7'
+      })
+    )
+
+    expect(config.baseURL).toBe('https://portal.example.com/v1')
+    expect(config.apiKey).toBe('sk-downstream-123')
+    expect(config.model).toBe('MiniMax/MiniMax-M2.7')
+    expect(config.modelsEndpoint).toBe('https://portal.example.com/v1/models')
+  })
+
 })

@@ -310,3 +310,15 @@ export const buildClaudeCodeSettingsJson = (input: IntegrationConfigInput) => {
     env
   })}\n`
 }
+
+export const buildOpenAiCompatibleConfig = (input: IntegrationConfigInput) => {
+  const primaryModelSlug = choosePrimaryModelSlug(input.modelSlugs, input.selectedModelSlug)
+
+  return `${jsonStringify({
+    baseURL: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`,
+    apiKey: input.portalKey,
+    model: primaryModelSlug,
+    modelsEndpoint: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1/models`
+  })}
+`
+}
