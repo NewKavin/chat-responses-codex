@@ -116,9 +116,9 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 request_count: None,
                 user_agent: None,
                 request_id: "req-4".to_string(),
-                status_code: 500,
-                error_message: None,
-                error_category: None,
+                status_code: 502,
+                error_message: Some("error decoding response body: unexpected eof".to_string()),
+                error_category: Some("stream_upstream_body_decode_error".to_string()),
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
@@ -139,8 +139,8 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 user_agent: None,
                 request_id: "req-5".to_string(),
                 status_code: 200,
-                error_message: None,
-                error_category: None,
+                error_message: Some("stream disconnected before completion".to_string()),
+                error_category: Some("stream_interrupted".to_string()),
                 prompt_tokens: 200,
                 completion_tokens: 100,
                 total_tokens: 300,
@@ -500,6 +500,43 @@ async fn test_logs_list_supports_filtering_by_status_code_list() {
         let status = log["status_code"].as_u64().unwrap();
         assert!(status == 200 || status == 400);
     }
+}
+
+#[tokio::test]
+async fn test_logs_list_supports_filtering_by_error_category_list() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?time_range=30d&error_categories=stream_interrupted,stream_upstream_body_decode_error")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let logs = result["logs"].as_array().unwrap();
+    assert_eq!(logs.len(), 2);
+    let categories = logs
+        .iter()
+        .map(|log| log["error_category"].as_str().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(categories.contains("stream_interrupted"));
+    assert!(categories.contains("stream_upstream_body_decode_error"));
 }
 
 #[tokio::test]

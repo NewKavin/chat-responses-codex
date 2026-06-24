@@ -29,6 +29,33 @@
             <el-option label="502 (上游网关错误)" :value="502" />
           </el-select>
         </el-form-item>
+        <el-form-item label="错误分类">
+          <el-select
+            v-model="filters.error_categories"
+            @change="handleFilterChange"
+            placeholder="全部"
+            clearable
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+          >
+            <el-option label="stream_interrupted (下游断连)" value="stream_interrupted" />
+            <el-option
+              label="stream_upstream_body_decode_error (上游响应解码失败)"
+              value="stream_upstream_body_decode_error"
+            />
+            <el-option
+              label="stream_upstream_read_error (上游流读取失败)"
+              value="stream_upstream_read_error"
+            />
+            <el-option
+              label="stream_upstream_timeout (上游流超时)"
+              value="stream_upstream_timeout"
+            />
+            <el-option label="stream_idle_timeout (空闲超时)" value="stream_idle_timeout" />
+            <el-option label="stream_max_duration (最大时长)" value="stream_max_duration" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="模型">
           <el-input
             v-model="filters.model"
@@ -67,7 +94,7 @@
         :closable="false"
         class="helper-text"
       >
-        日志按时间倒序展示。推理强度按下游请求原值显示；下游调用/上游请求名称、计费模式与 User-Agent 均支持原始透传字段优先展示。
+        日志按时间倒序展示。可以通过状态码、错误分类、模型和时间范围快速定位问题；推理强度按下游请求原值显示，下游调用/上游请求名称、计费模式与 User-Agent 均支持原始透传字段优先展示。
       </el-alert>
 
       <el-table :data="tableRows" v-loading="loading" stripe>
@@ -155,6 +182,14 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="错误分类" width="240" show-overflow-tooltip>
+          <template #default="{ row }">
+            <el-tag v-if="row.error_category" size="small" type="danger" effect="plain">
+              {{ row.error_category }}
+            </el-tag>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="错误信息" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.error_message?.trim() || '-' }}
@@ -199,6 +234,7 @@ const logs = ref<UsageLog[]>([])
 
 const filters = ref({
   status_codes: [] as number[],
+  error_categories: [] as string[],
   model: '',
   time_range: '7d',
   custom_range: [] as string[]
@@ -313,11 +349,12 @@ const loadData = async () => {
       page: number
       page_size: number
       time_range: string
-      status_codes?: string
-      model?: string
-      start_time?: number
-      end_time?: number
-    } = {
+    status_codes?: string
+    error_categories?: string
+    model?: string
+    start_time?: number
+    end_time?: number
+  } = {
       page: pagination.value.page,
       page_size: pagination.value.page_size,
       time_range: filters.value.time_range
@@ -325,6 +362,9 @@ const loadData = async () => {
 
     if (filters.value.status_codes.length > 0) {
       params.status_codes = filters.value.status_codes.join(',')
+    }
+    if (filters.value.error_categories.length > 0) {
+      params.error_categories = filters.value.error_categories.join(',')
     }
     if (filters.value.model.trim().length > 0) {
       params.model = filters.value.model.trim()

@@ -10,6 +10,7 @@ pub struct UsageLogQuery {
     pub page: usize,
     pub page_size: usize,
     pub status_codes: Vec<u16>,
+    pub error_categories: Vec<String>,
     pub model_substring: Option<String>,
     pub start_time: Option<u64>,
     pub end_time: Option<u64>,
@@ -21,6 +22,7 @@ impl Default for UsageLogQuery {
             page: 1,
             page_size: 10,
             status_codes: Vec::new(),
+            error_categories: Vec::new(),
             model_substring: None,
             start_time: None,
             end_time: None,
@@ -134,6 +136,19 @@ pub(crate) fn query_time_bounds(query: &UsageLogQuery, now: u64) -> (u64, u64) {
     }
 }
 
+pub(crate) fn normalize_error_categories(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim().to_ascii_lowercase();
+        if value.is_empty() || !seen.insert(value.clone()) {
+            continue;
+        }
+        normalized.push(value);
+    }
+    normalized
+}
+
 pub(crate) fn current_month_start(now: u64) -> u64 {
     let dt = UNIX_EPOCH + Duration::from_secs(now);
     let datetime = chrono::DateTime::<chrono::Utc>::from(dt);
@@ -216,12 +231,19 @@ pub fn build_downstream_usage_summary(
 
 impl AppState {
     pub async fn query_usage_logs_page(&self, query: UsageLogQuery) -> io::Result<UsageLogPage> {
+        let error_categories = normalize_error_categories(&query.error_categories);
+        let error_category_filter = if error_categories.is_empty() {
+            None
+        } else {
+            Some(error_categories.into_iter().collect::<HashSet<_>>())
+        };
         let query = UsageLogQuery {
             page: query.page.max(1),
             page_size: query
                 .page_size
                 .clamp(1, self.config.admin_logs_page_size_max.max(1)),
             status_codes: query.status_codes,
+            error_categories: query.error_categories,
             model_substring: query.model_substring,
             start_time: query.start_time,
             end_time: query.end_time,
@@ -259,6 +281,18 @@ impl AppState {
                 if !query.status_codes.is_empty() && !query.status_codes.contains(&log.status_code)
                 {
                     return false;
+                }
+
+                if let Some(error_category_filter) = &error_category_filter {
+                    let log_category = log
+                        .error_category
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase();
+                    if !error_category_filter.contains(&log_category) {
+                        return false;
+                    }
                 }
 
                 if let Some(model_substring) = &model_substring {

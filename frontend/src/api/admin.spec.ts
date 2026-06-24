@@ -86,6 +86,28 @@ describe('admin api auth behavior', () => {
 
     expect(spy).toHaveBeenCalledWith('/admin/model-probe')
   })
+
+  it('calls the logs endpoint with error category filters', async () => {
+    const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: {
+        logs: [],
+        total: 0,
+        page: 1,
+        page_size: 10,
+        total_pages: 0
+      }
+    } as never)
+
+    await adminApi.getLogs({
+      error_categories: 'stream_interrupted,stream_upstream_body_decode_error'
+    } as never)
+
+    expect(spy).toHaveBeenCalledWith('/admin/logs', {
+      params: {
+        error_categories: 'stream_interrupted,stream_upstream_body_decode_error'
+      }
+    })
+  })
 })
 
 describe('admin announcement api', () => {

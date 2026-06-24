@@ -2108,6 +2108,8 @@ pub(super) struct LogsQuery {
     page_size: usize,
     status_code: Option<u16>,
     status_codes: Option<String>,
+    error_category: Option<String>,
+    error_categories: Option<String>,
     model: Option<String>,
     #[serde(default = "default_time_range")]
     time_range: String,
@@ -2183,6 +2185,42 @@ pub(super) async fn admin_list_logs(
             .into_response();
         }
     }
+    let mut error_categories = query
+        .error_categories
+        .as_deref()
+        .map(|raw| {
+            raw.split(',')
+                .map(|part| part.trim().to_ascii_lowercase())
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(error_category) = query
+        .error_category
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+    {
+        if error_categories.is_empty() {
+            error_categories.push(error_category);
+        } else if error_categories.contains(&error_category) {
+            error_categories = vec![error_category];
+        } else {
+            error_categories.clear();
+            let page_size = query
+                .page_size
+                .clamp(1, state.config.admin_logs_page_size_max.max(1));
+            let page = query.page.max(1);
+            return Json(json!({
+                "logs": Vec::<Value>::new(),
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 0,
+            }))
+            .into_response();
+        }
+    }
     if query
         .model
         .as_deref()
@@ -2207,6 +2245,7 @@ pub(super) async fn admin_list_logs(
             page: query.page,
             page_size: query.page_size,
             status_codes,
+            error_categories,
             model_substring: query.model.clone(),
             start_time: Some(start_time),
             end_time: Some(end_time),

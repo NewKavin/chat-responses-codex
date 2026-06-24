@@ -162,6 +162,8 @@ export const adminApi = {
     page_size?: number
     status_code?: number
     status_codes?: string
+    error_category?: string
+    error_categories?: string
     model?: string
     time_range?: string
     start_time?: number

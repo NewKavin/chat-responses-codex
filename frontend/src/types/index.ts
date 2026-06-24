@@ -168,6 +168,7 @@ export interface UsageLog {
   request_id: string
   status_code: number
   error_message?: string
+  error_category?: string
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
