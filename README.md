@@ -210,6 +210,23 @@ flowchart LR
 - `GET /admin/logs`
 - `GET /portal`
 
+### 客户端兼容矩阵
+
+网关同时暴露以下协议端点：
+
+| 协议族 | 端点 | 典型客户端 |
+|--------|------|------------|
+| Responses | `/v1/responses` | Codex |
+| Chat Completions | `/v1/chat/completions` | Cline, OpenCode, 其他 OpenAI 兼容工具 |
+| Messages | `/v1/messages` | Claude Code |
+
+每个客户端只需要一个 `base_url` 和一个下游 Bearer Key：
+
+- Codex → 门户集成页的 **Codex** preset（`config.toml` + `model-catalog.json` + `codex login`）
+- Cline → 门户集成页的 **Cline / OpenAI 兼容** preset（`baseURL` + `apiKey` + `model`）
+- OpenCode → 门户集成页的 **OpenCode** preset（`opencode.json`）
+- Claude Code → 门户集成页的 **Claude Code** preset（`settings.json`）
+
 ### Codex 集成
 
 如果你要把 Codex 接到本项目上，优先打开门户里的集成页：
@@ -413,6 +430,23 @@ That design keeps client configuration stable, allows providers to be added or r
 - `GET /admin/downstreams`
 - `GET /admin/logs`
 - `GET /portal`
+
+### Client Compatibility Matrix
+
+The gateway exposes these protocol endpoints simultaneously:
+
+| Protocol family | Endpoint | Typical clients |
+|-----------------|----------|-----------------|
+| Responses | `/v1/responses` | Codex |
+| Chat Completions | `/v1/chat/completions` | Cline, OpenCode, other OpenAI-compatible tools |
+| Messages | `/v1/messages` | Claude Code |
+
+Each client only needs a `base_url` and a downstream Bearer key:
+
+- Codex → portal integration page **Codex** preset (`config.toml` + `model-catalog.json` + `codex login`)
+- Cline → portal integration page **Cline / OpenAI-compatible** preset (`baseURL` + `apiKey` + `model`)
+- OpenCode → portal integration page **OpenCode** preset (`opencode.json`)
+- Claude Code → portal integration page **Claude Code** preset (`settings.json`)
 
 ### Codex Integration
 
