@@ -4,7 +4,9 @@ mod common;
 mod auth;
 #[path = "gateway/chat.rs"]
 mod chat;
-#[path = "gateway/responses.rs"]
-mod responses;
 #[path = "gateway/claude.rs"]
 mod claude;
+#[path = "gateway/compatibility.rs"]
+mod compatibility;
+#[path = "gateway/responses.rs"]
+mod responses;
