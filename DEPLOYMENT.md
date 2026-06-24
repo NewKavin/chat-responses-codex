@@ -26,6 +26,7 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=900`
 - `POSTGRES_POOL_MAX_SIZE=16`
 - `ADMIN_LOGS_PAGE_SIZE_MAX=200`
 - `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
@@ -71,6 +72,9 @@ the gateway keeps per host before opening new sockets.
 fresh model-probe snapshot. Keep it separate from `DASHBOARD_CACHE_TTL_SECONDS`,
 which controls how long the backend reuses the cached probe result before
 calling upstreams again.
+`UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` controls how often the backend refreshes
+per-key model mappings from upstream `/v1/models`. Keep it separate from the browser
+refresh interval and from `DASHBOARD_CACHE_TTL_SECONDS`.
 
 ## Build The Image
 

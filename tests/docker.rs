@@ -172,6 +172,12 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
     );
     assert!(
         compose.contains(
+            "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-900}"
+        ),
+        "docker-compose.yml should configure the upstream model key sync interval"
+    );
+    assert!(
+        compose.contains(
             "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS: ${UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS:-30}"
         ),
         "docker-compose.yml should configure the upstream 429 fallback retry delay"
@@ -327,6 +333,7 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "USAGE_LOG_ROTATION_MAX_BYTES=",
         "USAGE_LOG_ARCHIVE_MAX_FILES=",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS=",
+        "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=",
         "DASHBOARD_CACHE_TTL_SECONDS=",
         "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS=",
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS=",
@@ -368,6 +375,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "USAGE_LOG_ROTATION_MAX_BYTES: ${USAGE_LOG_ROTATION_MAX_BYTES:-1048576}",
         "USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS: ${MODEL_PROBE_REFRESH_INTERVAL_SECONDS:-15}",
+        "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-900}",
         "DASHBOARD_CACHE_TTL_SECONDS: ${DASHBOARD_CACHE_TTL_SECONDS:-30}",
         "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS: ${UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS:-30}",
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS: ${UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS:-300}",

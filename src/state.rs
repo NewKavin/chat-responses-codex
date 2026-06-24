@@ -16,6 +16,10 @@ mod store;
 mod context_profile;
 #[path = "state/freekey_sync.rs"]
 mod freekey_sync;
+#[path = "state/model_discovery.rs"]
+mod model_discovery;
+#[path = "state/model_key_sync.rs"]
+mod model_key_sync;
 #[path = "state/normalize.rs"]
 mod normalize;
 #[path = "state/types.rs"]
@@ -46,6 +50,12 @@ use postgres::PostgresStateStore;
 pub use store::{StateStore, StoreFuture};
 
 pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
+#[allow(unused_imports)]
+pub use model_discovery::{
+    fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently,
+    KeyModelDiscoveryResult,
+};
+pub use model_key_sync::ModelKeySyncSummary;
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
     default_upstream_request_quota_5h, default_upstream_request_quota_requests,

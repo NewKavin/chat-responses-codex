@@ -99,6 +99,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .filter(|value| !value.trim().is_empty()),
         model_probe_refresh_interval_seconds: env_u64("MODEL_PROBE_REFRESH_INTERVAL_SECONDS", 15)
             .max(1),
+        upstream_model_key_sync_interval_seconds: env_u64(
+            "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
+            900,
+        )
+        .max(1),
         dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
         admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
@@ -159,6 +164,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     state.maybe_attach_redis().await;
+    let sync_state = state.clone();
+    tokio::spawn(async move {
+        sync_state.run_model_key_sync_loop().await;
+    });
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,

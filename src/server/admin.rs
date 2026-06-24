@@ -1,14 +1,13 @@
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, unix_seconds, AnnouncementConfig, AnnouncementLevel, AppState,
-    ApiKeyModelConfig, DefaultModelContextConfig, DownstreamConfig, FreekeySyncItem,
-    GlobalContextProfile, UpstreamConfig, UpstreamMutationError, UsageLog, UsageLogQuery,
-    portal_model_is_allowed,
+    fetch_models_from_upstream_keys_concurrently, portal_model_is_allowed, unix_seconds,
+    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState, DefaultModelContextConfig,
+    DownstreamConfig, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
+    UpstreamConfig, UpstreamMutationError, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -257,9 +256,7 @@ pub(super) async fn admin_dashboard(
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| log.downstream_key_id.clone());
-        *downstream_usage_counter
-            .entry(downstream_name)
-            .or_insert(0) += 1;
+        *downstream_usage_counter.entry(downstream_name).or_insert(0) += 1;
     }
 
     for bucket in &mut daily_series {
@@ -661,7 +658,9 @@ pub(super) struct GlobalContextProfilesPayload {
     global_context_profiles: std::collections::HashMap<String, GlobalContextProfile>,
 }
 
-pub(super) async fn admin_get_global_context_profiles(State(state): State<AppState>) -> impl IntoResponse {
+pub(super) async fn admin_get_global_context_profiles(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     Json(json!({
         "global_context_profiles": state.snapshot().await.global_context_profiles,
     }))
@@ -801,7 +800,13 @@ pub(super) async fn admin_sync_freekey_upstreams(
                 let mut seen = HashSet::new();
                 unique_keys.retain(|k| seen.insert(k.clone()));
             }
-            let results = fetch_models_from_upstream_keys_concurrently(&client, base_url, &unique_keys, admin_timeout).await;
+            let results = fetch_models_from_upstream_keys_concurrently(
+                &client,
+                base_url,
+                &unique_keys,
+                admin_timeout,
+            )
+            .await;
             for result in &results {
                 if result.error.is_none() {
                     valid_key_set.insert(result.key.clone());
@@ -851,8 +856,6 @@ pub(super) async fn admin_sync_freekey_upstreams(
     }
 }
 
-
-
 // ============================================================================
 // Batch create upstreams with auto model discovery
 // ============================================================================
@@ -878,11 +881,21 @@ pub(super) struct BatchCreateUpstreamPayload {
     active: bool,
 }
 
-fn default_batch_requests_per_minute() -> u32 { 60 }
-fn default_batch_request_quota_window_hours() -> u32 { 5 }
-fn default_batch_request_quota_requests() -> u32 { 500 }
-fn default_batch_max_concurrency() -> u32 { 10 }
-fn default_batch_active() -> bool { true }
+fn default_batch_requests_per_minute() -> u32 {
+    60
+}
+fn default_batch_request_quota_window_hours() -> u32 {
+    5
+}
+fn default_batch_request_quota_requests() -> u32 {
+    500
+}
+fn default_batch_max_concurrency() -> u32 {
+    10
+}
+fn default_batch_active() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct DiscoverUpstreamModelsPayload {
@@ -890,141 +903,12 @@ pub(super) struct DiscoverUpstreamModelsPayload {
     keys: Vec<String>,
 }
 
-fn key_prefix(key: &str) -> String {
-    let key = key.trim();
-    if key.len() <= 8 {
-        key.to_string()
-    } else {
-        format!("{}...", &key[..8])
-    }
-}
-
-async fn fetch_models_from_upstream(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    timeout_seconds: u64,
-) -> Result<Vec<String>, String> {
-    let url = join_upstream_url(base_url, "/v1/models");
-    let response = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .timeout(std::time::Duration::from_secs(timeout_seconds.max(1)))
-        .send()
-        .await
-        .map_err(|e| format!("请求 {} 失败: {}", url, e))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("{} 返回 {}: {}", url, status.as_u16(), body));
-    }
-
-    let payload: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("解析 {} 响应失败: {}", url, e))?;
-
-    let data = payload
-        .get("data")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| format!("{} 响应缺少 data 字段", url))?;
-
-    let mut models: Vec<String> = data
-        .iter()
-        .filter_map(|item| item.get("id").and_then(|v| v.as_str()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    models.sort();
-    models.dedup();
-
-    if models.is_empty() {
-        return Err(format!("{} 未返回任何模型", url));
-    }
-
-    Ok(models)
-}
-
-#[derive(Debug, Clone)]
-struct KeyModelDiscoveryResult {
-    index: usize,
-    key: String,
-    key_prefix: String,
-    models: Vec<String>,
-    latency_ms: u64,
-    error: Option<String>,
-}
-
-async fn fetch_models_from_upstream_keys_concurrently(
-    client: &reqwest::Client,
-    base_url: &str,
-    keys: &[String],
-    timeout_seconds: u64,
-) -> Vec<KeyModelDiscoveryResult> {
-    if keys.is_empty() {
-        return Vec::new();
-    }
-
-    let base_url = base_url.trim().to_string();
-    let concurrency = keys.len().max(1);
-    let mut results = stream::iter(keys.iter().cloned().enumerate().map(|(index, key)| {
-        let client = client.clone();
-        let base_url = base_url.clone();
-        let key = key.trim().to_string();
-        let key_prefix = key_prefix(&key);
-
-        async move {
-            if key.is_empty() {
-                return KeyModelDiscoveryResult {
-                    index,
-                    key,
-                    key_prefix,
-                    models: Vec::new(),
-                    latency_ms: 0,
-                    error: Some("key 为空".to_string()),
-                };
-            }
-
-            let started = std::time::Instant::now();
-            match fetch_models_from_upstream(&client, &base_url, &key, timeout_seconds).await {
-                Ok(models) => KeyModelDiscoveryResult {
-                    index,
-                    key,
-                    key_prefix,
-                    models,
-                    latency_ms: started.elapsed().as_millis().max(1) as u64,
-                    error: None,
-                },
-                Err(error) => KeyModelDiscoveryResult {
-                    index,
-                    key,
-                    key_prefix,
-                    models: Vec::new(),
-                    latency_ms: started.elapsed().as_millis().max(1) as u64,
-                    error: Some(error),
-                },
-            }
-        }
-    }))
-    .buffer_unordered(concurrency)
-    .collect::<Vec<_>>()
-    .await;
-
-    results.sort_by_key(|item| item.index);
-    results
-}
-
 pub(super) async fn build_model_probe_response(
     state: &AppState,
     allowlist: Option<&[String]>,
     cache_key: &str,
 ) -> ModelProbeResponse {
-    if let Some(cached) = state
-        .get_cached_json::<ModelProbeResponse>(cache_key)
-        .await
-    {
+    if let Some(cached) = state.get_cached_json::<ModelProbeResponse>(cache_key).await {
         return cached;
     }
 
@@ -1137,7 +1021,11 @@ pub(super) async fn build_model_probe_response(
     };
 
     state
-        .set_cached_json(cache_key, &response, state.config.dashboard_cache_ttl_seconds)
+        .set_cached_json(
+            cache_key,
+            &response,
+            state.config.dashboard_cache_ttl_seconds,
+        )
         .await;
 
     response
@@ -1177,7 +1065,9 @@ pub(super) async fn admin_create_upstreams_batch(
         .build()
         .unwrap_or_default();
 
-    let protocol_str = payload.protocol.unwrap_or_else(|| "ChatCompletions".to_string());
+    let protocol_str = payload
+        .protocol
+        .unwrap_or_else(|| "ChatCompletions".to_string());
     let protocol: UpstreamProtocol = match protocol_str.as_str() {
         "Responses" => UpstreamProtocol::Responses,
         _ => UpstreamProtocol::ChatCompletions,
@@ -1205,9 +1095,13 @@ pub(super) async fn admin_create_upstreams_batch(
     let mut failed = 0usize;
 
     // 并发获取每个 key 的模型列表
-    let discovery_results =
-        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys, admin_timeout)
-            .await;
+    let discovery_results = fetch_models_from_upstream_keys_concurrently(
+        &client,
+        &payload.base_url,
+        &payload.keys,
+        admin_timeout,
+    )
+    .await;
     for result in discovery_results {
         if let Some(error) = result.error {
             failed = failed.saturating_add(1);
@@ -1239,7 +1133,8 @@ pub(super) async fn admin_create_upstreams_batch(
     // The upstream might not support /v1/models or be temporarily unavailable.
     // Keys will be validated at runtime when requests are actually made.
     if valid_keys.is_empty() && !payload.keys.is_empty() {
-        let fallback_keys: Vec<String> = payload.keys
+        let fallback_keys: Vec<String> = payload
+            .keys
             .iter()
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
@@ -1293,32 +1188,28 @@ pub(super) async fn admin_create_upstreams_batch(
     upstream.normalize_for_storage();
 
     match state.insert_upstream(upstream.clone()).await {
-        Ok(()) => {
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "created": 1,
-                    "failed": failed,
-                    "total": payload.keys.len(),
-                    "id": upstream.id,
-                    "name": upstream.name,
-                    "keys_count": valid_keys.len(),
-                    "models_count": all_models.len(),
-                    "results": key_results,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {"message": format!("保存失败: {}", e)},
-                    "results": key_results,
-                })),
-            )
-                .into_response()
-        }
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "created": 1,
+                "failed": failed,
+                "total": payload.keys.len(),
+                "id": upstream.id,
+                "name": upstream.name,
+                "keys_count": valid_keys.len(),
+                "models_count": all_models.len(),
+                "results": key_results,
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {"message": format!("保存失败: {}", e)},
+                "results": key_results,
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -1340,9 +1231,13 @@ pub(super) async fn admin_discover_upstream_models(
         .build()
         .unwrap_or_default();
 
-    let discovery_results =
-        fetch_models_from_upstream_keys_concurrently(&client, &payload.base_url, &payload.keys, admin_timeout)
-            .await;
+    let discovery_results = fetch_models_from_upstream_keys_concurrently(
+        &client,
+        &payload.base_url,
+        &payload.keys,
+        admin_timeout,
+    )
+    .await;
 
     let mut all_models: Vec<String> = Vec::new();
     let mut key_results: Vec<Value> = Vec::new();
@@ -1554,7 +1449,13 @@ pub(super) async fn admin_update_upstream(
                 .build()
                 .unwrap_or_default();
 
-            let results = fetch_models_from_upstream_keys_concurrently(&client, &base_url, &all_keys, admin_timeout).await;
+            let results = fetch_models_from_upstream_keys_concurrently(
+                &client,
+                &base_url,
+                &all_keys,
+                admin_timeout,
+            )
+            .await;
             let mut valid_keys: HashSet<String> = HashSet::new();
             let mut valid_key_models: HashMap<String, Vec<String>> = HashMap::new();
             for result in &results {
@@ -1577,7 +1478,7 @@ pub(super) async fn admin_update_upstream(
                 // Build replacement arrays for api_keys and api_key_models.
                 let mut replacement_api_keys: Vec<String> = valid_keys.iter().cloned().collect();
                 replacement_api_keys.sort();
-                
+
                 let mut replacement_api_key_models: Vec<Value> = Vec::new();
                 for key in &replacement_api_keys {
                     let models = valid_key_models.get(key).cloned().unwrap_or_default();

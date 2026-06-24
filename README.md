@@ -91,6 +91,7 @@ cargo run
 - `ADMIN_PASSWORD=admin`
 - `APP_NAME=chat-responses-codex`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=900`
 
 启动后打开：
 
@@ -169,14 +170,16 @@ flowchart LR
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`：后台登录账号。
 - `APP_NAME`：页面和日志中的应用名。
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`：模型探测页自动刷新间隔，单位秒。
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：后端按 key 自动同步模型映射的周期，单位秒。
 - `DASHBOARD_CACHE_TTL_SECONDS`：后端复用模型探测快照的缓存时间，单位秒。
 - `USAGE_LOG_ROTATION_MAX_BYTES`：文件模式日志轮转阈值。
 - `USAGE_LOG_ARCHIVE_MAX_FILES`：文件模式日志归档上限。
 - `RUST_LOG`：可选，控制日志级别。
 - `TZ`：可选，时区。
 
-前者控制页面多久重新请求一次，后者控制后端多久重新探测一次。
-两者刻意分开，避免把 UI 刷新节奏和上游探测成本绑死在一起。
+前者控制页面多久重新请求一次，后者控制后端多久自动刷新模型-key 映射，
+再后面的缓存 TTL 控制服务端多久复用同一份探测结果。
+三者刻意分开，避免把 UI 刷新节奏、上游探测成本和缓存命中周期绑死在一起。
 
 配置原则：
 
