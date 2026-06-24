@@ -5,6 +5,7 @@ import {
   buildCodexConfigToml,
   buildCodexModelCatalogJson,
   buildGatewayBaseUrl,
+  buildAnthropicCompatibleConfig,
   buildOpenAiCompatibleConfig,
   buildGatewayModelsEndpoint,
   buildModelUsageStats,
@@ -313,6 +314,40 @@ describe('integration config generators', () => {
     expect(config.apiKey).toBe('sk-downstream-123')
     expect(config.model).toBe('MiniMax/MiniMax-M2.7')
     expect(config.modelsEndpoint).toBe('https://portal.example.com/v1/models')
+  })
+
+
+  it('builds an anthropic-compatible config for generic Messages clients', () => {
+    const config = JSON.parse(
+      buildAnthropicCompatibleConfig({
+        gatewayBaseUrl: 'https://portal.example.com',
+        portalKey: 'sk-downstream-123',
+        modelSlugs: ['claude-3-5-sonnet-20241022', 'MiniMax/MiniMax-M2.7'],
+        selectedModelSlug: 'claude-3-5-sonnet-20241022'
+      })
+    )
+
+    expect(config.baseURL).toBe('https://portal.example.com/v1')
+    expect(config.apiKey).toBe('sk-downstream-123')
+    expect(config.model).toBe('claude-3-5-sonnet-20241022')
+    expect(config.protocol).toBe('messages')
+    expect(config.modelsEndpoint).toBe('https://portal.example.com/v1/models')
+  })
+
+  it('anthropic-compatible config still works when the selected model is not Claude-prefixed', () => {
+    const config = JSON.parse(
+      buildAnthropicCompatibleConfig({
+        gatewayBaseUrl: 'https://portal.example.com',
+        portalKey: 'sk-downstream-123',
+        modelSlugs: ['MiniMax/MiniMax-M2.7'],
+        selectedModelSlug: 'MiniMax/MiniMax-M2.7'
+      })
+    )
+
+    expect(config.baseURL).toBe('https://portal.example.com/v1')
+    expect(config.apiKey).toBe('sk-downstream-123')
+    expect(config.model).toBe('MiniMax/MiniMax-M2.7')
+    expect(config.protocol).toBe('messages')
   })
 
 })

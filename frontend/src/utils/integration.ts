@@ -322,3 +322,16 @@ export const buildOpenAiCompatibleConfig = (input: IntegrationConfigInput) => {
   })}
 `
 }
+
+export const buildAnthropicCompatibleConfig = (input: IntegrationConfigInput) => {
+  const primaryModelSlug = choosePrimaryModelSlug(input.modelSlugs, input.selectedModelSlug)
+
+  return `${jsonStringify({
+    baseURL: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`,
+    apiKey: input.portalKey,
+    model: primaryModelSlug,
+    protocol: 'messages',
+    modelsEndpoint: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1/models`
+  })}
+`
+}
