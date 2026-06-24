@@ -8,7 +8,18 @@
 - 网关再连各家上游模型。
 - 模型名必须在 Codex、网关、上游三处保持完全一致。
 
-如果你已经登录了门户，优先打开 `<gateway_origin>/portal/integration`。页面会自动读取当前下游 key、当前网关 URL 和 live `/v1/models`，直接生成 Codex / OpenCode / Claude Code 的可复制配置。下面这些手工步骤保留着，方便你离线配置或做模板化部署。
+## 客户端兼容矩阵
+
+网关同时暴露 `/v1/chat/completions`、`/v1/responses`、`/v1/models` 和 `/v1/messages`。不同客户端根据自己支持的协议族选对应的端点：
+
+| 客户端 | 协议族 | 端点 | 配置方式 |
+|--------|--------|------|----------|
+| Codex | Responses | `/v1/responses` | `config.toml` + `model-catalog.json` + `codex login --with-api-key` |
+| Cline | Chat Completions | `/v1/chat/completions` | 门户 Cline preset（`baseURL` + `apiKey` + `model`） |
+| OpenCode | Chat Completions | `/v1/chat/completions` | `opencode.json` |
+| Claude Code | Messages | `/v1/messages` | `settings.json`（含 `ANTHROPIC_BASE_URL` 等环境变量） |
+
+如果你已经登录了门户，优先打开 `<gateway_origin>/portal/integration`。页面会自动读取当前下游 key、当前网关 URL 和 live `/v1/models`，直接生成 Codex / OpenCode / Claude Code / Cline 的可复制配置。下面这些手工步骤保留着，方便你离线配置或做模板化部署。
 
 ## 先看整体结构
 
