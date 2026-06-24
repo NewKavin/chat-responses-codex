@@ -868,14 +868,29 @@ fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
     }
 }
 
-async fn finalize_stream_interruption(
+fn classify_upstream_stream_error(
+    error_message: &str,
+    is_timeout: bool,
+    is_decode: bool,
+) -> (StatusCode, &'static str) {
+    let normalized = error_message.to_ascii_lowercase();
+    if is_timeout || normalized.contains("timed out") || normalized.contains("timeout") {
+        (StatusCode::GATEWAY_TIMEOUT, "stream_upstream_timeout")
+    } else if is_decode || normalized.contains("error decoding response body") {
+        (StatusCode::BAD_GATEWAY, "stream_upstream_body_decode_error")
+    } else {
+        (StatusCode::BAD_GATEWAY, "stream_upstream_read_error")
+    }
+}
+
+async fn finalize_stream_error(
     completion_context: Option<StreamCompletionContext>,
     log_context: Option<StreamUsageLogContext>,
     usage: Option<(u64, u64, u64)>,
+    status: StatusCode,
+    error_category: &'static str,
     error_message: String,
 ) {
-    let (status, error_category) = classify_stream_failure(&error_message);
-
     if let Some(context) = completion_context {
         context.release_all().await;
         context.mark_failure().await;
@@ -887,6 +902,24 @@ async fn finalize_stream_interruption(
         log_context.error_category = Some(error_category.to_string());
         log_context.emit(usage.unwrap_or((0, 0, 0))).await;
     }
+}
+
+async fn finalize_stream_interruption(
+    completion_context: Option<StreamCompletionContext>,
+    log_context: Option<StreamUsageLogContext>,
+    usage: Option<(u64, u64, u64)>,
+    error_message: String,
+) {
+    let (status, error_category) = classify_stream_failure(&error_message);
+    finalize_stream_error(
+        completion_context,
+        log_context,
+        usage,
+        status,
+        error_category,
+        error_message,
+    )
+    .await;
 }
 
 fn spawn_stream_interruption_cleanup(
@@ -1567,13 +1600,27 @@ async fn process_gateway_request(
             let request_cost = upstream.request_cost_for_model(model);
             let minute_cost = runtime.minute_cost + request_cost;
             let five_hour_cost = runtime.five_hour_cost + request_cost;
-            let candidate_keys = {
-                let keys = upstream.keys_for_model(model);
-                if keys.is_empty() {
+            let candidate_keys = upstream.keys_for_model(model);
+            let candidate_keys = if candidate_keys.is_empty() {
+                if upstream.api_key_models.is_empty() {
                     vec![upstream.api_key.clone()]
                 } else {
-                    keys
+                    tracing::debug!(
+                        request_id = %request_id,
+                        downstream_key_id = %downstream.id,
+                        path = %request_path,
+                        original_model = %model,
+                        normalized_model = %normalized_model,
+                        selected_upstream_id = %upstream.id,
+                        selected_upstream_name = %upstream.name,
+                        selected_upstream_protocol = ?protocol,
+                        api_key_model_count = upstream.api_key_models.len(),
+                        "upstream has no mapped key for requested model; skipping"
+                    );
+                    continue;
                 }
+            } else {
+                candidate_keys
             };
             tracing::info!(
                 request_id = %request_id,
@@ -4575,8 +4622,13 @@ fn proxied_stream_body(
                 Ok(None)
             }
             StreamReadOutcome::Chunk(Err(error)) => {
-                state.mark_stream_interrupted(error.to_string()).await;
-                Err(std::io::Error::other(error.to_string()))
+                let error_message = error.to_string();
+                let is_timeout = error.is_timeout();
+                let is_decode = error.is_decode();
+                state
+                    .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
+                    .await;
+                Err(std::io::Error::other(error_message))
             }
             StreamReadOutcome::Heartbeat => {
                 state.watchdog.record_heartbeat(TokioInstant::now());
@@ -4681,6 +4733,28 @@ impl ProxiedStreamState {
         let usage = self.usage;
         finalize_stream_interruption(completion_context, log_context, usage, error_message).await;
     }
+
+    async fn mark_upstream_stream_error(
+        &mut self,
+        error_message: String,
+        is_timeout: bool,
+        is_decode: bool,
+    ) {
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+        let (status, error_category) =
+            classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+        finalize_stream_error(
+            completion_context,
+            log_context,
+            usage,
+            status,
+            error_category,
+            error_message,
+        )
+        .await;
+    }
 }
 
 impl Drop for ProxiedStreamState {
@@ -4768,8 +4842,13 @@ fn translated_stream_body(
                     return Ok(None);
                 }
                 StreamReadOutcome::Chunk(Err(error)) => {
-                    state.mark_stream_interrupted(error.to_string()).await;
-                    return Err(std::io::Error::other(error.to_string()));
+                    let error_message = error.to_string();
+                    let is_timeout = error.is_timeout();
+                    let is_decode = error.is_decode();
+                    state
+                        .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
+                        .await;
+                    return Err(std::io::Error::other(error_message));
                 }
                 StreamReadOutcome::Heartbeat => {
                     state.watchdog.record_heartbeat(TokioInstant::now());
@@ -4893,6 +4972,28 @@ impl TranslatedStreamState {
         let log_context = self.log_context.take();
         let usage = self.usage;
         finalize_stream_interruption(completion_context, log_context, usage, error_message).await;
+    }
+
+    async fn mark_upstream_stream_error(
+        &mut self,
+        error_message: String,
+        is_timeout: bool,
+        is_decode: bool,
+    ) {
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+        let (status, error_category) =
+            classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+        finalize_stream_error(
+            completion_context,
+            log_context,
+            usage,
+            status,
+            error_category,
+            error_message,
+        )
+        .await;
     }
 }
 
@@ -5045,4 +5146,38 @@ async fn admin_auth_middleware(
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downstream_disconnect_stays_499() {
+        let (status, category) = classify_stream_failure("stream disconnected before completion");
+        assert_eq!(status, StatusCode::from_u16(499).unwrap());
+        assert_eq!(category, "stream_interrupted");
+    }
+
+    #[test]
+    fn upstream_stream_read_error_is_bad_gateway() {
+        let (status, category) = classify_upstream_stream_error(
+            "error decoding response body: unexpected eof",
+            false,
+            true,
+        );
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(category, "stream_upstream_body_decode_error");
+    }
+
+    #[test]
+    fn upstream_stream_timeout_is_gateway_timeout() {
+        let (status, category) = classify_upstream_stream_error(
+            "request timed out while reading upstream response",
+            true,
+            false,
+        );
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(category, "stream_upstream_timeout");
+    }
 }

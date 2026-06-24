@@ -87,7 +87,9 @@ fn normalized_model_request_costs(
     normalized
 }
 
-pub(super) fn normalized_model_contexts(values: Vec<ModelContextConfig>) -> Vec<ModelContextConfig> {
+pub(super) fn normalized_model_contexts(
+    values: Vec<ModelContextConfig>,
+) -> Vec<ModelContextConfig> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
     for config in values {
@@ -357,10 +359,8 @@ impl UpstreamConfig {
             }
         }
 
-        if keys.is_empty() {
-            self.available_keys()
-        } else {
-            keys
-        }
+        // When explicit model-to-key mappings are configured, a miss means this
+        // upstream does not have a usable key for the requested model.
+        keys
     }
 }

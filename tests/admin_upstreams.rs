@@ -6,22 +6,24 @@
 //! - Upstream toggle (enable/disable)
 //! - Input validation and error handling
 
-use axum::body::{Body, to_bytes};
+use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
+use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use axum::routing::get;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
-use chat_responses_codex::state::{ApiKeyModelConfig, AppConfig, AppState, PersistedState, UpstreamConfig};
+use chat_responses_codex::state::{
+    ApiKeyModelConfig, AppConfig, AppState, PersistedState, UpstreamConfig,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
+use tokio::sync::Barrier;
 use tower::ServiceExt;
 use uuid::Uuid;
-use tokio::sync::Barrier;
 
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
@@ -355,9 +357,7 @@ async fn test_upstreams_create_accepts_premium_models_not_in_supported() {
                 .uri("/api/admin/upstreams")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&upstream).unwrap(),
-                ))
+                .body(Body::from(serde_json::to_string(&upstream).unwrap()))
                 .unwrap(),
         )
         .await
@@ -774,15 +774,27 @@ async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_base_url() {
         .find(|upstream| upstream.id == "existing-id")
         .expect("upstream should exist");
     // 合并行为：旧 key 保留，新 key 追加。
-    assert!(upstream.available_keys().contains(&"old-key".to_string()),
-        "old key should survive merge, got {:?}", upstream.available_keys());
-    assert!(upstream.available_keys().contains(&"new-key".to_string()),
-        "new key should be merged, got {:?}", upstream.available_keys());
+    assert!(
+        upstream.available_keys().contains(&"old-key".to_string()),
+        "old key should survive merge, got {:?}",
+        upstream.available_keys()
+    );
+    assert!(
+        upstream.available_keys().contains(&"new-key".to_string()),
+        "new key should be merged, got {:?}",
+        upstream.available_keys()
+    );
     // 模型合并：旧 gpt-4 + 新 gpt-4o 都保留。
-    assert!(upstream.supported_models.contains(&"gpt-4".to_string()),
-        "old model should survive, got {:?}", upstream.supported_models);
-    assert!(upstream.supported_models.contains(&"gpt-4o".to_string()),
-        "new model should be added, got {:?}", upstream.supported_models);
+    assert!(
+        upstream.supported_models.contains(&"gpt-4".to_string()),
+        "old model should survive, got {:?}",
+        upstream.supported_models
+    );
+    assert!(
+        upstream.supported_models.contains(&"gpt-4o".to_string()),
+        "new model should be added, got {:?}",
+        upstream.supported_models
+    );
     // name 由载荷显式提供则更新。
     assert_eq!(upstream.name, "gpt-sync-new-name");
 }
@@ -849,12 +861,25 @@ async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_url_and_model(
     // 载荷未显式提供 name 时保留原名。
     assert_eq!(upstream.name, "legacy-name");
     // 合并行为：旧 key 保留，新 key 追加。
-    assert!(upstream.available_keys().contains(&"legacy-key".to_string()),
-        "legacy key should survive merge, got {:?}", upstream.available_keys());
-    assert!(upstream.available_keys().contains(&"replaced-key".to_string()),
-        "new key should be merged, got {:?}", upstream.available_keys());
-    assert!(upstream.supported_models.contains(&"model-a".to_string()),
-        "model-a should survive merge, got {:?}", upstream.supported_models);
+    assert!(
+        upstream
+            .available_keys()
+            .contains(&"legacy-key".to_string()),
+        "legacy key should survive merge, got {:?}",
+        upstream.available_keys()
+    );
+    assert!(
+        upstream
+            .available_keys()
+            .contains(&"replaced-key".to_string()),
+        "new key should be merged, got {:?}",
+        upstream.available_keys()
+    );
+    assert!(
+        upstream.supported_models.contains(&"model-a".to_string()),
+        "model-a should survive merge, got {:?}",
+        upstream.supported_models
+    );
 }
 
 #[tokio::test]
@@ -1043,28 +1068,64 @@ async fn test_admin_freekey_sync_replaces_stale_keys_and_models() {
 
     // 合并行为：旧 key 保留，新 key 追加。
     let available = upstream.available_keys();
-    assert!(available.contains(&"stale-key-1".to_string()),
-        "stale-key-1 should survive merge, got {:?}", available);
-    assert!(available.contains(&"stale-key-2".to_string()),
-        "stale-key-2 should survive merge, got {:?}", available);
-    assert!(available.contains(&"stale-key-3".to_string()),
-        "stale-key-3 should survive merge, got {:?}", available);
-    assert!(available.contains(&"fresh-key-a".to_string()),
-        "fresh-key-a should be merged, got {:?}", available);
-    assert!(available.contains(&"fresh-key-b".to_string()),
-        "fresh-key-b should be merged, got {:?}", available);
+    assert!(
+        available.contains(&"stale-key-1".to_string()),
+        "stale-key-1 should survive merge, got {:?}",
+        available
+    );
+    assert!(
+        available.contains(&"stale-key-2".to_string()),
+        "stale-key-2 should survive merge, got {:?}",
+        available
+    );
+    assert!(
+        available.contains(&"stale-key-3".to_string()),
+        "stale-key-3 should survive merge, got {:?}",
+        available
+    );
+    assert!(
+        available.contains(&"fresh-key-a".to_string()),
+        "fresh-key-a should be merged, got {:?}",
+        available
+    );
+    assert!(
+        available.contains(&"fresh-key-b".to_string()),
+        "fresh-key-b should be merged, got {:?}",
+        available
+    );
     // Old + new models should coexist.
-    assert!(upstream.supported_models.contains(&"old-model".to_string()),
-        "old-model should survive merge, got {:?}", upstream.supported_models);
-    assert!(upstream.supported_models.contains(&"another-old-model".to_string()),
-        "another-old-model should survive merge, got {:?}", upstream.supported_models);
-    assert!(upstream.supported_models.contains(&"model-x".to_string()),
-        "model-x should be added, got {:?}", upstream.supported_models);
+    assert!(
+        upstream.supported_models.contains(&"old-model".to_string()),
+        "old-model should survive merge, got {:?}",
+        upstream.supported_models
+    );
+    assert!(
+        upstream
+            .supported_models
+            .contains(&"another-old-model".to_string()),
+        "another-old-model should survive merge, got {:?}",
+        upstream.supported_models
+    );
+    assert!(
+        upstream.supported_models.contains(&"model-x".to_string()),
+        "model-x should be added, got {:?}",
+        upstream.supported_models
+    );
     // Old api_key_models should be preserved.
-    assert!(upstream.api_key_models.iter().any(|e| e.api_key == "stale-key-1"),
-        "stale-key-1 api_key_model should survive merge");
-    assert!(upstream.api_key_models.iter().any(|e| e.api_key == "stale-key-2"),
-        "stale-key-2 api_key_model should survive merge");
+    assert!(
+        upstream
+            .api_key_models
+            .iter()
+            .any(|e| e.api_key == "stale-key-1"),
+        "stale-key-1 api_key_model should survive merge"
+    );
+    assert!(
+        upstream
+            .api_key_models
+            .iter()
+            .any(|e| e.api_key == "stale-key-2"),
+        "stale-key-2 api_key_model should survive merge"
+    );
     // 身份字段保留。
     assert_eq!(upstream.id, "auto-id");
     assert!(upstream.auto_managed);
@@ -1257,8 +1318,37 @@ fn upstream_config_keys_for_model_prefers_model_specific_keys() {
     }))
     .unwrap();
 
-    assert_eq!(upstream.keys_for_model("gpt-4"), vec!["sk-key2".to_string()]);
-    assert_eq!(upstream.keys_for_model("claude-3"), vec!["sk-key3".to_string()]);
+    assert_eq!(
+        upstream.keys_for_model("gpt-4"),
+        vec!["sk-key2".to_string()]
+    );
+    assert_eq!(
+        upstream.keys_for_model("claude-3"),
+        vec!["sk-key3".to_string()]
+    );
+}
+
+#[test]
+fn upstream_config_keys_for_model_returns_empty_when_model_is_unmapped() {
+    let upstream: UpstreamConfig = serde_json::from_value(json!({
+        "id": "test-5",
+        "name": "Test Upstream",
+        "base_url": "https://api.example.com",
+        "api_key": "sk-key1",
+        "api_keys": ["sk-key2"],
+        "api_key_models": [
+            {
+                "api_key": "sk-key2",
+                "supported_models": ["gpt-4"]
+            }
+        ],
+        "protocol": "ChatCompletions",
+        "supported_models": ["gpt-4", "claude-3"],
+        "active": true
+    }))
+    .unwrap();
+
+    assert!(upstream.keys_for_model("claude-3").is_empty());
 }
 
 #[tokio::test]
@@ -1309,13 +1399,13 @@ async fn test_upstreams_update_preserves_multiple_api_keys() {
         .iter()
         .find(|u| u.id == "multi-key-test")
         .unwrap();
-    
+
     // With merge behavior, "key-a" (from api_key field) is merged into api_keys.
     assert_eq!(upstream.api_keys.len(), 3);
     assert!(upstream.api_keys.contains(&"key-a".to_string()));
     assert!(upstream.api_keys.contains(&"key-b".to_string()));
     assert!(upstream.api_keys.contains(&"key-c".to_string()));
-    
+
     // 验证 available_keys 返回所有 3 个 key
     let all_keys = upstream.available_keys();
     assert_eq!(all_keys.len(), 3);
@@ -1370,21 +1460,32 @@ async fn test_upstreams_update_with_multiline_api_key_in_payload() {
         .iter()
         .find(|u| u.id == "newline-test")
         .unwrap();
-    
+
     // 合并行为：包含换行的 api_key 作为单个字符串合并到 api_keys
     // 原有的 api_keys 和 legacy api_key 都保留。
-    assert!(upstream.api_keys.contains(&"key-a\nkey-b\nkey-c".to_string()),
-        "multiline key should be in api_keys, got {:?}", upstream.api_keys);
-    assert!(upstream.api_keys.contains(&"original-key-2".to_string()),
-        "old api_keys entry should survive, got {:?}", upstream.api_keys);
-    assert!(upstream.api_keys.contains(&"original-key".to_string()),
-        "legacy api_key should be merged, got {:?}", upstream.api_keys);
+    assert!(
+        upstream
+            .api_keys
+            .contains(&"key-a\nkey-b\nkey-c".to_string()),
+        "multiline key should be in api_keys, got {:?}",
+        upstream.api_keys
+    );
+    assert!(
+        upstream.api_keys.contains(&"original-key-2".to_string()),
+        "old api_keys entry should survive, got {:?}",
+        upstream.api_keys
+    );
+    assert!(
+        upstream.api_keys.contains(&"original-key".to_string()),
+        "legacy api_key should be merged, got {:?}",
+        upstream.api_keys
+    );
 }
 
 #[tokio::test]
 async fn test_batch_create_stores_all_keys_in_single_upstream() {
     use chat_responses_codex::server::build_router;
-    
+
     let state = create_test_state_with_upstreams(vec![]);
     let app = build_router(state.clone());
     let token = get_admin_token(&app, "admin", "admin").await;
@@ -1392,7 +1493,7 @@ async fn test_batch_create_stores_all_keys_in_single_upstream() {
     // 模拟用户输入多行 key 创建上游
     // 注意：由于 batch 创建需要验证 key 能获取模型，这里我们无法真正测试
     // 但我们可以直接测试 update 流程
-    
+
     // 先手动创建一个上游，然后测试编辑保存
     let create_payload = json!({
         "id": "test-multi",
@@ -1444,27 +1545,46 @@ async fn test_batch_create_stores_all_keys_in_single_upstream() {
 
     // 验证所有 key 都被保存
     let snapshot = state.snapshot().await;
-    let upstream = snapshot.upstreams.iter().find(|u| u.id == "test-multi").unwrap();
-    
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "test-multi")
+        .unwrap();
+
     println!("api_key: {:?}", upstream.api_key);
     println!("api_keys: {:?}", upstream.api_keys);
     println!("available_keys: {:?}", upstream.available_keys());
-    
+
     // 合并行为：新 key 与旧 single-key 全部合并保留
-    assert!(upstream.api_keys.contains(&"key-b".to_string()),
-        "key-b should be in api_keys, got {:?}", upstream.api_keys);
-    assert!(upstream.api_keys.contains(&"key-c".to_string()),
-        "key-c should be in api_keys, got {:?}", upstream.api_keys);
-    assert!(upstream.api_keys.contains(&"key-d".to_string()),
-        "key-d should be in api_keys, got {:?}", upstream.api_keys);
+    assert!(
+        upstream.api_keys.contains(&"key-b".to_string()),
+        "key-b should be in api_keys, got {:?}",
+        upstream.api_keys
+    );
+    assert!(
+        upstream.api_keys.contains(&"key-c".to_string()),
+        "key-c should be in api_keys, got {:?}",
+        upstream.api_keys
+    );
+    assert!(
+        upstream.api_keys.contains(&"key-d".to_string()),
+        "key-d should be in api_keys, got {:?}",
+        upstream.api_keys
+    );
     // key-a from api_key field is merged into api_keys
-    assert!(upstream.api_keys.contains(&"key-a".to_string()),
-        "key-a should be merged from api_key field, got {:?}", upstream.api_keys);
+    assert!(
+        upstream.api_keys.contains(&"key-a".to_string()),
+        "key-a should be merged from api_key field, got {:?}",
+        upstream.api_keys
+    );
     // original single-key is also merged
-    assert!(upstream.api_keys.contains(&"single-key".to_string()),
-        "single-key should survive merge, got {:?}", upstream.api_keys);
+    assert!(
+        upstream.api_keys.contains(&"single-key".to_string()),
+        "single-key should survive merge, got {:?}",
+        upstream.api_keys
+    );
     assert_eq!(upstream.api_keys.len(), 5);
-    
+
     // available_keys 应该返回全部 5 个 key (包含 legacy api_key)
     let all_keys = upstream.available_keys();
     assert_eq!(all_keys.len(), 5);
@@ -1715,7 +1835,9 @@ async fn test_freekey_sync_then_list_shows_upstream() {
         .unwrap();
 
     assert_eq!(sync_response.status(), StatusCode::OK);
-    let sync_body = axum::body::to_bytes(sync_response.into_body(), usize::MAX).await.unwrap();
+    let sync_body = axum::body::to_bytes(sync_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let sync_json: Value = serde_json::from_slice(&sync_body).unwrap();
     println!("sync response: {:?}", sync_json);
     assert_eq!(sync_json["created"].as_u64().unwrap(), 1);
@@ -1735,22 +1857,30 @@ async fn test_freekey_sync_then_list_shows_upstream() {
         .unwrap();
 
     assert_eq!(list_response.status(), StatusCode::OK);
-    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX).await.unwrap();
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let list_json: Value = serde_json::from_slice(&list_body).unwrap();
-    println!("list response: {:?}", serde_json::to_string_pretty(&list_json).unwrap());
-    
+    println!(
+        "list response: {:?}",
+        serde_json::to_string_pretty(&list_json).unwrap()
+    );
+
     // 3. 验证列表中有我们创建的上游
     assert!(list_json.as_array().unwrap().len() >= 1);
-    let found = list_json.as_array().unwrap().iter().any(|u| u["name"] == "test-list-verify");
+    let found = list_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["name"] == "test-list-verify");
     assert!(found, "Created upstream should appear in the list");
-    
+
     // 4. 验证 snapshot 数据
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams.len(), 1);
     assert_eq!(snapshot.upstreams[0].name, "test-list-verify");
     assert_eq!(snapshot.upstreams[0].api_key, "sk-verify-key");
 }
-
 
 // ============================================================================
 // Key merge tests — verify that update merges rather than replaces keys
@@ -1804,14 +1934,32 @@ async fn test_upstreams_update_merges_api_keys() {
 
     // All three keys should be present
     let snapshot = state.snapshot().await;
-    let u = snapshot.upstreams.iter().find(|u| u.id == "upstream-1").unwrap();
-    assert!(u.api_keys.contains(&"sk-existing-key".to_string()),
-        "old key should survive merge, got {:?}", u.api_keys);
-    assert!(u.api_keys.contains(&"sk-new-key-1".to_string()),
-        "new key 1 should be merged, got {:?}", u.api_keys);
-    assert!(u.api_keys.contains(&"sk-new-key-2".to_string()),
-        "new key 2 should be merged, got {:?}", u.api_keys);
-    assert_eq!(u.api_keys.len(), 3, "should have 3 unique keys, got {:?}", u.api_keys);
+    let u = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
+    assert!(
+        u.api_keys.contains(&"sk-existing-key".to_string()),
+        "old key should survive merge, got {:?}",
+        u.api_keys
+    );
+    assert!(
+        u.api_keys.contains(&"sk-new-key-1".to_string()),
+        "new key 1 should be merged, got {:?}",
+        u.api_keys
+    );
+    assert!(
+        u.api_keys.contains(&"sk-new-key-2".to_string()),
+        "new key 2 should be merged, got {:?}",
+        u.api_keys
+    );
+    assert_eq!(
+        u.api_keys.len(),
+        3,
+        "should have 3 unique keys, got {:?}",
+        u.api_keys
+    );
 }
 
 #[tokio::test]
@@ -1866,20 +2014,41 @@ async fn test_upstreams_update_merges_api_key_models() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let snapshot = state.snapshot().await;
-    let u = snapshot.upstreams.iter().find(|u| u.id == "upstream-1").unwrap();
+    let u = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
 
     // sk-key-a should have both models merged
-    let key_a = u.api_key_models.iter().find(|m| m.api_key == "sk-key-a").unwrap();
-    assert!(key_a.supported_models.contains(&"gpt-4".to_string()),
-        "sk-key-a should retain gpt-4, got {:?}", key_a.supported_models);
-    assert!(key_a.supported_models.contains(&"gpt-4-turbo".to_string()),
-        "sk-key-a should gain gpt-4-turbo, got {:?}", key_a.supported_models);
+    let key_a = u
+        .api_key_models
+        .iter()
+        .find(|m| m.api_key == "sk-key-a")
+        .unwrap();
+    assert!(
+        key_a.supported_models.contains(&"gpt-4".to_string()),
+        "sk-key-a should retain gpt-4, got {:?}",
+        key_a.supported_models
+    );
+    assert!(
+        key_a.supported_models.contains(&"gpt-4-turbo".to_string()),
+        "sk-key-a should gain gpt-4-turbo, got {:?}",
+        key_a.supported_models
+    );
     assert_eq!(key_a.supported_models.len(), 2);
 
     // sk-key-b should be present with its model
-    let key_b = u.api_key_models.iter().find(|m| m.api_key == "sk-key-b").unwrap();
-    assert!(key_b.supported_models.contains(&"claude-3".to_string()),
-        "sk-key-b should have claude-3, got {:?}", key_b.supported_models);
+    let key_b = u
+        .api_key_models
+        .iter()
+        .find(|m| m.api_key == "sk-key-b")
+        .unwrap();
+    assert!(
+        key_b.supported_models.contains(&"claude-3".to_string()),
+        "sk-key-b should have claude-3, got {:?}",
+        key_b.supported_models
+    );
     assert_eq!(key_b.supported_models.len(), 1);
 
     assert_eq!(u.api_key_models.len(), 2);
@@ -1936,9 +2105,21 @@ async fn test_upstreams_update_merge_dedup_keys() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let snapshot = state.snapshot().await;
-    let u = snapshot.upstreams.iter().find(|u| u.id == "upstream-1").unwrap();
-    let count = u.api_keys.iter().filter(|k| k == &"sk-existing-key").count();
-    assert_eq!(count, 1, "sk-existing-key should not be duplicated, got {:?}", u.api_keys);
+    let u = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
+    let count = u
+        .api_keys
+        .iter()
+        .filter(|k| k == &"sk-existing-key")
+        .count();
+    assert_eq!(
+        count, 1,
+        "sk-existing-key should not be duplicated, got {:?}",
+        u.api_keys
+    );
 }
 
 #[tokio::test]
@@ -1967,7 +2148,11 @@ async fn test_upstreams_update_empty_keys_preserves_existing() {
 
     let initial_keys = {
         let snapshot = state.snapshot().await;
-        let u = snapshot.upstreams.iter().find(|u| u.id == "upstream-1").unwrap();
+        let u = snapshot
+            .upstreams
+            .iter()
+            .find(|u| u.id == "upstream-1")
+            .unwrap();
         u.api_keys.clone()
     };
 
@@ -1993,6 +2178,13 @@ async fn test_upstreams_update_empty_keys_preserves_existing() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let snapshot = state.snapshot().await;
-    let u = snapshot.upstreams.iter().find(|u| u.id == "upstream-1").unwrap();
-    assert_eq!(u.api_keys, initial_keys, "empty input should not clear existing keys");
+    let u = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "upstream-1")
+        .unwrap();
+    assert_eq!(
+        u.api_keys, initial_keys,
+        "empty input should not clear existing keys"
+    );
 }
