@@ -12,16 +12,16 @@ mod postgres;
 #[path = "state/store.rs"]
 mod store;
 
-#[path = "state/types.rs"]
-mod types;
-#[path = "state/normalize.rs"]
-mod normalize;
-#[path = "state/usage.rs"]
-mod usage;
 #[path = "state/context_profile.rs"]
 mod context_profile;
 #[path = "state/freekey_sync.rs"]
 mod freekey_sync;
+#[path = "state/normalize.rs"]
+mod normalize;
+#[path = "state/types.rs"]
+mod types;
+#[path = "state/usage.rs"]
+mod usage;
 
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
@@ -45,38 +45,34 @@ pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, Us
 use postgres::PostgresStateStore;
 pub use store::{StateStore, StoreFuture};
 
+pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
 pub use types::{
-    AppConfig, UpstreamConfig, ApiKeyModelConfig, ModelRequestCostConfig,
-    ModelContextConfig, DefaultModelContextConfig, GlobalContextProfile,
-    UpstreamMutationError, DownstreamConfig, UsageLog, AnnouncementLevel,
-    AnnouncementConfig, PersistedState, ADMIN_SESSION_TTL_SECONDS,
-    default_upstream_request_quota_window_hours, default_upstream_request_quota_requests,
-    default_upstream_request_quota_5h, default_upstream_requests_per_minute,
-    default_upstream_max_concurrency, default_model_context_output_reserve,
+    default_model_context_output_reserve, default_upstream_max_concurrency,
+    default_upstream_request_quota_5h, default_upstream_request_quota_requests,
+    default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
+    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, DefaultModelContextConfig,
+    DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
+    PersistedState, UpstreamConfig, UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
 };
 pub use usage::{
-    PerMinuteUsage, RequestQuotaUsage, TokenUsage, TokenQuota, DailyStats, ModelStats,
-    portal_model_is_allowed,
+    portal_model_is_allowed, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage, TokenQuota,
+    TokenUsage,
 };
-pub use freekey_sync::{FreekeySyncSummary, FreekeySyncItem};
 
+use context_profile::{
+    normalize_context_profile_base_url, normalize_global_context_profiles_for_storage,
+};
 use usage::{
     build_downstream_request_windows, build_downstream_token_windows,
-    DownstreamTokenEvent,
-    downstream_token_retention_seconds, downstream_token_retry_after_seconds,
+    downstream_token_retention_seconds, downstream_token_retry_after_seconds, DownstreamTokenEvent,
     DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS, DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
 };
-use context_profile::{normalize_context_profile_base_url, normalize_global_context_profiles_for_storage};
 
 pub use crate::util::{
-    unix_seconds, new_id, encode_secret_suffix, join_upstream_url,
-    should_bypass_proxy_for_url, should_bypass_proxy_for_host,
-    build_upstream_http_client,
-    prune_expired_admin_sessions,
+    build_upstream_http_client, encode_secret_suffix, join_upstream_url, new_id,
+    prune_expired_admin_sessions, should_bypass_proxy_for_host, should_bypass_proxy_for_url,
+    unix_seconds,
 };
-
-
-
 
 #[derive(Clone)]
 pub struct AppState {
@@ -421,7 +417,6 @@ impl AppState {
         }
     }
 
-
     pub async fn load_from_path(path: impl AsRef<Path>, config: AppConfig) -> io::Result<Self> {
         if let Ok(database_url) = env::var("DATABASE_URL") {
             if !database_url.trim().is_empty() {
@@ -749,9 +744,9 @@ impl AppState {
             .await;
     }
 
-    pub async fn mark_upstream_concurrency_full(&self, upstream_id: &str, backoff_ms: u64) {
-        let backoff_seconds = backoff_ms.saturating_add(999) / 1000;
-        self.mark_upstream_cooldown(upstream_id, backoff_seconds.max(1), "concurrency_full")
+    pub async fn mark_upstream_concurrency_full(&self, upstream_id: &str, cooldown_ms: u64) {
+        let cooldown_seconds = cooldown_ms.saturating_add(999) / 1000;
+        self.mark_upstream_cooldown(upstream_id, cooldown_seconds.max(1), "concurrency_full")
             .await;
     }
 
@@ -1563,7 +1558,6 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     pub last_retry_after_seconds: Option<u64>,
 }
 
-
 #[derive(Debug, Clone)]
 struct RoutingAffinityEntry {
     upstream_id: String,
@@ -1590,17 +1584,6 @@ impl UpstreamAdmissionError {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
 
 fn quota_event_cost(events: &VecDeque<QuotaEvent>) -> f64 {
     events.iter().map(|event| event.cost).sum()
@@ -1796,4 +1779,3 @@ impl AppState {
         Ok(())
     }
 }
-

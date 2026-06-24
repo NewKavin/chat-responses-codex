@@ -1,11 +1,12 @@
+use super::admin::*;
+use super::concurrency_retry;
+use super::portal::*;
 use crate::protocol::{
     chat_request_to_responses_payload, chat_response_to_responses_payload,
     responses_request_to_chat_payload, responses_response_to_chat_payload, ProtocolError,
     StreamTranslator,
 };
 use crate::routing::UpstreamProtocol;
-use super::admin::*;
-use super::portal::*;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, AppConfig, AppState,
     GlobalContextProfile, UpstreamConfig, UsageLog,
@@ -1024,7 +1025,9 @@ async fn process_gateway_request(
     endpoint: EndpointKind,
 ) -> Result<DispatchResult, GatewayError> {
     let secret = downstream_secret_from_headers(&headers)?;
-    let downstream = state.downstream_for_secret(&secret).await
+    let downstream = state
+        .downstream_for_secret(&secret)
+        .await
         .ok_or_else(|| GatewayError::Unauthorized("invalid downstream key".into()))?;
     let routing_snapshot = state.routing_snapshot().await;
 
@@ -1537,6 +1540,14 @@ async fn process_gateway_request(
             })
             .collect::<Vec<_>>();
         let upstreams_for_retry = upstreams.clone();
+        let concurrency_retry_is_exclusive =
+            concurrency_retry::is_exclusive_model(upstreams_for_retry.len());
+        let concurrency_retry_budget_ms = concurrency_retry::concurrency_retry_budget_ms(
+            &state.config,
+            concurrency_retry_is_exclusive,
+        );
+        let concurrency_retry_budget_seconds =
+            concurrency_retry_budget_ms.saturating_add(999) / 1000;
         tracing::debug!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -1707,7 +1718,8 @@ async fn process_gateway_request(
                             return Ok(result);
                         }
                         Err(error)
-                            if key_index + 1 < candidate_keys.len() && should_try_next_key(&error) =>
+                            if key_index + 1 < candidate_keys.len()
+                                && should_try_next_key(&error) =>
                         {
                             tracing::warn!(
                                 request_id = %request_id,
@@ -1731,12 +1743,29 @@ async fn process_gateway_request(
                             message,
                             retry_after_seconds,
                         }) => {
-                            let backoff_ms =
-                                state.config.upstream_concurrency_retry_backoff_ms.max(1);
-                            let configured_retry_after_seconds =
-                                (backoff_ms.saturating_add(999) / 1000).max(1);
+                            let theoretical_backoff_ms =
+                                concurrency_retry::concurrency_retry_base_delay_ms(
+                                    &state.config,
+                                    concurrency_retry_attempts_used,
+                                );
+                            let theoretical_retry_after_seconds =
+                                theoretical_backoff_ms.saturating_add(999) / 1000;
+                            let retry_plan = concurrency_retry::plan_concurrency_retry(
+                                &state.config,
+                                concurrency_retry_attempts_used,
+                                started.elapsed().as_millis() as u64,
+                                concurrency_retry_is_exclusive,
+                                &request_id,
+                                &upstream.id,
+                                model,
+                            );
                             let retry_after_seconds = retry_after_seconds
-                                .unwrap_or(configured_retry_after_seconds)
+                                .unwrap_or_else(|| {
+                                    retry_plan
+                                        .as_ref()
+                                        .map(|plan| plan.retry_after_seconds)
+                                        .unwrap_or(theoretical_retry_after_seconds)
+                                })
                                 .max(1);
                             tracing::warn!(
                                 request_id = %request_id,
@@ -1750,13 +1779,21 @@ async fn process_gateway_request(
                                 selected_upstream_key_prefix = %key_prefix(api_key),
                                 error = %message,
                                 retry_after_seconds,
+                                model_is_exclusive = concurrency_retry_is_exclusive,
+                                concurrency_retry_budget_seconds,
                                 "upstream concurrency full"
                             );
                             if state.config.routing_affinity_enabled {
                                 state.clear_affinity_upstream(&downstream.id, normalized_model);
                             }
                             state
-                                .mark_upstream_concurrency_full(&upstream.id, backoff_ms)
+                                .mark_upstream_concurrency_full(
+                                    &upstream.id,
+                                    retry_plan
+                                        .as_ref()
+                                        .map(|plan| plan.sleep_ms)
+                                        .unwrap_or(theoretical_backoff_ms),
+                                )
                                 .await;
                             last_error = Some(GatewayError::ConcurrencyFull {
                                 message,
@@ -1765,9 +1802,7 @@ async fn process_gateway_request(
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
 
-                            if concurrency_retry_attempts_used
-                                < state.config.upstream_concurrency_retry_attempts.max(1)
-                            {
+                            if let Some(plan) = retry_plan {
                                 concurrency_retry_attempts_used =
                                     concurrency_retry_attempts_used.saturating_add(1);
                                 tracing::info!(
@@ -1785,9 +1820,11 @@ async fn process_gateway_request(
                                     concurrency_retry_attempts_limit = state
                                         .config
                                         .upstream_concurrency_retry_attempts,
+                                    model_is_exclusive = concurrency_retry_is_exclusive,
+                                    concurrency_retry_budget_seconds,
                                     "waiting for upstream concurrency slot before retrying"
                                 );
-                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                tokio::time::sleep(Duration::from_millis(plan.sleep_ms)).await;
                                 continue;
                             }
 
@@ -1848,11 +1885,16 @@ async fn process_gateway_request(
                             // 2. Force retry enabled (allows waiting even when Retry-After > max_retry_after_seconds)
                             // 3. OR Retry-After is within acceptable bounds
                             // This ensures single-model upstreams get proper retry behavior
-                            let can_force_retry = state.config.upstream_rate_limit_force_retry_enabled
+                            let can_force_retry = state
+                                .config
+                                .upstream_rate_limit_force_retry_enabled
                                 && retry_after_seconds
                                     <= state.config.upstream_rate_limit_retry_window_seconds.max(1);
                             let within_retry_bounds = retry_after_seconds
-                                <= state.config.upstream_rate_limit_max_retry_after_seconds.max(1);
+                                <= state
+                                    .config
+                                    .upstream_rate_limit_max_retry_after_seconds
+                                    .max(1);
 
                             if !has_available_alternative
                                 && rate_limit_retry_attempts_used
@@ -2229,11 +2271,17 @@ fn responses_function_tool_name(tool: &Value) -> Option<String> {
     let object = tool.as_object()?;
 
     if let Some(function) = object.get("function").and_then(Value::as_object) {
-        return function.get("name").and_then(Value::as_str).map(str::to_string);
+        return function
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
     }
 
     if object.get("type").and_then(Value::as_str) == Some("function") {
-        return object.get("name").and_then(Value::as_str).map(str::to_string);
+        return object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
     }
 
     None
@@ -3058,10 +3106,7 @@ async fn send_to_upstream(
         let send_future = state
             .client_for_url(&url)
             .post(url.clone())
-            .header(
-                header::AUTHORIZATION,
-                format!("Bearer {}", api_key),
-            )
+            .header(header::AUTHORIZATION, format!("Bearer {}", api_key))
             .json(&upstream_body)
             .send();
 
@@ -3223,15 +3268,20 @@ async fn send_to_upstream(
             }));
         }
 
-        if matches!(feedback, UpstreamFeedbackClassification::ProtocolUnsupported) {
-            return Err(GatewayError::TemporaryUpstreamUnavailable(if error_excerpt.is_empty() {
-                format!(
-                    "upstream does not support this model or endpoint (status {})",
-                    status.as_u16()
-                )
-            } else {
-                format!("upstream does not support this model or endpoint: {error_excerpt}")
-            }));
+        if matches!(
+            feedback,
+            UpstreamFeedbackClassification::ProtocolUnsupported
+        ) {
+            return Err(GatewayError::TemporaryUpstreamUnavailable(
+                if error_excerpt.is_empty() {
+                    format!(
+                        "upstream does not support this model or endpoint (status {})",
+                        status.as_u16()
+                    )
+                } else {
+                    format!("upstream does not support this model or endpoint: {error_excerpt}")
+                },
+            ));
         }
 
         // When the upstream HTTP status is 5xx, the upstream itself is failing.

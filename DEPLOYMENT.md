@@ -33,6 +33,8 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
 - `UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS=20`
 - `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50`
+- `UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=10`
+- `UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=2`
 - `UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10`
 - `UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800`
 - `UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400`
@@ -42,7 +44,11 @@ heartbeats before the idle watchdog fires.
 
 `UPSTREAM_RATE_LIMIT_*` handles ordinary 429 retries. `UPSTREAM_CONCURRENCY_RETRY_*`
 handles 429s that come from upstream concurrency saturation, where the account is
-alive but temporarily out of slots.
+alive but temporarily out of slots. `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS`
+controls the initial wait, which then grows exponentially with deterministic jitter.
+`UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS` caps the total per-request wait.
+`UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER` stretches that budget
+when only one active upstream supports the requested model.
 
 Optional for file-backed compatibility mode:
 
@@ -97,6 +103,8 @@ docker run -d \
   -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
   -e UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS=20 \
   -e UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50 \
+  -e UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=10 \
+  -e UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=2 \
   -e UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10 \
   -e UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800 \
   -e UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400 \

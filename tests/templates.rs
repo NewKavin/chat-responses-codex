@@ -90,6 +90,19 @@ fn app_config_defaults_stream_watchdog_settings() {
 }
 
 #[test]
+fn app_config_defaults_concurrency_retry_policy() {
+    let config = AppConfig::default();
+
+    assert_eq!(config.upstream_concurrency_retry_attempts, 20);
+    assert_eq!(config.upstream_concurrency_retry_backoff_ms, 50);
+    assert_eq!(config.upstream_concurrency_retry_max_wait_seconds, 10);
+    assert_eq!(
+        config.upstream_concurrency_retry_exclusive_wait_multiplier,
+        2
+    );
+}
+
+#[test]
 fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_settings() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();
@@ -118,6 +131,8 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
     for marker in [
         "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
         "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS",
+        "UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS",
+        "UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS",
     ] {
         assert!(

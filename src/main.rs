@@ -57,6 +57,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .max(1),
         upstream_concurrency_retry_backoff_ms: env_u64("UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS", 50)
             .max(1),
+        upstream_concurrency_retry_max_wait_seconds: env_u64(
+            "UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS",
+            10,
+        )
+        .max(1),
+        upstream_concurrency_retry_exclusive_wait_multiplier: env_u64(
+            "UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER",
+            2,
+        )
+        .max(1),
         context_retry_max_attempts_chat: env_u32(
             "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT",
             context_retry_max_attempts_chat_default,
@@ -87,11 +97,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         redis_url: env::var("REDIS_URL")
             .ok()
             .filter(|value| !value.trim().is_empty()),
-        model_probe_refresh_interval_seconds: env_u64(
-            "MODEL_PROBE_REFRESH_INTERVAL_SECONDS",
-            15,
-        )
-        .max(1),
+        model_probe_refresh_interval_seconds: env_u64("MODEL_PROBE_REFRESH_INTERVAL_SECONDS", 15)
+            .max(1),
         dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
         admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
@@ -118,11 +125,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             86_400,
         )
         .max(1),
-        admin_upstream_timeout_seconds: env_u64(
-            "ADMIN_UPSTREAM_TIMEOUT_SECONDS",
-            30,
-        )
-        .max(1),
+        admin_upstream_timeout_seconds: env_u64("ADMIN_UPSTREAM_TIMEOUT_SECONDS", 30).max(1),
     };
 
     init_tracing(&log_path);
