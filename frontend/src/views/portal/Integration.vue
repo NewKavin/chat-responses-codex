@@ -104,9 +104,11 @@
           <span class="compat-protocol">Messages 协议</span>
           <code>{{ gatewayApiBaseUrl }}/messages</code>
           <span class="compat-auth">Bearer 下游 Key</span>
-          <span class="compat-models">/v1/models + custom model option</span>
+          <span class="compat-models">/v1/models</span>
+          <span class="compat-adapter">网关内部转成 Chat Completions 再发给上游</span>
           <div class="compat-clients">
             <el-tag size="small" effect="plain">Claude Code</el-tag>
+            <el-tag size="small" effect="plain">其他兼容工具</el-tag>
           </div>
         </div>
       </div>
@@ -116,7 +118,7 @@
         type="info"
         :closable="false"
         show-icon
-        title="网关同时暴露 `/v1/chat/completions`、`/v1/responses`、`/v1/models` 和 `/v1/messages`。客户端只需要根据自己支持的协议族选对应的 endpoint 和 preset。"
+        title="网关同时暴露 `/v1/chat/completions`、`/v1/responses`、`/v1/models`、`/v1/messages` 和 `/v1/messages/count_tokens`。上游只支持 Chat Completions 和 Responses 两种协议；`/v1/messages` 是网关的适配层，收到 Anthropic 格式请求后内部转成 Chat Completions 再发给上游。客户端只需要根据自己支持的协议族选对应的 endpoint 和 preset。"
       />
     </el-card>
 

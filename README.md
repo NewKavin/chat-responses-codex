@@ -226,6 +226,7 @@ flowchart LR
 - Cline → 门户集成页的 **Cline / OpenAI 兼容** preset（`baseURL` + `apiKey` + `model`）
 - OpenCode → 门户集成页的 **OpenCode** preset（`opencode.json`）
 - Claude Code → 门户集成页的 **Claude Code** preset（`settings.json`）
+- Anthropic 兼容客户端 → 门户集成页的 **Anthropic / Messages 兼容** preset（`baseURL` + `apiKey` + `model`）
 
 ### Codex 集成
 
@@ -447,6 +448,7 @@ Each client only needs a `base_url` and a downstream Bearer key:
 - Cline → portal integration page **Cline / OpenAI-compatible** preset (`baseURL` + `apiKey` + `model`)
 - OpenCode → portal integration page **OpenCode** preset (`opencode.json`)
 - Claude Code → portal integration page **Claude Code** preset (`settings.json`)
+- Anthropic-compatible clients → portal integration page **Anthropic / Messages-compatible** preset (`baseURL` + `apiKey` + `model`)
 
 ### Codex Integration
 

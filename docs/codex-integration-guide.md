@@ -18,8 +18,9 @@
 | Cline | Chat Completions | `/v1/chat/completions` | 门户 Cline preset（`baseURL` + `apiKey` + `model`） |
 | OpenCode | Chat Completions | `/v1/chat/completions` | `opencode.json` |
 | Claude Code | Messages | `/v1/messages` | `settings.json`（含 `ANTHROPIC_BASE_URL` 等环境变量） |
+| 其他 Anthropic 兼容客户端 | Messages | `/v1/messages` | 门户 Anthropic preset（`baseURL` + `apiKey` + `model`） |
 
-如果你已经登录了门户，优先打开 `<gateway_origin>/portal/integration`。页面会自动读取当前下游 key、当前网关 URL 和 live `/v1/models`，直接生成 Codex / OpenCode / Claude Code / Cline 的可复制配置。下面这些手工步骤保留着，方便你离线配置或做模板化部署。
+如果你已经登录了门户，优先打开 `<gateway_origin>/portal/integration`。页面会自动读取当前下游 key、当前网关 URL 和 live `/v1/models`，直接生成 Codex / OpenCode / Claude Code / Cline / Anthropic 兼容 的可复制配置。下面这些手工步骤保留着，方便你离线配置或做模板化部署。
 
 ## 先看整体结构
 
