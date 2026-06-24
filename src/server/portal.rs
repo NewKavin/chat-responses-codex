@@ -298,6 +298,38 @@ pub(super) async fn portal_models(State(state): State<AppState>, headers: Header
     Json(model_stats).into_response()
 }
 
+pub(super) async fn portal_model_probe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let snapshot = state.snapshot().await;
+    let downstream = match snapshot.downstreams.iter().find(|d| d.id == downstream_id) {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": "Downstream not found"}})),
+            )
+                .into_response()
+        }
+    };
+
+    let cache_key = format!("model_probe:portal:{downstream_id}");
+    let response = super::admin::build_model_probe_response(
+        &state,
+        Some(downstream.model_allowlist.as_slice()),
+        &cache_key,
+    )
+    .await;
+
+    Json(response).into_response()
+}
+
 pub(super) async fn portal_announcement(
     State(state): State<AppState>,
     headers: HeaderMap,

@@ -38,7 +38,13 @@ describe('admin api auth behavior', () => {
         },
         daily_series: [],
         failure_categories: [],
-        user_agent_clusters: []
+        user_agent_clusters: [],
+        model_usage: [
+          { name: 'gpt-4o', value: 4 }
+        ],
+        downstream_usage: [
+          { name: 'Team Alpha', value: 3 }
+        ]
       }
     }
 
@@ -56,6 +62,29 @@ describe('admin api auth behavior', () => {
       app_name: 'chat-responses-codex'
     })
     expect(view.analytics.summary.total_requests).toBe(9)
+  })
+
+  it('calls the model probe endpoint', async () => {
+    const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: {
+        channels: [],
+        models: [],
+        summary: {
+          total_channels: 0,
+          healthy_channels: 0,
+          offline_channels: 0,
+          degraded_channels: 0,
+          total_models: 0,
+          average_latency_ms: 0
+        },
+        refreshed_at: 0,
+        refresh_interval_seconds: 15
+      }
+    } as never)
+
+    await adminApi.getModelProbe()
+
+    expect(spy).toHaveBeenCalledWith('/admin/model-probe')
   })
 })
 

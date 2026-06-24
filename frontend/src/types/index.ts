@@ -15,6 +15,11 @@ export interface LoginResponse {
 // Dashboard Types
 // ============================================================================
 
+export interface DashboardBreakdownItem {
+  name: string
+  value: number
+}
+
 export interface DashboardData {
   upstreams_count: number
   upstreams_active: number
@@ -46,14 +51,10 @@ export interface DashboardAnalyticsRange {
     avg_latency_ms: number
     success_rate: number
   }>
-  failure_categories: Array<{
-    name: string
-    value: number
-  }>
-  user_agent_clusters: Array<{
-    name: string
-    value: number
-  }>
+  failure_categories: DashboardBreakdownItem[]
+  user_agent_clusters: DashboardBreakdownItem[]
+  model_usage: DashboardBreakdownItem[]
+  downstream_usage: DashboardBreakdownItem[]
 }
 
 // ============================================================================ 
@@ -264,6 +265,40 @@ export interface PortalUsageHistory {
   recent_logs_page: number
   recent_logs_page_size: number
   recent_logs_total_pages: number
+}
+
+export interface ModelProbeSummary {
+  total_channels: number
+  healthy_channels: number
+  offline_channels: number
+  degraded_channels: number
+  total_models: number
+  average_latency_ms: number
+}
+
+export interface ModelProbeChannel {
+  upstream_id: string
+  upstream_name: string
+  key_prefix: string
+  status: 'healthy' | 'offline' | 'degraded' | string
+  latency_ms: number
+  model_count: number
+  models: string[]
+  last_probe_at: number
+  error: string | null
+}
+
+export interface ModelProbeModel {
+  model: string
+  channel_count: number
+}
+
+export interface ModelProbeResponse {
+  refreshed_at: number
+  refresh_interval_seconds: number
+  summary: ModelProbeSummary
+  channels: ModelProbeChannel[]
+  models: ModelProbeModel[]
 }
 
 // ============================================================================

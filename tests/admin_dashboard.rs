@@ -334,6 +334,241 @@ async fn admin_dashboard_returns_preaggregated_analytics() {
 }
 
 #[tokio::test]
+async fn admin_dashboard_returns_model_and_client_breakdowns() {
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+
+    let downstream_alpha = generate_downstream_key("alpha");
+    let downstream_beta = generate_downstream_key("beta");
+    let now = chat_responses_codex::state::unix_seconds();
+    let seven_days_ago = now.saturating_sub(7 * 24 * 60 * 60);
+
+    let state = PersistedState {
+        upstreams: vec![
+            UpstreamConfig {
+                id: "upstream-1".to_string(),
+                name: "Primary".to_string(),
+                base_url: "https://primary.example.com".to_string(),
+                api_key: "sk-primary".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["GLM-5".to_string()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            },
+            UpstreamConfig {
+                id: "upstream-2".to_string(),
+                name: "Secondary".to_string(),
+                base_url: "https://secondary.example.com".to_string(),
+                api_key: "sk-secondary".to_string(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["DeepSeek-R1".to_string()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            },
+        ],
+        downstreams: vec![
+            DownstreamConfig {
+                id: "downstream-alpha".to_string(),
+                name: "Team Alpha".to_string(),
+                hash: downstream_alpha.hash.clone(),
+                plaintext_key: Some(downstream_alpha.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["GLM-5".to_string(), "DeepSeek-R1".to_string()],
+                per_minute_limit: 100,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: Some(10000),
+                monthly_token_limit: Some(100000),
+                request_quota_window_hours: Some(24),
+                request_quota_requests: Some(1000),
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            },
+            DownstreamConfig {
+                id: "downstream-beta".to_string(),
+                name: "Team Beta".to_string(),
+                hash: downstream_beta.hash.clone(),
+                plaintext_key: Some(downstream_beta.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["DeepSeek-R1".to_string()],
+                per_minute_limit: 100,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            },
+        ],
+        usage_logs: vec![
+            UsageLog {
+                id: "log-1".to_string(),
+                downstream_key_id: "downstream-alpha".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("Team Alpha".to_string()),
+                upstream_name: Some("Primary".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "GLM-5".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: Some("Claude-Code/1.2.3".to_string()),
+                request_id: "req-1".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                total_tokens: 30,
+                latency_ms: 100,
+                created_at: now - 60,
+            },
+            UsageLog {
+                id: "log-2".to_string(),
+                downstream_key_id: "downstream-alpha".to_string(),
+                upstream_key_id: "upstream-2".to_string(),
+                downstream_name: Some("Team Alpha".to_string()),
+                upstream_name: Some("Secondary".to_string()),
+                endpoint: "/v1/responses".to_string(),
+                model: "DeepSeek-R1".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: Some("OpenAI/1.0".to_string()),
+                request_id: "req-2".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 20,
+                completion_tokens: 30,
+                total_tokens: 50,
+                latency_ms: 200,
+                created_at: now - 120,
+            },
+            UsageLog {
+                id: "log-3".to_string(),
+                downstream_key_id: "downstream-beta".to_string(),
+                upstream_key_id: "upstream-2".to_string(),
+                downstream_name: Some("Team Beta".to_string()),
+                upstream_name: Some("Secondary".to_string()),
+                endpoint: "/v1/responses".to_string(),
+                model: "DeepSeek-R1".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: Some("curl/8.1.0".to_string()),
+                request_id: "req-3".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 30,
+                completion_tokens: 40,
+                total_tokens: 70,
+                latency_ms: 150,
+                created_at: now - 180,
+            },
+            UsageLog {
+                id: "log-4".to_string(),
+                downstream_key_id: "downstream-beta".to_string(),
+                upstream_key_id: "upstream-1".to_string(),
+                downstream_name: Some("Team Beta".to_string()),
+                upstream_name: Some("Primary".to_string()),
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "GLM-5".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: Some("curl/8.1.0".to_string()),
+                request_id: "req-4".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 40,
+                completion_tokens: 10,
+                total_tokens: 50,
+                latency_ms: 175,
+                created_at: now - 240,
+            },
+            UsageLog {
+                id: "log-5".to_string(),
+                downstream_key_id: "downstream-alpha".to_string(),
+                upstream_key_id: "upstream-2".to_string(),
+                downstream_name: Some("Team Alpha".to_string()),
+                upstream_name: Some("Secondary".to_string()),
+                endpoint: "/v1/responses".to_string(),
+                model: "DeepSeek-R1".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: Some("OpenAI/1.0".to_string()),
+                request_id: "req-5".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 12,
+                completion_tokens: 18,
+                total_tokens: 30,
+                latency_ms: 210,
+                created_at: now - 300,
+            },
+        ],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+
+    let app_state = AppState::new(state, unique_state_path(), config);
+    let app = chat_responses_codex::server::build_router(app_state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/dashboard?range=7d")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let model_usage = result["analytics"]["model_usage"].as_array().unwrap();
+    assert_eq!(model_usage[0]["name"], "DeepSeek-R1");
+    assert_eq!(model_usage[0]["value"], 3);
+    assert_eq!(model_usage[1]["name"], "GLM-5");
+    assert_eq!(model_usage[1]["value"], 2);
+
+    let downstream_usage = result["analytics"]["downstream_usage"].as_array().unwrap();
+    assert_eq!(downstream_usage[0]["name"], "Team Alpha");
+    assert_eq!(downstream_usage[0]["value"], 3);
+    assert_eq!(downstream_usage[1]["name"], "Team Beta");
+    assert_eq!(downstream_usage[1]["value"], 2);
+
+    assert!(result["analytics"]["daily_series"].is_array());
+    assert!(result["analytics"]["failure_categories"].is_array());
+}
+
+#[tokio::test]
 async fn admin_dashboard_user_agent_clusters_deduplicate_by_downstream() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);

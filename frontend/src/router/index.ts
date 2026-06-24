@@ -1,7 +1,10 @@
-import { createRouter, createWebHashHistory } from 'vue-router'
+import { createMemoryHistory, createRouter, createWebHashHistory } from 'vue-router'
+
+const history =
+  typeof window === 'undefined' ? createMemoryHistory() : createWebHashHistory()
 
 const router = createRouter({
-  history: createWebHashHistory(),
+  history,
   routes: [
     {
       path: '/',
@@ -15,6 +18,12 @@ const router = createRouter({
     {
       path: '/portal',
       name: 'Portal',
+      component: () => import('@/views/portal/Portal.vue'),
+      meta: { requiresPortalAuth: true }
+    },
+    {
+      path: '/portal/model-probe',
+      name: 'PortalModelProbe',
       component: () => import('@/views/portal/Portal.vue'),
       meta: { requiresPortalAuth: true }
     },
@@ -43,6 +52,12 @@ const router = createRouter({
       path: '/admin/dashboard',
       name: 'AdminDashboard',
       component: () => import('@/views/admin/Dashboard.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/admin/model-probe',
+      name: 'AdminModelProbe',
+      component: () => import('@/views/admin/ModelProbe.vue'),
       meta: { requiresAuth: true }
     },
     {

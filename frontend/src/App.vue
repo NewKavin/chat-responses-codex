@@ -13,6 +13,7 @@
             @select="handleMenuSelect"
           >
             <el-menu-item index="/admin/dashboard">控制台总览</el-menu-item>
+            <el-menu-item index="/admin/model-probe">模型探测</el-menu-item>
             <el-menu-item index="/admin/upstreams">上游管理</el-menu-item>
             <el-menu-item index="/admin/downstreams">下游管理</el-menu-item>
             <el-menu-item index="/admin/logs">运行日志</el-menu-item>

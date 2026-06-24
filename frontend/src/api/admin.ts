@@ -9,6 +9,7 @@ import type {
   LoginRequest,
   LoginResponse,
   LogsResponse,
+  ModelProbeResponse,
   UpstreamConfig
 } from '@/types'
 
@@ -126,6 +127,8 @@ export const adminApi = {
         ...response,
         data: splitDashboardResponse(response.data)
       })),
+
+  getModelProbe: () => adminHttp.get<ModelProbeResponse>('/admin/model-probe'),
 
   // Upstreams
   getUpstreams: () => adminHttp.get<UpstreamConfig[]>('/admin/upstreams'),

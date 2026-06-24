@@ -3,6 +3,7 @@ use crate::state::{
     join_upstream_url, unix_seconds, AnnouncementConfig, AnnouncementLevel, AppState,
     ApiKeyModelConfig, DefaultModelContextConfig, DownstreamConfig, FreekeySyncItem,
     GlobalContextProfile, UpstreamConfig, UpstreamMutationError, UsageLog, UsageLogQuery,
+    portal_model_is_allowed,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
@@ -11,6 +12,7 @@ use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Debug, serde::Deserialize)]
@@ -87,6 +89,10 @@ struct DashboardAnalyticsResponse {
     daily_series: Vec<DashboardDailySeriesItem>,
     failure_categories: Vec<DashboardNamedValue>,
     user_agent_clusters: Vec<DashboardNamedValue>,
+    #[serde(default)]
+    model_usage: Vec<DashboardNamedValue>,
+    #[serde(default)]
+    downstream_usage: Vec<DashboardNamedValue>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,6 +116,44 @@ struct DashboardDailySeriesItem {
 struct DashboardNamedValue {
     name: String,
     value: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ModelProbeResponse {
+    refreshed_at: u64,
+    refresh_interval_seconds: u64,
+    summary: ModelProbeSummary,
+    channels: Vec<ModelProbeChannel>,
+    models: Vec<ModelProbeModel>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ModelProbeSummary {
+    total_channels: usize,
+    healthy_channels: usize,
+    offline_channels: usize,
+    degraded_channels: usize,
+    total_models: usize,
+    average_latency_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ModelProbeChannel {
+    upstream_id: String,
+    upstream_name: String,
+    key_prefix: String,
+    status: String,
+    latency_ms: u64,
+    model_count: usize,
+    models: Vec<String>,
+    last_probe_at: u64,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ModelProbeModel {
+    model: String,
+    channel_count: usize,
 }
 
 pub(super) async fn admin_dashboard(
@@ -156,6 +200,8 @@ pub(super) async fn admin_dashboard(
     let mut total_tokens = 0u64;
     let mut failure_counter: HashMap<String, u64> = HashMap::new();
     let mut user_agent_downstreams: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut model_usage_counter: HashMap<String, u64> = HashMap::new();
+    let mut downstream_usage_counter: HashMap<String, u64> = HashMap::new();
 
     let day_index = daily_series
         .iter()
@@ -196,6 +242,24 @@ pub(super) async fn admin_dashboard(
                 .or_default()
                 .insert(log.downstream_key_id.clone());
         }
+
+        let model_name = log.model.trim();
+        if !model_name.is_empty() {
+            *model_usage_counter
+                .entry(model_name.to_string())
+                .or_insert(0) += 1;
+        }
+
+        let downstream_name = log
+            .downstream_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| log.downstream_key_id.clone());
+        *downstream_usage_counter
+            .entry(downstream_name)
+            .or_insert(0) += 1;
     }
 
     for bucket in &mut daily_series {
@@ -230,6 +294,28 @@ pub(super) async fn admin_dashboard(
             .then(left.name.cmp(&right.name))
     });
 
+    let mut model_usage = model_usage_counter
+        .into_iter()
+        .map(|(name, value)| DashboardNamedValue { name, value })
+        .collect::<Vec<_>>();
+    model_usage.sort_by(|left, right| {
+        right
+            .value
+            .cmp(&left.value)
+            .then(left.name.cmp(&right.name))
+    });
+
+    let mut downstream_usage = downstream_usage_counter
+        .into_iter()
+        .map(|(name, value)| DashboardNamedValue { name, value })
+        .collect::<Vec<_>>();
+    downstream_usage.sort_by(|left, right| {
+        right
+            .value
+            .cmp(&left.value)
+            .then(left.name.cmp(&right.name))
+    });
+
     let analytics = DashboardAnalyticsResponse {
         range: range.to_string(),
         summary: DashboardAnalyticsSummary {
@@ -249,6 +335,8 @@ pub(super) async fn admin_dashboard(
         daily_series,
         failure_categories,
         user_agent_clusters,
+        model_usage,
+        downstream_usage,
     };
 
     let active_models = snapshot
@@ -284,6 +372,12 @@ pub(super) async fn admin_dashboard(
         )
         .await;
 
+    Json(response).into_response()
+}
+
+pub(super) async fn admin_model_probe(State(state): State<AppState>) -> impl IntoResponse {
+    let cache_key = "model_probe:admin";
+    let response = build_model_probe_response(&state, None, cache_key).await;
     Json(response).into_response()
 }
 
@@ -859,6 +953,7 @@ struct KeyModelDiscoveryResult {
     key: String,
     key_prefix: String,
     models: Vec<String>,
+    latency_ms: u64,
     error: Option<String>,
 }
 
@@ -887,16 +982,19 @@ async fn fetch_models_from_upstream_keys_concurrently(
                     key,
                     key_prefix,
                     models: Vec::new(),
+                    latency_ms: 0,
                     error: Some("key 为空".to_string()),
                 };
             }
 
+            let started = std::time::Instant::now();
             match fetch_models_from_upstream(&client, &base_url, &key, timeout_seconds).await {
                 Ok(models) => KeyModelDiscoveryResult {
                     index,
                     key,
                     key_prefix,
                     models,
+                    latency_ms: started.elapsed().as_millis().max(1) as u64,
                     error: None,
                 },
                 Err(error) => KeyModelDiscoveryResult {
@@ -904,6 +1002,7 @@ async fn fetch_models_from_upstream_keys_concurrently(
                     key,
                     key_prefix,
                     models: Vec::new(),
+                    latency_ms: started.elapsed().as_millis().max(1) as u64,
                     error: Some(error),
                 },
             }
@@ -915,6 +1014,133 @@ async fn fetch_models_from_upstream_keys_concurrently(
 
     results.sort_by_key(|item| item.index);
     results
+}
+
+pub(super) async fn build_model_probe_response(
+    state: &AppState,
+    allowlist: Option<&[String]>,
+    cache_key: &str,
+) -> ModelProbeResponse {
+    if let Some(cached) = state
+        .get_cached_json::<ModelProbeResponse>(cache_key)
+        .await
+    {
+        return cached;
+    }
+
+    let snapshot = state.snapshot().await;
+    let timeout_seconds = state.config.admin_upstream_timeout_seconds.max(1);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()
+        .unwrap_or_default();
+    let refreshed_at = unix_seconds();
+
+    let mut channels = Vec::new();
+    let mut model_channels: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut total_latency = 0u64;
+    let mut healthy_channels = 0usize;
+    let mut offline_channels = 0usize;
+
+    for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
+        let keys = upstream.available_keys();
+        let discovery_results = fetch_models_from_upstream_keys_concurrently(
+            &client,
+            &upstream.base_url,
+            &keys,
+            timeout_seconds,
+        )
+        .await;
+
+        for result in discovery_results {
+            let KeyModelDiscoveryResult {
+                key_prefix,
+                mut models,
+                latency_ms,
+                error,
+                ..
+            } = result;
+            let channel_id = format!("{}:{}", upstream.id, key_prefix);
+            if let Some(allowlist) = allowlist {
+                models.retain(|model| portal_model_is_allowed(allowlist, model));
+            }
+
+            let status = if error.is_some() {
+                offline_channels += 1;
+                "offline"
+            } else {
+                healthy_channels += 1;
+                "healthy"
+            };
+
+            total_latency += latency_ms;
+            if error.is_none() {
+                for model in &models {
+                    model_channels
+                        .entry(model.clone())
+                        .or_default()
+                        .insert(channel_id.clone());
+                }
+            }
+
+            channels.push(ModelProbeChannel {
+                upstream_id: upstream.id.clone(),
+                upstream_name: upstream.name.clone(),
+                key_prefix,
+                status: status.to_string(),
+                latency_ms,
+                model_count: models.len(),
+                models,
+                last_probe_at: refreshed_at,
+                error,
+            });
+        }
+    }
+
+    channels.sort_by(|left, right| {
+        left.upstream_name
+            .cmp(&right.upstream_name)
+            .then(left.key_prefix.cmp(&right.key_prefix))
+    });
+
+    let mut models = model_channels
+        .into_iter()
+        .map(|(model, channels)| ModelProbeModel {
+            model,
+            channel_count: channels.len(),
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        right
+            .channel_count
+            .cmp(&left.channel_count)
+            .then(left.model.cmp(&right.model))
+    });
+
+    let response = ModelProbeResponse {
+        refreshed_at,
+        refresh_interval_seconds: state.config.model_probe_refresh_interval_seconds,
+        summary: ModelProbeSummary {
+            total_channels: channels.len(),
+            healthy_channels,
+            offline_channels,
+            degraded_channels: 0,
+            total_models: models.len(),
+            average_latency_ms: if channels.is_empty() {
+                0
+            } else {
+                total_latency / channels.len() as u64
+            },
+        },
+        channels,
+        models,
+    };
+
+    state
+        .set_cached_json(cache_key, &response, state.config.dashboard_cache_ttl_seconds)
+        .await;
+
+    response
 }
 
 pub(super) async fn admin_create_upstreams_batch(

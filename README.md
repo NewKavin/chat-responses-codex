@@ -90,6 +90,7 @@ cargo run
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=admin`
 - `APP_NAME=chat-responses-codex`
+- `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
 
 启动后打开：
 
@@ -167,10 +168,15 @@ flowchart LR
 - `LOG_PATH`：运行日志路径。
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`：后台登录账号。
 - `APP_NAME`：页面和日志中的应用名。
+- `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`：模型探测页自动刷新间隔，单位秒。
+- `DASHBOARD_CACHE_TTL_SECONDS`：后端复用模型探测快照的缓存时间，单位秒。
 - `USAGE_LOG_ROTATION_MAX_BYTES`：文件模式日志轮转阈值。
 - `USAGE_LOG_ARCHIVE_MAX_FILES`：文件模式日志归档上限。
 - `RUST_LOG`：可选，控制日志级别。
 - `TZ`：可选，时区。
+
+前者控制页面多久重新请求一次，后者控制后端多久重新探测一次。
+两者刻意分开，避免把 UI 刷新节奏和上游探测成本绑死在一起。
 
 配置原则：
 

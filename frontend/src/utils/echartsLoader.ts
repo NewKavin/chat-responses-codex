@@ -1,4 +1,4 @@
-import { BarChart, LineChart } from 'echarts/charts'
+import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import {
   GridComponent,
   LegendComponent,
@@ -19,6 +19,7 @@ export const loadEcharts = (): Promise<EchartsModule> => {
         GridComponent,
         LegendComponent,
         LineChart,
+        PieChart,
         TooltipComponent,
       ])
       return echarts

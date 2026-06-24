@@ -25,6 +25,7 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `APP_NAME=chat-responses-codex`
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
+- `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
 - `POSTGRES_POOL_MAX_SIZE=16`
 - `ADMIN_LOGS_PAGE_SIZE_MAX=200`
 - `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
@@ -60,6 +61,10 @@ until the TTL expires. This reduces repeated log scans on refresh-heavy admin pa
 `ADMIN_LOGS_PAGE_SIZE_MAX` is the intended ceiling for admin log pagination responses.
 `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST` controls how many idle upstream HTTP connections
 the gateway keeps per host before opening new sockets.
+`MODEL_PROBE_REFRESH_INTERVAL_SECONDS` controls how often the browser asks for a
+fresh model-probe snapshot. Keep it separate from `DASHBOARD_CACHE_TTL_SECONDS`,
+which controls how long the backend reuses the cached probe result before
+calling upstreams again.
 
 ## Build The Image
 

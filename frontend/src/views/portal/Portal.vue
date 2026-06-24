@@ -35,6 +35,9 @@
           <el-tab-pane label="概览" name="overview">
             <Overview />
           </el-tab-pane>
+          <el-tab-pane label="模型探测" name="model-probe" lazy>
+            <ModelProbe />
+          </el-tab-pane>
           <el-tab-pane label="限额详情" name="quota" lazy>
             <QuotaDetails />
           </el-tab-pane>
@@ -57,9 +60,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, provide, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, provide, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import Overview from './Overview.vue'
+import ModelProbe from './ModelProbe.vue'
 import QuotaDetails from './QuotaDetails.vue'
 import UsageHistory from './UsageHistory.vue'
 import Integration from './Integration.vue'
@@ -70,6 +74,7 @@ import { buildAnnouncementSeenKey, shouldShowAnnouncement } from '@/utils/announ
 import type { Announcement } from '@/types'
 
 const router = useRouter()
+const route = useRoute()
 const activeTab = ref('overview')
 const employeeId = ref('')
 const announcementDialogVisible = ref(false)
@@ -152,6 +157,16 @@ const handleAcknowledge = () => {
 
 const handleTabChange = (tabName: string) => {
   activeTab.value = tabName
+  if (tabName === 'model-probe') {
+    if (route.path !== '/portal/model-probe') {
+      router.push('/portal/model-probe')
+    }
+    return
+  }
+
+  if (tabName === 'overview' && route.path === '/portal/model-probe') {
+    router.push('/portal')
+  }
 }
 
 const handleLogout = () => {
@@ -172,6 +187,14 @@ onMounted(async () => {
     await loadAnnouncement(id)
   }
 })
+
+watch(
+  () => route.path,
+  path => {
+    activeTab.value = path === '/portal/model-probe' ? 'model-probe' : 'overview'
+  },
+  { immediate: true }
+)
 
 // 提供 token 给子组件
 provide('portalToken', () => safeLocalStorageGet('portal_token'))

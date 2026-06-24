@@ -86,6 +86,7 @@ fn app_config_defaults_stream_watchdog_settings() {
     assert_eq!(config.upstream_stream_keepalive_interval_seconds, 10);
     assert_eq!(config.upstream_stream_idle_timeout_seconds, 1_800);
     assert_eq!(config.upstream_stream_max_duration_seconds, 86_400);
+    assert_eq!(config.model_probe_refresh_interval_seconds, 15);
 }
 
 #[test]
@@ -98,6 +99,7 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
         "UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS",
         "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS",
         "UPSTREAM_STREAM_MAX_DURATION_SECONDS",
+        "MODEL_PROBE_REFRESH_INTERVAL_SECONDS",
     ] {
         assert!(
             env_example.contains(marker),
@@ -116,6 +118,7 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
     for marker in [
         "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
         "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS",
+        "MODEL_PROBE_REFRESH_INTERVAL_SECONDS",
     ] {
         assert!(
             deployment.contains(marker),

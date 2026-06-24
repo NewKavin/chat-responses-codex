@@ -1,0 +1,9 @@
+import { describe, expect, it } from 'vitest'
+import router from './index'
+
+describe('router', () => {
+  it('registers the admin and portal model probe routes', () => {
+    expect(router.getRoutes().some(route => route.path === '/admin/model-probe')).toBe(true)
+    expect(router.getRoutes().some(route => route.path === '/portal/model-probe')).toBe(true)
+  })
+})

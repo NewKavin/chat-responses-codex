@@ -3,6 +3,7 @@ import type {
   Announcement,
   PortalOverview,
   PortalModelStat,
+  ModelProbeResponse,
   PortalQuota,
   PortalUsageHistory
 } from '@/types'
@@ -45,6 +46,9 @@ export const portalApi = {
 
   // Overview
   getOverview: () => portalHttp.get<PortalOverview>('/portal/overview'),
+
+  // Model Probe
+  getModelProbe: () => portalHttp.get<ModelProbeResponse>('/portal/model-probe'),
 
   // Quota
   getQuota: () => portalHttp.get<PortalQuota>('/portal/quota'),

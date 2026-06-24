@@ -124,6 +124,7 @@ cargo run
 - `LOG_PATH=logs/chat-responses-codex.log`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=admin`
+- `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
 
 ### 1.2 Docker 启动
 

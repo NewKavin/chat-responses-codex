@@ -455,6 +455,13 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
+        .route(
+            "/api/admin/model-probe",
+            get(admin_model_probe).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
         // Admin API - Upstreams
         .route(
             "/api/admin/upstreams",
@@ -576,6 +583,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/quota", get(portal_quota))
         .route("/api/portal/usage-history", get(portal_usage_history))
         .route("/api/portal/models", get(portal_models))
+        .route("/api/portal/model-probe", get(portal_model_probe))
         .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
