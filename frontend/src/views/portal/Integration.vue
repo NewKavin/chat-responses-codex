@@ -198,6 +198,40 @@
             />
           </div>
         </el-tab-pane>
+        <el-tab-pane label="Cline / OpenAI 兼容" name="cline">
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="Cline 和其他 OpenAI 兼容客户端共用同一个配置格式：只需要 `baseURL`、`apiKey` 和默认模型。模型列表来自网关 `/v1/models`，不需要手工维护。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 配置 Cline 或其他 OpenAI 兼容客户端</h4>
+                  <p>
+                    复制下面的 JSON，在客户端里填入 <code>Base URL</code>、<code>API Key</code>
+                    和 <code>Model</code> 即可。模型列表可以从网关的
+                    <code>/v1/models</code> 实时获取。
+                  </p>
+                </div>
+                <el-button size="small" @click="copyCode(openAiCompatibleConfig)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ openAiCompatibleConfig }}</pre>
+            </div>
+
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="保存后重新打开客户端即可。模型名、网关 URL 和 key 都已经按当前门户的最新值写好了。"
+            />
+          </div>
+        </el-tab-pane>
 
         <el-tab-pane label="Claude Code" name="claude">
           <div class="tab-body">
@@ -250,6 +284,7 @@ import {
   buildModelUsageStats,
   buildGatewayBaseUrl,
   buildGatewayModelsEndpoint,
+  buildOpenAiCompatibleConfig,
   buildOpenCodeConfig,
   extractGatewayModelSlugs,
   rankModelSlugsByUsage,
@@ -324,6 +359,15 @@ const opencodeConfig = computed(() =>
 
 const claudeCodeSettingsJson = computed(() =>
   buildClaudeCodeSettingsJson({
+    gatewayBaseUrl: gatewayBaseUrl.value,
+    portalKey: portalKey.value,
+    modelSlugs: allModelSlugs.value,
+    selectedModelSlug: primaryModelSlug.value
+  })
+)
+
+const openAiCompatibleConfig = computed(() =>
+  buildOpenAiCompatibleConfig({
     gatewayBaseUrl: gatewayBaseUrl.value,
     portalKey: portalKey.value,
     modelSlugs: allModelSlugs.value,
