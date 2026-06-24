@@ -66,6 +66,60 @@
       />
     </el-card>
 
+
+    <el-card class="compat-matrix-card">
+      <template #header>
+        <div class="section-head">
+          <div>
+            <h3>客户端兼容矩阵</h3>
+            <p>按协议族分组，每个客户端只需要一个配置即可连接网关。</p>
+          </div>
+        </div>
+      </template>
+
+      <div class="compat-grid">
+        <div class="compat-family">
+          <h4>Codex</h4>
+          <span class="compat-protocol">Responses 协议</span>
+          <code>{{ gatewayApiBaseUrl }}/responses</code>
+          <span class="compat-auth">codex login --with-api-key</span>
+          <span class="compat-models">model-catalog.json + /v1/models</span>
+        </div>
+
+        <div class="compat-family">
+          <h4>OpenAI 兼容客户端</h4>
+          <span class="compat-protocol">Chat Completions 协议</span>
+          <code>{{ gatewayApiBaseUrl }}/chat/completions</code>
+          <span class="compat-auth">Bearer 下游 Key</span>
+          <span class="compat-models">/v1/models</span>
+          <div class="compat-clients">
+            <el-tag size="small" effect="plain">Cline</el-tag>
+            <el-tag size="small" effect="plain">OpenCode</el-tag>
+            <el-tag size="small" effect="plain">其他兼容工具</el-tag>
+          </div>
+        </div>
+
+        <div class="compat-family">
+          <h4>Anthropic 兼容客户端</h4>
+          <span class="compat-protocol">Messages 协议</span>
+          <code>{{ gatewayApiBaseUrl }}/messages</code>
+          <span class="compat-auth">Bearer 下游 Key</span>
+          <span class="compat-models">/v1/models + custom model option</span>
+          <div class="compat-clients">
+            <el-tag size="small" effect="plain">Claude Code</el-tag>
+          </div>
+        </div>
+      </div>
+
+      <el-alert
+        class="status-alert"
+        type="info"
+        :closable="false"
+        show-icon
+        title="网关同时暴露 `/v1/chat/completions`、`/v1/responses`、`/v1/models` 和 `/v1/messages`。客户端只需要根据自己支持的协议族选对应的 endpoint 和 preset。"
+      />
+    </el-card>
+
     <el-card v-if="sortedModelStats.length" class="model-card">
       <template #header>
         <div class="section-head">
@@ -696,5 +750,60 @@ p {
   .summary-grid :deep(.el-descriptions__body) {
     display: block;
   }
+}
+
+.compat-matrix-card {
+  border-radius: 16px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
+}
+
+.compat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.compat-family {
+  padding: 16px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  border: 1px solid #e6eef9;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.compat-family h4 {
+  font-size: 15px;
+  color: #1f2d3d;
+  margin: 0;
+}
+
+.compat-protocol {
+  font-size: 12px;
+  color: #409eff;
+  font-weight: 600;
+}
+
+.compat-family code {
+  background: #f3f6fa;
+  border: 1px solid #e3eaf3;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: #1f2d3d;
+  font-size: 12px;
+}
+
+.compat-auth,
+.compat-models {
+  font-size: 12px;
+  color: #606266;
+}
+
+.compat-clients {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
 }
 </style>
