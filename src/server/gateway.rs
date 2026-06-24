@@ -1019,8 +1019,9 @@ impl StreamWatchdog {
     }
 
     fn record_heartbeat(&mut self, at: TokioInstant) {
-        // Heartbeats are downstream-visible progress and should extend the idle window.
-        self.record_upstream_activity(at);
+        // Heartbeats are local-only keepalive signals and should NOT reset
+        // the upstream activity timer. Only update heartbeat deadline tracking.
+        self.last_heartbeat_at = at;
     }
 }
 
