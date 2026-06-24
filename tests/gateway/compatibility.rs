@@ -14,7 +14,7 @@ async fn v1_models_endpoint_returns_available_models() {
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
-                supported_models: vec![PORTAL_COMPAT_MODELS[0].map(|m| m.to_string())],
+                supported_models: vec![PORTAL_COMPAT_MODELS[0].to_string()],
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -54,13 +54,13 @@ async fn v1_models_endpoint_returns_available_models() {
                 .uri("/v1/models")
                 .header(
                     header::AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)),
+                    HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
                 )
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
-        .unwrap()
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 

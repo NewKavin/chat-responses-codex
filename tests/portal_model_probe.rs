@@ -5,7 +5,9 @@ use axum::{Json, Router};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
-use chat_responses_codex::state::{AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig};
+use chat_responses_codex::state::{
+    AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tower::ServiceExt;
@@ -64,7 +66,10 @@ fn create_test_state(base_url: String) -> (AppState, String) {
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
-    (AppState::new(state, unique_state_path(), config), portal_key)
+    (
+        AppState::new(state, unique_state_path(), config),
+        portal_key,
+    )
 }
 
 async fn get_portal_token(app: &axum::Router, employee_id: &str, key: &str) -> String {

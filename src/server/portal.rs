@@ -65,7 +65,10 @@ pub(super) async fn portal_login(
 // ============================================================================
 
 /// Portal overview
-pub(super) async fn portal_overview(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(super) async fn portal_overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     // Extract downstream ID from Bearer token
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
@@ -148,7 +151,10 @@ pub(super) async fn portal_overview(State(state): State<AppState>, headers: Head
 }
 
 /// Portal quota details
-pub(super) async fn portal_quota(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(super) async fn portal_quota(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
@@ -170,9 +176,7 @@ pub(super) async fn portal_quota(State(state): State<AppState>, headers: HeaderM
     let request_quota = state.compute_request_quota_usage(downstream).await;
     let now = unix_seconds();
     let token_usage = state.compute_token_usage(&downstream_id, now).await;
-    let model_contexts = state
-        .compute_portal_model_context_limits(downstream)
-        .await;
+    let model_contexts = state.compute_portal_model_context_limits(downstream).await;
     let model_contexts_json: serde_json::Map<String, Value> = model_contexts
         .into_iter()
         .map(|(slug, cfg)| {
@@ -275,7 +279,10 @@ pub(super) async fn portal_usage_history(
 }
 
 /// Portal models
-pub(super) async fn portal_models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(super) async fn portal_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
@@ -353,7 +360,10 @@ pub(super) async fn portal_announcement(
 }
 
 /// Portal get key - returns plaintext_key for the authenticated downstream
-pub(super) async fn portal_get_key(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(super) async fn portal_get_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
@@ -378,7 +388,10 @@ pub(super) async fn portal_get_key(State(state): State<AppState>, headers: Heade
 }
 
 /// Portal rotate key - generates new key for authenticated downstream
-pub(super) async fn portal_rotate_key(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+pub(super) async fn portal_rotate_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,

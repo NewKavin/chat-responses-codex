@@ -95,7 +95,11 @@ pub(crate) struct RequestCapture {
     pub(crate) request_body: Option<serde_json::Value>,
 }
 
-pub(crate) async fn wait_for_upstream_in_flight(state: &AppState, upstream_id: &str, expected: u32) {
+pub(crate) async fn wait_for_upstream_in_flight(
+    state: &AppState,
+    upstream_id: &str,
+    expected: u32,
+) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let snapshots = state.upstream_runtime_snapshots().await;

@@ -91,8 +91,6 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
     );
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn downstream_chat_request_uses_exact_model_name_for_upstream_request_body() {
     with_proxy_env_cleared(|| async move {
@@ -222,8 +220,6 @@ async fn downstream_chat_request_uses_exact_model_name_for_upstream_request_body
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn downstream_chat_request_routes_via_exact_model_name_when_supported_models_are_uppercase() {
     with_proxy_env_cleared(|| async move {
@@ -352,8 +348,6 @@ async fn downstream_chat_request_routes_via_exact_model_name_when_supported_mode
     })
     .await;
 }
-
-
 
 #[tokio::test]
 async fn downstream_chat_completions_supports_configured_portal_models() {
@@ -506,8 +500,6 @@ async fn downstream_chat_completions_supports_configured_portal_models() {
     }
 }
 
-
-
 #[tokio::test]
 async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_account() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -544,7 +536,7 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-b".into(),
@@ -570,7 +562,7 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -638,8 +630,6 @@ async fn upstream_reference_quota_biased_routing_prefers_the_less_pressured_acco
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 2);
 }
-
-
 
 #[tokio::test]
 async fn downstream_chat_request_uses_key_mapped_to_requested_model() {
@@ -776,8 +766,6 @@ async fn downstream_chat_request_uses_key_mapped_to_requested_model() {
     })
     .await;
 }
-
-
 
 #[tokio::test]
 async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorized() {
@@ -929,7 +917,106 @@ async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorize
     .await;
 }
 
+#[tokio::test]
+async fn downstream_chat_request_does_not_fall_back_to_primary_key_for_unmapped_model() {
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let upstream =
+            spawn_recording_chat_upstream("primary", "upstream-low-secret", hits.clone()).await;
 
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: upstream,
+                    api_key: "upstream-low-secret".into(),
+                    api_keys: vec!["upstream-premium-secret".into()],
+                    api_key_models: vec![chat_responses_codex::state::ApiKeyModelConfig {
+                        api_key: "upstream-low-secret".into(),
+                        supported_models: vec!["gpt-4".into()],
+                    }],
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4".into(), "glm-5.1".into()],
+
+                    default_model_context: None,
+
+                    model_contexts: vec![],
+                    request_quota_window_hours: 5,
+
+                    request_quota_requests: 600,
+                    requests_per_minute: 60,
+                    max_concurrency: 10,
+                    model_request_costs: vec![],
+                    priority: 100,
+                    premium_models: vec!["glm-5.1".into()],
+                    premium_only: false,
+                    protect_premium_quota: true,
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["glm-5.1".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "glm-5.1",
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            hits.lock().unwrap().is_empty(),
+            "gateway should not route an unmapped premium model through the primary key"
+        );
+    })
+    .await;
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_exists() {
@@ -970,7 +1057,7 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         protect_premium_quota: true,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                     UpstreamConfig {
                         id: "general".into(),
@@ -996,7 +1083,7 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -1056,8 +1143,6 @@ async fn non_premium_model_avoids_protected_premium_upstream_when_alternative_ex
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alternative() {
     with_proxy_env_cleared(|| async move {
@@ -1094,7 +1179,7 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
                     protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 }],
                 downstreams: vec![DownstreamConfig {
                     id: "down-1".into(),
@@ -1153,8 +1238,6 @@ async fn non_premium_model_falls_back_to_protected_premium_upstream_when_no_alte
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn premium_only_model_routes_to_protected_upstream() {
     with_proxy_env_cleared(|| async move {
@@ -1190,7 +1273,7 @@ async fn premium_only_model_routes_to_protected_upstream() {
                     protect_premium_quota: true,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 }],
                 downstreams: vec![DownstreamConfig {
                     id: "down-1".into(),
@@ -1253,8 +1336,6 @@ async fn premium_only_model_routes_to_protected_upstream() {
     })
     .await;
 }
-
-
 
 #[tokio::test(flavor = "current_thread")]
 async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
@@ -1356,7 +1437,7 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         protect_premium_quota: true,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                     UpstreamConfig {
                         id: "normal".into(),
@@ -1381,7 +1462,7 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -1447,8 +1528,6 @@ async fn premium_model_routes_with_exact_allowlist_and_upstream_rewrite() {
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn routing_rebalances_when_models_overlap() {
     with_proxy_env_cleared(|| async move {
@@ -1487,7 +1566,7 @@ async fn routing_rebalances_when_models_overlap() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                     UpstreamConfig {
                         id: "up-b".into(),
@@ -1512,7 +1591,7 @@ async fn routing_rebalances_when_models_overlap() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -1586,8 +1665,6 @@ async fn routing_rebalances_when_models_overlap() {
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn equal_model_accounts_rotate_when_their_pressure_ties() {
     with_proxy_env_cleared(|| async move {
@@ -1626,7 +1703,7 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                     UpstreamConfig {
                         id: "up-b".into(),
@@ -1651,7 +1728,7 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
                         protect_premium_quota: false,
                         active: true,
                         failure_count: 0,
-                    ..Default::default()
+                        ..Default::default()
                     },
                 ],
                 downstreams: vec![DownstreamConfig {
@@ -1724,8 +1801,6 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
     .await;
 }
 
-
-
 #[tokio::test]
 async fn upstream_reference_quota_does_not_block_single_account_when_upstream_accepts_requests() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1760,7 +1835,7 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -1828,8 +1903,6 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
     assert_eq!(hits, vec!["up-a".to_string(), "up-a".to_string()]);
 }
 
-
-
 #[tokio::test]
 async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_request() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1870,7 +1943,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-b".into(),
@@ -1899,7 +1972,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -1974,8 +2047,6 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
     assert_eq!(snapshot.upstreams[0].failure_count, 0);
 }
 
-
-
 #[tokio::test]
 async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2014,7 +2085,7 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -2081,8 +2152,6 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
     let hits = hits.lock().unwrap().clone();
     assert_eq!(hits, vec!["up-a".to_string(), "up-a".to_string()]);
 }
-
-
 
 #[tokio::test]
 async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the_cooldown_window() {
@@ -2118,7 +2187,7 @@ async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -2183,8 +2252,6 @@ async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the
     let hits = hits.lock().unwrap().clone();
     assert_eq!(hits, vec!["up-a".to_string(), "up-a".to_string()]);
 }
-
-
 
 #[tokio::test]
 async fn upstream_concurrency_full_429_retries_with_configured_attempts() {
@@ -2274,7 +2341,7 @@ async fn upstream_concurrency_full_429_retries_with_configured_attempts() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -2503,8 +2570,6 @@ async fn upstream_concurrency_full_retries_same_key_before_switching_keys() {
     assert_eq!(auth_headers[1], "Bearer primary-secret");
 }
 
-
-
 #[tokio::test]
 async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_multiple_429s() {
     let tempdir = tempdir().unwrap();
@@ -2594,7 +2659,7 @@ async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_mul
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -2653,8 +2718,6 @@ async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_mul
     assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
-
-
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_limit_error_retries_once_with_reduced_max_tokens() {
@@ -2796,8 +2859,6 @@ async fn context_limit_error_retries_once_with_reduced_max_tokens() {
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn context_limit_error_without_adjustable_token_cap_returns_bad_request() {
     with_proxy_env_cleared(|| async move {
@@ -2904,8 +2965,6 @@ async fn context_limit_error_without_adjustable_token_cap_returns_bad_request() 
     })
     .await;
 }
-
-
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() {
@@ -3060,8 +3119,6 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
     with_proxy_env_cleared(|| async move {
@@ -3205,8 +3262,6 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
     })
     .await;
 }
-
-
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_budget_compacts_payload_before_retrying_upstream() {
@@ -3363,8 +3418,6 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
     .await;
 }
 
-
-
 #[tokio::test]
 async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -3451,7 +3504,7 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-b".into(),
@@ -3477,7 +3530,7 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -3573,8 +3626,6 @@ async fn concurrent_requests_prefer_the_idle_upstream_when_another_is_busy() {
     let hits = hits.lock().unwrap().clone();
     assert_eq!(hits, vec!["up-a".to_string(), "up-b".to_string()]);
 }
-
-
 
 #[tokio::test]
 async fn downstream_streaming_request_reports_model_routing_failure_precisely() {
@@ -3691,8 +3742,6 @@ async fn downstream_streaming_request_reports_model_routing_failure_precisely() 
     assert!(message.contains("supported_models"));
     assert!(!message.contains("model_aliases"));
 }
-
-
 
 #[tokio::test]
 async fn downstream_chat_request_supports_upstream_base_url_with_v1_prefix() {
@@ -3822,8 +3871,6 @@ async fn downstream_chat_request_supports_upstream_base_url_with_v1_prefix() {
     assert_eq!(capture.lock().unwrap().path, "/v1/chat/completions");
 }
 
-
-
 #[tokio::test]
 async fn downstream_request_is_rejected_after_exceeding_per_minute_limit() {
     let capture = Arc::new(AtomicUsize::new(0));
@@ -3950,8 +3997,6 @@ async fn downstream_request_is_rejected_after_exceeding_per_minute_limit() {
 
     assert_eq!(capture.load(Ordering::SeqCst), 1);
 }
-
-
 
 #[tokio::test]
 async fn downstream_chat_stream_is_proxied_as_event_stream() {
@@ -4091,8 +4136,6 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
     assert_eq!(captured.request_body.unwrap()["stream"], true);
 }
 
-
-
 #[tokio::test]
 async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
@@ -4168,7 +4211,7 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -4247,8 +4290,6 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
     assert!(text.contains("data: {\"id\":\"chatcmpl-stream\""));
     assert!(text.contains("data: [DONE]"));
 }
-
-
 
 #[tokio::test]
 async fn downstream_chat_stream_records_usage_from_final_chunk() {
@@ -4403,8 +4444,6 @@ async fn downstream_chat_stream_records_usage_from_final_chunk() {
     assert_eq!(snapshot.usage_logs[0].total_tokens, 5);
 }
 
-
-
 #[tokio::test]
 async fn downstream_chat_stream_is_synthesized_from_json_response() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
@@ -4558,8 +4597,6 @@ async fn downstream_chat_stream_is_synthesized_from_json_response() {
     assert_eq!(snapshot.usage_logs[0].completion_tokens, 3);
     assert_eq!(snapshot.usage_logs[0].total_tokens, 5);
 }
-
-
 
 #[tokio::test]
 async fn downstream_chat_stream_is_translated_from_responses_stream() {
@@ -4819,8 +4856,6 @@ async fn downstream_chat_stream_is_translated_from_responses_stream() {
     );
 }
 
-
-
 #[tokio::test]
 async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
     let tempdir = tempdir().unwrap();
@@ -4890,7 +4925,7 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -4978,8 +5013,6 @@ async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
 // Batch 2: Upstream Feedback Classification Tests
 // ============================================================================
 
-
-
 #[tokio::test]
 async fn upstream_429_triggers_cooldown_from_retry_after() {
     let tempdir = tempdir().unwrap();
@@ -5039,7 +5072,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -5095,8 +5128,6 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
     // Should get 429 from upstream
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 }
-
-
 
 #[tokio::test]
 async fn upstream_429_does_not_poison_downstream_per_minute_window() {
@@ -5160,7 +5191,7 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -5235,8 +5266,6 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
         "downstream request window should not be poisoned by upstream 429"
     );
 }
-
-
 
 #[tokio::test]
 async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
@@ -5327,7 +5356,7 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -5395,8 +5424,6 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
     );
 }
 
-
-
 #[tokio::test]
 async fn generic_400_is_not_treated_as_concurrency_full() {
     let tempdir = tempdir().unwrap();
@@ -5455,7 +5482,7 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -5511,8 +5538,6 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
     // Should get 400 from upstream, not treated as concurrency full
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
-
-
 
 #[tokio::test]
 async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() {
@@ -5576,7 +5601,7 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -5637,8 +5662,6 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
         "unexpected gateway body: {body}"
     );
 }
-
-
 
 #[tokio::test]
 async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_requests() {
@@ -5703,7 +5726,7 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -5764,8 +5787,6 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
         "unexpected gateway body: {body}"
     );
 }
-
-
 
 #[tokio::test]
 async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_signal() {
@@ -5836,7 +5857,7 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -5918,8 +5939,6 @@ async fn request_is_allowed_without_local_admission_when_upstream_has_no_busy_si
 
     assert_eq!(response2.status(), StatusCode::OK);
 }
-
-
 
 #[tokio::test]
 async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
@@ -6020,7 +6039,7 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
                 UpstreamConfig {
                     id: "up-2".into(),
@@ -6045,7 +6064,7 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
                     protect_premium_quota: false,
                     active: true,
                     failure_count: 0,
-                ..Default::default()
+                    ..Default::default()
                 },
             ],
             downstreams: vec![DownstreamConfig {
@@ -6103,8 +6122,6 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-
-
 #[tokio::test]
 async fn stream_disconnect_releases_runtime_state() {
     let tempdir = tempdir().unwrap();
@@ -6159,7 +6176,7 @@ async fn stream_disconnect_releases_runtime_state() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -6223,8 +6240,6 @@ async fn stream_disconnect_releases_runtime_state() {
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
 }
 
-
-
 #[tokio::test]
 async fn stream_interruption_marks_interrupted_not_success() {
     let tempdir = tempdir().unwrap();
@@ -6279,7 +6294,7 @@ async fn stream_interruption_marks_interrupted_not_success() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -6359,8 +6374,6 @@ async fn stream_interruption_marks_interrupted_not_success() {
     );
 }
 
-
-
 #[tokio::test]
 async fn translated_stream_disconnect_releases_runtime_state() {
     let tempdir = tempdir().unwrap();
@@ -6416,7 +6429,7 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -6480,8 +6493,6 @@ async fn translated_stream_disconnect_releases_runtime_state() {
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
 }
 
-
-
 #[tokio::test]
 async fn translated_stream_drop_after_done_is_logged_as_success() {
     let tempdir = tempdir().unwrap();
@@ -6537,7 +6548,7 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -6628,8 +6639,6 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
     assert_eq!(log.error_message.as_deref(), None);
 }
 
-
-
 #[tokio::test]
 async fn stream_idle_timeout_interrupts_hung_stream() {
     let tempdir = tempdir().unwrap();
@@ -6685,7 +6694,7 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -6787,8 +6796,6 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
     );
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     let tempdir = tempdir().unwrap();
@@ -6851,7 +6858,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -6961,8 +6968,6 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     assert_eq!(log.error_message.as_deref(), None);
 }
 
-
-
 #[tokio::test]
 async fn stream_max_duration_interrupts_hung_stream() {
     let tempdir = tempdir().unwrap();
@@ -7020,7 +7025,7 @@ async fn stream_max_duration_interrupts_hung_stream() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -7122,8 +7127,6 @@ async fn stream_max_duration_interrupts_hung_stream() {
     );
 }
 
-
-
 #[tokio::test]
 async fn synthesized_stream_response_releases_runtime_state() {
     let tempdir = tempdir().unwrap();
@@ -7193,7 +7196,7 @@ async fn synthesized_stream_response_releases_runtime_state() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -7256,8 +7259,6 @@ async fn synthesized_stream_response_releases_runtime_state() {
     let second = app.clone().oneshot(request()).await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
 }
-
-
 
 #[tokio::test]
 async fn logs_distinguish_local_reference_from_upstream_feedback() {
@@ -7328,7 +7329,7 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
@@ -7392,8 +7393,6 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
     assert_eq!(log.status_code, 200);
 }
 
-
-
 #[tokio::test]
 async fn admin_upstream_runtime_exposes_feedback_cooldown() {
     let tempdir = tempdir().unwrap();
@@ -7453,7 +7452,7 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 protect_premium_quota: false,
                 active: true,
                 failure_count: 0,
-            ..Default::default()
+                ..Default::default()
             }],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),

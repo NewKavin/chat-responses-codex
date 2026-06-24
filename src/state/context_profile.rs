@@ -1,6 +1,6 @@
-use crate::state::AppState;
 use super::normalize::normalized_default_model_context;
 use super::types::*;
+use crate::state::AppState;
 use std::collections::HashMap;
 
 pub(super) fn normalize_context_profile_base_url(base_url: &str) -> String {
@@ -83,7 +83,11 @@ impl UpstreamConfig {
             })
     }
 
-    pub fn context_fallback_model_for(&self, model: &str, minimum_context_limit: u32) -> Option<String> {
+    pub fn context_fallback_model_for(
+        &self,
+        model: &str,
+        minimum_context_limit: u32,
+    ) -> Option<String> {
         self.context_fallback_model_for_with_profile(model, minimum_context_limit, None)
     }
 

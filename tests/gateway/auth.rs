@@ -119,8 +119,6 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-
-
 #[tokio::test]
 async fn downstream_chat_request_is_forwarded_and_logged() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
@@ -272,8 +270,6 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
     assert_eq!(log.request_count, Some(1));
 }
 
-
-
 #[tokio::test]
 async fn downstream_chat_request_accepts_x_api_key_header() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
@@ -396,8 +392,6 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
     );
 }
 
-
-
 #[tokio::test]
 async fn claude_count_tokens_endpoint_accepts_x_api_key() {
     let downstream_key = generate_downstream_key("gw");
@@ -453,8 +447,6 @@ async fn claude_count_tokens_endpoint_accepts_x_api_key() {
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(payload["input_tokens"].as_u64().unwrap() > 0);
 }
-
-
 
 #[tokio::test]
 async fn admin_upstreams_page_mentions_protocol_capabilities() {

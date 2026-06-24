@@ -1,7 +1,7 @@
-use crate::state::AppState;
-use crate::state::normalize_context_profile_base_url;
 use super::types::*;
+use crate::state::normalize_context_profile_base_url;
 use crate::state::unix_seconds;
+use crate::state::AppState;
 use chrono::Datelike;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -64,7 +64,9 @@ pub(super) struct DownstreamTokenEvent {
 pub(super) const DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS: u64 = 24 * 60 * 60;
 pub(super) const DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 
-pub(super) fn build_downstream_request_windows(logs: &[UsageLog]) -> HashMap<String, VecDeque<u64>> {
+pub(super) fn build_downstream_request_windows(
+    logs: &[UsageLog],
+) -> HashMap<String, VecDeque<u64>> {
     let mut windows = HashMap::new();
     for log in normalized_usage_logs(logs) {
         windows
@@ -145,7 +147,9 @@ pub(super) fn downstream_token_retry_after_seconds(
     window_seconds.max(1)
 }
 
-pub(super) fn build_active_upstream_model_catalog(snapshot: &PersistedState) -> HashMap<String, Vec<String>> {
+pub(super) fn build_active_upstream_model_catalog(
+    snapshot: &PersistedState,
+) -> HashMap<String, Vec<String>> {
     let mut catalog: HashMap<String, Vec<String>> = HashMap::new();
     let mut seen_exact = HashSet::new();
 
@@ -228,7 +232,13 @@ impl AppState {
 
         let downstream = snapshot.downstreams.iter().find(|d| d.id == downstream_id);
         let limit = downstream
-            .map(|d| if d.rate_limit_enabled { d.per_minute_limit } else { 0 })
+            .map(|d| {
+                if d.rate_limit_enabled {
+                    d.per_minute_limit
+                } else {
+                    0
+                }
+            })
             .unwrap_or(0);
 
         let used = snapshot

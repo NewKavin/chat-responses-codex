@@ -205,6 +205,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
             start_time: Some(0),
             end_time: Some(u64::MAX),
             status_codes: vec![200],
+            error_categories: vec![],
             model_substring: Some("glm".to_string()),
             page: 1,
             page_size: 10,
@@ -299,7 +300,10 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
         "api_key_models".to_string(),
         upstream_json.get("api_key_models").cloned().unwrap(),
     );
-    assert_eq!(serde_json::to_value(&snapshot.upstreams[0]).unwrap(), expected);
+    assert_eq!(
+        serde_json::to_value(&snapshot.upstreams[0]).unwrap(),
+        expected
+    );
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
@@ -531,6 +535,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
             start_time: Some(0),
             end_time: Some(u64::MAX),
             status_codes: vec![],
+            error_categories: vec![],
             model_substring: None,
             page: 1,
             page_size: 10,

@@ -1,8 +1,8 @@
-use crate::state::AppState;
 use super::normalize::{parse_u64_flexible, parse_upstream_protocol, parse_upstream_protocols};
-use serde_json::Value;
 use super::types::*;
+use crate::state::AppState;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -281,8 +281,9 @@ impl AppState {
                     upstream.base_url = base_url.to_string();
                 }
                 // Check for replace mode flag from admin_update_upstream key validation.
-                let replace_api_keys = updates.get("_replace_api_keys").and_then(|v| v.as_bool()) == Some(true);
-                
+                let replace_api_keys =
+                    updates.get("_replace_api_keys").and_then(|v| v.as_bool()) == Some(true);
+
                 if replace_api_keys {
                     // Directly replace api_keys and api_key_models with validated keys.
                     if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
@@ -291,7 +292,9 @@ impl AppState {
                             .filter_map(|v| v.as_str().map(|s| s.to_string()))
                             .collect();
                     }
-                    if let Some(api_key_models) = updates.get("api_key_models").and_then(|v| v.as_array()) {
+                    if let Some(api_key_models) =
+                        updates.get("api_key_models").and_then(|v| v.as_array())
+                    {
                         upstream.api_key_models = api_key_models
                             .iter()
                             .filter_map(|value| {
@@ -308,7 +311,8 @@ impl AppState {
                                 })
                             })
                             .collect();
-                        upstream.supported_models = derive_supported_models(&upstream.api_key_models);
+                        upstream.supported_models =
+                            derive_supported_models(&upstream.api_key_models);
                     }
                 } else {
                     // Legacy merge behavior (only adds, never removes).
@@ -377,7 +381,8 @@ impl AppState {
                         .iter()
                         .filter_map(|value| {
                             let slug = value.get("slug").and_then(|v| v.as_str())?;
-                            let context_limit = value.get("context_limit").and_then(parse_u64_flexible)?;
+                            let context_limit =
+                                value.get("context_limit").and_then(parse_u64_flexible)?;
                             let output_reserve = value
                                 .get("output_reserve")
                                 .and_then(parse_u64_flexible)
@@ -426,8 +431,9 @@ impl AppState {
                 {
                     upstream.request_quota_window_hours = request_quota_window_hours as u32;
                 }
-                if let Some(request_quota_requests) =
-                    updates.get("request_quota_requests").and_then(|v| v.as_u64())
+                if let Some(request_quota_requests) = updates
+                    .get("request_quota_requests")
+                    .and_then(|v| v.as_u64())
                 {
                     upstream.request_quota_requests = request_quota_requests as u32;
                 }
@@ -441,12 +447,14 @@ impl AppState {
                 {
                     upstream.requests_per_minute = requests_per_minute as u32;
                 }
-                if let Some(max_concurrency) = updates.get("max_concurrency").and_then(|v| v.as_u64())
+                if let Some(max_concurrency) =
+                    updates.get("max_concurrency").and_then(|v| v.as_u64())
                 {
                     upstream.max_concurrency = max_concurrency as u32;
                 }
-                if let Some(model_request_costs) =
-                    updates.get("model_request_costs").and_then(|v| v.as_array())
+                if let Some(model_request_costs) = updates
+                    .get("model_request_costs")
+                    .and_then(|v| v.as_array())
                 {
                     upstream.model_request_costs = model_request_costs
                         .iter()

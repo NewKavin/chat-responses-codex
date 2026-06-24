@@ -1383,7 +1383,6 @@ async fn test_portal_rotate_key_old_key_invalid_after_rotation() {
     assert_eq!(response2.status(), StatusCode::UNAUTHORIZED);
 }
 
-
 fn create_state_with_context_limits() -> (AppState, String) {
     let config = AppConfig::default();
     let generated = generate_downstream_key("sk");
@@ -1399,14 +1398,12 @@ fn create_state_with_context_limits() -> (AppState, String) {
                     "ZhipuAI/GLM-5".to_string(),
                     "MiniMax/MiniMax-M2.7".to_string(),
                 ],
-                model_contexts: vec![
-                    ModelContextConfig {
-                        slug: "ZhipuAI/GLM-5".to_string(),
-                        context_limit: 400_000,
-                        output_reserve: 40_000,
-                        context_group: "glm".to_string(),
-                    },
-                ],
+                model_contexts: vec![ModelContextConfig {
+                    slug: "ZhipuAI/GLM-5".to_string(),
+                    context_limit: 400_000,
+                    output_reserve: 40_000,
+                    context_group: "glm".to_string(),
+                }],
                 default_model_context: Some(DefaultModelContextConfig {
                     context_limit: 200_000,
                     output_reserve: 20_000,
@@ -1421,14 +1418,12 @@ fn create_state_with_context_limits() -> (AppState, String) {
                 base_url: "https://small.example.invalid".to_string(),
                 api_key: "test-key-2".to_string(),
                 supported_models: vec!["ZhipuAI/GLM-5".to_string()],
-                model_contexts: vec![
-                    ModelContextConfig {
-                        slug: "ZhipuAI/GLM-5".to_string(),
-                        context_limit: 128_000,
-                        output_reserve: 16_000,
-                        context_group: "glm".to_string(),
-                    },
-                ],
+                model_contexts: vec![ModelContextConfig {
+                    slug: "ZhipuAI/GLM-5".to_string(),
+                    context_limit: 128_000,
+                    output_reserve: 16_000,
+                    context_group: "glm".to_string(),
+                }],
                 default_model_context: None,
                 active: true,
                 ..UpstreamConfig::default()

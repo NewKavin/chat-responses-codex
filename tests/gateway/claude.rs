@@ -134,8 +134,6 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
     );
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn claude_messages_stream_true_returns_anthropic_sse_events() {
     with_proxy_env_cleared(|| async move {
@@ -285,8 +283,6 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn claude_messages_stream_true_emits_tool_use_block_events() {
     with_proxy_env_cleared(|| async move {
@@ -413,8 +409,6 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
     })
     .await;
 }
-
-
 
 #[tokio::test(flavor = "current_thread")]
 async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
@@ -598,8 +592,6 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
     .await;
 }
 
-
-
 #[tokio::test(flavor = "current_thread")]
 async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
     with_proxy_env_cleared(|| async move {
@@ -724,8 +716,6 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
     })
     .await;
 }
-
-
 
 #[tokio::test]
 async fn downstream_messages_supports_configured_portal_models() {

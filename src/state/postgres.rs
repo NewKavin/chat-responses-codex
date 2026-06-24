@@ -1,9 +1,10 @@
-use super::log_queries::{current_month_start, enrich_usage_log, query_time_bounds};
+use super::log_queries::{
+    current_month_start, enrich_usage_log, normalize_error_categories, query_time_bounds,
+};
 use super::{
-    unix_seconds, AnnouncementConfig, AnnouncementLevel, DownstreamConfig, DownstreamUsageSummary,
-    DefaultModelContextConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
-    PersistedState, UpstreamConfig, ApiKeyModelConfig,
-    UpstreamProtocol,
+    unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig,
+    DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary, GlobalContextProfile,
+    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UpstreamProtocol,
     UsageLog, UsageLogPage, UsageLogQuery,
 };
 use bb8::Pool;
@@ -71,10 +72,12 @@ impl PostgresStateStore {
             .map_err(io_other)?
         {
             let protocol = decode_protocol(row.get::<_, String>(4))?;
-            let api_keys: Vec<String> = row.get::<_, Option<String>>(20)
+            let api_keys: Vec<String> = row
+                .get::<_, Option<String>>(20)
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
-            let api_key_models: Vec<ApiKeyModelConfig> = row.get::<_, Option<String>>(21)
+            let api_key_models: Vec<ApiKeyModelConfig> = row
+                .get::<_, Option<String>>(21)
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
             upstreams.push(UpstreamConfig {
@@ -87,7 +90,9 @@ impl PostgresStateStore {
                 protocol,
                 protocols: decode_protocols(row.get::<_, Option<String>>(5), protocol)?,
                 model_contexts: decode_model_contexts(row.get::<_, Option<String>>(6))?,
-                default_model_context: decode_default_model_context(row.get::<_, Option<String>>(7))?,
+                default_model_context: decode_default_model_context(
+                    row.get::<_, Option<String>>(7),
+                )?,
                 supported_models: Vec::new(),
                 request_quota_window_hours: row.get::<_, i32>(8) as u32,
                 request_quota_requests: row.get::<_, i32>(9) as u32,
@@ -159,7 +164,7 @@ impl PostgresStateStore {
                     .push(ModelRequestCostConfig {
                         slug: row.get::<_, String>(1),
                         cost: row.get::<_, i32>(2) as f64,
-                });
+                    });
             }
         }
 
@@ -320,6 +325,8 @@ impl PostgresStateStore {
             .map(|status_code| i32::from(*status_code))
             .collect::<Vec<_>>();
         let no_status_filter = status_codes.is_empty();
+        let error_categories = normalize_error_categories(&query.error_categories);
+        let no_error_category_filter = error_categories.is_empty();
         let model_substring = query
             .model_substring
             .as_deref()
@@ -334,12 +341,15 @@ impl PostgresStateStore {
                  WHERE created_at >= $1
                    AND created_at <= $2
                    AND ($3 OR status_code = ANY($4))
-                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(TRIM(model))) > 0)",
+                   AND ($5 OR LOWER(TRIM(COALESCE(error_category, ''))) = ANY($6))
+                   AND ($7::TEXT IS NULL OR POSITION($7 IN LOWER(TRIM(model))) > 0)",
                 &[
                     &start_time,
                     &end_time,
                     &no_status_filter,
                     &status_codes,
+                    &no_error_category_filter,
+                    &error_categories,
                     &model_substring,
                 ],
             )
@@ -364,14 +374,17 @@ impl PostgresStateStore {
                  WHERE created_at >= $1
                    AND created_at <= $2
                    AND ($3 OR status_code = ANY($4))
-                   AND ($5::TEXT IS NULL OR POSITION($5 IN LOWER(TRIM(model))) > 0)
+                   AND ($5 OR LOWER(TRIM(COALESCE(error_category, ''))) = ANY($6))
+                   AND ($7::TEXT IS NULL OR POSITION($7 IN LOWER(TRIM(model))) > 0)
                  ORDER BY created_at DESC, request_id ASC, id ASC
-                 LIMIT $6 OFFSET $7",
+                 LIMIT $8 OFFSET $9",
                 &[
                     &start_time,
                     &end_time,
                     &no_status_filter,
                     &status_codes,
+                    &no_error_category_filter,
+                    &error_categories,
                     &model_substring,
                     &limit,
                     &offset,
@@ -1066,9 +1079,7 @@ fn decode_default_model_context(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn encode_default_model_context(
-    value: &Option<DefaultModelContextConfig>,
-) -> Option<String> {
+fn encode_default_model_context(value: &Option<DefaultModelContextConfig>) -> Option<String> {
     value
         .as_ref()
         .and_then(|context| serde_json::to_string(context).ok())
