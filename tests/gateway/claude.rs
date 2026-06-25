@@ -260,6 +260,15 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
+        let captured = capture.lock().unwrap().clone();
+        let captured_body = captured.request_body.unwrap();
+        assert_eq!(captured_body["messages"][0]["content"], "Hello");
+        assert_eq!(
+            captured_body
+                .get("stream")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
         assert!(payload.contains("event: message_start"));
         assert!(payload.contains("\"type\":\"message_start\""));
         assert!(payload.contains("event: content_block_delta"));
@@ -268,17 +277,8 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
         assert!(payload.contains("event: message_delta"));
         assert!(payload.contains("\"stop_reason\":\"end_turn\""));
         assert!(payload.contains("event: message_stop"));
-
-        let captured = capture.lock().unwrap().clone();
+        assert!(!payload.contains("data: [DONE]"));
         assert_eq!(captured.path, "/v1/chat/completions");
-        let captured_body = captured.request_body.unwrap();
-        assert_eq!(captured_body["messages"][0]["content"], "Hello");
-        assert_ne!(
-            captured_body
-                .get("stream")
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
     })
     .await;
 }
@@ -286,46 +286,65 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
 #[tokio::test(flavor = "current_thread")]
 async fn claude_messages_stream_true_emits_tool_use_block_events() {
     with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();
         let state_path = tempdir.path().join("state.json");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
 
-        let upstream_app = Router::new().route(
-            "/v1/chat/completions",
-            post(|_request: Request<Body>| async move {
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "id": "chatcmpl-tool-stream",
-                        "object": "chat.completion",
-                        "created": 1,
-                        "model": "gpt-4.1-mini",
-                        "choices": [{
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": "Checking weather",
-                                "tool_calls": [{
-                                    "id": "call_1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "get_weather",
-                                        "arguments": "{\"city\":\"Paris\"}"
-                                    }
-                                }]
-                            },
-                            "finish_reason": "tool_calls"
-                        }],
-                        "usage": {
-                            "prompt_tokens": 10,
-                            "completion_tokens": 4,
-                            "total_tokens": 14
-                        }
-                    })),
-                )
-            }),
-        );
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-tool-stream",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "Checking weather",
+                                        "tool_calls": [{
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "get_weather",
+                                                "arguments": "{\"city\":\"Paris\"}"
+                                            }
+                                        }]
+                                    },
+                                    "finish_reason": "tool_calls"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 10,
+                                    "completion_tokens": 4,
+                                    "total_tokens": 14
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
         tokio::spawn(async move {
             axum::serve(listener, upstream_app).await.unwrap();
@@ -406,6 +425,167 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
         assert!(payload.contains("\"type\":\"input_json_delta\""));
         assert!(payload.contains("\\\"city\\\":\\\"Paris\\\""));
         assert!(payload.contains("\"stop_reason\":\"tool_use\""));
+        assert!(!payload.contains("data: [DONE]"));
+
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured.path, "/v1/chat/completions");
+        let captured_body = captured.request_body.unwrap();
+        assert_eq!(captured_body["messages"][0]["content"], "Hello");
+        assert_eq!(
+            captured_body
+                .get("stream")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claude_messages_stream_true_adapts_chat_chunk_sse_without_gateway_synthesis() {
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        let chunks = vec![
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n",
+                            )),
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n",
+                            )),
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":5,\"total_tokens\":12}}\n\n",
+                            )),
+                            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                        ];
+
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(stream::iter(chunks)),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{}", address),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("x-api-key", downstream_key.plaintext)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "gpt-4.1-mini",
+                    "max_tokens": 128,
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "Hello"}]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload = String::from_utf8(body.to_vec()).unwrap();
+        assert!(payload.contains("event: message_start"));
+        assert!(payload.contains("event: content_block_delta"));
+        assert!(payload.contains("\"text\":\"Hel\""));
+        assert!(payload.contains("\"text\":\"lo\""));
+        assert!(payload.contains("event: message_delta"));
+        assert!(payload.contains("\"stop_reason\":\"end_turn\""));
+        assert!(payload.contains("event: message_stop"));
+        assert!(!payload.contains("chat.completion.chunk"));
+        assert!(!payload.contains("data: [DONE]"));
+
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured.path, "/v1/chat/completions");
+        let captured_body = captured.request_body.unwrap();
+        assert_eq!(captured_body["messages"][0]["content"], "Hello");
+        assert_eq!(
+            captured_body
+                .get("stream")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
     })
     .await;
 }
