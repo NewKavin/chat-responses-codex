@@ -1,6 +1,50 @@
 use super::common::*;
 use serde_json::json;
 
+#[derive(Debug)]
+struct ParsedSseEvent {
+    event: Option<String>,
+    data: String,
+}
+
+fn parse_sse_events(payload: &str) -> Vec<ParsedSseEvent> {
+    payload
+        .split("\n\n")
+        .filter_map(|frame| {
+            let frame = frame.trim();
+            if frame.is_empty() {
+                return None;
+            }
+
+            let mut event = None;
+            let mut data_lines = Vec::new();
+            for line in frame.lines() {
+                if let Some(rest) = line.strip_prefix("event: ") {
+                    event = Some(rest.to_string());
+                } else if let Some(rest) = line.strip_prefix("data: ") {
+                    data_lines.push(rest.to_string());
+                }
+            }
+
+            Some(ParsedSseEvent {
+                event,
+                data: data_lines.join("\n"),
+            })
+        })
+        .collect()
+}
+
+fn parse_sse_event_data(payload: &str) -> Vec<(Option<String>, serde_json::Value)> {
+    parse_sse_events(payload)
+        .into_iter()
+        .map(|event| {
+            let data = serde_json::from_str(&event.data)
+                .unwrap_or_else(|err| panic!("failed to parse SSE data as JSON: {err}: {}", event.data));
+            (event.event, data)
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
@@ -260,6 +304,7 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
+        let events = parse_sse_event_data(&payload);
         let captured = capture.lock().unwrap().clone();
         let captured_body = captured.request_body.unwrap();
         assert_eq!(captured_body["messages"][0]["content"], "Hello");
@@ -278,6 +323,15 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
         assert!(payload.contains("\"stop_reason\":\"end_turn\""));
         assert!(payload.contains("event: message_stop"));
         assert!(!payload.contains("data: [DONE]"));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_start")
+                && data["type"] == "content_block_start"
+                && data["content_block"]["type"] == "text"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_stop")
+                && data["type"] == "content_block_stop"
+        }));
         assert_eq!(captured.path, "/v1/chat/completions");
     })
     .await;
@@ -420,11 +474,23 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
-        assert!(payload.contains("\"type\":\"tool_use\""));
-        assert!(payload.contains("\"name\":\"get_weather\""));
-        assert!(payload.contains("\"type\":\"input_json_delta\""));
-        assert!(payload.contains("\\\"city\\\":\\\"Paris\\\""));
-        assert!(payload.contains("\"stop_reason\":\"tool_use\""));
+        let events = parse_sse_event_data(&payload);
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_start")
+                && data["type"] == "content_block_start"
+                && data["content_block"]["type"] == "tool_use"
+                && data["content_block"]["name"] == "get_weather"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_delta")
+                && data["type"] == "content_block_delta"
+                && data["delta"]["type"] == "input_json_delta"
+                && data["delta"]["partial_json"].as_str().is_some_and(|value| value.contains("\"city\":\"Paris\""))
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("message_delta")
+                && data["delta"]["stop_reason"] == "tool_use"
+        }));
         assert!(!payload.contains("data: [DONE]"));
 
         let captured = capture.lock().unwrap().clone();
@@ -566,13 +632,40 @@ async fn claude_messages_stream_true_adapts_chat_chunk_sse_without_gateway_synth
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
-        assert!(payload.contains("event: message_start"));
-        assert!(payload.contains("event: content_block_delta"));
-        assert!(payload.contains("\"text\":\"Hel\""));
-        assert!(payload.contains("\"text\":\"lo\""));
-        assert!(payload.contains("event: message_delta"));
-        assert!(payload.contains("\"stop_reason\":\"end_turn\""));
-        assert!(payload.contains("event: message_stop"));
+        let events = parse_sse_event_data(&payload);
+        let text = events
+            .iter()
+            .filter(|(event, data)| {
+                event.as_deref() == Some("content_block_delta")
+                    && data["delta"]["type"] == "text_delta"
+            })
+            .filter_map(|(_, data)| data["delta"]["text"].as_str())
+            .collect::<String>();
+        assert_eq!(text, "Hello");
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("message_start") && data["type"] == "message_start"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_start")
+                && data["type"] == "content_block_start"
+                && data["content_block"]["type"] == "text"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_delta")
+                && data["type"] == "content_block_delta"
+                && data["delta"]["type"] == "text_delta"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_stop")
+                && data["type"] == "content_block_stop"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("message_delta")
+                && data["delta"]["stop_reason"] == "end_turn"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("message_stop") && data["type"] == "message_stop"
+        }));
         assert!(!payload.contains("chat.completion.chunk"));
         assert!(!payload.contains("data: [DONE]"));
 
