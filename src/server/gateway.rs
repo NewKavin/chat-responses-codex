@@ -20,6 +20,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::{stream, StreamExt};
+use tokio::sync::mpsc;
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde_json::{json, Map, Value};
@@ -707,9 +708,19 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> impl 
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
-    match process_gateway_request(state, headers, body, EndpointKind::ChatCompletions).await {
+    body: Json<Value>,
+) -> Response {
+    let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if is_stream {
+        return dispatch_streaming_request(
+            state,
+            headers,
+            body.0,
+            EndpointKind::ChatCompletions,
+        )
+        .await;
+    }
+    match process_gateway_request(state, headers, body.0, EndpointKind::ChatCompletions).await {
         Ok(result) => dispatch_success(result),
         Err(error) => error.into_response(),
     }
@@ -718,9 +729,19 @@ async fn chat_completions(
 async fn responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
-    match process_gateway_request(state, headers, body, EndpointKind::Responses).await {
+    body: Json<Value>,
+) -> Response {
+    let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if is_stream {
+        return dispatch_streaming_request(
+            state,
+            headers,
+            body.0,
+            EndpointKind::Responses,
+        )
+        .await;
+    }
+    match process_gateway_request(state, headers, body.0, EndpointKind::Responses).await {
         Ok(result) => dispatch_success(result),
         Err(error) => error.into_response(),
     }
@@ -992,11 +1013,37 @@ fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
         || (normalized.contains("timed out") && normalized.contains("sse"))
     {
         (StatusCode::GATEWAY_TIMEOUT, "stream_idle_timeout")
+    } else if normalized.contains("before any upstream output") {
+        (
+            StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
+            "stream_client_cancelled",
+        )
+    } else if normalized.contains("partial output received") {
+        (
+            StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
+            "stream_incomplete_close",
+        )
     } else {
         (
             StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
             "stream_interrupted",
         )
+    }
+}
+
+/// Build a discriminative interruption message for the Drop path based on
+/// how far the stream progressed before the downstream client closed.
+/// Splits the catch-all `stream_interrupted` bucket into
+/// `stream_client_cancelled` (no output yet) and `stream_incomplete_close`
+/// (some output received but not completed) for actionable 499 triage.
+fn stream_drop_interruption_message(usage: Option<(u64, u64, u64)>) -> String {
+    let saw_output = usage
+        .map(|(prompt, completion, _)| prompt > 0 || completion > 0)
+        .unwrap_or(false);
+    if saw_output {
+        "client disconnected during stream (partial output received)".to_string()
+    } else {
+        "client disconnected before any upstream output".to_string()
     }
 }
 
@@ -1118,11 +1165,23 @@ struct StreamWatchdog {
     started_at: TokioInstant,
     last_upstream_activity_at: TokioInstant,
     last_heartbeat_at: TokioInstant,
+    /// How many heartbeats have been sent since the last real upstream data.
+    /// Each heartbeat can extend the idle deadline by one heartbeat_interval,
+    /// but once this count reaches `max_heartbeat_extensions`, no further
+    /// extensions are granted. This prevents the original bug where heartbeats
+    /// indefinitely reset the idle timeout, causing 499 errors on long streams.
+    heartbeat_extensions_since_last_data: u32,
+    /// Maximum heartbeat extensions allowed: ceil(idle_timeout / keepalive_interval) + 1.
+    /// Heartbeats can bridge at most one idle_timeout period of upstream silence.
+    max_heartbeat_extensions: u32,
 }
 
 impl StreamWatchdog {
     fn new(timeouts: StreamTimeouts) -> Self {
         let now = TokioInstant::now();
+        let max_heartbeat_extensions = (timeouts.idle_timeout.as_secs()
+            / timeouts.keepalive_interval.as_secs().max(1))
+        .saturating_add(1) as u32;
         Self {
             heartbeat_interval: timeouts.keepalive_interval,
             idle_timeout: timeouts.idle_timeout,
@@ -1130,6 +1189,8 @@ impl StreamWatchdog {
             started_at: now,
             last_upstream_activity_at: now,
             last_heartbeat_at: now,
+            heartbeat_extensions_since_last_data: 0,
+            max_heartbeat_extensions,
         }
     }
 
@@ -1138,7 +1199,13 @@ impl StreamWatchdog {
     }
 
     fn idle_deadline(&self) -> TokioInstant {
-        self.last_upstream_activity_at + self.idle_timeout
+        let base = self.last_upstream_activity_at + self.idle_timeout;
+        if self.heartbeat_extensions_since_last_data == 0 {
+            return base;
+        }
+        let extension = self.heartbeat_interval
+            * self.heartbeat_extensions_since_last_data;
+        base + extension
     }
 
     fn max_deadline(&self) -> TokioInstant {
@@ -1148,12 +1215,30 @@ impl StreamWatchdog {
     fn record_upstream_activity(&mut self, at: TokioInstant) {
         self.last_upstream_activity_at = at;
         self.last_heartbeat_at = at;
+        self.heartbeat_extensions_since_last_data = 0;
     }
 
     fn record_heartbeat(&mut self, at: TokioInstant) {
-        // Heartbeats are downstream progress, so they extend the idle deadline
-        // even though they do not reflect new upstream bytes.
-        self.record_upstream_activity(at);
+        // Heartbeats extend the idle deadline, but only up to
+        // max_heartbeat_extensions times. Prevents indefinite idle reset.
+        self.last_heartbeat_at = at;
+        if self.heartbeat_extensions_since_last_data < self.max_heartbeat_extensions {
+            self.heartbeat_extensions_since_last_data += 1;
+        }
+    }
+
+    fn debug_state(&self, now: TokioInstant) -> String {
+        let idle_elapsed = now.duration_since(self.last_upstream_activity_at).as_secs();
+        let heartbeat_elapsed = now.duration_since(self.last_heartbeat_at).as_secs();
+        let total_elapsed = now.duration_since(self.started_at).as_secs();
+        format!(
+            "total={}s idle_elapsed={}s/{}s heartbeat_elapsed={}s/{}s hb_ext={}/{}",
+            total_elapsed,
+            idle_elapsed, self.idle_timeout.as_secs(),
+            heartbeat_elapsed, self.heartbeat_interval.as_secs(),
+            self.heartbeat_extensions_since_last_data,
+            self.max_heartbeat_extensions,
+        )
     }
 }
 
@@ -5180,6 +5265,219 @@ fn extract_claude_system_text(system: &Value) -> String {
     }
 }
 
+
+/// Build a pre-connect SSE stream that sends keepalive frames to the downstream
+/// client while `process_gateway_request` runs in the background. This eliminates
+/// the "first-byte vacuum" (up to 120s with response_header_timeout) where the
+/// downstream client received no data, which was the primary cause of 499
+/// stream_interrupted errors.
+///
+/// The stream receives results from a background task via `rx`:
+/// 1. Sends `: keepalive\n\n` frames every `keepalive_interval` seconds.
+/// 2. When the background task completes with a `DispatchResult::Stream`,
+///    bridges to the upstream SSE stream.
+/// 3. When the background task completes with an error, emits an SSE error
+///    frame followed by `[DONE]`.
+/// 4. When the background task completes with a `DispatchResult::Json`,
+///    synthesizes an SSE stream from the JSON body.
+fn early_keepalive_stream(
+    rx: mpsc::Receiver<Result<DispatchResult, GatewayError>>,
+    endpoint: EndpointKind,
+    keepalive_interval: Duration,
+) -> Body {
+    let stream = stream::unfold(
+        EarlyStreamState::Waiting {
+            rx,
+            last_heartbeat_at: TokioInstant::now(),
+            keepalive_interval,
+            endpoint,
+        },
+        move |state| async move {
+            match state {
+                EarlyStreamState::Waiting {
+                    mut rx,
+                    last_heartbeat_at,
+                    keepalive_interval,
+                    endpoint,
+                } => {
+                    let deadline = last_heartbeat_at + keepalive_interval;
+                    tokio::select! {
+                        result = rx.recv() => {
+                            match result {
+                                Some(Ok(dispatch_result)) => {
+                                    match dispatch_result.body {
+                                        DispatchBody::Stream(body) => {
+                                            let mut stream = body.into_data_stream();
+                                            match StreamExt::next(&mut stream).await {
+                                                Some(Ok(bytes)) if !bytes.is_empty() => {
+                                                    Some((Ok(bytes), EarlyStreamState::DrainingBody { body: stream }))
+                                                }
+                                                Some(Ok(_)) => {
+                                                    Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body: stream }))
+                                                }
+                                                Some(Err(error)) => {
+                                                    Some((Err(std::io::Error::other(error.to_string())), EarlyStreamState::Done))
+                                                }
+                                                None => None,
+                                            }
+                                        }
+                                        DispatchBody::Json(json) => {
+                                            match synthesize_stream_body(endpoint, &json) {
+                                                Ok(body) => {
+                                                    let mut stream = body.into_data_stream();
+                                                    match StreamExt::next(&mut stream).await {
+                                                        Some(Ok(bytes)) if !bytes.is_empty() => {
+                                                            Some((Ok(bytes), EarlyStreamState::DrainingBody { body: stream }))
+                                                        }
+                                                        Some(Ok(_)) => {
+                                                            Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body: stream }))
+                                                        }
+                                                        Some(Err(error)) => {
+                                                            Some((Err(std::io::Error::other(error.to_string())), EarlyStreamState::Done))
+                                                        }
+                                                        None => None,
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    Some((Ok(sse_error_frame(&error.to_string())), EarlyStreamState::Done))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(Err(error)) => {
+                                    Some((Ok(sse_error_frame(&error.to_string())), EarlyStreamState::Done))
+                                }
+                                None => {
+                                    Some((Ok(sse_error_frame("request processing channel closed")), EarlyStreamState::Done))
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => {
+                            Some((
+                                Ok(sse_keepalive_frame()),
+                                EarlyStreamState::Waiting {
+                                    rx,
+                                    last_heartbeat_at: TokioInstant::now(),
+                                    keepalive_interval,
+                                    endpoint,
+                                },
+                            ))
+                        }
+                    }
+                }
+                EarlyStreamState::DrainingBody { mut body } => {
+                    match StreamExt::next(&mut body).await {
+                        Some(Ok(bytes)) => {
+                            if bytes.is_empty() {
+                                Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body }))
+                            } else {
+                                Some((Ok(bytes), EarlyStreamState::DrainingBody { body }))
+                            }
+                        }
+                        Some(Err(error)) => {
+                            Some((Err(std::io::Error::other(error.to_string())), EarlyStreamState::Done))
+                        }
+                        None => None,
+                    }
+                }
+                EarlyStreamState::Done => None,
+            }
+        },
+    );
+
+    Body::from_stream(stream)
+}
+enum EarlyStreamState {
+    Waiting {
+        rx: mpsc::Receiver<Result<DispatchResult, GatewayError>>,
+        last_heartbeat_at: TokioInstant,
+        keepalive_interval: Duration,
+        endpoint: EndpointKind,
+    },
+    DrainingBody {
+        body: BodyDataStream,
+    },
+    Done,
+}
+
+/// Build an SSE error frame.
+fn sse_error_frame(message: &str) -> Bytes {
+    let error_json = json!({
+        "error": {
+            "message": message,
+        }
+    });
+    Bytes::from(format!("data: {}\n\ndata: [DONE]\n\n", error_json))
+}
+
+
+
+
+/// Handle a streaming request by spawning `process_gateway_request` in the
+/// background and returning an early SSE keepalive stream. If the request
+/// fails quickly (e.g. model not found, auth error) within the pre-check
+/// window, a normal HTTP error response is returned instead.
+async fn dispatch_streaming_request(
+    state: AppState,
+    headers: HeaderMap,
+    body: Value,
+    endpoint: EndpointKind,
+) -> Response {
+    let keepalive_interval = Duration::from_secs(
+        state.config.upstream_stream_keepalive_interval_seconds.max(1),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<Result<DispatchResult, GatewayError>>(1);
+    let bg_state = state.clone();
+    tokio::spawn(async move {
+        let result = process_gateway_request(bg_state, headers, body, endpoint).await;
+        let _ = tx.send(result).await;
+    });
+
+    // Wait briefly for immediate errors (model not found, auth failure, etc.).
+    // 200ms is enough for synchronous validation failures but well below the
+    // typical upstream latency, so legitimate streaming requests are not delayed.
+    match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+        Ok(Some(Ok(result))) => return dispatch_success(result),
+        Ok(Some(Err(error))) => return error.into_response(),
+        Ok(None) => {
+            return GatewayError::Upstream("request processing channel closed".into())
+                .into_response()
+        }
+        Err(_) => {
+            // Still running — start the SSE keepalive stream.
+            let body = early_keepalive_stream(rx, endpoint, keepalive_interval);
+            return dispatch_stream_response(body, String::new());
+        }
+    }
+}
+
+fn dispatch_stream_response(body: Body, request_id: String) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        if !request_id.is_empty() {
+            headers.insert(
+                header::HeaderName::from_static("x-gateway-request-id"),
+                value,
+            );
+        }
+    }
+    (StatusCode::OK, headers, body).into_response()
+}
+
 fn dispatch_success(result: DispatchResult) -> Response {
     let request_id = HeaderValue::from_str(&result.request_id)
         .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
@@ -5278,7 +5576,10 @@ fn proxied_stream_body(
                 Ok(Some((sse_keepalive_frame(), state)))
             }
             StreamReadOutcome::IdleTimeout => {
-                let error_message = "idle timeout waiting for SSE".to_string();
+                let now = TokioInstant::now();
+                let debug_info = state.watchdog.debug_state(now);
+                let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
+                tracing::warn!("stream idle timeout: {}", debug_info);
                 state.mark_stream_interrupted(error_message.clone()).await;
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -5286,7 +5587,10 @@ fn proxied_stream_body(
                 ))
             }
             StreamReadOutcome::MaxDurationExceeded => {
-                let error_message = "stream max duration exceeded before completion".to_string();
+                let now = TokioInstant::now();
+                let debug_info = state.watchdog.debug_state(now);
+                let error_message = format!("stream max duration exceeded before completion ({})", debug_info);
+                tracing::warn!("stream max duration: {}", debug_info);
                 state.mark_stream_interrupted(error_message.clone()).await;
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -5432,7 +5736,7 @@ impl Drop for ProxiedStreamState {
                 completion_context,
                 log_context,
                 usage,
-                "stream disconnected before completion".to_string(),
+                stream_drop_interruption_message(usage),
             );
         }
     }
@@ -5515,7 +5819,10 @@ fn translated_stream_body(
                     return Ok(Some((sse_keepalive_frame(), state)));
                 }
                 StreamReadOutcome::IdleTimeout => {
-                    let error_message = "idle timeout waiting for SSE".to_string();
+                    let now = TokioInstant::now();
+                    let debug_info = state.watchdog.debug_state(now);
+                    let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
+                    tracing::warn!("stream idle timeout: {}", debug_info);
                     state.mark_stream_interrupted(error_message.clone()).await;
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -5523,8 +5830,10 @@ fn translated_stream_body(
                     ));
                 }
                 StreamReadOutcome::MaxDurationExceeded => {
-                    let error_message =
-                        "stream max duration exceeded before completion".to_string();
+                    let now = TokioInstant::now();
+                    let debug_info = state.watchdog.debug_state(now);
+                    let error_message = format!("stream max duration exceeded before completion ({})", debug_info);
+                    tracing::warn!("stream max duration: {}", debug_info);
                     state.mark_stream_interrupted(error_message.clone()).await;
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -5711,7 +6020,7 @@ impl Drop for TranslatedStreamState {
                 completion_context,
                 log_context,
                 usage,
-                "stream disconnected before completion".to_string(),
+                stream_drop_interruption_message(usage),
             );
         }
     }
@@ -5722,7 +6031,13 @@ fn serialize_sse_data(value: &Value) -> Bytes {
 }
 
 fn sse_keepalive_frame() -> Bytes {
-    Bytes::from_static(b": keepalive\n\n")
+    // A real SSE `data:` event (not a `: comment` frame). Comment frames are
+    // silently dropped by downstream SSE parsers and do not reset client-side
+    // idle timers such as Codex's `stream_idle_timeout_ms`, which caused 499
+    // `stream_interrupted` / "idle timeout waiting for SSE" errors during long
+    // upstream reasoning pauses. The `response.ping` type mirrors the OpenAI
+    // Responses protocol heartbeat so conformant clients treat it as activity.
+    Bytes::from_static(b"event: response.ping\ndata: {\"type\":\"response.ping\"}\n\n")
 }
 
 fn sse_done_frame() -> Bytes {
@@ -5848,10 +6163,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sse_keepalive_frame_is_a_data_event_not_a_comment() {
+        // SSE comment frames (": keepalive\n\n") are silently dropped by
+        // client SSE parsers and do NOT reset client-side idle timers such as
+        // Codex's `stream_idle_timeout_ms`. The keepalive must carry a real
+        // `data:` field so downstream clients count it as stream activity.
+        let frame = sse_keepalive_frame();
+        let text = std::str::from_utf8(&frame).unwrap();
+        assert!(
+            !text.starts_with(':'),
+            "keepalive frame must not be a comment, got: {text:?}"
+        );
+        assert!(
+            text.contains("data:"),
+            "keepalive frame must include a data field, got: {text:?}"
+        );
+        assert!(
+            text.ends_with("\n\n"),
+            "keepalive frame must be terminated with a blank line, got: {text:?}"
+        );
+    }
+
+    #[test]
     fn downstream_disconnect_stays_499() {
         let (status, category) = classify_stream_failure("stream disconnected before completion");
         assert_eq!(status, StatusCode::from_u16(499).unwrap());
         assert_eq!(category, "stream_interrupted");
+    }
+
+    #[test]
+    fn drop_message_no_usage_means_cancelled_before_output() {
+        assert_eq!(
+            stream_drop_interruption_message(None),
+            "client disconnected before any upstream output"
+        );
+        assert_eq!(
+            stream_drop_interruption_message(Some((0, 0, 0))),
+            "client disconnected before any upstream output"
+        );
+    }
+
+    #[test]
+    fn drop_message_with_usage_means_partial_output() {
+        assert_eq!(
+            stream_drop_interruption_message(Some((100, 5, 105))),
+            "client disconnected during stream (partial output received)"
+        );
+    }
+
+        #[test]
+    fn client_cancelled_before_output_is_categorized() {
+        // Codex/user cancelled the turn before any upstream output arrived.
+        let (status, category) =
+            classify_stream_failure("client disconnected before any upstream output");
+        assert_eq!(status, StatusCode::from_u16(499).unwrap());
+        assert_eq!(category, "stream_client_cancelled");
+    }
+
+    #[test]
+    fn client_disconnected_during_partial_output_is_categorized() {
+        // Downstream closed mid-stream after some (incomplete) output but
+        // before the completion signal. Distinct from a clean cancel.
+        let (status, category) =
+            classify_stream_failure("client disconnected during stream (partial output received)");
+        assert_eq!(status, StatusCode::from_u16(499).unwrap());
+        assert_eq!(category, "stream_incomplete_close");
     }
 
     #[test]

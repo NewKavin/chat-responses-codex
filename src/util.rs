@@ -59,10 +59,16 @@ pub fn should_bypass_proxy_for_host(host: &str) -> bool {
 
 /// Build an HTTP client for upstream requests.
 pub fn build_upstream_http_client(config: &AppConfig, no_proxy: bool) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(
-        config.upstream_connect_timeout_seconds.max(1),
-    ));
-    builder = builder.pool_max_idle_per_host(config.upstream_http_pool_max_idle_per_host);
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(
+            config.upstream_connect_timeout_seconds.max(1),
+        ))
+        .pool_max_idle_per_host(config.upstream_http_pool_max_idle_per_host)
+        // TCP keepalive prevents long-lived streaming connections from being
+        // silently killed by intermediate network devices.
+        .tcp_keepalive(Duration::from_secs(
+            config.upstream_stream_keepalive_interval_seconds.max(1) * 3,
+        ));
     if no_proxy {
         builder = builder.no_proxy();
     }

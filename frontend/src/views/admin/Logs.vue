@@ -39,7 +39,9 @@
             collapse-tags
             collapse-tags-tooltip
           >
-            <el-option label="stream_interrupted (下游断连)" value="stream_interrupted" />
+            <el-option label="stream_client_cancelled (客户端取消，无输出)" value="stream_client_cancelled" />
+            <el-option label="stream_incomplete_close (下游断连，已有部分输出)" value="stream_incomplete_close" />
+            <el-option label="stream_interrupted (下游断连，未分类)" value="stream_interrupted" />
             <el-option
               label="stream_upstream_body_decode_error (上游响应解码失败)"
               value="stream_upstream_body_decode_error"

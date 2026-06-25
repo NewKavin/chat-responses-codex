@@ -6362,13 +6362,16 @@ async fn stream_interruption_marks_interrupted_not_success() {
         .usage_logs
         .last()
         .expect("expected usage log entry");
-    assert_eq!(log.error_category.as_deref(), Some("stream_interrupted"));
     assert_eq!(log.status_code, 499);
+    // The upstream emitted a content chunk but no usage/[DONE], so the drop
+    // path classifies this as a client cancel before billable output rather
+    // than the generic stream_interrupted bucket.
+    assert_eq!(log.error_category.as_deref(), Some("stream_client_cancelled"));
     assert!(
         log.error_message
             .as_deref()
             .unwrap_or_default()
-            .contains("stream disconnected"),
+            .contains("client disconnected"),
         "unexpected interruption message: {:?}",
         log.error_message
     );
@@ -6915,7 +6918,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let keepalive_bytes = Bytes::from_static(b": keepalive\n\n");
+    let keepalive_bytes = Bytes::from_static(b"event: response.ping\ndata: {\"type\":\"response.ping\"}\n\n");
 
     let first_frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
         .await
