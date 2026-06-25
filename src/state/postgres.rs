@@ -4,11 +4,12 @@ use super::log_queries::{
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig,
     DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary, GlobalContextProfile,
-    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UpstreamProtocol,
-    UsageLog, UsageLogPage, UsageLogQuery,
+    ModelContextConfig, ModelRequestCostConfig, PersistedState, ResponseHistoryEntry,
+    UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
@@ -503,6 +504,92 @@ impl PostgresStateStore {
             month_tokens: i64_to_u64(token_row.get::<_, i64>(1)),
             total_models,
             active_models: i64_to_usize(active_models),
+        }))
+    }
+
+    pub async fn upsert_response_history(
+        &self,
+        response_id: &str,
+        items: &[Value],
+        request_state: &Map<String, Value>,
+        created_at: u64,
+    ) -> io::Result<()> {
+        let mut conn = self.pool.get().await.map_err(io_other)?;
+        let tx = conn.transaction().await.map_err(io_other)?;
+        let items_json = serde_json::to_string(items).map_err(io_other)?;
+        let request_state_json = serde_json::to_string(request_state).map_err(io_other)?;
+        let created_at_db = u64_to_i64(created_at);
+        let cutoff = u64_to_i64(created_at.saturating_sub(super::RESPONSE_HISTORY_TTL_SECONDS));
+        let max_entries = super::RESPONSE_HISTORY_MAX_ENTRIES as i64;
+
+        tx.execute(
+            "INSERT INTO response_history (response_id, items, state, created_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (response_id) DO UPDATE SET
+                 items = EXCLUDED.items,
+                 state = EXCLUDED.state,
+                 created_at = EXCLUDED.created_at",
+            &[&response_id, &items_json, &request_state_json, &created_at_db],
+        )
+        .await
+        .map_err(io_other)?;
+
+        tx.execute(
+            "DELETE FROM response_history
+             WHERE created_at < $1",
+            &[&cutoff],
+        )
+        .await
+        .map_err(io_other)?;
+
+        tx.execute(
+            "DELETE FROM response_history
+             WHERE response_id IN (
+                 SELECT response_id
+                 FROM response_history
+                 ORDER BY created_at DESC, response_id DESC
+                 OFFSET $1
+             )",
+            &[&max_entries],
+        )
+        .await
+        .map_err(io_other)?;
+
+        tx.commit().await.map_err(io_other)
+    }
+
+    pub async fn response_history(
+        &self,
+        response_id: &str,
+        not_before: u64,
+    ) -> io::Result<Option<ResponseHistoryEntry>> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let not_before_db = u64_to_i64(not_before);
+        let row = conn
+            .query_opt(
+                "SELECT items, state, created_at
+                 FROM response_history
+                 WHERE response_id = $1
+                   AND created_at >= $2",
+                &[&response_id, &not_before_db],
+            )
+            .await
+            .map_err(io_other)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let items_json: String = row.get(0);
+        let request_state_json: String = row.get(1);
+        let created_at_db: i64 = row.get(2);
+        let items = serde_json::from_str::<Vec<Value>>(&items_json).map_err(io_other)?;
+        let request_state = serde_json::from_str::<Map<String, Value>>(&request_state_json)
+            .map_err(io_other)?;
+        Ok(Some(ResponseHistoryEntry {
+            items,
+            request_state,
+            created_at: i64_to_u64(created_at_db),
         }))
     }
 
@@ -1260,6 +1347,19 @@ ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_message TEXT NULL;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_category TEXT NULL;
+
+CREATE TABLE IF NOT EXISTS response_history (
+    response_id TEXT PRIMARY KEY,
+    items TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT '{}',
+    created_at BIGINT NOT NULL
+);
+
+ALTER TABLE response_history
+    ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT '{}';
+
+CREATE INDEX IF NOT EXISTS response_history_created_at_idx
+    ON response_history (created_at DESC, response_id);
 
 CREATE INDEX IF NOT EXISTS usage_logs_created_at_idx
     ON usage_logs (created_at DESC, id);

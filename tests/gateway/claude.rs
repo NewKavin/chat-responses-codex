@@ -180,7 +180,7 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn claude_messages_stream_true_returns_anthropic_sse_events() {
-    with_proxy_env_cleared(|| async move {
+    let (status, content_type, payload, captured) = with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();
         let state_path = tempdir.path().join("state.json");
@@ -294,52 +294,53 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/event-stream")
-        );
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
-        assert!(!payload.contains("data: [DONE]"));
-        let events = parse_sse_event_data(&payload);
         let captured = capture.lock().unwrap().clone();
-        let captured_body = captured.request_body.unwrap();
-        assert_eq!(captured_body["messages"][0]["content"], "Hello");
-        assert_eq!(
-            captured_body
-                .get("stream")
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert!(payload.contains("event: message_start"));
-        assert!(payload.contains("\"type\":\"message_start\""));
-        assert!(payload.contains("event: content_block_delta"));
-        assert!(payload.contains("\"type\":\"text_delta\""));
-        assert!(payload.contains("\"text\":\"Hi\""));
-        assert!(payload.contains("event: message_delta"));
-        assert!(payload.contains("\"stop_reason\":\"end_turn\""));
-        assert!(payload.contains("event: message_stop"));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_start")
-                && data["type"] == "content_block_start"
-                && data["content_block"]["type"] == "text"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_stop")
-                && data["type"] == "content_block_stop"
-        }));
-        assert_eq!(captured.path, "/v1/chat/completions");
+        (status, content_type, payload, captured)
     })
     .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("text/event-stream"));
+    assert!(!payload.contains("data: [DONE]"));
+    let events = parse_sse_event_data(&payload);
+    let captured_body = captured.request_body.unwrap();
+    assert_eq!(captured_body["messages"][0]["content"], "Hello");
+    assert_eq!(
+        captured_body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert!(payload.contains("event: message_start"));
+    assert!(payload.contains("\"type\":\"message_start\""));
+    assert!(payload.contains("event: content_block_delta"));
+    assert!(payload.contains("\"type\":\"text_delta\""));
+    assert!(payload.contains("\"text\":\"Hi\""));
+    assert!(payload.contains("event: message_delta"));
+    assert!(payload.contains("\"stop_reason\":\"end_turn\""));
+    assert!(payload.contains("event: message_stop"));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_start")
+            && data["type"] == "content_block_start"
+            && data["content_block"]["type"] == "text"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_stop") && data["type"] == "content_block_stop"
+    }));
+    assert_eq!(captured.path, "/v1/chat/completions");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn claude_messages_stream_true_emits_tool_use_block_events() {
-    with_proxy_env_cleared(|| async move {
+    let (status, content_type, payload, captured) = with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();
         let state_path = tempdir.path().join("state.json");
@@ -464,59 +465,61 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/event-stream")
-        );
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
-        assert!(!payload.contains("data: [DONE]"));
-        let events = parse_sse_event_data(&payload);
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_start")
-                && data["type"] == "content_block_start"
-                && data["content_block"]["type"] == "tool_use"
-                && data["content_block"]["name"] == "get_weather"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_delta")
-                && data["type"] == "content_block_delta"
-                && data["delta"]["type"] == "input_json_delta"
-                && data["delta"]["partial_json"].as_str().is_some_and(|value| value.contains("\"city\":\"Paris\""))
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("message_delta")
-                && data["delta"]["stop_reason"] == "tool_use"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_stop")
-                && data["type"] == "content_block_stop"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("message_stop") && data["type"] == "message_stop"
-        }));
-
         let captured = capture.lock().unwrap().clone();
-        assert_eq!(captured.path, "/v1/chat/completions");
-        let captured_body = captured.request_body.unwrap();
-        assert_eq!(captured_body["messages"][0]["content"], "Hello");
-        assert_eq!(
-            captured_body
-                .get("stream")
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
+        (status, content_type, payload, captured)
     })
     .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("text/event-stream"));
+    assert!(!payload.contains("data: [DONE]"));
+    let events = parse_sse_event_data(&payload);
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_start")
+            && data["type"] == "content_block_start"
+            && data["content_block"]["type"] == "tool_use"
+            && data["content_block"]["name"] == "get_weather"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_delta")
+            && data["type"] == "content_block_delta"
+            && data["delta"]["type"] == "input_json_delta"
+            && data["delta"]["partial_json"]
+                .as_str()
+                .is_some_and(|value| value.contains("\"city\":\"Paris\""))
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("message_delta") && data["delta"]["stop_reason"] == "tool_use"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_stop") && data["type"] == "content_block_stop"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("message_stop") && data["type"] == "message_stop"
+    }));
+
+    assert_eq!(captured.path, "/v1/chat/completions");
+    let captured_body = captured.request_body.unwrap();
+    assert_eq!(captured_body["messages"][0]["content"], "Hello");
+    assert_eq!(
+        captured_body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn claude_messages_stream_true_adapts_chat_chunk_sse_without_gateway_synthesis() {
-    with_proxy_env_cleared(|| async move {
+async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic_events() {
+    let (status, content_type, payload, captured) = with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();
         let state_path = tempdir.path().join("state.json");
@@ -629,65 +632,65 @@ async fn claude_messages_stream_true_adapts_chat_chunk_sse_without_gateway_synth
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/event-stream")
-        );
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
-        assert!(!payload.contains("data: [DONE]"));
-        let events = parse_sse_event_data(&payload);
-        let text = events
-            .iter()
-            .filter(|(event, data)| {
-                event.as_deref() == Some("content_block_delta")
-                    && data["delta"]["type"] == "text_delta"
-            })
-            .filter_map(|(_, data)| data["delta"]["text"].as_str())
-            .collect::<String>();
-        assert_eq!(text, "Hello");
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("message_start") && data["type"] == "message_start"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_start")
-                && data["type"] == "content_block_start"
-                && data["content_block"]["type"] == "text"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_delta")
-                && data["type"] == "content_block_delta"
-                && data["delta"]["type"] == "text_delta"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("content_block_stop")
-                && data["type"] == "content_block_stop"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("message_delta")
-                && data["delta"]["stop_reason"] == "end_turn"
-        }));
-        assert!(events.iter().any(|(event, data)| {
-            event.as_deref() == Some("message_stop") && data["type"] == "message_stop"
-        }));
-        assert!(!payload.contains("chat.completion.chunk"));
-
         let captured = capture.lock().unwrap().clone();
-        assert_eq!(captured.path, "/v1/chat/completions");
-        let captured_body = captured.request_body.unwrap();
-        assert_eq!(captured_body["messages"][0]["content"], "Hello");
-        assert_eq!(
-            captured_body
-                .get("stream")
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
+        (status, content_type, payload, captured)
     })
     .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("text/event-stream"));
+    assert!(!payload.contains("data: [DONE]"));
+    let events = parse_sse_event_data(&payload);
+    let text = events
+        .iter()
+        .filter(|(event, data)| {
+            event.as_deref() == Some("content_block_delta")
+                && data["delta"]["type"] == "text_delta"
+        })
+        .filter_map(|(_, data)| data["delta"]["text"].as_str())
+        .collect::<String>();
+    assert_eq!(text, "Hello");
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("message_start") && data["type"] == "message_start"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_start")
+            && data["type"] == "content_block_start"
+            && data["content_block"]["type"] == "text"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_delta")
+            && data["type"] == "content_block_delta"
+            && data["delta"]["type"] == "text_delta"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("content_block_stop") && data["type"] == "content_block_stop"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("message_delta") && data["delta"]["stop_reason"] == "end_turn"
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event.as_deref() == Some("message_stop") && data["type"] == "message_stop"
+    }));
+    assert!(!payload.contains("chat.completion.chunk"));
+
+    assert_eq!(captured.path, "/v1/chat/completions");
+    let captured_body = captured.request_body.unwrap();
+    assert_eq!(captured_body["messages"][0]["content"], "Hello");
+    assert_eq!(
+        captured_body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

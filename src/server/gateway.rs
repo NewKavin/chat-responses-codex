@@ -12,18 +12,18 @@ use crate::state::{
     GlobalContextProfile, UpstreamConfig, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
-use axum::body::Body;
+use axum::body::{Body, BodyDataStream};
 use axum::extract::{ConnectInfo, Json, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
-use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::time::Instant as TokioInstant;
@@ -845,6 +845,138 @@ impl StreamCompletionContext {
     }
 }
 
+#[derive(Clone)]
+struct ResponseHistoryContext {
+    state: AppState,
+    history_input_items: Vec<Value>,
+    history_request_state: Map<String, Value>,
+}
+
+impl ResponseHistoryContext {
+    fn store_from_completed_event(&self, event: &Value) -> bool {
+        if event.get("type").and_then(Value::as_str) != Some("response.completed") {
+            return false;
+        }
+        self.store_from_response_value(event.get("response").unwrap_or(&Value::Null))
+    }
+
+    fn store_from_response_body(&self, response: &Value) -> bool {
+        self.store_from_response_value(response)
+    }
+
+    fn store_from_response_value(&self, response: &Value) -> bool {
+        let Some(response_id) = response
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return false;
+        };
+        let Some(output) = response.get("output").and_then(Value::as_array) else {
+            return false;
+        };
+
+        let mut items = self.history_input_items.clone();
+        items.extend(output.iter().cloned());
+        self.state
+            .store_response_history(
+                response_id.to_string(),
+                items,
+                self.history_request_state.clone(),
+            );
+        true
+    }
+}
+
+const RESPONSE_HISTORY_STATE_FIELDS: &[&str] = &[
+    "instructions",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+];
+
+fn normalize_responses_input_items(input: &Value) -> Result<Vec<Value>, GatewayError> {
+    match input {
+        Value::String(content) => Ok(vec![json!({
+            "role": "user",
+            "content": content,
+        })]),
+        Value::Array(items) => Ok(items.clone()),
+        Value::Object(_) => Ok(vec![input.clone()]),
+        other => Err(GatewayError::BadRequest(format!(
+            "unsupported responses input payload: {other}"
+        ))),
+    }
+}
+
+fn capture_response_history_state(object: &Map<String, Value>) -> Map<String, Value> {
+    let mut state = Map::new();
+    for field in RESPONSE_HISTORY_STATE_FIELDS {
+        if let Some(value) = object.get(*field) {
+            state.insert((*field).to_string(), value.clone());
+        }
+    }
+    state
+}
+
+fn apply_response_history_state(object: &mut Map<String, Value>, state: &Map<String, Value>) {
+    for (key, value) in state {
+        object.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+}
+
+async fn prepare_response_history_context(
+    state: &AppState,
+    body: &mut Value,
+) -> Result<ResponseHistoryContext, GatewayError> {
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| GatewayError::BadRequest("responses body must be an object".into()))?;
+    let previous_response_id = object
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut history_request_state = capture_response_history_state(object);
+    let current_input_items = match object.get("input") {
+        Some(input) => normalize_responses_input_items(input)?,
+        None if previous_response_id.is_some() => Vec::new(),
+        None => return Err(GatewayError::BadRequest("missing input".into())),
+    };
+
+    let effective_input_items = if let Some(previous_response_id) = previous_response_id.as_deref()
+    {
+        let mut prior_history =
+            state
+                .response_history(previous_response_id)
+                .await
+                .ok_or_else(|| {
+                    GatewayError::BadRequest(format!(
+                        "unknown previous_response_id \"{previous_response_id}\"; cached response history is unavailable (it may have expired or the gateway may have restarted)"
+                    ))
+                })?;
+        let mut prior_items = prior_history.items;
+        prior_items.extend(current_input_items);
+        history_request_state = prior_history.request_state;
+        history_request_state.extend(capture_response_history_state(object));
+        apply_response_history_state(object, &history_request_state);
+        prior_items
+    } else {
+        current_input_items
+    };
+
+    object.insert("input".into(), Value::Array(effective_input_items.clone()));
+    object.remove("previous_response_id");
+
+    Ok(ResponseHistoryContext {
+        state: state.clone(),
+        history_input_items: effective_input_items,
+        history_request_state,
+    })
+}
+
 fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
     let normalized = error_message.to_ascii_lowercase();
     if normalized.contains("max duration")
@@ -1019,9 +1151,9 @@ impl StreamWatchdog {
     }
 
     fn record_heartbeat(&mut self, at: TokioInstant) {
-        // Heartbeats are local-only keepalive signals and should NOT reset
-        // the upstream activity timer. Only update heartbeat deadline tracking.
-        self.last_heartbeat_at = at;
+        // Heartbeats are downstream progress, so they extend the idle deadline
+        // even though they do not reflect new upstream bytes.
+        self.record_upstream_activity(at);
     }
 }
 
@@ -1055,7 +1187,7 @@ async fn wait_for_upstream_chunk(
 async fn process_gateway_request(
     state: AppState,
     headers: HeaderMap,
-    body: Value,
+    mut body: Value,
     endpoint: EndpointKind,
 ) -> Result<DispatchResult, GatewayError> {
     let secret = downstream_secret_from_headers(&headers)?;
@@ -1067,6 +1199,42 @@ async fn process_gateway_request(
 
     let request_id = Uuid::new_v4().to_string();
     let request_path = endpoint.path();
+    let response_history_context = if endpoint == EndpointKind::Responses {
+        match prepare_response_history_context(&state, &mut body).await {
+            Ok(context) => Some(context),
+            Err(error) => {
+                let body_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                append_gateway_usage_log(
+                    &state,
+                    &request_id,
+                    &downstream.id,
+                    &downstream.name,
+                    "",
+                    None,
+                    request_path,
+                    body_model,
+                    None,
+                    headers
+                        .get(header::USER_AGENT)
+                        .and_then(|value| value.to_str().ok()),
+                    error.status_code(),
+                    Some(error.to_string()),
+                    None,
+                    0,
+                    0,
+                    0,
+                    Instant::now(),
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let model = body
         .get("model")
         .and_then(Value::as_str)
@@ -1694,6 +1862,7 @@ async fn process_gateway_request(
                         fallback_to_chat,
                         global_context_profile.as_ref(),
                         stream_completion_context.clone(),
+                        response_history_context.clone(),
                     )
                     .await;
 
@@ -2994,6 +3163,7 @@ async fn send_to_upstream(
     chat_fallback_requested: bool,
     global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
+    response_history_context: Option<ResponseHistoryContext>,
 ) -> Result<DispatchResult, GatewayError> {
     let upstream_body = match (endpoint, upstream_protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => body.clone(),
@@ -3488,6 +3658,7 @@ async fn send_to_upstream(
                     response,
                     stream_log_context,
                     stream_completion_context,
+                    response_history_context,
                     stream_timeouts,
                 )?
             } else {
@@ -3497,6 +3668,7 @@ async fn send_to_upstream(
                     endpoint.native_protocol(),
                     stream_log_context,
                     stream_completion_context,
+                    response_history_context,
                     stream_timeouts,
                 )?
             }
@@ -3521,6 +3693,9 @@ async fn send_to_upstream(
                 }
             };
 
+            if let Some(context) = response_history_context.as_ref() {
+                context.store_from_response_body(&final_body);
+            }
             usage_body = Some(final_body.clone());
             synthesize_stream_body(endpoint, &final_body)?
         };
@@ -3558,6 +3733,10 @@ async fn send_to_upstream(
             chat_response_to_responses_payload(&upstream_json).map_err(protocol_error_to_gateway)?
         }
     };
+
+    if let Some(context) = response_history_context.as_ref() {
+        context.store_from_response_body(&body);
+    }
 
     let usage = usage_from_body(&body);
 
@@ -3900,40 +4079,66 @@ fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
     let request_id = HeaderValue::from_str(&result.request_id)
         .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
 
-    let claude_body = match result.body {
-        DispatchBody::Json(body) => match chat_completion_to_claude_message(&body) {
-            Ok(claude_body) => claude_body,
-            Err(error) => return error.into_response(),
-        },
-        DispatchBody::Stream(_) => {
-            return GatewayError::BadRequest(
-                "claude streaming compatibility is not implemented for translated upstream streams yet".into(),
-            )
-            .into_response();
-        }
-    };
-
     let mut headers = HeaderMap::new();
     headers.insert(
         header::HeaderName::from_static("x-gateway-request-id"),
         request_id,
     );
 
-    if stream {
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/event-stream"),
-        );
-        match claude_message_to_sse_body(&claude_body) {
-            Ok(body) => (result.status, headers, body).into_response(),
-            Err(error) => error.into_response(),
+    match result.body {
+        DispatchBody::Json(body) => {
+            let claude_body = match chat_completion_to_claude_message(&body) {
+                Ok(claude_body) => claude_body,
+                Err(error) => return error.into_response(),
+            };
+
+            if stream {
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                headers.insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-cache, no-transform"),
+                );
+                headers.insert(
+                    header::HeaderName::from_static("x-accel-buffering"),
+                    HeaderValue::from_static("no"),
+                );
+                match claude_message_to_sse_body(&claude_body) {
+                    Ok(body) => (result.status, headers, body).into_response(),
+                    Err(error) => error.into_response(),
+                }
+            } else {
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                (result.status, headers, Json(claude_body)).into_response()
+            }
         }
-    } else {
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        (result.status, headers, Json(claude_body)).into_response()
+        DispatchBody::Stream(body) => {
+            if !stream {
+                return GatewayError::BadRequest(
+                    "upstream returned a stream for a non-stream Claude request".into(),
+                )
+                .into_response();
+            }
+
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-transform"),
+            );
+            headers.insert(
+                header::HeaderName::from_static("x-accel-buffering"),
+                HeaderValue::from_static("no"),
+            );
+            (result.status, headers, claude_stream_body(body)).into_response()
+        }
     }
 }
 
@@ -4111,6 +4316,438 @@ fn claude_sse_event(event: &str, payload: Value) -> Bytes {
     Bytes::from(format!("event: {event}\ndata: {payload}\n\n"))
 }
 
+fn chat_finish_reason_to_claude_stop_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("length") => "max_tokens",
+        Some("tool_calls") | Some("function_call") => "tool_use",
+        _ => "end_turn",
+    }
+}
+
+fn claude_stream_body(body: Body) -> Body {
+    let state = ClaudeStreamState {
+        stream: body.into_data_stream(),
+        buffer: Vec::new(),
+        pending: VecDeque::new(),
+        usage: None,
+        message_id: None,
+        model: None,
+        message_start_emitted: false,
+        current_text_block_index: None,
+        next_block_index: 0,
+        tool_blocks: BTreeMap::new(),
+        stop_reason: None,
+        downstream_finished: false,
+        upstream_done: false,
+    };
+    let stream = stream::try_unfold(state, |mut state| async move {
+        loop {
+            if let Some(bytes) = state.pending.pop_front() {
+                return Ok(Some((bytes, state)));
+            }
+
+            if state.upstream_done {
+                return Ok(None);
+            }
+
+            match state.stream.next().await {
+                Some(Ok(chunk)) => {
+                    state.buffer.extend_from_slice(&chunk);
+                    state.drain_buffer()?;
+                }
+                Some(Err(error)) => return Err(std::io::Error::other(error.to_string())),
+                None => state.finish_upstream(),
+            }
+        }
+    });
+
+    Body::from_stream(stream)
+}
+
+#[derive(Debug, Default)]
+struct ClaudeToolUseState {
+    block_index: usize,
+    id: String,
+    name: String,
+    started: bool,
+    stopped: bool,
+}
+
+struct ClaudeStreamState {
+    stream: BodyDataStream,
+    buffer: Vec<u8>,
+    pending: VecDeque<Bytes>,
+    usage: Option<(u64, u64, u64)>,
+    message_id: Option<String>,
+    model: Option<String>,
+    message_start_emitted: bool,
+    current_text_block_index: Option<usize>,
+    next_block_index: usize,
+    tool_blocks: BTreeMap<usize, ClaudeToolUseState>,
+    stop_reason: Option<String>,
+    downstream_finished: bool,
+    upstream_done: bool,
+}
+
+impl ClaudeStreamState {
+    fn drain_buffer(&mut self) -> Result<(), std::io::Error> {
+        while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
+            let payload = parse_sse_data_payload(&frame)?;
+            self.buffer.drain(..frame.len() + delimiter_len);
+
+            let Some(payload) = payload else {
+                self.pending.push_back(sse_keepalive_frame());
+                continue;
+            };
+
+            if payload.trim() == "[DONE]" {
+                if !self.downstream_finished {
+                    self.finish_message();
+                }
+                continue;
+            }
+
+            let event: Value = serde_json::from_str(&payload)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            self.consume_chat_chunk(&event)?;
+        }
+
+        Ok(())
+    }
+
+    fn consume_chat_chunk(&mut self, chunk: &Value) -> Result<(), std::io::Error> {
+        if self.downstream_finished {
+            return Ok(());
+        }
+
+        if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+            self.message_id = Some(id.to_string());
+        }
+        if let Some(model) = chunk.get("model").and_then(Value::as_str) {
+            self.model = Some(model.to_string());
+        }
+        if let Some(usage) = stream_usage_from_value(chunk) {
+            self.usage = Some(usage);
+        }
+
+        let Some(choice) = chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+        else {
+            return Ok(());
+        };
+
+        let delta = choice.get("delta").unwrap_or(&Value::Null);
+        if let Some(text) = delta
+            .get("content")
+            .map(|content| extract_plain_text_from_content(Some(content)))
+            .filter(|text| !text.is_empty())
+        {
+            self.close_open_tool_blocks();
+            self.emit_text_delta(&text);
+        }
+
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            if !tool_calls.is_empty() {
+                self.close_text_block();
+                self.ensure_message_start();
+                for (fallback_index, tool_call) in tool_calls.iter().enumerate() {
+                    self.emit_tool_call_delta(tool_call, fallback_index)?;
+                }
+            }
+        }
+
+        if let Some(function_call) = delta.get("function_call") {
+            self.close_text_block();
+            self.ensure_message_start();
+            self.emit_legacy_function_call_delta(function_call)?;
+        }
+
+        if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.stop_reason = Some(chat_finish_reason_to_claude_stop_reason(Some(finish_reason)).to_string());
+            self.finish_message();
+        }
+
+        Ok(())
+    }
+
+    fn emit_text_delta(&mut self, text: &str) {
+        self.ensure_message_start();
+
+        let index = match self.current_text_block_index {
+            Some(index) => index,
+            None => {
+                let index = self.next_block_index;
+                self.next_block_index = self.next_block_index.saturating_add(1);
+                self.pending.push_back(claude_sse_event(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {
+                            "type": "text",
+                            "text": ""
+                        }
+                    }),
+                ));
+                self.current_text_block_index = Some(index);
+                index
+            }
+        };
+
+        self.pending.push_back(claude_sse_event(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {
+                    "type": "text_delta",
+                    "text": text
+                }
+            }),
+        ));
+    }
+
+    fn emit_tool_call_delta(
+        &mut self,
+        tool_call: &Value,
+        fallback_index: usize,
+    ) -> Result<(), std::io::Error> {
+        let tool_index = tool_call
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(fallback_index);
+        let function = tool_call.get("function").and_then(Value::as_object);
+        let call_id = tool_call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        let name = function
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        let partial_json = function
+            .and_then(|function| function.get("arguments"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        self.emit_tool_delta_parts(tool_index, call_id, name, partial_json)
+    }
+
+    fn emit_legacy_function_call_delta(&mut self, function_call: &Value) -> Result<(), std::io::Error> {
+        let call_id = function_call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        let name = function_call
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        let partial_json = function_call
+            .get("arguments")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        self.emit_tool_delta_parts(0, call_id, name, partial_json)
+    }
+
+    fn emit_tool_delta_parts(
+        &mut self,
+        tool_index: usize,
+        call_id: Option<&str>,
+        name: Option<&str>,
+        partial_json: Option<String>,
+    ) -> Result<(), std::io::Error> {
+        if !self.tool_blocks.contains_key(&tool_index) {
+            let block_index = self.next_block_index;
+            self.next_block_index = self.next_block_index.saturating_add(1);
+            self.tool_blocks.insert(
+                tool_index,
+                ClaudeToolUseState {
+                    block_index,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let mut start_event = None;
+        let mut delta_event = None;
+        {
+            let state = self
+                .tool_blocks
+                .get_mut(&tool_index)
+                .ok_or_else(|| std::io::Error::other("missing tool call state"))?;
+            if let Some(call_id) = call_id {
+                state.id = call_id.to_string();
+            }
+            if let Some(name) = name {
+                state.name = name.to_string();
+            }
+            if state.id.is_empty() {
+                state.id = format!("toolu_{}", state.block_index);
+            }
+            let should_start = !state.started && (!state.name.is_empty() || partial_json.is_some());
+            if should_start {
+                state.started = true;
+                start_event = Some((state.block_index, state.id.clone(), state.name.clone()));
+            }
+            if let Some(partial_json) = partial_json.filter(|value| !value.is_empty()) {
+                delta_event = Some((state.block_index, partial_json));
+            }
+        }
+
+        if let Some((block_index, call_id, name)) = start_event {
+            self.pending.push_back(claude_sse_event(
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": block_index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": {}
+                    }
+                }),
+            ));
+        }
+
+        if let Some((block_index, partial_json)) = delta_event {
+            self.pending.push_back(claude_sse_event(
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": partial_json
+                    }
+                }),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_message_start(&mut self) {
+        if self.message_start_emitted {
+            return;
+        }
+
+        let input_tokens = self.usage.unwrap_or((0, 0, 0)).0;
+        self.pending.push_back(claude_sse_event(
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": self.message_id.as_deref().unwrap_or("msg"),
+                    "type": "message",
+                    "role": "assistant",
+                    "model": self.model.as_deref().unwrap_or_default(),
+                    "content": [],
+                    "stop_reason": Value::Null,
+                    "stop_sequence": Value::Null,
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": 0
+                    }
+                }
+            }),
+        ));
+        self.message_start_emitted = true;
+    }
+
+    fn close_text_block(&mut self) {
+        let Some(index) = self.current_text_block_index.take() else {
+            return;
+        };
+
+        self.pending.push_back(claude_sse_event(
+            "content_block_stop",
+            json!({
+                "type": "content_block_stop",
+                "index": index
+            }),
+        ));
+    }
+
+    fn close_open_tool_blocks(&mut self) {
+        let tool_indexes = self.tool_blocks.keys().copied().collect::<Vec<_>>();
+        for tool_index in tool_indexes {
+            self.close_tool_block(tool_index);
+        }
+    }
+
+    fn close_tool_block(&mut self, tool_index: usize) {
+        let Some((block_index, should_emit)) = self.tool_blocks.get_mut(&tool_index).map(|state| {
+            if state.started && !state.stopped {
+                state.stopped = true;
+                (state.block_index, true)
+            } else {
+                (state.block_index, false)
+            }
+        }) else {
+            return;
+        };
+
+        if should_emit {
+            self.pending.push_back(claude_sse_event(
+                "content_block_stop",
+                json!({
+                    "type": "content_block_stop",
+                    "index": block_index
+                }),
+            ));
+        }
+    }
+
+    fn finish_message(&mut self) {
+        if self.downstream_finished {
+            return;
+        }
+
+        self.ensure_message_start();
+        self.close_text_block();
+        self.close_open_tool_blocks();
+
+        self.pending.push_back(claude_sse_event(
+            "message_delta",
+            json!({
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": self
+                        .stop_reason
+                        .as_deref()
+                        .unwrap_or(chat_finish_reason_to_claude_stop_reason(None)),
+                    "stop_sequence": Value::Null
+                },
+                "usage": {
+                    "output_tokens": self.usage.unwrap_or((0, 0, 0)).1
+                }
+            }),
+        ));
+        self.pending.push_back(claude_sse_event(
+            "message_stop",
+            json!({
+                "type": "message_stop"
+            }),
+        ));
+        self.downstream_finished = true;
+    }
+
+    fn finish_upstream(&mut self) {
+        if !self.downstream_finished {
+            self.finish_message();
+        }
+        self.upstream_done = true;
+        self.buffer.clear();
+    }
+}
+
 fn chat_completion_to_claude_message(body: &Value) -> Result<Value, GatewayError> {
     let choice = body
         .get("choices")
@@ -4233,8 +4870,9 @@ fn claude_messages_to_chat_payload(body: &Value) -> Result<Value, String> {
             claude_tool_choice_to_chat_tool_choice(tool_choice)?,
         );
     }
-    // Claude streaming transport is not yet mapped to /v1/messages SSE output.
-    // Force non-stream behavior by not forwarding the stream flag downstream.
+    if let Some(stream) = body.get("stream").and_then(Value::as_bool) {
+        output.insert("stream".into(), Value::Bool(stream));
+    }
     if let Some(inference_strength) = body.get("inference_strength").and_then(Value::as_str) {
         output.insert(
             "inference_strength".into(),
@@ -4586,6 +5224,7 @@ fn proxied_stream_body(
     response: reqwest::Response,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
+    response_history_context: Option<ResponseHistoryContext>,
     stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
     let state = ProxiedStreamState {
@@ -4594,7 +5233,10 @@ fn proxied_stream_body(
         usage: None,
         log_context: Some(log_context),
         completion_context: stream_completion_context,
+        response_history_context,
+        response_history_stored: false,
         finished: false,
+        semantic_completion_emitted: false,
         usage_log_flushed: false,
         watchdog: StreamWatchdog::new(stream_timeouts),
     };
@@ -4663,7 +5305,10 @@ struct ProxiedStreamState {
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
+    response_history_context: Option<ResponseHistoryContext>,
+    response_history_stored: bool,
     finished: bool,
+    semantic_completion_emitted: bool,
     usage_log_flushed: bool,
     watchdog: StreamWatchdog,
 }
@@ -4690,6 +5335,16 @@ impl ProxiedStreamState {
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
+            }
+            if event.get("type").and_then(Value::as_str) == Some("response.completed") {
+                self.semantic_completion_emitted = true;
+            }
+            if !self.response_history_stored {
+                if let Some(context) = self.response_history_context.as_ref() {
+                    if context.store_from_completed_event(&event) {
+                        self.response_history_stored = true;
+                    }
+                }
             }
         }
 
@@ -4768,9 +5423,9 @@ impl Drop for ProxiedStreamState {
         let log_context = self.log_context.take();
         let usage = self.usage;
 
-        if self.finished {
-            // Stream completed normally (received [DONE]) but client disconnected
-            // before consuming all remaining chunks. Log as success, not error.
+        if self.finished || self.semantic_completion_emitted {
+            // The upstream Responses stream is complete once `response.completed`
+            // has been seen, even if `[DONE]` has not arrived yet.
             spawn_stream_normal_completion_cleanup(completion_context, log_context, usage);
         } else {
             spawn_stream_interruption_cleanup(
@@ -4789,6 +5444,7 @@ fn translated_stream_body(
     target_protocol: UpstreamProtocol,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
+    response_history_context: Option<ResponseHistoryContext>,
     stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
     let translator = StreamTranslator::new(source_protocol, target_protocol).ok_or_else(|| {
@@ -4805,7 +5461,10 @@ fn translated_stream_body(
         usage: None,
         log_context: Some(log_context),
         completion_context: stream_completion_context,
+        response_history_context,
+        response_history_stored: false,
         finished: false,
+        semantic_completion_emitted: false,
         usage_log_flushed: false,
         watchdog: StreamWatchdog::new(stream_timeouts),
     };
@@ -4887,7 +5546,10 @@ struct TranslatedStreamState {
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
+    response_history_context: Option<ResponseHistoryContext>,
+    response_history_stored: bool,
     finished: bool,
+    semantic_completion_emitted: bool,
     usage_log_flushed: bool,
     watchdog: StreamWatchdog,
 }
@@ -4919,6 +5581,21 @@ impl TranslatedStreamState {
                 .translator
                 .translate_event(&event)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if translated.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("response.completed")
+            }) {
+                self.semantic_completion_emitted = true;
+            }
+            if !self.response_history_stored {
+                if let Some(context) = self.response_history_context.as_ref() {
+                    if translated
+                        .iter()
+                        .any(|item| context.store_from_completed_event(item))
+                    {
+                        self.response_history_stored = true;
+                    }
+                }
+            }
             for item in translated {
                 self.pending.push_back(serialize_sse_data(&item));
             }
@@ -4936,6 +5613,21 @@ impl TranslatedStreamState {
             .translator
             .finish()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if translated.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("response.completed")
+        }) {
+            self.semantic_completion_emitted = true;
+        }
+        if !self.response_history_stored {
+            if let Some(context) = self.response_history_context.as_ref() {
+                if translated
+                    .iter()
+                    .any(|item| context.store_from_completed_event(item))
+                {
+                    self.response_history_stored = true;
+                }
+            }
+        }
         for item in translated {
             self.pending.push_back(serialize_sse_data(&item));
         }
@@ -5008,9 +5700,11 @@ impl Drop for TranslatedStreamState {
         let log_context = self.log_context.take();
         let usage = self.usage;
 
-        if self.finished {
-            // Stream completed normally (received [DONE]) but client disconnected
-            // before consuming all pending translated frames. Log as success.
+        if self.finished || self.semantic_completion_emitted {
+            // A translated Responses stream can be semantically complete once
+            // `response.completed` has been emitted, even if the upstream chat
+            // provider trails with usage/[DONE]. Treat a downstream drop after
+            // that point as success, not a spurious interruption.
             spawn_stream_normal_completion_cleanup(completion_context, log_context, usage);
         } else {
             spawn_stream_interruption_cleanup(

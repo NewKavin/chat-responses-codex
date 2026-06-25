@@ -1,4 +1,6 @@
 use super::common::*;
+use axum::response::IntoResponse;
+use futures_util::StreamExt;
 use serde_json::json;
 
 #[tokio::test]
@@ -678,6 +680,164 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
 }
 
 #[tokio::test]
+async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logged_as_success() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/responses",
+            post(
+                move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                      request: Request<Body>| async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let mut lock = capture.lock().unwrap();
+                    lock.path = parts.uri.path().to_string();
+                    lock.authorization = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    lock.request_body = Some(payload);
+
+                    let initial_chunks = stream::iter(vec![
+                        Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                            "data: {}\n\n",
+                            json!({
+                                "type": "response.completed",
+                                "response": {
+                                    "id": "resp-stream",
+                                    "object": "response",
+                                    "output": []
+                                }
+                            })
+                        ))),
+                    ]);
+                    let delayed_done = stream::once(async {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"))
+                    });
+
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(initial_chunks.chain(delayed_done)),
+                    )
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "input": "Hello"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("timed out waiting for proxied SSE frame")
+        .expect("expected proxied SSE frame")
+        .expect("expected proxied SSE data frame");
+    let bytes = frame.into_data().expect("expected data frame");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("response.completed"));
+    assert!(!text.contains("[DONE]"));
+    drop(body);
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+
+    let snapshot = state.snapshot().await;
+    let log = snapshot
+        .usage_logs
+        .last()
+        .expect("expected usage log entry");
+    assert_eq!(log.status_code, 200);
+    assert_eq!(log.error_category.as_deref(), None);
+    assert_eq!(log.error_message.as_deref(), None);
+}
+
+#[tokio::test]
 async fn downstream_responses_stream_retries_without_stream_when_upstream_rejects_stream() {
     let capture = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let tempdir = tempdir().unwrap();
@@ -1212,6 +1372,271 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
     let request_body = captured.request_body.unwrap();
     assert_eq!(request_body["messages"][0]["content"], "Need weather");
     assert_eq!(request_body["tools"][0]["function"]["name"], "get_weather");
+}
+
+#[tokio::test]
+async fn downstream_responses_previous_response_id_replays_prior_state_and_output_history_for_chat_upstream() {
+    let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+    let call_count_clone = call_count.clone();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(capture): State<Arc<Mutex<Vec<RequestCapture>>>>,
+                      request: Request<Body>| {
+                    let call_count = call_count_clone.clone();
+                    async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.push(RequestCapture {
+                            path: parts.uri.path().to_string(),
+                            authorization: parts
+                                .headers
+                                .get(header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_string),
+                            request_body: Some(payload),
+                        });
+
+                        let current_call = call_count.fetch_add(1, Ordering::SeqCst);
+                        if current_call == 0 {
+                            let chunks = vec![
+                                Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                    "data: {}\n\n",
+                                    json!({
+                                        "id": "chatcmpl-prev",
+                                        "object": "chat.completion.chunk",
+                                        "created": 1,
+                                        "model": "gpt-4.1-mini",
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {
+                                                "role": "assistant",
+                                                "tool_calls": [{
+                                                    "index": 0,
+                                                    "id": "call_1",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "exec_command",
+                                                        "arguments": "{\"cmd\":\"pwd\"}"
+                                                    }
+                                                }]
+                                            },
+                                            "finish_reason": null
+                                        }]
+                                    })
+                                ))),
+                                Ok(Bytes::from(format!(
+                                    "data: {}\n\n",
+                                    json!({
+                                        "id": "chatcmpl-prev",
+                                        "object": "chat.completion.chunk",
+                                        "created": 1,
+                                        "model": "gpt-4.1-mini",
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {},
+                                            "finish_reason": "tool_calls"
+                                        }]
+                                    })
+                                ))),
+                                Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                            ];
+
+                            (
+                                StatusCode::OK,
+                                [(header::CONTENT_TYPE, "text/event-stream")],
+                                Body::from_stream(stream::iter(chunks)),
+                            )
+                                .into_response()
+                        } else {
+                            (
+                                StatusCode::OK,
+                                axum::Json(json!({
+                                    "id": "chatcmpl-next",
+                                    "object": "chat.completion",
+                                    "created": 2,
+                                    "model": "gpt-4.1-mini",
+                                    "choices": [{
+                                        "index": 0,
+                                        "message": {"role": "assistant", "content": "done"},
+                                        "finish_reason": "stop"
+                                    }],
+                                    "usage": {
+                                        "prompt_tokens": 5,
+                                        "completion_tokens": 1,
+                                        "total_tokens": 6
+                                    }
+                                })),
+                            )
+                                .into_response()
+                        }
+                    }
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "instructions": "You are a shell assistant.",
+                        "input": "Use pwd",
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "description": "Run a shell command",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "cmd": {"type": "string"}
+                                    },
+                                    "required": ["cmd"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = to_bytes(first_response.into_body(), usize::MAX).await.unwrap();
+    let first_text = String::from_utf8(first_body.to_vec()).unwrap();
+    assert!(first_text.contains("response.completed"));
+    assert!(first_text.contains("\"id\":\"chatcmpl-prev\""));
+
+    let second_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "previous_response_id": "chatcmpl-prev",
+                        "input": [
+                            {
+                                "type": "function_call_output",
+                                "call_id": "call_1",
+                                "output": "/home/kavin"
+                            },
+                            {
+                                "role": "user",
+                                "content": "Continue"
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let _second_body = to_bytes(second_response.into_body(), usize::MAX).await.unwrap();
+
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2);
+    let second_request_body = captured[1].request_body.clone().unwrap();
+    let messages = second_request_body["messages"].as_array().unwrap();
+    assert_eq!(second_request_body["tools"][0]["function"]["name"], "exec_command");
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "You are a shell assistant.");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "Use pwd");
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[2]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"]["arguments"],
+        "{\"cmd\":\"pwd\"}"
+    );
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "call_1");
+    assert_eq!(messages[3]["content"], "/home/kavin");
+    assert_eq!(messages[4]["role"], "user");
+    assert_eq!(messages[4]["content"], "Continue");
 }
 
 #[tokio::test]
@@ -4352,6 +4777,205 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
     assert!(
         saw_done,
         "translated stream should emit a terminal [DONE] frame"
+    );
+    drop(body);
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+
+    let snapshot = state.snapshot().await;
+    let log = snapshot
+        .usage_logs
+        .last()
+        .expect("expected usage log entry");
+    assert_eq!(log.status_code, 200);
+    assert_eq!(log.error_category.as_deref(), None);
+    assert_eq!(log.error_message.as_deref(), None);
+}
+
+#[tokio::test]
+async fn translated_chat_to_responses_drop_after_completed_event_is_logged_as_success() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|_body: String| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+
+            let initial_chunks = stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                    "data: {}\n\n",
+                    json!({
+                        "id": "chatcmpl-tool",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "exec_command",
+                                        "arguments": "{\"cmd\":\"pwd\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    })
+                ))),
+                Ok(Bytes::from(format!(
+                    "data: {}\n\n",
+                    json!({
+                        "id": "chatcmpl-tool",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "tool_calls"
+                        }]
+                    })
+                ))),
+            ]);
+            let delayed_done = stream::once(async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"))
+            });
+
+            (
+                StatusCode::OK,
+                headers,
+                Body::from_stream(initial_chunks.chain(delayed_done)),
+            )
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "input": "Use pwd",
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "description": "Run a shell command",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "cmd": {"type": "string"}
+                                    },
+                                    "required": ["cmd"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let mut saw_completed = false;
+    let mut saw_done = false;
+    for _ in 0..8 {
+        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("timed out waiting for translated SSE frame")
+            .expect("expected translated SSE frame")
+            .expect("expected translated SSE data frame");
+        let bytes = frame.into_data().expect("expected data frame");
+        let text = String::from_utf8_lossy(&bytes);
+        if text.contains("response.completed") {
+            saw_completed = true;
+            break;
+        }
+        if text.contains("[DONE]") {
+            saw_done = true;
+            break;
+        }
+    }
+
+    assert!(saw_completed, "expected translated stream to emit response.completed");
+    assert!(
+        !saw_done,
+        "test expected to drop before the translated [DONE] frame arrived"
     );
     drop(body);
 

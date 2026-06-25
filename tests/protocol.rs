@@ -364,6 +364,101 @@ fn responses_request_converts_tool_calls_and_outputs_to_chat_payload() {
 }
 
 #[test]
+fn responses_request_merges_function_call_with_following_assistant_message_before_tool_output() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "exec_command:1",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Running command"
+                    }
+                ]
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "exec_command:1",
+                "output": "/home/kavin"
+            },
+            {
+                "role": "user",
+                "content": "Continue"
+            }
+        ]
+    });
+
+    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+    let messages = converted["messages"].as_array().expect("messages array");
+
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["content"], "Running command");
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "exec_command:1");
+    assert_eq!(
+        messages[0]["tool_calls"][0]["function"]["arguments"],
+        "{\"cmd\":\"pwd\"}"
+    );
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "exec_command:1");
+    assert_eq!(messages[1]["content"], "/home/kavin");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"], "Continue");
+}
+
+#[test]
+fn responses_request_merges_consecutive_function_calls_into_one_assistant_message() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "exec_command:1",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            },
+            {
+                "type": "function_call",
+                "call_id": "write_stdin:1",
+                "name": "write_stdin",
+                "arguments": "{\"chars\":\"help\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "exec_command:1",
+                "output": "/home/kavin"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "write_stdin:1",
+                "output": "usage"
+            }
+        ]
+    });
+
+    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+    let messages = converted["messages"].as_array().expect("messages array");
+
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["tool_calls"].as_array().map(Vec::len), Some(2));
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "exec_command:1");
+    assert_eq!(messages[0]["tool_calls"][1]["id"], "write_stdin:1");
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "exec_command:1");
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[2]["tool_call_id"], "write_stdin:1");
+}
+
+#[test]
 fn chat_response_converts_tool_calls_to_responses_output() {
     let chat_response = json!({
         "id": "chatcmpl-1",

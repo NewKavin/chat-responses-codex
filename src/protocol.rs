@@ -76,6 +76,7 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
 pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, ProtocolError> {
     let model = string_field(input, "model")?;
     let mut messages = Vec::new();
+    let mut pending_assistant = None;
 
     if let Some(instructions) = input.get("instructions") {
         let content = responses_content_to_chat_content(instructions)?;
@@ -90,6 +91,7 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
         .ok_or(ProtocolError::MissingField("input"))?;
     match input_value {
         Value::String(content) => {
+            flush_pending_assistant_message(&mut pending_assistant, &mut messages);
             messages.push(json!({
                 "role": "user",
                 "content": content,
@@ -97,11 +99,11 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
         }
         Value::Array(items) => {
             for item in items {
-                translate_responses_input_item(item, &mut messages)?;
+                translate_responses_input_item(item, &mut pending_assistant, &mut messages)?;
             }
         }
         Value::Object(_) => {
-            translate_responses_input_item(input_value, &mut messages)?;
+            translate_responses_input_item(input_value, &mut pending_assistant, &mut messages)?;
         }
         other => {
             return Err(ProtocolError::InvalidPayload(format!(
@@ -109,6 +111,7 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
             )));
         }
     }
+    flush_pending_assistant_message(&mut pending_assistant, &mut messages);
 
     let mut output = Map::new();
     output.insert("model".into(), Value::String(model.to_string()));
@@ -357,10 +360,12 @@ fn translate_chat_message_to_responses(
 
 fn translate_responses_input_item(
     item: &Value,
+    pending_assistant: &mut Option<Map<String, Value>>,
     messages: &mut Vec<Value>,
 ) -> Result<(), ProtocolError> {
     match item {
         Value::String(content) => {
+            flush_pending_assistant_message(pending_assistant, messages);
             messages.push(json!({
                 "role": "user",
                 "content": content,
@@ -371,21 +376,37 @@ fn translate_responses_input_item(
             let item_type = object.get("type").and_then(Value::as_str);
             match item_type {
                 Some("function_call") => {
-                    messages.push(response_function_call_item_to_chat_message(object)?);
+                    merge_assistant_chat_message(
+                        pending_assistant,
+                        response_function_call_item_to_chat_message(object)?,
+                    )?;
                     Ok(())
                 }
                 Some("function_call_output") => {
+                    flush_pending_assistant_message(pending_assistant, messages);
                     messages.push(response_function_call_output_to_chat_message(object)?);
                     Ok(())
                 }
                 Some("message") => {
-                    messages.push(responses_message_object_to_chat_message(object)?);
+                    let message = responses_message_object_to_chat_message(object)?;
+                    if object.get("role").and_then(Value::as_str) == Some("assistant") {
+                        merge_assistant_chat_message(pending_assistant, message)?;
+                    } else {
+                        flush_pending_assistant_message(pending_assistant, messages);
+                        messages.push(message);
+                    }
                     Ok(())
                 }
                 Some(other) if object.contains_key("role") || object.contains_key("content") => {
                     let mut cloned = object.clone();
                     cloned.insert("type".into(), Value::String(other.to_string()));
-                    messages.push(responses_message_object_to_chat_message(&cloned)?);
+                    let message = responses_message_object_to_chat_message(&cloned)?;
+                    if cloned.get("role").and_then(Value::as_str) == Some("assistant") {
+                        merge_assistant_chat_message(pending_assistant, message)?;
+                    } else {
+                        flush_pending_assistant_message(pending_assistant, messages);
+                        messages.push(message);
+                    }
                     Ok(())
                 }
                 _ if object.contains_key("role")
@@ -393,7 +414,14 @@ fn translate_responses_input_item(
                     || object.contains_key("tool_call_id")
                     || object.contains_key("tool_calls") =>
                 {
-                    messages.push(responses_message_object_to_chat_message(object)?);
+                    let message = responses_message_object_to_chat_message(object)?;
+                    let role = message.get("role").and_then(Value::as_str);
+                    if role == Some("assistant") {
+                        merge_assistant_chat_message(pending_assistant, message)?;
+                    } else {
+                        flush_pending_assistant_message(pending_assistant, messages);
+                        messages.push(message);
+                    }
                     Ok(())
                 }
                 _ => Err(ProtocolError::InvalidPayload(format!(
@@ -403,6 +431,83 @@ fn translate_responses_input_item(
         }
         other => Err(ProtocolError::InvalidPayload(format!(
             "unsupported input item: {other}"
+        ))),
+    }
+}
+
+fn flush_pending_assistant_message(
+    pending_assistant: &mut Option<Map<String, Value>>,
+    messages: &mut Vec<Value>,
+) {
+    if let Some(message) = pending_assistant.take() {
+        messages.push(Value::Object(message));
+    }
+}
+
+fn merge_assistant_chat_message(
+    pending_assistant: &mut Option<Map<String, Value>>,
+    message: Value,
+) -> Result<(), ProtocolError> {
+    let object = message.as_object().ok_or_else(|| {
+        ProtocolError::InvalidPayload(format!("unsupported assistant message: {message}"))
+    })?;
+    let role = object.get("role").and_then(Value::as_str).unwrap_or("assistant");
+    if role != "assistant" {
+        return Err(ProtocolError::InvalidPayload(format!(
+            "expected assistant message, got role: {role}"
+        )));
+    }
+
+    let pending = pending_assistant.get_or_insert_with(|| {
+        let mut pending = Map::new();
+        pending.insert("role".into(), Value::String("assistant".into()));
+        pending.insert("content".into(), Value::Null);
+        pending
+    });
+
+    if let Some(content) = object.get("content") {
+        let current = pending.get("content").cloned().unwrap_or(Value::Null);
+        pending.insert("content".into(), merge_chat_message_content(current, content.clone())?);
+    }
+
+    if let Some(tool_calls) = object.get("tool_calls").and_then(Value::as_array) {
+        let merged = pending
+            .entry("tool_calls")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let merged_array = merged.as_array_mut().ok_or_else(|| {
+            ProtocolError::InvalidPayload("assistant tool_calls must be an array".into())
+        })?;
+        merged_array.extend(tool_calls.iter().cloned());
+    }
+
+    Ok(())
+}
+
+fn merge_chat_message_content(current: Value, next: Value) -> Result<Value, ProtocolError> {
+    match (current, next) {
+        (Value::Null, value) | (value, Value::Null) => Ok(value),
+        (Value::String(mut left), Value::String(right)) => {
+            left.push_str(&right);
+            Ok(Value::String(left))
+        }
+        (left, right) => {
+            let mut parts = chat_content_value_to_parts(left)?;
+            parts.extend(chat_content_value_to_parts(right)?);
+            Ok(Value::Array(parts))
+        }
+    }
+}
+
+fn chat_content_value_to_parts(value: Value) -> Result<Vec<Value>, ProtocolError> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::String(text) => Ok(vec![json!({
+            "type": "text",
+            "text": text,
+        })]),
+        Value::Array(parts) => Ok(parts),
+        other => Err(ProtocolError::InvalidPayload(format!(
+            "unsupported chat content value: {other}"
         ))),
     }
 }

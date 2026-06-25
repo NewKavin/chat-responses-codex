@@ -6,6 +6,7 @@ use chat_responses_codex::state::{
     PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
 };
 use serde_json::json;
+use serde_json::Map;
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
@@ -418,6 +419,91 @@ async fn postgres_roundtrip_preserves_global_context_profiles() {
             .context_group,
         "glm",
     );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_response_history() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    let response_id = format!("resp-{}", Uuid::new_v4().simple());
+    let items = vec![
+        json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Hi"
+                }
+            ]
+        }),
+        json!({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "/home/kavin"
+        }),
+    ];
+
+    let request_state = Map::from_iter([
+        ("instructions".to_string(), json!("You are terse.")),
+        (
+            "tools".to_string(),
+            json!([{
+                "type": "function",
+                "function": {
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cmd": {"type": "string"}
+                        }
+                    }
+                }
+            }]),
+        ),
+    ]);
+
+    state.store_response_history(
+        response_id.clone(),
+        items.clone(),
+        request_state.clone(),
+    );
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let persisted_entry = loop {
+        let reloaded = AppState::load_from_database_url(&database_url, config.clone())
+            .await
+            .expect("should reload state from PostgreSQL");
+        if let Some(entry) = reloaded.response_history(&response_id).await {
+            break entry;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for persisted response history");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+
+    assert_eq!(persisted_entry.items, items);
+    assert_eq!(persisted_entry.request_state, request_state);
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");

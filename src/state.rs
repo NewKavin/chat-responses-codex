@@ -31,7 +31,7 @@ use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
@@ -84,6 +84,81 @@ pub use crate::util::{
     unix_seconds,
 };
 
+const RESPONSE_HISTORY_MAX_ENTRIES: usize = 2048;
+const RESPONSE_HISTORY_TTL_SECONDS: u64 = 12 * 60 * 60;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResponseHistoryEntry {
+    pub items: Vec<Value>,
+    pub request_state: Map<String, Value>,
+    pub created_at: u64,
+}
+
+#[derive(Clone)]
+struct StoredResponseHistory {
+    items: Vec<Value>,
+    request_state: Map<String, Value>,
+    created_at: u64,
+}
+
+#[derive(Default)]
+struct ResponseHistoryStore {
+    entries: HashMap<String, StoredResponseHistory>,
+    order: VecDeque<String>,
+}
+
+impl ResponseHistoryStore {
+    fn evict_expired(&mut self, now: u64) {
+        while let Some(response_id) = self.order.front().cloned() {
+            let is_expired = self
+                .entries
+                .get(&response_id)
+                .map(|entry| now.saturating_sub(entry.created_at) > RESPONSE_HISTORY_TTL_SECONDS)
+                .unwrap_or(true);
+            if !is_expired {
+                break;
+            }
+            self.order.pop_front();
+            self.entries.remove(&response_id);
+        }
+    }
+
+    fn insert(
+        &mut self,
+        response_id: String,
+        items: Vec<Value>,
+        request_state: Map<String, Value>,
+        created_at: u64,
+        now: u64,
+    ) {
+        self.entries.insert(
+            response_id.clone(),
+            StoredResponseHistory {
+                items,
+                request_state,
+                created_at,
+            },
+        );
+        self.order.retain(|existing| existing != &response_id);
+        self.order.push_back(response_id);
+        self.evict_expired(now);
+        while self.order.len() > RESPONSE_HISTORY_MAX_ENTRIES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(&mut self, response_id: &str, now: u64) -> Option<ResponseHistoryEntry> {
+        self.evict_expired(now);
+        self.entries.get(response_id).map(|entry| ResponseHistoryEntry {
+            items: entry.items.clone(),
+            request_state: entry.request_state.clone(),
+            created_at: entry.created_at,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
@@ -95,6 +170,7 @@ pub struct AppState {
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
+    response_history: Arc<StdMutex<ResponseHistoryStore>>,
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
     routing_tie_breakers: Arc<StdMutex<HashMap<String, u64>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
@@ -130,6 +206,71 @@ impl StateStore for PostgresStateStore {
 impl AppState {
     pub fn new(state: PersistedState, store_path: impl Into<PathBuf>, config: AppConfig) -> Self {
         Self::new_with_archived(state, Vec::new(), store_path, config)
+    }
+
+    pub fn store_response_history(
+        &self,
+        response_id: impl Into<String>,
+        items: Vec<Value>,
+        request_state: Map<String, Value>,
+    ) {
+        let response_id = response_id.into();
+        let created_at = unix_seconds();
+        {
+            let mut history = self.response_history.lock().unwrap();
+            history.insert(
+                response_id.clone(),
+                items.clone(),
+                request_state.clone(),
+                created_at,
+                created_at,
+            );
+        }
+
+        let Some(postgres) = self.postgres.clone() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(error) = postgres
+                    .upsert_response_history(&response_id, &items, &request_state, created_at)
+                    .await
+                {
+                    tracing::warn!(
+                        response_id = %response_id,
+                        error = %error,
+                        "failed to persist response history"
+                    );
+                }
+            });
+        }
+    }
+
+    pub async fn response_history(&self, response_id: &str) -> Option<ResponseHistoryEntry> {
+        let now = unix_seconds();
+        {
+            let mut history = self.response_history.lock().unwrap();
+            if let Some(entry) = history.get(response_id, now) {
+                return Some(entry);
+            }
+        }
+
+        let postgres = self.postgres.clone()?;
+        let entry = postgres
+            .response_history(response_id, now.saturating_sub(RESPONSE_HISTORY_TTL_SECONDS))
+            .await
+            .ok()
+            .flatten()?;
+
+        let mut history = self.response_history.lock().unwrap();
+        history.insert(
+            response_id.to_string(),
+            entry.items.clone(),
+            entry.request_state.clone(),
+            entry.created_at,
+            now,
+        );
+        Some(entry)
     }
 
     pub fn new_with_store(
@@ -182,6 +323,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
@@ -229,6 +371,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
@@ -270,6 +413,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
