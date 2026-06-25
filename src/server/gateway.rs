@@ -6031,13 +6031,19 @@ fn serialize_sse_data(value: &Value) -> Bytes {
 }
 
 fn sse_keepalive_frame() -> Bytes {
-    // A real SSE `data:` event (not a `: comment` frame). Comment frames are
-    // silently dropped by downstream SSE parsers and do not reset client-side
-    // idle timers such as Codex's `stream_idle_timeout_ms`, which caused 499
-    // `stream_interrupted` / "idle timeout waiting for SSE" errors during long
-    // upstream reasoning pauses. The `response.ping` type mirrors the OpenAI
-    // Responses protocol heartbeat so conformant clients treat it as activity.
-    Bytes::from_static(b"event: response.ping\ndata: {\"type\":\"response.ping\"}\n\n")
+    // A real SSE `data:` event with no explicit `event:` line.
+    // SSE spec §9.2.4: if the `event:` field is absent, the event type
+    // defaults to "message". An empty JSON object `{}` is valid and
+    // harmless for every client, but carries enough payload to be
+    // counted as stream activity, resetting client-side idle timers
+    // such as Codex's `stream_idle_timeout_ms`.
+    //
+    // We previously used `event: response.ping` / `data: {"type":"response.ping"}`,
+    // but Codex's Responses SSE decoding layer silently drops `response.ping`
+    // events without resetting its higher-level idle deadline, which caused
+    // 499 `stream_client_cancelled` for slow models whose first byte takes
+    // longer than `stream_idle_timeout_ms`.
+    Bytes::from_static(b"data: {}\n\n")
 }
 
 fn sse_done_frame() -> Bytes {

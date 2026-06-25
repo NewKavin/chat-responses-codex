@@ -6918,7 +6918,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let keepalive_bytes = Bytes::from_static(b"event: response.ping\ndata: {\"type\":\"response.ping\"}\n\n");
+    let keepalive_bytes = Bytes::from_static(b"data: {}\n\n");
 
     let first_frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
         .await
