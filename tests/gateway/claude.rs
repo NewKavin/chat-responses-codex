@@ -304,6 +304,7 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!payload.contains("data: [DONE]"));
         let events = parse_sse_event_data(&payload);
         let captured = capture.lock().unwrap().clone();
         let captured_body = captured.request_body.unwrap();
@@ -322,7 +323,6 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
         assert!(payload.contains("event: message_delta"));
         assert!(payload.contains("\"stop_reason\":\"end_turn\""));
         assert!(payload.contains("event: message_stop"));
-        assert!(!payload.contains("data: [DONE]"));
         assert!(events.iter().any(|(event, data)| {
             event.as_deref() == Some("content_block_start")
                 && data["type"] == "content_block_start"
@@ -474,6 +474,7 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!payload.contains("data: [DONE]"));
         let events = parse_sse_event_data(&payload);
         assert!(events.iter().any(|(event, data)| {
             event.as_deref() == Some("content_block_start")
@@ -491,7 +492,13 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
             event.as_deref() == Some("message_delta")
                 && data["delta"]["stop_reason"] == "tool_use"
         }));
-        assert!(!payload.contains("data: [DONE]"));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("content_block_stop")
+                && data["type"] == "content_block_stop"
+        }));
+        assert!(events.iter().any(|(event, data)| {
+            event.as_deref() == Some("message_stop") && data["type"] == "message_stop"
+        }));
 
         let captured = capture.lock().unwrap().clone();
         assert_eq!(captured.path, "/v1/chat/completions");
@@ -632,6 +639,7 @@ async fn claude_messages_stream_true_adapts_chat_chunk_sse_without_gateway_synth
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!payload.contains("data: [DONE]"));
         let events = parse_sse_event_data(&payload);
         let text = events
             .iter()
@@ -667,7 +675,6 @@ async fn claude_messages_stream_true_adapts_chat_chunk_sse_without_gateway_synth
             event.as_deref() == Some("message_stop") && data["type"] == "message_stop"
         }));
         assert!(!payload.contains("chat.completion.chunk"));
-        assert!(!payload.contains("data: [DONE]"));
 
         let captured = capture.lock().unwrap().clone();
         assert_eq!(captured.path, "/v1/chat/completions");
