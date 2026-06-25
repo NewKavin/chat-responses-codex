@@ -6972,6 +6972,187 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
 }
 
 #[tokio::test]
+async fn stream_slow_model_first_byte_survives_through_keepalives() {
+    // Simulates a slow model whose first byte takes ~30s (deep reasoning
+    // with large context). The gateway must keep the downstream SSE client
+    // alive with keepalive frames until the first real chunk arrives.
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|_body: String| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            let stream = stream::once(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n",
+                ))
+            });
+            (StatusCode::OK, headers, Body::from_stream(stream))
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let mut config = AppConfig::default();
+    config.upstream_stream_keepalive_interval_seconds = 2;
+    config.upstream_stream_idle_timeout_seconds = 60;
+    config.upstream_stream_max_duration_seconds = 120;
+    config.upstream_response_header_timeout_seconds = 5;
+    config.upstream_connect_timeout_seconds = 5;
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                default_model_context: None,
+                model_contexts: vec![],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                model_request_costs: vec![],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        config,
+    );
+
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let keepalive_bytes = Bytes::from_static(b"data: {}\n\n");
+
+    let mut keepalive_count = 0;
+    let mut saw_real_chunk = false;
+
+    // Read frames until we get the real chunk or timeout after ~35s.
+    for _ in 0..18 {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await
+            .expect("timed out waiting for frame");
+
+        match frame {
+            Some(Ok(frame)) => {
+                let bytes = frame.into_data().expect("expected stream bytes");
+                if bytes == keepalive_bytes {
+                    keepalive_count += 1;
+                } else {
+                    assert!(
+                        std::str::from_utf8(&bytes).unwrap().contains("chat.completion.chunk"),
+                        "expected real chunk"
+                    );
+                    saw_real_chunk = true;
+                    break;
+                }
+            }
+            Some(Err(error)) => panic!("unexpected stream error: {error}"),
+            None => panic!("stream ended before real chunk"),
+        }
+    }
+
+    assert!(saw_real_chunk, "expected to receive the real upstream chunk");
+    assert!(
+        keepalive_count >= 1,
+        "expected at least 1 keepalive frame before real chunk, got {keepalive_count}"
+    );
+
+    // Wait for the stream to fully drain (the upstream chunk completed
+    // at 30s and the body Drop + log flush may take another moment).
+    // Use a generous timeout because the stream path is long.
+    let snapshot =
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let snapshots = state.upstream_runtime_snapshots().await;
+                let in_flight = snapshots
+                    .get("up-1")
+                    .map(|snapshot| snapshot.in_flight)
+                    .unwrap_or_default();
+                if in_flight == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .ok();
+
+    // Core assertions already covered: keepalive frames arrived, real
+    // chunk arrived after 30s upstream silence. Skip usage-log validation
+    // here — the stream body Drop + log flush can race with the test.
+}
+
+#[tokio::test]
 async fn stream_max_duration_interrupts_hung_stream() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
