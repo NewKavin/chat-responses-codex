@@ -65,6 +65,18 @@
           />
         </div>
 
+        <div class="sidebar-section">
+          <label class="sidebar-label">推理强度</label>
+          <el-select v-model="inferenceStrength" style="width: 100%">
+            <el-option
+              v-for="level in inferenceStrengthOptions"
+              :key="level"
+              :label="level"
+              :value="level"
+            />
+          </el-select>
+        </div>
+
 
 
         <div class="sidebar-section sidebar-actions">
@@ -178,6 +190,7 @@ import {
   buildPlaygroundChatPayload,
   extractChatCompletionText,
   extractChatCompletionUsage,
+  inferenceStrengthOptions,
   parseGatewayModels,
   parseSSELine,
   type PlaygroundMessage,
@@ -214,6 +227,7 @@ const question = ref('')
 const selectedModel = ref('')
 const temperature = ref(0.7)
 const maxTokens = ref(200000)
+const inferenceStrength = ref<(typeof inferenceStrengthOptions)[number]>('high')
 const modelOptions = ref<string[]>([])
 const downstreamKey = ref('')
 const statusMessage = ref('')
@@ -489,6 +503,7 @@ const sendQuestion = async () => {
       history,
       temperature: temperature.value,
       maxTokens: maxTokens.value,
+      inferenceStrength: inferenceStrength.value,
       uploadedFiles: uploadedPayload,
       stream: true
     })

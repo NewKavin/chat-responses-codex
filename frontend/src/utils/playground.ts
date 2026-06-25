@@ -24,7 +24,10 @@ export interface BuildPlaygroundChatRequestInput {
   uploadedFiles?: UploadedFileContext[]
   temperature?: number
   maxTokens?: number
+  inferenceStrength?: string
 }
+
+export const inferenceStrengthOptions = ['xhigh', 'high', 'medium', 'low'] as const
 
 const formatUploadedFileText = (file: UploadedFileContext) => {
   const mimeType = file.type || 'application/octet-stream'
@@ -139,6 +142,7 @@ export const buildPlaygroundChatPayload = ({
   uploadedFiles,
   temperature,
   maxTokens,
+  inferenceStrength,
   stream = false
 }: BuildPlaygroundChatRequestInput & { stream?: boolean }): {
   model: string
@@ -146,6 +150,7 @@ export const buildPlaygroundChatPayload = ({
   stream: boolean
   temperature?: number
   max_tokens?: number
+  inference_strength?: string
 } => {
   const normalizedHistory = history
     .filter(
@@ -164,6 +169,7 @@ export const buildPlaygroundChatPayload = ({
     stream: boolean
     temperature?: number
     max_tokens?: number
+    inference_strength?: string
   } = {
     model,
     messages: [...normalizedHistory, { role: 'user', content: userContent }],
@@ -176,6 +182,11 @@ export const buildPlaygroundChatPayload = ({
 
   if (typeof maxTokens === 'number' && maxTokens >= 1) {
     payload.max_tokens = Math.floor(maxTokens)
+  }
+
+  const normalizedInferenceStrength = inferenceStrength?.trim()
+  if (normalizedInferenceStrength) {
+    payload.inference_strength = normalizedInferenceStrength
   }
 
   return payload

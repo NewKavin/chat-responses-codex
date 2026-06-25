@@ -135,6 +135,16 @@ describe('playground chat payload', () => {
       { role: 'user', content: 'test' }
     ])
   })
+
+  it('includes inference strength when provided', () => {
+    const payload = buildPlaygroundChatPayload({
+      model: 'gpt-4',
+      question: 'test',
+      inferenceStrength: 'high' as any
+    } as any)
+
+    expect((payload as any).inference_strength).toBe('high')
+  })
 })
 
 describe('playground response extraction', () => {

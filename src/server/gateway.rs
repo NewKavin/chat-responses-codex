@@ -948,7 +948,7 @@ async fn prepare_response_history_context(
 
     let effective_input_items = if let Some(previous_response_id) = previous_response_id.as_deref()
     {
-        let mut prior_history =
+        let prior_history =
             state
                 .response_history(previous_response_id)
                 .await
