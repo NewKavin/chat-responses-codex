@@ -126,11 +126,11 @@
         </el-table-column>
         <el-table-column label="推理强度" width="100">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain">{{ row.inferenceStrength }}</el-tag>
+            <el-tag size="small" effect="plain">{{ formatInferenceStrength(row.inferenceStrength) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="endpoint" label="端点" min-width="220" show-overflow-tooltip />
-        <el-table-column label="类型" width="100">
+        <el-table-column label="日志类型" width="100">
           <template #default="{ row }">
             <el-tag size="small">{{ row.logType }}</el-tag>
           </template>
@@ -228,6 +228,7 @@ import {
 } from '@element-plus/icons-vue'
 import { adminApi } from '@/api/admin'
 import type { UsageLog } from '@/types'
+import { formatInferenceStrength } from '@/utils/logDisplay'
 
 const loading = ref(false)
 const logs = ref<UsageLog[]>([])
@@ -316,7 +317,7 @@ const resolveApiDescriptor = (log: UsageLog): ApiDescriptor => {
 
 const buildDisplayLog = (log: UsageLog): DisplayLog => {
   const api = resolveApiDescriptor(log)
-  const inferenceStrength = log.inference_strength?.trim() || '标准'
+  const inferenceStrength = formatInferenceStrength(log.inference_strength)
   const billingMode = log.billing_mode?.trim() || (log.total_tokens > 0 ? 'Token 计费' : '请求计费')
   const userAgent = log.user_agent?.trim() || '未采集'
   const requestCount = log.request_count ?? 1

@@ -10,10 +10,10 @@
       
       <el-table :data="upstreams" v-loading="loading" stripe style="width: 100%">
         <el-table-column prop="id" label="ID" width="150" />
-        <el-table-column prop="name" label="名称" width="200" />
-        <el-table-column label="协议" width="220">
+        <el-table-column prop="name" label="名称" min-width="200" />
+        <el-table-column label="协议" min-width="240">
           <template #default="{ row }">
-            <el-space wrap>
+            <div class="protocol-cell">
               <el-tag
                 v-for="protocol in displayProtocols(row)"
                 :key="`${row.id}-${protocol}`"
@@ -21,7 +21,7 @@
               >
                 {{ protocol }}
               </el-tag>
-            </el-space>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="模型数量" width="100">
@@ -35,7 +35,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="高端模型保护" width="140">
+        <el-table-column label="高端模型保护" min-width="160">
           <template #default="{ row }">
             <el-tooltip v-if="row.protect_premium_quota && row.premium_models.length > 0" 
                         :content="'保护模型: ' + row.premium_models.join(', ')" 
@@ -734,6 +734,13 @@ onUnmounted(() => {
 
 .header h2 {
   margin: 0;
+}
+
+.protocol-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
 }
 
 .model-input-group {

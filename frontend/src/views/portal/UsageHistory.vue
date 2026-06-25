@@ -46,6 +46,13 @@
             </el-table-column>
             <el-table-column prop="model" label="模型" min-width="130" show-overflow-tooltip />
             <el-table-column prop="endpoint" label="端点" min-width="180" show-overflow-tooltip />
+            <el-table-column label="推理强度" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" effect="plain">
+                  {{ formatInferenceStrength(row.inference_strength) }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column label="状态" width="88" align="center">
               <template #default="{ row }">
                 <el-tag :type="getStatusType(row.status_code)">
@@ -112,6 +119,7 @@ import { buildUsageHistoryBuckets } from '@/utils/usageHistoryChart'
 import { loadEcharts } from '@/utils/echartsLoader'
 import type { EChartsType } from 'echarts/core'
 import { formatCompactNumber } from '@/utils/numberFormat'
+import { formatInferenceStrength } from '@/utils/logDisplay'
 
 type ChartRange = '1d' | '7d' | '30d'
 
