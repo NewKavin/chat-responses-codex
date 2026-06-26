@@ -6,6 +6,7 @@ use crate::protocol::{
     responses_request_to_chat_payload, responses_response_to_chat_payload, ProtocolError,
     StreamTranslator,
 };
+use crate::keys::verify_downstream_key;
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, AppConfig, AppState,
@@ -13,7 +14,7 @@ use crate::state::{
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
-use axum::extract::{ConnectInfo, Json, State};
+use axum::extract::{ConnectInfo, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -688,12 +689,25 @@ async fn healthz() -> impl IntoResponse {
     "ok"
 }
 
-async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+async fn list_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ModelsQuery>,
+) -> Response {
     let Ok(secret) = downstream_secret_from_headers(&headers) else {
         return GatewayError::Unauthorized("missing authorization header or x-api-key".into())
             .into_response();
     };
 
+    // Codex sends `?client_version=x.y.z` when fetching its model catalog.
+    // Return the Codex-compatible `{"models": [ModelInfo]}` shape so Codex
+    // can display context-window usage and reasoning levels for custom
+    // models served through the gateway.
+    if query.client_version.is_some() {
+        return list_models_codex_format(&state, &secret).await;
+    }
+
+    // Standard OpenAI-compatible clients get `{"object":"list","data":[...]}`.
     let models = state.available_models_for_downstream(&secret).await;
     Json(json!({
         "object": "list",
@@ -703,6 +717,87 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> impl 
         })).collect::<Vec<_>>()
     }))
     .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ModelsQuery {
+    client_version: Option<String>,
+}
+
+/// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
+///
+/// Each model entry includes `context_window` (from the upstream's
+/// `model_contexts` configuration) so Codex can display real-time context
+/// usage percentage in its status bar.
+async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
+    let snapshot = state.routing_snapshot().await;
+    let Some(downstream) = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.active && verify_downstream_key(secret, &d.hash))
+        .cloned()
+    else {
+        return GatewayError::Unauthorized("invalid downstream key".into()).into_response();
+    };
+
+    // Collect (model, context_window) pairs from all active upstreams.
+    let mut model_contexts: std::collections::HashMap<String, Option<i64>> =
+        std::collections::HashMap::new();
+    for upstream in snapshot.upstreams.iter().filter(|u| u.active) {
+        let upstream_models = if upstream.route_models().is_empty() {
+            // Models discovered via endpoint probe have no known context window.
+            upstream.supported_models.clone()
+        } else {
+            upstream.route_models()
+        };
+        for model in upstream_models {
+            if downstream.model_allowlist.is_empty()
+                || portal_model_is_allowed(&downstream.model_allowlist, &model)
+            {
+                let ctx = upstream
+                    .context_config_for_model(&model)
+                    .map(|c| c.context_limit as i64);
+                // Prefer the first non-None context window found.
+                model_contexts
+                    .entry(model)
+                    .or_insert(ctx);
+            }
+        }
+    }
+
+    let mut models: Vec<String> = model_contexts.keys().cloned().collect();
+    models.sort();
+    let model_infos = models
+        .into_iter()
+        .map(|slug| {
+            let context_window = model_contexts.get(&slug).copied().flatten();
+            json!({
+                "slug": slug,
+                "display_name": slug,
+                "description": null,
+                "supported_reasoning_levels": [],
+                "shell_type": "zsh",
+                "visibility": "public",
+                "supported_in_api": true,
+                "priority": 0,
+                "base_instructions": "",
+                "apply_patch_tool_type": "apply_patch",
+                "supports_reasoning_summaries": false,
+                "default_reasoning_summary": "auto",
+                "support_verbosity": false,
+                "supports_parallel_tool_calls": true,
+                "supports_image_detail_original": false,
+                "context_window": context_window,
+                "max_context_window": context_window,
+                "effective_context_window_percent": 95,
+                "additional_speed_tiers": [],
+                "service_tiers": [],
+                "input_modalities": ["text"],
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Json(json!({ "models": model_infos })).into_response()
 }
 
 async fn chat_completions(
