@@ -681,3 +681,49 @@ fn responses_response_rejects_non_assistant_output_roles() {
         .to_string()
         .contains("unsupported responses output role"));
 }
+#[test]
+fn chat_request_to_responses_forwards_reasoning_effort() {
+    let input = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "hello"}],
+        "reasoning_effort": "high"
+    });
+    let result = chat_request_to_responses_payload(&input).unwrap();
+    let reasoning = result.get("reasoning").and_then(|r| r.as_object()).unwrap();
+    assert_eq!(reasoning.get("effort").and_then(|v| v.as_str()), Some("high"));
+}
+
+#[test]
+fn responses_request_to_chat_forwards_reasoning_effort() {
+    let input = json!({
+        "model": "gpt-4",
+        "input": "hello",
+        "reasoning": {"effort": "medium"}
+    });
+    let result = responses_request_to_chat_payload(&input).unwrap();
+    assert_eq!(
+        result.get("reasoning_effort").and_then(|v| v.as_str()),
+        Some("medium")
+    );
+}
+
+#[test]
+fn chat_request_without_reasoning_effort_is_unchanged() {
+    let input = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+    let result = chat_request_to_responses_payload(&input).unwrap();
+    assert!(result.get("reasoning").is_none());
+}
+
+#[test]
+fn responses_request_without_reasoning_effort_is_unchanged() {
+    let input = json!({
+        "model": "gpt-4",
+        "input": "hello"
+    });
+    let result = responses_request_to_chat_payload(&input).unwrap();
+    assert!(result.get("reasoning_effort").is_none());
+}
+

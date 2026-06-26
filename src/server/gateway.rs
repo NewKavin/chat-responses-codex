@@ -5310,10 +5310,10 @@ fn early_keepalive_stream(
                                             let mut stream = body.into_data_stream();
                                             match StreamExt::next(&mut stream).await {
                                                 Some(Ok(bytes)) if !bytes.is_empty() => {
-                                                    Some((Ok(bytes), EarlyStreamState::DrainingBody { body: stream }))
+                                                    Some((Ok(bytes), EarlyStreamState::DrainingBody { body: stream, last_heartbeat_at: TokioInstant::now(), keepalive_interval }))
                                                 }
                                                 Some(Ok(_)) => {
-                                                    Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body: stream }))
+                                                    Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body: stream, last_heartbeat_at: TokioInstant::now(), keepalive_interval }))
                                                 }
                                                 Some(Err(error)) => {
                                                     Some((Err(std::io::Error::other(error.to_string())), EarlyStreamState::Done))
@@ -5327,10 +5327,10 @@ fn early_keepalive_stream(
                                                     let mut stream = body.into_data_stream();
                                                     match StreamExt::next(&mut stream).await {
                                                         Some(Ok(bytes)) if !bytes.is_empty() => {
-                                                            Some((Ok(bytes), EarlyStreamState::DrainingBody { body: stream }))
+                                                            Some((Ok(bytes), EarlyStreamState::DrainingBody { body: stream, last_heartbeat_at: TokioInstant::now(), keepalive_interval }))
                                                         }
                                                         Some(Ok(_)) => {
-                                                            Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body: stream }))
+                                                            Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body: stream, last_heartbeat_at: TokioInstant::now(), keepalive_interval }))
                                                         }
                                                         Some(Err(error)) => {
                                                             Some((Err(std::io::Error::other(error.to_string())), EarlyStreamState::Done))
@@ -5366,19 +5366,30 @@ fn early_keepalive_stream(
                         }
                     }
                 }
-                EarlyStreamState::DrainingBody { mut body } => {
-                    match StreamExt::next(&mut body).await {
-                        Some(Ok(bytes)) => {
-                            if bytes.is_empty() {
-                                Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body }))
-                            } else {
-                                Some((Ok(bytes), EarlyStreamState::DrainingBody { body }))
+                EarlyStreamState::DrainingBody { mut body, last_heartbeat_at, keepalive_interval } => {
+                    let deadline = last_heartbeat_at + keepalive_interval;
+                    tokio::select! {
+                        frame = StreamExt::next(&mut body) => {
+                            match frame {
+                                Some(Ok(bytes)) => {
+                                    if bytes.is_empty() {
+                                        Some((Ok(Bytes::new()), EarlyStreamState::DrainingBody { body, last_heartbeat_at, keepalive_interval }))
+                                    } else {
+                                        Some((Ok(bytes), EarlyStreamState::DrainingBody { body, last_heartbeat_at: TokioInstant::now(), keepalive_interval }))
+                                    }
+                                }
+                                Some(Err(error)) => {
+                                    Some((Err(std::io::Error::other(error.to_string())), EarlyStreamState::Done))
+                                }
+                                None => None,
                             }
                         }
-                        Some(Err(error)) => {
-                            Some((Err(std::io::Error::other(error.to_string())), EarlyStreamState::Done))
+                        _ = tokio::time::sleep_until(deadline) => {
+                            Some((
+                                Ok(sse_keepalive_frame()),
+                                EarlyStreamState::DrainingBody { body, last_heartbeat_at: TokioInstant::now(), keepalive_interval },
+                            ))
                         }
-                        None => None,
                     }
                 }
                 EarlyStreamState::Done => None,
@@ -5397,6 +5408,8 @@ enum EarlyStreamState {
     },
     DrainingBody {
         body: BodyDataStream,
+        last_heartbeat_at: TokioInstant,
+        keepalive_interval: Duration,
     },
     Done,
 }

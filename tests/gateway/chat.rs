@@ -7097,7 +7097,7 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
     let mut saw_real_chunk = false;
 
     // Read frames until we get the real chunk or timeout after ~35s.
-    for _ in 0..18 {
+    for _ in 0..30 {
         let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
             .await
             .expect("timed out waiting for frame");

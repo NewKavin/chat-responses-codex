@@ -69,6 +69,15 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
             Value::String(instructions.join("\n")),
         );
     }
+    // Forward reasoning effort from chat protocol to Responses protocol.
+    // Codex sends `reasoning_effort` as a top-level chat field; the Responses
+    // protocol expects it nested under `reasoning.effort`.
+    if let Some(effort) = input.get("reasoning_effort").and_then(Value::as_str) {
+        output.insert(
+            "reasoning".into(),
+            json!({"effort": effort}),
+        );
+    }
     output.insert("input".into(), Value::Array(response_input));
     Ok(Value::Object(output))
 }
@@ -120,6 +129,17 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
     copy_field(input, &mut output, "top_p");
     copy_field(input, &mut output, "stop");
     copy_field(input, &mut output, "metadata");
+    // Forward reasoning effort from Responses protocol to chat protocol.
+    // Codex sends reasoning.effort in Responses requests; translate to the
+    // top-level `reasoning_effort` field expected by chat-compatible upstreams.
+    if let Some(effort) = input
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .and_then(|r| r.get("effort"))
+        .and_then(Value::as_str)
+    {
+        output.insert("reasoning_effort".into(), Value::String(effort.to_string()));
+    }
     if let Some(tools) = input.get("tools").and_then(Value::as_array) {
         let converted = tools
             .iter()
