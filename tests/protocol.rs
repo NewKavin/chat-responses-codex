@@ -282,6 +282,64 @@ fn chat_request_converts_flat_tool_call_fields_to_responses_payload() {
 }
 
 #[test]
+fn chat_request_converts_shared_openai_fields_to_responses_payload() {
+    let chat = json!({
+        "model": "gpt-4.1-mini",
+        "messages": [
+            {"role": "user", "content": "Hello"}
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "reply",
+                "schema": {
+                    "type": "object"
+                }
+            }
+        },
+        "service_tier": "priority",
+        "store": true,
+        "safety_identifier": "user-123",
+        "prompt_cache_key": "cache-123",
+        "prompt_cache_retention": "24h",
+        "verbosity": "high",
+        "stream_options": {
+            "include_obfuscation": false,
+            "include_usage": true
+        }
+    });
+
+    let converted = chat_request_to_responses_payload(&chat).expect("conversion should work");
+
+    assert_eq!(converted["service_tier"], "priority");
+    assert_eq!(converted["store"], true);
+    assert_eq!(converted["safety_identifier"], "user-123");
+    assert_eq!(converted["prompt_cache_key"], "cache-123");
+    assert_eq!(converted["prompt_cache_retention"], "24h");
+    assert_eq!(converted["text"]["format"]["type"], "json_schema");
+    assert_eq!(converted["text"]["format"]["json_schema"]["name"], "reply");
+    assert_eq!(converted["text"]["verbosity"], "high");
+    assert_eq!(converted["stream_options"]["include_obfuscation"], false);
+    assert!(converted["stream_options"].get("include_usage").is_none());
+}
+
+#[test]
+fn chat_request_rejects_multiple_choices_for_responses_payload() {
+    let chat = json!({
+        "model": "gpt-4.1-mini",
+        "messages": [
+            {"role": "user", "content": "Hello"}
+        ],
+        "n": 2
+    });
+
+    let error = chat_request_to_responses_payload(&chat).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("multiple chat completion choices are not supported"));
+}
+
+#[test]
 fn responses_request_converts_tool_calls_and_outputs_to_chat_payload() {
     let responses = json!({
         "model": "gpt-4.1-mini",
@@ -361,6 +419,46 @@ fn responses_request_converts_tool_calls_and_outputs_to_chat_payload() {
     assert_eq!(converted["parallel_tool_calls"], true);
     assert_eq!(converted["metadata"]["trace_id"], "abc");
     assert_eq!(converted["tools"][0]["function"]["name"], "get_weather");
+}
+
+#[test]
+fn responses_request_converts_shared_openai_fields_to_chat_payload() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": "Hello",
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "reply",
+                    "schema": {
+                        "type": "object"
+                    }
+                }
+            },
+            "verbosity": "high"
+        },
+        "service_tier": "priority",
+        "store": true,
+        "safety_identifier": "user-123",
+        "prompt_cache_key": "cache-123",
+        "prompt_cache_retention": "24h",
+        "stream_options": {
+            "include_obfuscation": false
+        }
+    });
+
+    let converted = responses_request_to_chat_payload(&responses).expect("conversion should work");
+
+    assert_eq!(converted["service_tier"], "priority");
+    assert_eq!(converted["store"], true);
+    assert_eq!(converted["safety_identifier"], "user-123");
+    assert_eq!(converted["prompt_cache_key"], "cache-123");
+    assert_eq!(converted["prompt_cache_retention"], "24h");
+    assert_eq!(converted["response_format"]["type"], "json_schema");
+    assert_eq!(converted["response_format"]["json_schema"]["name"], "reply");
+    assert_eq!(converted["verbosity"], "high");
+    assert_eq!(converted["stream_options"]["include_obfuscation"], false);
 }
 
 #[test]
@@ -507,6 +605,40 @@ fn chat_response_converts_tool_calls_to_responses_output() {
 }
 
 #[test]
+fn chat_response_rejects_multiple_choices_for_responses_payload() {
+    let chat_response = json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "gpt-4.1-mini",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hi"
+                },
+                "finish_reason": "stop"
+            },
+            {
+                "index": 1,
+                "message": {
+                    "role": "assistant",
+                    "content": "Bye"
+                },
+                "finish_reason": "stop"
+            }
+        ]
+    });
+
+    let error =
+        chat_response_to_responses_payload(&chat_response).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("multiple chat completion choices are not supported"));
+}
+
+#[test]
 fn responses_response_converts_tool_calls_to_chat_payload() {
     let responses = json!({
         "id": "resp-1",
@@ -547,6 +679,48 @@ fn responses_response_converts_tool_calls_to_chat_payload() {
     assert_eq!(converted["usage"]["prompt_tokens"], 1);
     assert_eq!(converted["usage"]["completion_tokens"], 0);
     assert_eq!(converted["usage"]["total_tokens"], 1);
+}
+
+#[test]
+fn responses_response_rejects_multiple_assistant_messages_for_chat_payload() {
+    let responses = json!({
+        "id": "resp-1",
+        "object": "response",
+        "created": 1,
+        "model": "gpt-4.1-mini",
+        "output": [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Hi",
+                        "annotations": []
+                    }
+                ]
+            },
+            {
+                "id": "msg_2",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Bye",
+                        "annotations": []
+                    }
+                ]
+            }
+        ]
+    });
+
+    let error =
+        responses_response_to_chat_payload(&responses).expect_err("conversion should fail");
+    assert!(error
+        .to_string()
+        .contains("multiple assistant messages are not supported"));
 }
 
 #[test]
@@ -633,6 +807,45 @@ fn responses_stream_translator_ignores_reasoning_items_with_completed_usage() {
 }
 
 #[test]
+fn chat_stream_translator_rejects_multiple_choices() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let chunk = json!({
+        "id": "chatcmpl-stream",
+        "object": "chat.completion.chunk",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": "Hi"
+                },
+                "finish_reason": null
+            },
+            {
+                "index": 1,
+                "delta": {
+                    "role": "assistant",
+                    "content": "Bye"
+                },
+                "finish_reason": null
+            }
+        ]
+    });
+
+    let error = translator
+        .translate_event(&chunk)
+        .expect_err("translation should fail");
+    assert!(error
+        .to_string()
+        .contains("multiple chat completion choices are not supported"));
+}
+
+#[test]
 fn responses_response_rejects_unknown_output_items() {
     let responses = json!({
         "id": "resp-1",
@@ -681,6 +894,52 @@ fn responses_response_rejects_non_assistant_output_roles() {
         .to_string()
         .contains("unsupported responses output role"));
 }
+
+#[test]
+fn responses_stream_translator_rejects_multiple_assistant_messages() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .expect("translator should exist");
+
+    let first_message_added = json!({
+        "type": "response.output_item.added",
+        "response_id": "resp-1",
+        "output_index": 0,
+        "item": {
+            "id": "msg-1",
+            "type": "message",
+            "status": "in_progress",
+            "role": "assistant",
+            "content": []
+        }
+    });
+    translator
+        .translate_event(&first_message_added)
+        .expect("first message should translate");
+
+    let second_message_added = json!({
+        "type": "response.output_item.added",
+        "response_id": "resp-1",
+        "output_index": 1,
+        "item": {
+            "id": "msg-2",
+            "type": "message",
+            "status": "in_progress",
+            "role": "assistant",
+            "content": []
+        }
+    });
+
+    let error = translator
+        .translate_event(&second_message_added)
+        .expect_err("translation should fail");
+    assert!(error
+        .to_string()
+        .contains("multiple assistant messages are not supported"));
+}
+
 #[test]
 fn chat_request_to_responses_forwards_reasoning_effort() {
     let input = json!({
@@ -726,4 +985,3 @@ fn responses_request_without_reasoning_effort_is_unchanged() {
     let result = responses_request_to_chat_payload(&input).unwrap();
     assert!(result.get("reasoning_effort").is_none());
 }
-

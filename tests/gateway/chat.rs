@@ -4599,6 +4599,169 @@ async fn downstream_chat_stream_is_synthesized_from_json_response() {
 }
 
 #[tokio::test]
+async fn downstream_chat_stream_preserves_multiple_choices_when_upstream_returns_json_response() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-json",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "message": {"role": "assistant", "content": "Hi"},
+                                        "finish_reason": "stop"
+                                    },
+                                    {
+                                        "index": 1,
+                                        "message": {"role": "assistant", "content": "Bye"},
+                                        "finish_reason": "stop"
+                                    }
+                                ],
+                                "usage": {
+                                    "prompt_tokens": 2,
+                                    "completion_tokens": 3,
+                                    "total_tokens": 5
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+
+                rate_limit_enabled: true,
+
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "stream": true,
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("\"content\":\"Hi\""));
+    assert!(text.contains("\"content\":\"Bye\""));
+    assert!(text.contains("\"index\":0"));
+    assert!(text.contains("\"index\":1"));
+    assert!(text.contains("data: [DONE]"));
+
+    let captured = capture.lock().unwrap().clone();
+    let request_body = captured.request_body.unwrap();
+    assert_eq!(captured.path, "/v1/chat/completions");
+    assert_eq!(
+        captured.authorization.as_deref(),
+        Some("Bearer upstream-secret")
+    );
+    assert_eq!(request_body["stream"], true);
+    assert_eq!(request_body["stream_options"]["include_usage"], true);
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].prompt_tokens, 2);
+    assert_eq!(snapshot.usage_logs[0].completion_tokens, 3);
+    assert_eq!(snapshot.usage_logs[0].total_tokens, 5);
+}
+
+#[tokio::test]
 async fn downstream_chat_stream_is_translated_from_responses_stream() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();

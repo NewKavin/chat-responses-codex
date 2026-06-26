@@ -776,15 +776,20 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "display_name": slug,
                 "description": null,
                 "supported_reasoning_levels": [],
-                "shell_type": "zsh",
-                "visibility": "public",
+                "shell_type": "shell_command",
+                "visibility": "list",
                 "supported_in_api": true,
                 "priority": 0,
                 "base_instructions": "",
-                "apply_patch_tool_type": "apply_patch",
+                "web_search_tool_type": "text",
+                "truncation_policy": {
+                    "mode": "bytes",
+                    "limit": 10_000
+                },
                 "supports_reasoning_summaries": false,
                 "default_reasoning_summary": "auto",
                 "support_verbosity": false,
+                "apply_patch_tool_type": null,
                 "supports_parallel_tool_calls": true,
                 "supports_image_detail_original": false,
                 "context_window": context_window,
@@ -792,6 +797,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "effective_context_window_percent": 95,
                 "additional_speed_tiers": [],
                 "service_tiers": [],
+                "experimental_supported_tools": [],
                 "input_modalities": ["text"],
             })
         })
@@ -3981,15 +3987,51 @@ fn synthesize_stream_body(
 }
 
 fn synthesize_chat_stream_body(final_body: &Value) -> Result<Body, GatewayError> {
-    let choice = final_body
+    let choices = final_body
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
         .ok_or_else(|| GatewayError::Upstream("missing chat choices".into()))?;
-    let message = choice
-        .get("message")
-        .or_else(|| choice.get("delta"))
-        .ok_or_else(|| GatewayError::Upstream("missing chat message".into()))?;
+    let mut stream_choices = Vec::new();
+
+    for (fallback_index, choice) in choices.iter().enumerate() {
+        let choice_index = choice
+            .get("index")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(fallback_index);
+        let message = choice
+            .get("message")
+            .or_else(|| choice.get("delta"))
+            .ok_or_else(|| GatewayError::Upstream("missing chat message".into()))?;
+        let mut delta = serde_json::Map::new();
+        delta.insert("role".into(), Value::String("assistant".into()));
+        if let Some(content) = message.get("content") {
+            delta.insert("content".into(), content.clone());
+        }
+        if let Some(tool_calls) = message.get("tool_calls") {
+            delta.insert("tool_calls".into(), tool_calls.clone());
+        }
+        if let Some(function_call) = message.get("function_call") {
+            delta.insert("function_call".into(), function_call.clone());
+        }
+        let finish_reason = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                if delta.get("tool_calls").is_some() || delta.get("function_call").is_some() {
+                    Some("tool_calls")
+                } else {
+                    Some("stop")
+                }
+            });
+        stream_choices.push(json!({
+            "index": choice_index,
+            "delta": Value::Object(delta),
+            "finish_reason": finish_reason
+                .map(|value| Value::String(value.to_string()))
+                .unwrap_or(Value::Null)
+        }));
+    }
     let response_id = final_body
         .get("id")
         .and_then(Value::as_str)
@@ -4002,39 +4044,12 @@ fn synthesize_chat_stream_body(final_body: &Value) -> Result<Body, GatewayError>
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let mut delta = serde_json::Map::new();
-    delta.insert("role".into(), Value::String("assistant".into()));
-    if let Some(content) = message.get("content") {
-        delta.insert("content".into(), content.clone());
-    }
-    if let Some(tool_calls) = message.get("tool_calls") {
-        delta.insert("tool_calls".into(), tool_calls.clone());
-    }
-    if let Some(function_call) = message.get("function_call") {
-        delta.insert("function_call".into(), function_call.clone());
-    }
-    let finish_reason = choice
-        .get("finish_reason")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            if delta.get("tool_calls").is_some() || delta.get("function_call").is_some() {
-                Some("tool_calls")
-            } else {
-                Some("stop")
-            }
-        });
     let chunk = json!({
         "id": response_id,
         "object": "chat.completion.chunk",
         "created": created_at,
         "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": Value::Object(delta),
-            "finish_reason": finish_reason
-                .map(|value| Value::String(value.to_string()))
-                .unwrap_or(Value::Null)
-        }]
+        "choices": stream_choices
     });
     let chunks = vec![
         Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {}\n\n", chunk))),
@@ -4072,7 +4087,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
     let mut sequence_number = 2u64;
 
     if let Some(items) = final_body.get("output").and_then(Value::as_array) {
-        for item in items {
+        for (output_index, item) in items.iter().enumerate() {
             let Some(object) = item.as_object() else {
                 continue;
             };
@@ -4083,7 +4098,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                         "type": "response.output_item.added",
                         "sequence_number": sequence_number,
                         "response_id": response_id,
-                        "output_index": 0,
+                        "output_index": output_index,
                         "item": {
                             "id": item_id,
                             "type": "message",
@@ -4101,7 +4116,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                             "sequence_number": sequence_number,
                             "response_id": response_id,
                             "item_id": item_id,
-                            "output_index": 0,
+                            "output_index": output_index,
                             "content_index": 0,
                             "delta": text
                         }));
@@ -4113,7 +4128,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                         "sequence_number": sequence_number,
                         "response_id": response_id,
                         "item_id": item_id,
-                        "output_index": 0,
+                        "output_index": output_index,
                         "content_index": 0,
                         "text": text
                     }));
@@ -4123,7 +4138,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                         "type": "response.output_item.done",
                         "sequence_number": sequence_number,
                         "response_id": response_id,
-                        "output_index": 0,
+                        "output_index": output_index,
                         "item": {
                             "id": item_id,
                             "type": "message",
@@ -4154,7 +4169,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                         "type": "response.output_item.added",
                         "sequence_number": sequence_number,
                         "response_id": response_id,
-                        "output_index": 0,
+                        "output_index": output_index,
                         "item": {
                             "id": item_id,
                             "type": "function_call",
@@ -4171,7 +4186,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                             "sequence_number": sequence_number,
                             "response_id": response_id,
                             "item_id": item_id,
-                            "output_index": 0,
+                            "output_index": output_index,
                             "delta": arguments
                         }));
                         sequence_number = sequence_number.saturating_add(1);
@@ -4181,7 +4196,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                         "sequence_number": sequence_number,
                         "response_id": response_id,
                         "item_id": item_id,
-                        "output_index": 0,
+                        "output_index": output_index,
                         "name": name,
                         "arguments": arguments
                     }));
@@ -4190,7 +4205,7 @@ fn synthesize_responses_stream_body(final_body: &Value) -> Result<Body, GatewayE
                         "type": "response.output_item.done",
                         "sequence_number": sequence_number,
                         "response_id": response_id,
-                        "output_index": 0,
+                        "output_index": output_index,
                         "item": {
                             "id": item_id,
                             "type": "function_call",

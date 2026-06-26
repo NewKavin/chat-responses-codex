@@ -27,6 +27,22 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
     let mut instructions = Vec::new();
     let mut response_input = Vec::new();
 
+    if let Some(n) = input.get("n") {
+        match n.as_u64() {
+            Some(1) => {}
+            Some(value) => {
+                return Err(ProtocolError::InvalidPayload(format!(
+                    "multiple chat completion choices are not supported when converting Chat Completions payloads to Responses payloads: n={value}"
+                )));
+            }
+            None => {
+                return Err(ProtocolError::InvalidPayload(format!(
+                    "unsupported chat completion n value for Responses payloads: {n}"
+                )));
+            }
+        }
+    }
+
     for message in messages {
         translate_chat_message_to_responses(message, &mut instructions, &mut response_input)?;
     }
@@ -38,6 +54,16 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
     copy_field(input, &mut output, "top_p");
     copy_field(input, &mut output, "stop");
     copy_field(input, &mut output, "metadata");
+    copy_field(input, &mut output, "service_tier");
+    copy_field(input, &mut output, "store");
+    copy_field(input, &mut output, "safety_identifier");
+    copy_field(input, &mut output, "prompt_cache_key");
+    copy_field(input, &mut output, "prompt_cache_retention");
+    if !output.contains_key("prompt_cache_key") {
+        if let Some(user) = input.get("user") {
+            output.insert("prompt_cache_key".into(), user.clone());
+        }
+    }
     copy_field(input, &mut output, "parallel_tool_calls");
     if let Some(tools) = input.get("tools") {
         output.insert("tools".into(), tools.clone());
@@ -68,6 +94,27 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
             "instructions".into(),
             Value::String(instructions.join("\n")),
         );
+    }
+    if let Some(response_format) = input.get("response_format") {
+        insert_nested_object_field(&mut output, "text", "format", response_format.clone());
+    }
+    if let Some(verbosity) = input.get("verbosity") {
+        insert_nested_object_field(&mut output, "text", "verbosity", verbosity.clone());
+    }
+    if let Some(stream_options) = input.get("stream_options").and_then(Value::as_object) {
+        let mut output_stream_options = Map::new();
+        if let Some(include_obfuscation) = stream_options.get("include_obfuscation") {
+            output_stream_options.insert(
+                "include_obfuscation".into(),
+                include_obfuscation.clone(),
+            );
+        }
+        if !output_stream_options.is_empty() {
+            output.insert(
+                "stream_options".into(),
+                Value::Object(output_stream_options),
+            );
+        }
     }
     // Forward reasoning effort from chat protocol to Responses protocol.
     // Codex sends `reasoning_effort` as a top-level chat field; the Responses
@@ -129,6 +176,11 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
     copy_field(input, &mut output, "top_p");
     copy_field(input, &mut output, "stop");
     copy_field(input, &mut output, "metadata");
+    copy_field(input, &mut output, "service_tier");
+    copy_field(input, &mut output, "store");
+    copy_field(input, &mut output, "safety_identifier");
+    copy_field(input, &mut output, "prompt_cache_key");
+    copy_field(input, &mut output, "prompt_cache_retention");
     // Forward reasoning effort from Responses protocol to chat protocol.
     // Codex sends reasoning.effort in Responses requests; translate to the
     // top-level `reasoning_effort` field expected by chat-compatible upstreams.
@@ -165,6 +217,29 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
     if let Some(max_output_tokens) = input.get("max_output_tokens") {
         output.insert("max_tokens".into(), max_output_tokens.clone());
     }
+    if let Some(text) = input.get("text").and_then(Value::as_object) {
+        if let Some(response_format) = text.get("format") {
+            output.insert("response_format".into(), response_format.clone());
+        }
+        if let Some(verbosity) = text.get("verbosity") {
+            output.insert("verbosity".into(), verbosity.clone());
+        }
+    }
+    if let Some(stream_options) = input.get("stream_options").and_then(Value::as_object) {
+        let mut output_stream_options = Map::new();
+        if let Some(include_obfuscation) = stream_options.get("include_obfuscation") {
+            output_stream_options.insert(
+                "include_obfuscation".into(),
+                include_obfuscation.clone(),
+            );
+        }
+        if !output_stream_options.is_empty() {
+            output.insert(
+                "stream_options".into(),
+                Value::Object(output_stream_options),
+            );
+        }
+    }
     output.insert("messages".into(), Value::Array(messages));
     Ok(Value::Object(output))
 }
@@ -172,6 +247,11 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
 pub fn chat_response_to_responses_payload(input: &Value) -> Result<Value, ProtocolError> {
     let model = string_field(input, "model")?;
     let choices = array_field(input, "choices")?;
+    if choices.len() > 1 {
+        return Err(ProtocolError::InvalidPayload(
+            "multiple chat completion choices are not supported when converting Chat Completions responses to Responses payloads".into(),
+        ));
+    }
     let Some(choice) = choices.first() else {
         return Err(ProtocolError::MissingField("choices[0]"));
     };
@@ -224,10 +304,17 @@ pub fn responses_response_to_chat_payload(input: &Value) -> Result<Value, Protoc
     let model = string_field(input, "model")?;
     let output_items = array_field(input, "output")?;
     let mut assistant_message = None;
+    let mut saw_assistant_message = false;
     let mut tool_calls = Vec::new();
 
     for item in output_items {
         if let Some(message) = response_output_item_to_chat_message(item)? {
+            if saw_assistant_message {
+                return Err(ProtocolError::InvalidPayload(
+                    "multiple assistant messages are not supported when converting Responses payloads to chat payloads".into(),
+                ));
+            }
+            saw_assistant_message = true;
             assistant_message = Some(message);
             continue;
         }
@@ -313,6 +400,21 @@ fn copy_field(input: &Value, output: &mut Map<String, Value>, field: &'static st
     if let Some(value) = input.get(field) {
         output.insert(field.to_string(), value.clone());
     }
+}
+
+fn insert_nested_object_field(
+    output: &mut Map<String, Value>,
+    outer_field: &'static str,
+    inner_field: &'static str,
+    value: Value,
+) {
+    let entry = output
+        .entry(outer_field.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(object) = entry.as_object_mut() else {
+        return;
+    };
+    object.insert(inner_field.to_string(), value);
 }
 
 fn translate_chat_message_to_responses(
@@ -1330,6 +1432,11 @@ impl ChatToResponsesState {
         let Some(choices) = event.get("choices").and_then(Value::as_array) else {
             return Ok(Vec::new());
         };
+        if choices.len() > 1 {
+            return Err(ProtocolError::InvalidPayload(
+                "multiple chat completion choices are not supported when translating Chat stream events to Responses payloads".into(),
+            ));
+        }
         let Some(choice) = choices.first() else {
             return Ok(Vec::new());
         };
@@ -1785,6 +1892,7 @@ struct ResponsesToChatState {
     created_at: Option<u64>,
     assistant_role_emitted: bool,
     completed_emitted: bool,
+    assistant_message_output_index: Option<usize>,
     text: String,
     tool_calls: BTreeMap<usize, ResponsesToolCallState>,
 }
@@ -1806,6 +1914,7 @@ impl ResponsesToChatState {
             created_at: None,
             assistant_role_emitted: false,
             completed_emitted: false,
+            assistant_message_output_index: None,
             text: String::new(),
             tool_calls: BTreeMap::new(),
         }
@@ -1832,6 +1941,12 @@ impl ResponsesToChatState {
                         }
                         ResponseOutputItemKind::Message => {
                             response_output_message_object_to_chat_message(item)?;
+                            let output_index = event
+                                .get("output_index")
+                                .and_then(Value::as_u64)
+                                .map(|value| value as usize)
+                                .unwrap_or(0);
+                            self.ensure_single_assistant_message_output_index(output_index)?;
                             self.emit_assistant_role(&mut output);
                         }
                         ResponseOutputItemKind::Reasoning => {}
@@ -1840,10 +1955,22 @@ impl ResponsesToChatState {
             }
             "response.output_text.delta" => {
                 self.emit_assistant_role(&mut output);
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(0);
+                self.ensure_single_assistant_message_output_index(output_index)?;
                 self.emit_output_text_delta(event, &mut output)?;
             }
             "response.output_text.done" => {
                 self.emit_assistant_role(&mut output);
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(0);
+                self.ensure_single_assistant_message_output_index(output_index)?;
                 self.emit_output_text_done(event, &mut output);
             }
             "response.function_call_arguments.delta" => {
@@ -1964,6 +2091,23 @@ impl ResponsesToChatState {
         let created_at = unix_seconds();
         self.created_at = Some(created_at);
         created_at
+    }
+
+    fn ensure_single_assistant_message_output_index(
+        &mut self,
+        output_index: usize,
+    ) -> Result<(), ProtocolError> {
+        if let Some(existing_output_index) = self.assistant_message_output_index {
+            if existing_output_index != output_index {
+                return Err(ProtocolError::InvalidPayload(
+                    "multiple assistant messages are not supported when translating Responses streams to chat payloads".into(),
+                ));
+            }
+        } else {
+            self.assistant_message_output_index = Some(output_index);
+        }
+
+        Ok(())
     }
 
     fn emit_assistant_role(&mut self, output: &mut Vec<Value>) {
@@ -2215,6 +2359,12 @@ impl ResponsesToChatState {
             }
             ResponseOutputItemKind::Message => {
                 response_output_message_object_to_chat_message(item)?;
+                let output_index = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(0);
+                self.ensure_single_assistant_message_output_index(output_index)?;
                 self.emit_function_call_arguments_done(event);
             }
             ResponseOutputItemKind::Reasoning => {}
@@ -2229,6 +2379,7 @@ impl ResponsesToChatState {
         let Some(output) = response.get("output").and_then(Value::as_array) else {
             return Ok(());
         };
+        let mut assistant_message_count = 0usize;
 
         for item in output {
             let object = item.as_object().ok_or_else(|| {
@@ -2241,6 +2392,12 @@ impl ResponsesToChatState {
                 }
                 ResponseOutputItemKind::Message => {
                     response_output_message_object_to_chat_message(object)?;
+                    assistant_message_count = assistant_message_count.saturating_add(1);
+                    if assistant_message_count > 1 {
+                        return Err(ProtocolError::InvalidPayload(
+                            "multiple assistant messages are not supported when translating Responses payloads to chat payloads".into(),
+                        ));
+                    }
                 }
                 ResponseOutputItemKind::Reasoning => {}
             }
