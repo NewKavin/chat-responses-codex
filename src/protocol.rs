@@ -58,6 +58,7 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
     copy_field(input, &mut output, "store");
     copy_field(input, &mut output, "safety_identifier");
     copy_field(input, &mut output, "prompt_cache_key");
+    copy_field(input, &mut output, "client_metadata");
     copy_field(input, &mut output, "prompt_cache_retention");
     if !output.contains_key("prompt_cache_key") {
         if let Some(user) = input.get("user") {

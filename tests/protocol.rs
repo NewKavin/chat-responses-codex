@@ -985,3 +985,79 @@ fn responses_request_without_reasoning_effort_is_unchanged() {
     let result = responses_request_to_chat_payload(&input).unwrap();
     assert!(result.get("reasoning_effort").is_none());
 }
+
+// --- P1: Field forwarding tests (RED — these fields are currently dropped) ---
+
+#[test]
+fn chat_request_forwards_client_metadata_to_responses() {
+    let input = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "hello"}],
+        "client_metadata": {
+            "x-codex-turn-metadata": "{\"session_id\":\"abc\",\"turn_id\":\"def\"}"
+        }
+    });
+    let result = chat_request_to_responses_payload(&input).unwrap();
+    assert!(
+        result.get("client_metadata").is_some(),
+        "client_metadata should be forwarded in chat→responses conversion"
+    );
+}
+
+#[test]
+fn responses_request_forwards_client_metadata_to_chat() {
+    let input = json!({
+        "model": "gpt-4",
+        "input": "hello",
+        "client_metadata": {
+            "x-codex-turn-metadata": "{\"session_id\":\"abc\",\"turn_id\":\"def\"}"
+        }
+    });
+    let result = responses_request_to_chat_payload(&input).unwrap();
+    // ChatCompletions API doesn't have client_metadata, so it should be dropped
+    // gracefully (not crash). The test just verifies no error.
+    assert_eq!(result["model"], "gpt-4");
+}
+
+#[test]
+fn chat_request_forwards_stop_to_responses() {
+    let input = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stop": ["\n"]
+    });
+    let result = chat_request_to_responses_payload(&input).unwrap();
+    // stop is already copy_field'd, verify it's present
+    assert!(
+        result.get("stop").is_some(),
+        "stop should be forwarded in chat→responses conversion"
+    );
+}
+
+#[test]
+fn responses_request_forwards_parallel_tool_calls_to_chat() {
+    let input = json!({
+        "model": "gpt-4",
+        "input": "hello",
+        "parallel_tool_calls": true
+    });
+    let result = responses_request_to_chat_payload(&input).unwrap();
+    assert!(
+        result.get("parallel_tool_calls").is_some(),
+        "parallel_tool_calls should be forwarded in responses→chat conversion"
+    );
+}
+
+#[test]
+fn chat_request_forwards_parallel_tool_calls_to_responses() {
+    let input = json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "hello"}],
+        "parallel_tool_calls": true
+    });
+    let result = chat_request_to_responses_payload(&input).unwrap();
+    assert!(
+        result.get("parallel_tool_calls").is_some(),
+        "parallel_tool_calls should be forwarded in chat→responses conversion"
+    );
+}

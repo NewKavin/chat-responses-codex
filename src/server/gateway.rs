@@ -775,7 +775,13 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "slug": slug,
                 "display_name": slug,
                 "description": null,
-                "supported_reasoning_levels": [],
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                    {"effort": "medium", "description": "Balances speed and reasoning depth"},
+                    {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+                    {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"}
+                ],
+                "default_reasoning_level": "high",
                 "shell_type": "shell_command",
                 "visibility": "list",
                 "supported_in_api": true,
@@ -786,7 +792,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                     "mode": "bytes",
                     "limit": 10_000
                 },
-                "supports_reasoning_summaries": false,
+                "supports_reasoning_summaries": true,
                 "default_reasoning_summary": "auto",
                 "support_verbosity": false,
                 "apply_patch_tool_type": null,
@@ -4529,6 +4535,9 @@ fn claude_stream_body(body: Body) -> Body {
         model: None,
         message_start_emitted: false,
         current_text_block_index: None,
+        thinking_block_index: None,
+        thinking_block_started: false,
+        thinking_block_finished: false,
         next_block_index: 0,
         tool_blocks: BTreeMap::new(),
         stop_reason: None,
@@ -4577,6 +4586,9 @@ struct ClaudeStreamState {
     model: Option<String>,
     message_start_emitted: bool,
     current_text_block_index: Option<usize>,
+    thinking_block_index: Option<usize>,
+    thinking_block_started: bool,
+    thinking_block_finished: bool,
     next_block_index: usize,
     tool_blocks: BTreeMap<usize, ClaudeToolUseState>,
     stop_reason: Option<String>,
@@ -4634,11 +4646,65 @@ impl ClaudeStreamState {
         };
 
         let delta = choice.get("delta").unwrap_or(&Value::Null);
+
+        // reasoning_content (DeepSeek-style thinking) → Anthropic thinking block
+        if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str) {
+            if !reasoning_content.is_empty() && !self.thinking_block_finished {
+                self.ensure_message_start();
+                if !self.thinking_block_started {
+                    let idx = self.next_block_index;
+                    self.next_block_index = self.next_block_index.saturating_add(1);
+                    self.thinking_block_index = Some(idx);
+                    self.thinking_block_started = true;
+                    self.pending.push_back(claude_sse_event(
+                        "content_block_start",
+                        json!({
+                            "type": "content_block_start",
+                            "index": idx,
+                            "content_block": {
+                                "type": "thinking",
+                                "thinking": ""
+                            }
+                        }),
+                    ));
+                }
+                self.pending.push_back(claude_sse_event(
+                    "content_block_delta",
+                    json!({
+                        "type": "content_block_delta",
+                        "index": self.thinking_block_index.unwrap_or(0),
+                        "delta": {
+                            "type": "thinking_delta",
+                            "thinking": reasoning_content
+                        }
+                    }),
+                ));
+            } else if reasoning_content.is_empty() && self.thinking_block_started && !self.thinking_block_finished {
+                self.thinking_block_finished = true;
+                self.pending.push_back(claude_sse_event(
+                    "content_block_stop",
+                    json!({
+                        "type": "content_block_stop",
+                        "index": self.thinking_block_index.unwrap_or(0)
+                    }),
+                ));
+            }
+        }
         if let Some(text) = delta
             .get("content")
             .map(|content| extract_plain_text_from_content(Some(content)))
             .filter(|text| !text.is_empty())
         {
+            if self.thinking_block_started && !self.thinking_block_finished {
+                self.thinking_block_finished = true;
+                self.pending.push_back(claude_sse_event(
+                    "content_block_stop",
+                    json!({
+                        "type": "content_block_stop",
+                        "index": self.thinking_block_index.unwrap_or(0)
+                    }),
+                ));
+            }
             self.close_open_tool_blocks();
             self.emit_text_delta(&text);
         }
@@ -5064,6 +5130,10 @@ fn claude_messages_to_chat_payload(body: &Value) -> Result<Value, String> {
             "tool_choice".into(),
             claude_tool_choice_to_chat_tool_choice(tool_choice)?,
         );
+    }
+    // Anthropic stop_sequences → OpenAI stop array
+    if let Some(stop_sequences) = body.get("stop_sequences").and_then(Value::as_array) {
+        output.insert("stop".into(), Value::Array(stop_sequences.clone()));
     }
     if let Some(stream) = body.get("stream").and_then(Value::as_bool) {
         output.insert("stream".into(), Value::Bool(stream));

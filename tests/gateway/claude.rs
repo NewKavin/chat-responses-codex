@@ -1152,3 +1152,251 @@ async fn downstream_messages_supports_configured_portal_models() {
         );
     }
 }
+
+/// P0: reasoning_content from upstream ChatCompletions stream must be
+/// translated into Anthropic "thinking" blocks in the Claude Messages SSE
+/// output. Currently reasoning_content is silently dropped.
+#[tokio::test]
+async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |_state: State<Arc<Mutex<RequestCapture>>>,
+                      _request: Request<Body>| async move {
+                    let chunk1 = serde_json::to_string(&json!({
+                        "id": "chatcmpl-rs",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "deepseek-r1",
+                        "choices": [{"index": 0, "delta": {"reasoning_content": "Let me think", "content": ""}, "finish_reason": null}]
+                    })).unwrap();
+                    let chunk2 = serde_json::to_string(&json!({
+                        "id": "chatcmpl-rs",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "deepseek-r1",
+                        "choices": [{"index": 0, "delta": {"reasoning_content": "", "content": "Answer"}, "finish_reason": null}]
+                    })).unwrap();
+                    let chunk3 = serde_json::to_string(&json!({
+                        "id": "chatcmpl-rs",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "deepseek-r1",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
+                    })).unwrap();
+
+                    let chunks = vec![
+                        Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {}\n\n", chunk1))),
+                        Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {}\n\n", chunk2))),
+                        Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {}\n\n", chunk3))),
+                        Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                    ];
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(stream::iter(chunks)),
+                    )
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["deepseek-r1".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["deepseek-r1".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-api-key", downstream_key.plaintext)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_string(&json!({
+                "model": "deepseek-r1",
+                "max_tokens": 1024,
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            })).unwrap(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8_lossy(&body);
+
+    // The Claude SSE output must include a "thinking" block when upstream
+    // sends reasoning_content (DeepSeek-style).
+    assert!(
+        text.contains("thinking") || text.contains("reasoning_content"),
+        "reasoning_content from upstream must appear in Claude SSE output, got:\n{}",
+        text
+    );
+}
+
+/// P1: Claude Messages stop_sequences should be translated to Chat Completions
+/// stop array. Currently the field is silently dropped.
+#[tokio::test]
+async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    // Upstream returns a simple non-streaming chat completion
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                      request: Request<Body>| async move {
+                    let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    capture.lock().unwrap().request_body = Some(parsed);
+
+                    axum::Json(json!({
+                        "id": "chatcmpl-1",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-api-key", downstream_key.plaintext)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_string(&json!({
+                "model": "gpt-4.1-mini",
+                "max_tokens": 100,
+                "stop_sequences": ["STOP", "END"],
+                "messages": [{"role": "user", "content": "hi"}]
+            })).unwrap(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify the captured upstream request has the stop field
+    let captured_body = capture.lock().unwrap().request_body.clone().unwrap();
+    let stop = captured_body.get("stop").and_then(|v| v.as_array());
+    assert!(
+        stop.is_some(),
+        "stop_sequences should be forwarded as stop array, got: {:?}",
+        captured_body.get("stop")
+    );
+    let stop_values: Vec<&str> = stop.unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        stop_values.contains(&"STOP") && stop_values.contains(&"END"),
+        "stop should contain STOP and END, got: {:?}",
+        stop_values
+    );
+}
