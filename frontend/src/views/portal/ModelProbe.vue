@@ -62,8 +62,10 @@ const loadData = async () => {
     loading.value = true
     const { data } = await portalApi.getModelProbe()
     probeData.value = data
-  } catch (error) {
-    ElMessage.error('加载模型探测失败')
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.error?.message || '加载模型探测失败'
+    ElMessage.error(errorMsg)
+    // 保持原有数据，但标记为可能需要刷新
   } finally {
     loading.value = false
     scheduleRefresh()

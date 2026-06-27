@@ -20,6 +20,26 @@
       </div>
     </section>
 
+    <!-- 错误提示 -->
+    <el-alert
+      v-if="hasError"
+      :title="errorMessage"
+      type="error"
+      :closable="false"
+      show-icon
+      class="probe-error-alert"
+    />
+
+    <!-- 空数据提示 -->
+    <el-alert
+      v-else-if="isEmpty"
+      title="暂无通道数据"
+      type="info"
+      :closable="false"
+      show-icon
+      class="probe-empty-alert"
+    />
+
     <el-row :gutter="16" class="summary-grid">
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
         <div class="summary-card">
@@ -181,6 +201,9 @@ let statusChart: EChartsType | null = null
 let coverageChart: EChartsType | null = null
 
 const loading = computed(() => props.loading ?? false)
+const hasError = computed(() => props.data.summary?.total_channels === 0 && !props.loading)
+const isEmpty = computed(() => props.data.summary?.total_channels === 0 && !props.loading && !hasError.value)
+const errorMessage = computed(() => '模型探测失败，请检查上游配置或稍后重试')
 const summary = computed(() => props.data.summary)
 const sortedChannels = computed(() => sortProbeChannels(props.data.channels))
 const modelCoverage = computed(() => groupTopProbeModels(props.data.models, 8))
@@ -333,6 +356,22 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.probe-error-alert,
+.probe-empty-alert {
+  margin: 0;
+  border-radius: 12px;
+}
+
+.probe-error-alert {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.probe-empty-alert {
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.2);
 }
 
 .probe-hero {
