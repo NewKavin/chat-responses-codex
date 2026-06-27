@@ -244,6 +244,7 @@ export const extractChatCompletionUsage = (body: unknown) => {
 
 export interface StreamChunk {
   content: string
+  reasoningContent?: string
   usage?: {
     prompt_tokens: number
     completion_tokens: number
@@ -267,6 +268,8 @@ export const parseSSELine = (line: string): StreamChunk | null => {
     const parsed = JSON.parse(data)
     const delta = parsed.choices?.[0]?.delta
     const content = typeof delta?.content === 'string' ? delta.content : ''
+    const reasoningContent =
+      typeof delta?.reasoning_content === 'string' ? delta.reasoning_content : undefined
     const usage = parsed.usage
     let usageResult: StreamChunk['usage'] | undefined
 
@@ -279,7 +282,7 @@ export const parseSSELine = (line: string): StreamChunk | null => {
       }
     }
 
-    return { content, usage: usageResult, done: false }
+    return { content, reasoningContent, usage: usageResult, done: false }
   } catch {
     return null
   }

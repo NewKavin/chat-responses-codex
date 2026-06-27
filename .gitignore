@@ -14,3 +14,7 @@ logs/
 **/*.rs.bk
 node_modules/
 .superpowers/
+
+# Hermes Agent (bun-installed npm bridge + python venv)
+.hermes-venv/
+.hermes.env

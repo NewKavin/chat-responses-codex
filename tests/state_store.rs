@@ -142,7 +142,7 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
     );
     assert_eq!(page.logs[0].api_name, "ChatCompletions API");
     assert_eq!(page.logs[0].log_type, "对话");
-    assert_eq!(page.logs[0].inference_strength, "标准");
+    assert_eq!(page.logs[0].inference_strength, "-");
     assert_eq!(page.logs[0].billing_mode, "Token 计费");
     assert_eq!(page.logs[0].request_count, 1);
     assert_eq!(page.logs[0].user_agent, "未采集");

@@ -1432,16 +1432,29 @@ pub(super) async fn admin_update_upstream(
         let existing_keys = upstream.available_keys();
         drop(snapshot);
 
-        // Merge existing + new keys and dedup.
-        let mut all_keys: Vec<String> = existing_keys.clone();
-        {
+        // When the caller requested replace mode (frontend edited the key list
+        // and wants the submitted set to fully replace the stored set), only
+        // validate the keys the caller actually submitted. Merging existing
+        // keys here would resurrect keys the user just deleted whenever they
+        // are still valid upstream-side.
+        let replace_mode = updates
+            .get("_replace_api_keys")
+            .and_then(|v| v.as_bool())
+            == Some(true);
+
+        let all_keys: Vec<String> = if replace_mode {
+            new_keys.clone()
+        } else {
+            // Legacy merge behavior: keep existing keys and add new ones.
+            let mut merged: Vec<String> = existing_keys.clone();
             let mut seen: HashSet<String> = existing_keys.iter().cloned().collect();
             for key in new_keys {
                 if seen.insert(key.clone()) {
-                    all_keys.push(key);
+                    merged.push(key);
                 }
             }
-        }
+            merged
+        };
 
         if !all_keys.is_empty() {
             let client = reqwest::Client::builder()

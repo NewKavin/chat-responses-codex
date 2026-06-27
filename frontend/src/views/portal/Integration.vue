@@ -297,7 +297,7 @@
               type="info"
               :closable="false"
               show-icon
-              title="所有支持 Anthropic Messages 协议的客户端共用同一个配置格式：只需要 `baseURL`、`apiKey` 和默认模型。网关同时暴露 `/v1/messages` 和 `/v1/messages/count_tokens`，客户端直接指向网关即可。"
+              title="所有支持 Anthropic Messages 协议的客户端共用同一个配置格式：只需要 `baseURL`、`apiKey` 和默认模型。网关同时暴露 `/v1/messages` 和 `/v1/messages/count_tokens`，客户端把 baseURL 指向网关根地址即可，SDK 会自己拼接 `/v1/messages`。"
             />
 
             <div class="step-card">
@@ -332,7 +332,7 @@
               type="info"
               :closable="false"
               show-icon
-              title="Claude Code 直接使用 `~/.claude/settings.json`。当前 key、网关 URL 和默认模型都会写进去。"
+              title="Claude Code 直接使用 `~/.claude/settings.json`。当前 key、网关根地址和默认模型都会写进去；Claude Code 会自己拼接 `/v1/messages`。"
             />
 
             <div class="step-card">
@@ -341,7 +341,8 @@
                   <h4>步骤 1: 写入 `~/.claude/settings.json`</h4>
                   <p>
                     这个配置已经写好了 Anthropic 兼容网关所需的环境变量；如果模型名不是 Claude
-                    前缀，页面会自动补一个 custom model option。
+                    前缀，页面会自动补一个 custom model option。`ANTHROPIC_BASE_URL` 填的是网关根地址，
+                    不要再手工加 `/v1`。
                   </p>
                 </div>
                 <el-button size="small" @click="copyCode(claudeCodeSettingsJson)">复制</el-button>
@@ -355,6 +356,70 @@
               :closable="false"
               show-icon
               title="保存后重启 Claude Code 即可。默认模型会跟随门户使用量最高的模型，非 Claude 前缀模型会自动补 custom model option。"
+            />
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="Hermes Agent" name="hermes">
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="Hermes Agent 是自我进化的 AI agent。通过 bun 安装 npm 桥接器,再用 venv 装 Python 运行时,配置 provider 指向网关即可。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 安装 npm 桥接器</h4>
+                  <p>在项目根目录用 bun 安装 <code>hermes-agent</code> 桥接包。</p>
+                </div>
+                <el-button size="small" @click="copyCode(hermesInstallNpm)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ hermesInstallNpm }}</pre>
+            </div>
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 2: 安装 Python 运行时</h4>
+                  <p>hermes-agent 是 Python 包的桥接器,需 Python 3.11+。受 PEP 668 限制,用 venv 安装。</p>
+                </div>
+                <el-button size="small" @click="copyCode(hermesInstallPython)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ hermesInstallPython }}</pre>
+            </div>
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 3: 写入 ~/.hermes/config.yaml</h4>
+                  <p>把下游 key 填入项目根目录 <code>.hermes.env</code> 的 <code>CHAT2RESPONSES_KEY</code>,然后保存配置文件。</p>
+                </div>
+                <el-button size="small" @click="copyCode(hermesConfigYaml)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ hermesConfigYaml }}</pre>
+            </div>
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 4: 启动</h4>
+                  <p>项目提供了启动脚本,自动加载 <code>.hermes.env</code> 和 venv。</p>
+                </div>
+                <el-button size="small" @click="copyCode(hermesLaunch)">复制</el-button>
+              </div>
+              <pre class="code-block">{{ hermesLaunch }}</pre>
+            </div>
+
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="完成后即可用 hermes chat 与模型对话,所有请求经网关路由,门户日志可见。"
             />
           </div>
         </el-tab-pane>
@@ -415,6 +480,43 @@ const allModelSlugs = computed(() => {
 
 
 const primaryModelSlug = computed(() => allModelSlugs.value[0] ?? '')
+
+const hermesInstallNpm = computed(() => `# 在项目根目录
+bun install`)
+
+const hermesInstallPython = computed(() => `# Python 3.11+ 需求,用 venv 隔离
+python3 -m venv .hermes-venv
+.hermes-venv/bin/python -m pip install --upgrade pip
+.hermes-venv/bin/pip install hermes-agent`)
+
+const hermesConfigYaml = computed(() => {
+  const base = gatewayBaseUrl.value || 'http://127.0.0.1:3000'
+  const model = primaryModelSlug.value || 'gpt-4.1-mini'
+  return `# ~/.hermes/config.yaml
+model: ${model}
+max_turns: 90
+
+providers:
+  chat2responses:
+    name: chat2responses
+    base_url: ${base}
+    api_mode: openai
+    key_env: CHAT2RESPONSES_KEY
+    discover_models: true
+    default_model: ${model}
+
+# 项目根目录 .hermes.env:
+# CHAT2RESPONSES_KEY=${portalKey.value || '<你的下游key>'}`
+})
+
+const hermesLaunch = computed(() => {
+  const model = primaryModelSlug.value || 'gpt-4.1-mini'
+  return `# 项目根目录执行
+./scripts/hermes.sh chat
+
+# 指定模型
+./scripts/hermes.sh -m ${model} chat`
+})
 const sortedModelStats = computed(() => {
   const stats = buildModelUsageStats(gatewayModelSlugs.value, portalModelStats.value)
   if (!modelAllowlist.value.length) return stats

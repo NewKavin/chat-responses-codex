@@ -107,6 +107,13 @@
             <el-icon v-else :size="20"><MagicStick /></el-icon>
           </div>
           <div class="chat-message-body">
+            <details v-if="message.reasoning" class="chat-reasoning" open>
+              <summary class="chat-reasoning-summary">
+                <el-icon :size="14"><MagicStick /></el-icon>
+                <span>思考过程</span>
+              </summary>
+              <div class="chat-reasoning-content markdown-body" v-html="renderMarkdown(message.reasoning)"></div>
+            </details>
             <div v-if="message.role === 'assistant' && !message.isError" class="chat-message-content markdown-body" v-html="renderMarkdown(message.content)"></div>
             <pre v-else class="chat-message-content chat-message-content--plain">{{ message.content }}</pre>
             <div class="chat-message-file" v-if="message.uploadedFiles?.length">
@@ -123,6 +130,13 @@
             <el-icon :size="20"><MagicStick /></el-icon>
           </div>
           <div class="chat-message-body">
+            <details v-if="streamingReasoning" class="chat-reasoning" open>
+              <summary class="chat-reasoning-summary">
+                <el-icon :size="14"><MagicStick /></el-icon>
+                <span>思考中…</span>
+              </summary>
+              <div class="chat-reasoning-content markdown-body" v-html="renderMarkdown(streamingReasoning)"></div>
+            </details>
             <div class="chat-message-content markdown-body" v-html="renderMarkdown(streamingContent)"></div>
             <span class="typing-cursor"></span>
           </div>
@@ -218,6 +232,7 @@ interface ConversationMessage {
   content: string
   uploadedFiles?: UploadedFileContext[]
   usageText?: string
+  reasoning?: string
   isError?: boolean
 }
 
@@ -238,6 +253,7 @@ const uploadedFiles = ref<UploadedFile[]>([])
 const messagesContainerRef = ref<HTMLElement | null>(null)
 const sidebarCollapsed = ref(false)
 const streamingContent = ref('')
+const streamingReasoning = ref('')
 
 const MAX_FILE_SIZE_BYTES = 1024 * 1024
 
@@ -495,6 +511,7 @@ const sendQuestion = async () => {
   question.value = ''
   uploadedFiles.value = []
   streamingContent.value = ''
+  streamingReasoning.value = ''
 
   try {
     const payload = buildPlaygroundChatPayload({
@@ -545,6 +562,9 @@ const sendQuestion = async () => {
           const chunk = parseSSELine(line)
           if (!chunk) continue
           if (chunk.done) continue
+          if (chunk.reasoningContent) {
+            streamingReasoning.value += chunk.reasoningContent
+          }
           if (chunk.content) {
             streamingContent.value += chunk.content
             finalContent = streamingContent.value
@@ -558,6 +578,9 @@ const sendQuestion = async () => {
       for (const line of buffer.split('\n')) {
         const chunk = parseSSELine(line)
         if (!chunk) continue
+        if (chunk.reasoningContent) {
+          streamingReasoning.value += chunk.reasoningContent
+        }
         if (chunk.content) {
           streamingContent.value += chunk.content
           finalContent = streamingContent.value
@@ -573,9 +596,12 @@ const sendQuestion = async () => {
     }
 
     streamingContent.value = ''
+    const finalReasoning = streamingReasoning.value
+    streamingReasoning.value = ''
     messages.value.push({
       role: 'assistant',
       content: finalContent || '（模型返回空内容）',
+      reasoning: finalReasoning || undefined,
       usageText: formatUsage(finalUsage)
     })
 
@@ -584,6 +610,7 @@ const sendQuestion = async () => {
     uploadedFiles.value = pendingUploads
     const message = error instanceof Error ? error.message : '未知错误'
     streamingContent.value = ''
+    streamingReasoning.value = ''
     messages.value.push({
       role: 'assistant',
       content: message,
@@ -599,6 +626,7 @@ const clearConversation = () => {
   messages.value = []
   uploadedFiles.value = []
   streamingContent.value = ''
+  streamingReasoning.value = ''
   statusMessage.value = ''
   statusType.value = 'info'
 }
@@ -811,6 +839,31 @@ onMounted(() => {
   gap: 4px;
 }
 
+
+.chat-reasoning {
+  margin: 0 0 10px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  background: #f8f9fb;
+  overflow: hidden;
+}
+.chat-reasoning-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #606266;
+  user-select: none;
+}
+.chat-reasoning-content {
+  padding: 4px 12px 12px;
+  font-size: 13px;
+  color: #909399;
+  line-height: 1.7;
+  border-top: 1px dashed #e4e7ed;
+}
 .chat-message-content {
   margin: 0;
   line-height: 1.7;

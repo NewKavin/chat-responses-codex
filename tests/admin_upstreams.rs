@@ -2188,3 +2188,95 @@ async fn test_upstreams_update_empty_keys_preserves_existing() {
         "empty input should not clear existing keys"
     );
 }
+
+/// Reproduces: editing an upstream to remove one of multiple API keys fails to
+/// persist the deletion. The admin update handler merged existing keys with the
+/// submitted keys before re-validating, so a deleted-but-still-valid key was
+/// resurrected.
+#[tokio::test]
+async fn test_upstreams_update_replace_mode_removes_deleted_key() {
+    // Spawn a mock upstream that answers /v1/models successfully for any key.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let mock_upstream = Router::new().route(
+        "/v1/models",
+        get(|| async {
+            (
+                StatusCode::OK,
+                axum::Json(json!({
+                    "data": [
+                        {"id": "gpt-4"},
+                        {"id": "gpt-3.5-turbo"}
+                    ]
+                })),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, mock_upstream).await.unwrap();
+    });
+
+    let base_url = format!("http://{}", upstream_addr);
+
+    // Upstream has three keys initially: key-a, key-b, key-c.
+    let existing = vec![UpstreamConfig {
+        id: "replace-delete-test".to_string(),
+        name: "Replace Delete Test".to_string(),
+        base_url: base_url.clone(),
+        api_key: "key-a".to_string(),
+        api_keys: vec!["key-b".to_string(), "key-c".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Frontend sends only key-a and key-b (key-c was deleted), with the
+    // _replace_api_keys flag set so the backend replaces rather than merges.
+    let update_payload = json!({
+        "api_key": "key-a",
+        "api_keys": ["key-b"],
+        "_replace_api_keys": true
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/replace-delete-test")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&update_payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "replace-delete-test")
+        .unwrap();
+
+    let all_keys = upstream.available_keys();
+    assert_eq!(
+        all_keys.len(),
+        2,
+        "deleted key-c should not be present; got {:?}",
+        all_keys
+    );
+    assert!(all_keys.contains(&"key-a".to_string()));
+    assert!(all_keys.contains(&"key-b".to_string()));
+    assert!(
+        !all_keys.contains(&"key-c".to_string()),
+        "key-c should have been deleted, got {:?}",
+        all_keys
+    );
+}

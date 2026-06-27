@@ -87,7 +87,7 @@ pub(crate) fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("标准")
+        .unwrap_or("-")
         .to_string();
     let billing_mode = log
         .billing_mode

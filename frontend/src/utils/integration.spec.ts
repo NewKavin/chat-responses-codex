@@ -291,7 +291,7 @@ describe('integration config generators', () => {
     )
 
     expect(settings.model).toBe('MiniMax/MiniMax-M2.7')
-    expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://portal.example.com/v1')
+    expect(settings.env.ANTHROPIC_BASE_URL).toBe('https://portal.example.com')
     expect(settings.env.ANTHROPIC_API_KEY).toBe('sk-downstream-123')
     expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-downstream-123')
     expect(settings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe('1')
@@ -327,7 +327,7 @@ describe('integration config generators', () => {
       })
     )
 
-    expect(config.baseURL).toBe('https://portal.example.com/v1')
+    expect(config.baseURL).toBe('https://portal.example.com')
     expect(config.apiKey).toBe('sk-downstream-123')
     expect(config.model).toBe('claude-3-5-sonnet-20241022')
     expect(config.protocol).toBe('messages')
@@ -344,10 +344,17 @@ describe('integration config generators', () => {
       })
     )
 
-    expect(config.baseURL).toBe('https://portal.example.com/v1')
+    expect(config.baseURL).toBe('https://portal.example.com')
     expect(config.apiKey).toBe('sk-downstream-123')
     expect(config.model).toBe('MiniMax/MiniMax-M2.7')
     expect(config.protocol).toBe('messages')
   })
 
 })
+
+  it('advertises supports_reasoning_summaries=true so Codex sends reasoning.effort', () => {
+    const catalog = JSON.parse(
+      buildCodexModelCatalogJson(['ZhipuAI/GLM-5'])
+    )
+    expect(catalog.models[0].supports_reasoning_summaries).toBe(true)
+  })

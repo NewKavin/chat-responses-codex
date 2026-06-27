@@ -1,0 +1,14 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": {
+        "hermes-agent": "^0.17.0",
+      },
+    },
+  },
+  "packages": {
+    "hermes-agent": ["hermes-agent@0.17.0", "", { "bin": { "hermes": "bin/hermes.js", "hermes-agent": "bin/hermes-agent.js" } }, "sha512-PzSJiYqmwpTudmakYs2oCJ57OW3VwEJYf8buTuKvuRvcYEUf/KOTu2dD6pLf2XYgDKErpvcDaoSAJ1nGCyvzAA=="],
+  }
+}

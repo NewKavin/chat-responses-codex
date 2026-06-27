@@ -743,7 +743,7 @@ async fn test_logs_list_enriched_fields_follow_endpoint_and_token_shape() {
     assert_eq!(row["id"], "log-3");
     assert_eq!(row["api_name"], "Responses API");
     assert_eq!(row["log_type"], "推理");
-    assert_eq!(row["inference_strength"], "标准");
+    assert_eq!(row["inference_strength"], "-");
     assert_eq!(row["billing_mode"], "请求计费");
     assert_eq!(row["request_count"], 1);
     assert_eq!(row["user_agent"], "未采集");

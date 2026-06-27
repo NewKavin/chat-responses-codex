@@ -146,7 +146,13 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["shell_type"], "shell_command");
     assert_eq!(model["visibility"], "list");
     assert!(model["apply_patch_tool_type"].is_null());
-    assert_eq!(model["supports_reasoning_summaries"], false);
+    assert_eq!(model["supports_reasoning_summaries"], true);
+    assert_eq!(model["default_reasoning_level"], "high");
+    {
+        let levels = model["supported_reasoning_levels"].as_array().expect("supported_reasoning_levels array");
+        let efforts: Vec<&str> = levels.iter().map(|v| v["effort"].as_str().unwrap()).collect();
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh"]);
+    }
     assert_eq!(model["default_reasoning_summary"], "auto");
     assert_eq!(model["support_verbosity"], false);
     assert_eq!(model["supports_parallel_tool_calls"], true);

@@ -17,27 +17,16 @@ const router = createRouter({
     },
     {
       path: '/portal',
-      name: 'Portal',
       component: () => import('@/views/portal/Portal.vue'),
-      meta: { requiresPortalAuth: true }
-    },
-    {
-      path: '/portal/model-probe',
-      name: 'PortalModelProbe',
-      component: () => import('@/views/portal/Portal.vue'),
-      meta: { requiresPortalAuth: true }
-    },
-    {
-      path: '/portal/integration',
-      name: 'PortalIntegration',
-      component: () => import('@/views/portal/Integration.vue'),
-      meta: { requiresPortalAuth: true }
-    },
-    {
-      path: '/portal/key',
-      name: 'PortalKeyManagement',
-      component: () => import('@/views/portal/KeyManagement.vue'),
-      meta: { requiresPortalAuth: true }
+      meta: { requiresPortalAuth: true },
+      children: [
+        { path: '', name: 'PortalOverview', component: () => import('@/views/portal/Overview.vue') },
+        { path: 'model-probe', name: 'PortalModelProbe', component: () => import('@/views/portal/ModelProbe.vue') },
+        { path: 'history', name: 'PortalHistory', component: () => import('@/views/portal/UsageHistory.vue') },
+        { path: 'integration', name: 'PortalIntegration', component: () => import('@/views/portal/Integration.vue') },
+        { path: 'playground', name: 'PortalPlayground', component: () => import('@/views/portal/Playground.vue') },
+        { path: 'key', name: 'PortalKeyManagement', component: () => import('@/views/portal/KeyManagement.vue') }
+      ]
     },
     {
       path: '/admin/login',

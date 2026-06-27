@@ -92,6 +92,7 @@ export interface UpstreamConfig {
   managed_source?: string | null
   last_synced_at?: number
   runtime_state?: UpstreamRuntimeState
+  _replace_api_keys?: boolean
 }
 
 export interface UpstreamRuntimeState {

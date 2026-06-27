@@ -205,7 +205,7 @@ export const buildCodexModelCatalogJson = (
         supported_in_api: true,
         priority: index,
         base_instructions: 'You are Codex, a coding agent.',
-        supports_reasoning_summaries: false,
+        supports_reasoning_summaries: true,
         support_verbosity: false,
         truncation_policy: {
           mode: 'tokens',
@@ -292,8 +292,9 @@ export const buildOpenCodeConfig = (input: IntegrationConfigInput) => {
 
 export const buildClaudeCodeSettingsJson = (input: IntegrationConfigInput) => {
   const primaryModelSlug = choosePrimaryModelSlug(input.modelSlugs, input.selectedModelSlug)
+  const gatewayBaseUrl = buildGatewayBaseUrl(input.gatewayBaseUrl)
   const env: Record<string, string> = {
-    ANTHROPIC_BASE_URL: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`,
+    ANTHROPIC_BASE_URL: gatewayBaseUrl,
     ANTHROPIC_API_KEY: input.portalKey,
     ANTHROPIC_AUTH_TOKEN: input.portalKey,
     CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1'
@@ -325,13 +326,14 @@ export const buildOpenAiCompatibleConfig = (input: IntegrationConfigInput) => {
 
 export const buildAnthropicCompatibleConfig = (input: IntegrationConfigInput) => {
   const primaryModelSlug = choosePrimaryModelSlug(input.modelSlugs, input.selectedModelSlug)
+  const gatewayBaseUrl = buildGatewayBaseUrl(input.gatewayBaseUrl)
 
   return `${jsonStringify({
-    baseURL: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`,
+    baseURL: gatewayBaseUrl,
     apiKey: input.portalKey,
     model: primaryModelSlug,
     protocol: 'messages',
-    modelsEndpoint: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1/models`
+    modelsEndpoint: `${gatewayBaseUrl}/v1/models`
   })}
 `
 }

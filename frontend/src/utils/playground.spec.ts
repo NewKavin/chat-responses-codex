@@ -3,6 +3,7 @@ import {
   buildPlaygroundChatPayload,
   extractChatCompletionText,
   parseGatewayModels,
+  parseSSELine,
   type UploadedFileContext
 } from './playground'
 
@@ -178,5 +179,29 @@ describe('playground response extraction', () => {
 
   it('throws when response has no choices', () => {
     expect(() => extractChatCompletionText({})).toThrow('响应缺少 choices')
+  })
+})
+
+describe('parseSSELine', () => {
+  it('extracts reasoning_content delta from deepseek-style stream chunks', () => {
+    const line = 'data: {"choices":[{"index":0,"delta":{"reasoning_content":"思考中","content":""}}]}'
+    const chunk = parseSSELine(line)
+    expect(chunk).not.toBeNull()
+    expect(chunk!.reasoningContent).toBe('思考中')
+    expect(chunk!.content).toBe('')
+  })
+
+  it('extracts content delta alongside reasoning_content', () => {
+    const line = 'data: {"choices":[{"index":0,"delta":{"reasoning_content":"","content":"答案"}}]}'
+    const chunk = parseSSELine(line)
+    expect(chunk!.content).toBe('答案')
+    expect(chunk!.reasoningContent).toBe('')
+  })
+
+  it('returns undefined reasoningContent when field is absent', () => {
+    const line = 'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}'
+    const chunk = parseSSELine(line)
+    expect(chunk!.content).toBe('hi')
+    expect(chunk!.reasoningContent).toBeUndefined()
   })
 })
