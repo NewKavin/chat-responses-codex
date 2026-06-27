@@ -602,6 +602,14 @@ const handleSubmit = async () => {
       if (editKeys.length > 0) {
         submitData.api_key = editKeys[0]
         submitData.api_keys = editKeys.slice(1)
+        // 添加替换标志，让后端替换所有 key 而不是合并
+        submitData._replace_api_keys = true
+      } else {
+        // 用户删除了所有 key，需要清空
+        submitData.api_key = ''
+        submitData.api_keys = []
+        submitData.api_key_models = []
+        submitData._replace_api_keys = true
       }
       await adminApi.updateUpstream(form.value.id!, submitData)
       const editTotalKeys = [submitData.api_key, ...(submitData.api_keys || [])].filter(Boolean).length
