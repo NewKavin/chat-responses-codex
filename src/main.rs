@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .max(1),
         upstream_stream_keepalive_interval_seconds: env_u64(
             "UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS",
-            10,
+            3,
         )
         .max(1),
         upstream_stream_idle_timeout_seconds: env_u64(

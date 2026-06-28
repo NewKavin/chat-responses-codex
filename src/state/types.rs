@@ -78,7 +78,7 @@ impl Default for AppConfig {
             admin_upstream_timeout_seconds: 30,
             upstream_connect_timeout_seconds: 30,
             upstream_response_header_timeout_seconds: 30,
-            upstream_stream_keepalive_interval_seconds: 10,
+            upstream_stream_keepalive_interval_seconds: 3,
             upstream_stream_idle_timeout_seconds: 1_800,
             upstream_stream_max_duration_seconds: 86_400,
         }
