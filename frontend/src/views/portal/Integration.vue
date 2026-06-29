@@ -367,7 +367,7 @@
               type="info"
               :closable="false"
               show-icon
-              title="Hermes Agent 是自我进化的 AI agent。通过 bun 安装 npm 桥接器,再用 venv 装 Python 运行时,配置 provider 指向网关即可。"
+              title="Hermes Agent 是自我进化的 AI agent。通过 bun 安装 npm 桥接器,再用 venv 装 Python 运行时,配置 model.provider=custom 和 model.base_url 指向网关即可。"
             />
 
             <div class="step-card">
@@ -396,7 +396,7 @@
               <div class="step-head">
                 <div>
                   <h4>步骤 3: 写入 ~/.hermes/config.yaml</h4>
-                  <p>把下游 key 填入项目根目录 <code>.hermes.env</code> 的 <code>CHAT2RESPONSES_KEY</code>,然后保存配置文件。</p>
+                  <p>把下游 key 填入项目根目录 <code>.hermes.env</code> 的 <code>CHAT2RESPONSES_KEY</code>,然后保存新的 <code>model</code> 配置。</p>
                 </div>
                 <el-button size="small" @click="copyCode(hermesConfigYaml)">复制</el-button>
               </div>
@@ -442,6 +442,7 @@ import {
   buildGatewayBaseUrl,
   buildGatewayModelsEndpoint,
   buildAnthropicCompatibleConfig,
+  buildHermesConfigYaml,
   buildOpenAiCompatibleConfig,
   buildOpenCodeConfig,
   extractGatewayModelSlugs,
@@ -490,27 +491,16 @@ python3 -m venv .hermes-venv
 .hermes-venv/bin/pip install hermes-agent`)
 
 const hermesConfigYaml = computed(() => {
-  const base = gatewayBaseUrl.value || 'http://127.0.0.1:3000'
-  const model = primaryModelSlug.value || 'gpt-4.1-mini'
-  return `# ~/.hermes/config.yaml
-model: ${model}
-max_turns: 90
-
-providers:
-  chat2responses:
-    name: chat2responses
-    base_url: ${base}
-    api_mode: openai
-    key_env: CHAT2RESPONSES_KEY
-    discover_models: true
-    default_model: ${model}
-
-# 项目根目录 .hermes.env:
-# CHAT2RESPONSES_KEY=${portalKey.value || '<你的下游key>'}`
+  if (!primaryModelSlug.value) return ''
+  return buildHermesConfigYaml({
+    gatewayBaseUrl: gatewayBaseUrl.value || 'http://127.0.0.1:3000',
+    portalKey: portalKey.value,
+    modelSlug: primaryModelSlug.value
+  })
 })
 
 const hermesLaunch = computed(() => {
-  const model = primaryModelSlug.value || 'gpt-4.1-mini'
+  const model = primaryModelSlug.value
   return `# 项目根目录执行
 ./scripts/hermes.sh chat
 

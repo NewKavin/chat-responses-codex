@@ -349,6 +349,336 @@ async fn downstream_chat_request_routes_via_exact_model_name_when_supported_mode
     .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn downstream_chat_request_downgrades_xhigh_reasoning_for_deepseek_v4_pro() {
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
+                        assert_eq!(
+                            lock.request_body
+                                .as_ref()
+                                .and_then(|body| body.get("reasoning_effort"))
+                                .and_then(|value| value.as_str()),
+                            Some("high"),
+                            "gateway should downgrade unsupported xhigh reasoning for deepseek-ai/deepseek-v4-pro"
+                        );
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "deepseek-ai/deepseek-v4-pro",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": ["deepseek-ai/deepseek-v4-pro"],
+                "active": true,
+                "failure_count": 0
+            }],
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["deepseek-ai/deepseek-v4-pro"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
+        .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "deepseek-ai/deepseek-v4-pro",
+                    "messages": [
+                        {"role": "user", "content": "Hello"}
+                    ],
+                    "reasoning_effort": "xhigh"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response body: {body_text}"
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
+
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured.path, "/v1/chat/completions");
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer upstream-secret")
+        );
+        assert_eq!(
+            captured
+                .request_body
+                .as_ref()
+                .and_then(|body| body.get("reasoning_effort"))
+                .and_then(|value| value.as_str()),
+            Some("high")
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn downstream_chat_request_normalizes_missing_required_arrays_in_real_cline_tools() {
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let tools = payload["tools"].as_array().expect("tools array");
+                        let tool_names = [
+                            "team_status",
+                            "team_list_runs",
+                            "team_await_runs",
+                            "team_read_mailbox",
+                            "team_cleanup",
+                            "team_list_outcomes",
+                        ];
+
+                        for name in tool_names {
+                            let tool = tools
+                                .iter()
+                                .find(|tool| tool["function"]["name"].as_str() == Some(name))
+                                .unwrap_or_else(|| panic!("missing tool {name}"));
+                            assert_eq!(
+                                tool["function"]["parameters"]["required"],
+                                json!([]),
+                                "tool {name} should be normalized to an empty required array"
+                            );
+                        }
+
+                        let skills_tool = tools
+                            .iter()
+                            .find(|tool| tool["function"]["name"].as_str() == Some("skills"))
+                            .expect("skills tool");
+                        assert_eq!(
+                            skills_tool["function"]["parameters"]["required"],
+                            json!(["skill"])
+                        );
+
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload.clone());
+
+                        let model = payload
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .unwrap_or("claude-sonnet-4-5-20250929");
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(stream::iter(vec![
+                                Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                    "data: {}\n\n",
+                                    json!({
+                                        "id": "chatcmpl-test",
+                                        "object": "chat.completion.chunk",
+                                        "created": 1,
+                                        "model": model,
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {"role": "assistant", "content": "Hi"},
+                                            "finish_reason": "stop"
+                                        }]
+                                    })
+                                ))),
+                                Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                            ])),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": ["claude-sonnet-4-5-20250929"],
+                "active": true,
+                "failure_count": 0
+            }],
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["claude-sonnet-4-5-20250929"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
+        .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
+
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tmp/mock-cline/002-request.json"
+        )))
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(
+            fixture["body"].as_str().expect("fixture body string"),
+        )
+        .unwrap();
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method(fixture["method"].as_str().expect("fixture method"))
+            .uri(fixture["url"].as_str().expect("fixture url"))
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response_text = String::from_utf8_lossy(&response_body);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response body: {response_text}"
+        );
+        assert!(
+            response_text.contains("Hi"),
+            "unexpected response body: {response_text}"
+        );
+
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured.path, "/v1/chat/completions");
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Bearer upstream-secret")
+        );
+        let request_body = captured.request_body.unwrap();
+        let tools = request_body["tools"].as_array().expect("tools array");
+        for name in [
+            "team_status",
+            "team_list_runs",
+            "team_await_runs",
+            "team_read_mailbox",
+            "team_cleanup",
+            "team_list_outcomes",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["function"]["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("missing tool {name}"));
+            assert_eq!(tool["function"]["parameters"]["required"], json!([]));
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn downstream_chat_completions_supports_configured_portal_models() {
     let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
@@ -7081,7 +7411,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let keepalive_bytes = Bytes::from_static(b"data: {}\n\n");
+    let keepalive_bytes = Bytes::from_static(b": keepalive\n\n");
 
     let first_frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
         .await
@@ -7254,7 +7584,7 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let keepalive_bytes = Bytes::from_static(b"data: {}\n\n");
+    let keepalive_bytes = Bytes::from_static(b": keepalive\n\n");
 
     let mut keepalive_count = 0;
     let mut saw_real_chunk = false;

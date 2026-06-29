@@ -13,6 +13,12 @@ type CodexConfigInput = {
   modelSlug: string
 }
 
+type HermesConfigInput = {
+  gatewayBaseUrl: string
+  portalKey: string
+  modelSlug: string
+}
+
 type IntegrationConfigInput = {
   gatewayBaseUrl: string
   portalKey: string
@@ -257,6 +263,26 @@ requires_openai_auth = true
 
 export const buildCodexAuthLoginCommand = (portalKey: string) =>
   `printf '%s' ${shellSingleQuote(portalKey)} | codex login --with-api-key`
+
+export const buildHermesConfigYaml = (input: HermesConfigInput) => {
+  const gatewayApiBaseUrl = `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`
+  const modelSlug = input.modelSlug || ''
+  const portalKey = input.portalKey || '<你的下游key>'
+
+  return `# ~/.hermes/config.yaml
+# Hermes 0.17+ 使用 model dict 作为主配置。
+model:
+  provider: custom
+  default: ${JSON.stringify(modelSlug)}
+  base_url: ${JSON.stringify(gatewayApiBaseUrl)}
+  api_key: "\${CHAT2RESPONSES_KEY}"
+
+max_turns: 90
+
+# 项目根目录 .hermes.env:
+# CHAT2RESPONSES_KEY=${portalKey}
+`
+}
 
 export const buildOpenCodeConfig = (input: IntegrationConfigInput) => {
   const primaryModelSlug = choosePrimaryModelSlug(input.modelSlugs, input.selectedModelSlug)

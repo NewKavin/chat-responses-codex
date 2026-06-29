@@ -9,6 +9,7 @@ import {
   buildOpenAiCompatibleConfig,
   buildGatewayModelsEndpoint,
   buildModelUsageStats,
+  buildHermesConfigYaml,
   buildOpenCodeConfig,
   extractGatewayModelSlugs,
   rankModelSlugsByUsage,
@@ -175,6 +176,23 @@ describe('integration config generators', () => {
     expect(toml).toContain('base_url = "https://portal.example.com/v1"')
     expect(toml).not.toContain('OPENAI_API_KEY')
     expect(toml).not.toContain('sk-downstream-123')
+  })
+
+  it('builds a hermes config using the current model schema', () => {
+    const yaml = buildHermesConfigYaml({
+      gatewayBaseUrl: 'https://portal.example.com',
+      portalKey: 'sk-downstream-123',
+      modelSlug: 'MiniMax/MiniMax-M2.7'
+    })
+
+    expect(yaml).toContain('model:')
+    expect(yaml).toContain('provider: custom')
+    expect(yaml).toContain('default: "MiniMax/MiniMax-M2.7"')
+    expect(yaml).toContain('base_url: "https://portal.example.com/v1"')
+    expect(yaml).toContain('api_key: "${CHAT2RESPONSES_KEY}"')
+    expect(yaml).toContain('CHAT2RESPONSES_KEY=sk-downstream-123')
+    expect(yaml).not.toContain('providers:')
+    expect(yaml).not.toContain('key_env:')
   })
 
   it('builds a codex model catalog from ranked slugs', () => {

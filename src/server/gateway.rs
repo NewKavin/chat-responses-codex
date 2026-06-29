@@ -724,6 +724,55 @@ struct ModelsQuery {
     client_version: Option<String>,
 }
 
+const DEFAULT_SUPPORTED_REASONING_LEVELS: [(&str, &str); 4] = [
+    ("low", "Fast responses with lighter reasoning"),
+    ("medium", "Balances speed and reasoning depth"),
+    ("high", "Greater reasoning depth for complex problems"),
+    ("xhigh", "Extra high reasoning depth for complex problems"),
+];
+
+const DEEPSEEK_V4_PRO_SUPPORTED_REASONING_LEVELS: [(&str, &str); 3] = [
+    ("low", "Fast responses with lighter reasoning"),
+    ("medium", "Balances speed and reasoning depth"),
+    ("high", "Greater reasoning depth for complex problems"),
+];
+
+fn supported_reasoning_levels_for_model(model: &str) -> &'static [(&'static str, &'static str)] {
+    match model {
+        "deepseek-ai/deepseek-v4-pro" => &DEEPSEEK_V4_PRO_SUPPORTED_REASONING_LEVELS,
+        _ => &DEFAULT_SUPPORTED_REASONING_LEVELS,
+    }
+}
+
+fn normalize_reasoning_effort_for_model(model: &str, effort: &str) -> Option<&'static str> {
+    match (model, effort) {
+        ("deepseek-ai/deepseek-v4-pro", "xhigh") => Some("high"),
+        _ => None,
+    }
+}
+
+fn normalize_chat_tool_required_arrays(body: &mut Value) {
+    let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for tool in tools {
+        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let Some(parameters) = function
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+
+        if !matches!(parameters.get("required"), Some(Value::Array(_))) {
+            parameters.insert("required".into(), Value::Array(Vec::new()));
+        }
+    }
+}
+
 /// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
 ///
 /// Each model entry includes `context_window` (from the upstream's
@@ -771,16 +820,21 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
         .into_iter()
         .map(|slug| {
             let context_window = model_contexts.get(&slug).copied().flatten();
+            let supported_reasoning_levels =
+                supported_reasoning_levels_for_model(&slug)
+                    .iter()
+                    .map(|(effort, description)| {
+                        json!({
+                            "effort": effort,
+                            "description": description
+                        })
+                    })
+                    .collect::<Vec<_>>();
             json!({
                 "slug": slug,
                 "display_name": slug,
                 "description": null,
-                "supported_reasoning_levels": [
-                    {"effort": "low", "description": "Fast responses with lighter reasoning"},
-                    {"effort": "medium", "description": "Balances speed and reasoning depth"},
-                    {"effort": "high", "description": "Greater reasoning depth for complex problems"},
-                    {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"}
-                ],
+                "supported_reasoning_levels": supported_reasoning_levels,
                 "default_reasoning_level": "high",
                 "shell_type": "shell_command",
                 "visibility": "list",
@@ -3492,6 +3546,45 @@ async fn send_to_upstream(
         );
     }
 
+    if upstream_protocol == UpstreamProtocol::ChatCompletions {
+        if let Some(object) = upstream_body.as_object_mut() {
+            if let Some(requested_reasoning_effort) =
+                object.get("reasoning_effort").and_then(Value::as_str)
+            {
+                if let Some(normalized_reasoning_effort) = normalize_reasoning_effort_for_model(
+                    &final_upstream_model,
+                    requested_reasoning_effort,
+                ) {
+                    if normalized_reasoning_effort != requested_reasoning_effort {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream_key_id,
+                            path = %endpoint.path(),
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_name = %upstream.name,
+                            selected_upstream_protocol = ?upstream_protocol,
+                            upstream_model = %request_model,
+                            final_upstream_model = %final_upstream_model,
+                            requested_reasoning_effort = %requested_reasoning_effort,
+                            normalized_reasoning_effort = %normalized_reasoning_effort,
+                            "downgraded reasoning effort for upstream compatibility"
+                        );
+                        object.insert(
+                            "reasoning_effort".into(),
+                            Value::String(normalized_reasoning_effort.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if upstream_protocol == UpstreamProtocol::ChatCompletions {
+        normalize_chat_tool_required_arrays(&mut upstream_body);
+    }
+
     let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream_protocol));
     tracing::info!(
         request_id = %request_id,
@@ -3848,6 +3941,7 @@ async fn send_to_upstream(
             if upstream_protocol == endpoint.native_protocol() {
                 proxied_stream_body(
                     response,
+                    endpoint,
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
@@ -3858,6 +3952,7 @@ async fn send_to_upstream(
                     response,
                     upstream_protocol,
                     endpoint.native_protocol(),
+                    endpoint,
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
@@ -5453,7 +5548,7 @@ fn extract_claude_system_text(system: &Value) -> String {
 /// stream_interrupted errors.
 ///
 /// The stream receives results from a background task via `rx`:
-/// 1. Sends `: keepalive\n\n` frames every `keepalive_interval` seconds.
+/// 1. Sends endpoint-specific keepalive frames every `keepalive_interval` seconds.
 /// 2. When the background task completes with a `DispatchResult::Stream`,
 ///    bridges to the upstream SSE stream.
 /// 3. When the background task completes with an error, emits an SSE error
@@ -5470,7 +5565,6 @@ fn early_keepalive_stream(
             rx,
             last_heartbeat_at: TokioInstant::now(),
             keepalive_interval,
-            endpoint,
         },
         move |state| async move {
             match state {
@@ -5478,7 +5572,6 @@ fn early_keepalive_stream(
                     mut rx,
                     last_heartbeat_at,
                     keepalive_interval,
-                    endpoint,
                 } => {
                     let deadline = last_heartbeat_at + keepalive_interval;
                     tokio::select! {
@@ -5535,12 +5628,11 @@ fn early_keepalive_stream(
                         }
                         _ = tokio::time::sleep_until(deadline) => {
                             Some((
-                                Ok(sse_keepalive_frame()),
+                                Ok(sse_keepalive_frame_for_endpoint(endpoint)),
                                 EarlyStreamState::Waiting {
                                     rx,
                                     last_heartbeat_at: TokioInstant::now(),
                                     keepalive_interval,
-                                    endpoint,
                                 },
                             ))
                         }
@@ -5566,7 +5658,7 @@ fn early_keepalive_stream(
                         }
                         _ = tokio::time::sleep_until(deadline) => {
                             Some((
-                                Ok(sse_keepalive_frame()),
+                                Ok(sse_keepalive_frame_for_endpoint(endpoint)),
                                 EarlyStreamState::DrainingBody { body, last_heartbeat_at: TokioInstant::now(), keepalive_interval },
                             ))
                         }
@@ -5584,7 +5676,6 @@ enum EarlyStreamState {
         rx: mpsc::Receiver<Result<DispatchResult, GatewayError>>,
         last_heartbeat_at: TokioInstant,
         keepalive_interval: Duration,
-        endpoint: EndpointKind,
     },
     DrainingBody {
         body: BodyDataStream,
@@ -5713,6 +5804,7 @@ fn dispatch_success(result: DispatchResult) -> Response {
 
 fn proxied_stream_body(
     response: reqwest::Response,
+    endpoint: EndpointKind,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
@@ -5766,7 +5858,7 @@ fn proxied_stream_body(
             }
             StreamReadOutcome::Heartbeat => {
                 state.watchdog.record_heartbeat(TokioInstant::now());
-                Ok(Some((sse_keepalive_frame(), state)))
+                Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)))
             }
             StreamReadOutcome::IdleTimeout => {
                 let now = TokioInstant::now();
@@ -5939,6 +6031,7 @@ fn translated_stream_body(
     response: reqwest::Response,
     source_protocol: UpstreamProtocol,
     target_protocol: UpstreamProtocol,
+    endpoint: EndpointKind,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
@@ -6009,7 +6102,7 @@ fn translated_stream_body(
                 }
                 StreamReadOutcome::Heartbeat => {
                     state.watchdog.record_heartbeat(TokioInstant::now());
-                    return Ok(Some((sse_keepalive_frame(), state)));
+                    return Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)));
                 }
                 StreamReadOutcome::IdleTimeout => {
                     let now = TokioInstant::now();
@@ -6239,6 +6332,13 @@ fn sse_keepalive_frame() -> Bytes {
     Bytes::from_static(b"data: {}\n\n")
 }
 
+fn sse_keepalive_frame_for_endpoint(endpoint: EndpointKind) -> Bytes {
+    match endpoint {
+        EndpointKind::ChatCompletions => Bytes::from_static(b": keepalive\n\n"),
+        EndpointKind::Responses => sse_keepalive_frame(),
+    }
+}
+
 fn sse_done_frame() -> Bytes {
     Bytes::from_static(b"data: [DONE]\n\n")
 }
@@ -6380,6 +6480,20 @@ mod tests {
         assert!(
             text.ends_with("\n\n"),
             "keepalive frame must be terminated with a blank line, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn chat_keepalive_frame_is_a_comment_not_a_data_event() {
+        let frame = sse_keepalive_frame_for_endpoint(EndpointKind::ChatCompletions);
+        let text = std::str::from_utf8(&frame).unwrap();
+        assert!(
+            text.starts_with(':'),
+            "chat keepalive frame must be a comment, got: {text:?}"
+        );
+        assert!(
+            text.ends_with("\n\n"),
+            "chat keepalive frame must be terminated with a blank line, got: {text:?}"
         );
     }
 
