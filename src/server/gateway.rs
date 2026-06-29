@@ -4027,6 +4027,12 @@ async fn send_to_upstream(
 
     let usage = usage_from_body(&body);
 
+    if status == StatusCode::OK && is_empty_success_response(&body) {
+        return Err(GatewayError::Upstream(
+            "upstream returned an empty response body (no content, zero tokens)".into(),
+        ));
+    }
+
     Ok(DispatchResult {
         status,
         body: DispatchBody::Json(body),
@@ -4370,6 +4376,76 @@ fn extract_plain_text_from_content(content: Option<&Value>) -> String {
 fn usage_from_body(body: &Value) -> (u64, u64, u64) {
     usage_from_usage_value(body.get("usage").unwrap_or(&Value::Null))
 }
+
+fn is_empty_success_response(body: &Value) -> bool {
+    // Detect upstream 200 responses that carry no usable output:
+    // either the choices/output array is missing or empty, or the
+    // message content is an empty string/empty array, and no tokens
+    // were billed. This matches the real-world huazi relay bug where
+    // Claude non-stream responses come back as `content:""` with
+    // `completion_tokens:0` — structurally valid but useless.
+    let usage = body.get("usage").unwrap_or(&Value::Null);
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if completion_tokens != 0 || output_tokens != 0 {
+        return false;
+    }
+
+    // ChatCompletions shape: choices[].message.content
+    if let Some(choices) = body.get("choices").and_then(Value::as_array) {
+        if choices.is_empty() {
+            return true;
+        }
+        for choice in choices {
+            let content = choice
+                .get("message")
+                .or_else(|| choice.get("delta"))
+                .and_then(|m| m.get("content"));
+            match content {
+                Some(Value::String(text)) if !text.is_empty() => return false,
+                Some(Value::Array(parts)) => {
+                    for part in parts {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            if !t.is_empty() {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        return true;
+    }
+
+    // Responses shape: output[].content[].text
+    if let Some(output) = body.get("output").and_then(Value::as_array) {
+        if output.is_empty() {
+            return true;
+        }
+        for item in output {
+            if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                for part in parts {
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
 
 fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
     let request_id = HeaderValue::from_str(&result.request_id)

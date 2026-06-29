@@ -8193,3 +8193,107 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
         "cooldown_until should be set after rate limit"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn downstream_chat_request_rejects_empty_success_body_with_bad_gateway() {
+    with_proxy_env_cleared(|| async move {
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        // Mock upstream returns HTTP 200 but with empty content and zero tokens,
+        // mirroring the real huazi relay bug for Claude non-stream requests.
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async move {
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "msg_empty",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "claude-sonnet-4-5-20250929",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": ""},
+                                "finish_reason": ""
+                            }],
+                            "usage": {
+                                "prompt_tokens": 0,
+                                "completion_tokens": 0,
+                                "total_tokens": 0
+                            }
+                        })),
+                    )
+                }),
+            )
+            .with_state(());
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": ["claude-sonnet-4-5-20250929"],
+                "active": true,
+                "failure_count": 0
+            }],
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["claude-sonnet-4-5-20250929"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
+        .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "claude-sonnet-4-5-20250929",
+                    "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+                    "max_tokens": 16,
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            status,
+            StatusCode::BAD_GATEWAY,
+            "gateway should reject empty 200 body as 502, got {status}: {body_text}"
+        );
+    })
+    .await;
+}
