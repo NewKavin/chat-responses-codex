@@ -6400,6 +6400,12 @@ fn sse_keepalive_frame() -> Bytes {
     // counted as stream activity, resetting client-side idle timers
     // such as Codex's `stream_idle_timeout_ms`.
     //
+    // NOTE: Codex's production default is DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+    // (5 minutes) in codex-rs/model-provider-info/src/lib.rs:26, NOT 5s. The 5_000
+    // value only appears in test helpers (provider_for() in model-provider/src/provider.rs:398).
+    // Keepalive interval (3s) is well within the 5min idle window; the 3s choice is
+    // conservative and not required to beat a 5s deadline.
+    //
     // We previously used `event: response.ping` / `data: {"type":"response.ping"}`,
     // but Codex's Responses SSE decoding layer silently drops `response.ping`
     // events without resetting its higher-level idle deadline, which caused
