@@ -170,7 +170,7 @@ flowchart LR
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`：后台登录账号。
 - `APP_NAME`：页面和日志中的应用名。
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`：模型探测页自动刷新间隔，单位秒。
-- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：后端按 key 自动同步模型映射的周期，单位秒。
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：已废弃（后台自动同步循环已移除，模型映射仅在"获取模型"时刷新）。保留该字段仅为向后兼容。
 - `DASHBOARD_CACHE_TTL_SECONDS`：后端复用模型探测快照的缓存时间，单位秒。
 - `USAGE_LOG_ROTATION_MAX_BYTES`：文件模式日志轮转阈值。
 - `USAGE_LOG_ARCHIVE_MAX_FILES`：文件模式日志归档上限。

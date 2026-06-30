@@ -164,10 +164,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     state.maybe_attach_redis().await;
-    let sync_state = state.clone();
-    tokio::spawn(async move {
-        sync_state.run_model_key_sync_loop().await;
-    });
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,

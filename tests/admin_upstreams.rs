@@ -773,26 +773,19 @@ async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_base_url() {
         .iter()
         .find(|upstream| upstream.id == "existing-id")
         .expect("upstream should exist");
-    // 合并行为：旧 key 保留，新 key 追加。
-    assert!(
-        upstream.available_keys().contains(&"old-key".to_string()),
-        "old key should survive merge, got {:?}",
-        upstream.available_keys()
+    // 替换语义：载荷只带 new-key，旧 old-key 应被删除。
+    let mut available = upstream.available_keys();
+    available.sort();
+    assert_eq!(
+        available,
+        vec!["new-key".to_string()],
+        "only the submitted valid key should remain; old-key should be removed, got {:?}",
+        available
     );
-    assert!(
-        upstream.available_keys().contains(&"new-key".to_string()),
-        "new key should be merged, got {:?}",
-        upstream.available_keys()
-    );
-    // 模型合并：旧 gpt-4 + 新 gpt-4o 都保留。
-    assert!(
-        upstream.supported_models.contains(&"gpt-4".to_string()),
-        "old model should survive, got {:?}",
-        upstream.supported_models
-    );
+    // 后端不探活：supported_models 由 api_key_models 派生，载荷未带模型映射故只保留新模型。
     assert!(
         upstream.supported_models.contains(&"gpt-4o".to_string()),
-        "new model should be added, got {:?}",
+        "new model gpt-4o should be present, got {:?}",
         upstream.supported_models
     );
     // name 由载荷显式提供则更新。
@@ -860,24 +853,18 @@ async fn test_admin_freekey_sync_updates_auto_managed_upstream_by_url_and_model(
         .expect("upstream should exist");
     // 载荷未显式提供 name 时保留原名。
     assert_eq!(upstream.name, "legacy-name");
-    // 合并行为：旧 key 保留，新 key 追加。
-    assert!(
-        upstream
-            .available_keys()
-            .contains(&"legacy-key".to_string()),
-        "legacy key should survive merge, got {:?}",
-        upstream.available_keys()
-    );
-    assert!(
-        upstream
-            .available_keys()
-            .contains(&"replaced-key".to_string()),
-        "new key should be merged, got {:?}",
-        upstream.available_keys()
+    // 替换语义：载荷只带 replaced-key，旧 legacy-key 应被删除。
+    let mut available = upstream.available_keys();
+    available.sort();
+    assert_eq!(
+        available,
+        vec!["replaced-key".to_string()],
+        "only the submitted valid key should remain; legacy-key should be removed, got {:?}",
+        available
     );
     assert!(
         upstream.supported_models.contains(&"model-a".to_string()),
-        "model-a should survive merge, got {:?}",
+        "model-a should be present, got {:?}",
         upstream.supported_models
     );
 }
@@ -991,9 +978,18 @@ async fn test_admin_freekey_sync_only_imports_valid_status() {
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(result["created"].as_u64().unwrap(), 1);
-    assert_eq!(result["updated"].as_u64().unwrap(), 0);
-    assert_eq!(result["skipped"].as_u64().unwrap(), 0);
+    // Only the valid key creates a new upstream; the invalid key is ignored
+    // for creation (it would only matter when clearing an existing upstream).
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.name == "valid-status")
+        .expect("only the valid-key upstream should be created");
+    let mut available = upstream.available_keys();
+    available.sort();
+    assert_eq!(available, vec!["valid-key".to_string()]);
+    assert!(!upstream.available_keys().contains(&"invalid-key".to_string()));
 }
 
 #[tokio::test]
@@ -1066,65 +1062,47 @@ async fn test_admin_freekey_sync_replaces_stale_keys_and_models() {
         .find(|upstream| upstream.id == "auto-id")
         .expect("upstream should exist");
 
-    // 合并行为：旧 key 保留，新 key 追加。
-    let available = upstream.available_keys();
-    assert!(
-        available.contains(&"stale-key-1".to_string()),
-        "stale-key-1 should survive merge, got {:?}",
+    // 替换语义：载荷只带 fresh-key-a / fresh-key-b，旧 stale-key-1/2/3 全部删除。
+    let mut available = upstream.available_keys();
+    available.sort();
+    assert_eq!(
+        available,
+        vec!["fresh-key-a".to_string(), "fresh-key-b".to_string()],
+        "only the submitted valid keys should remain; stale keys should be removed, got {:?}",
         available
     );
-    assert!(
-        available.contains(&"stale-key-2".to_string()),
-        "stale-key-2 should survive merge, got {:?}",
-        available
-    );
-    assert!(
-        available.contains(&"stale-key-3".to_string()),
-        "stale-key-3 should survive merge, got {:?}",
-        available
-    );
-    assert!(
-        available.contains(&"fresh-key-a".to_string()),
-        "fresh-key-a should be merged, got {:?}",
-        available
-    );
-    assert!(
-        available.contains(&"fresh-key-b".to_string()),
-        "fresh-key-b should be merged, got {:?}",
-        available
-    );
-    // Old + new models should coexist.
-    assert!(
-        upstream.supported_models.contains(&"old-model".to_string()),
-        "old-model should survive merge, got {:?}",
-        upstream.supported_models
-    );
-    assert!(
-        upstream
-            .supported_models
-            .contains(&"another-old-model".to_string()),
-        "another-old-model should survive merge, got {:?}",
-        upstream.supported_models
-    );
+    // 旧 model 应被移除，仅保留载荷带入的 model-x。
     assert!(
         upstream.supported_models.contains(&"model-x".to_string()),
-        "model-x should be added, got {:?}",
+        "model-x should be present, got {:?}",
         upstream.supported_models
     );
-    // Old api_key_models should be preserved.
     assert!(
-        upstream
+        !upstream.supported_models.contains(&"old-model".to_string()),
+        "old-model should be removed under replace semantics, got {:?}",
+        upstream.supported_models
+    );
+    assert!(
+        !upstream
+            .supported_models
+            .contains(&"another-old-model".to_string()),
+        "another-old-model should be removed under replace semantics, got {:?}",
+        upstream.supported_models
+    );
+    // 旧 api_key_models 应被修剪掉，只保留新 key 的映射。
+    assert!(
+        !upstream
             .api_key_models
             .iter()
             .any(|e| e.api_key == "stale-key-1"),
-        "stale-key-1 api_key_model should survive merge"
+        "stale-key-1 api_key_model should be removed"
     );
     assert!(
-        upstream
+        !upstream
             .api_key_models
             .iter()
             .any(|e| e.api_key == "stale-key-2"),
-        "stale-key-2 api_key_model should survive merge"
+        "stale-key-2 api_key_model should be removed"
     );
     // 身份字段保留。
     assert_eq!(upstream.id, "auto-id");
@@ -2278,5 +2256,230 @@ async fn test_upstreams_update_replace_mode_removes_deleted_key() {
         !all_keys.contains(&"key-c".to_string()),
         "key-c should have been deleted, got {:?}",
         all_keys
+    );
+}
+
+// ============================================================================
+// New tests: api_key field sync on replace, external key query endpoint,
+// empty key set handling, manual upstream not exposed.
+// ============================================================================
+
+/// When admin_update_upstream runs in replace mode, the legacy `api_key`
+/// single-key field must be synced to `api_keys.first()` so it does not
+/// resurrect deleted keys via the routing fallback.
+#[tokio::test]
+async fn test_update_replace_mode_syncs_legacy_api_key_field() {
+    let existing = vec![UpstreamConfig {
+        id: "sync-field-test".to_string(),
+        name: "Sync Field Test".to_string(),
+        base_url: "https://api.field-test.example.com/v1".to_string(),
+        api_key: "old-primary".to_string(),
+        api_keys: vec!["old-extra".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Replace with two new keys; old-primary and old-extra must both vanish.
+    let update_payload = json!({
+        "api_key": "new-primary",
+        "api_keys": ["new-extra"],
+        "_replace_api_keys": true
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/sync-field-test")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&update_payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "sync-field-test")
+        .unwrap();
+
+    // legacy api_key field must not resurrect old-primary; it must reflect the
+    // new key set.
+    assert_eq!(upstream.api_key, "new-primary");
+    let mut available = upstream.available_keys();
+    available.sort();
+    assert_eq!(
+        available,
+        vec!["new-extra".to_string(), "new-primary".to_string()],
+        "old keys should be gone, got {:?}",
+        available
+    );
+}
+
+/// The external key query endpoint must only return auto_managed upstreams;
+/// manual upstreams must never expose their keys.
+#[tokio::test]
+async fn test_list_upstream_keys_only_returns_auto_managed() {
+    let existing = vec![
+        UpstreamConfig {
+            id: "auto-1".to_string(),
+            name: "Auto One".to_string(),
+            base_url: "https://auto-1.example.com/v1".to_string(),
+            api_key: "auto-key-1".to_string(),
+            api_keys: vec!["auto-key-2".to_string()],
+            auto_managed: true,
+            managed_source: Some("freekey".to_string()),
+            protocol: UpstreamProtocol::ChatCompletions,
+            supported_models: vec!["gpt-4".to_string()],
+            active: true,
+            ..Default::default()
+        },
+        UpstreamConfig {
+            id: "manual-1".to_string(),
+            name: "Manual One".to_string(),
+            base_url: "https://manual-1.example.com/v1".to_string(),
+            api_key: "manual-secret-key".to_string(),
+            auto_managed: false,
+            protocol: UpstreamProtocol::ChatCompletions,
+            supported_models: vec!["gpt-4".to_string()],
+            active: true,
+            ..Default::default()
+        },
+    ];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams/keys")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    let upstreams = result["upstreams"].as_array().expect("upstreams array");
+    assert_eq!(upstreams.len(), 1, "only auto_managed upstreams exposed");
+    assert_eq!(upstreams[0]["id"], "auto-1");
+
+    let mut keys: Vec<String> = upstreams[0]["api_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["auto-key-1".to_string(), "auto-key-2".to_string()]
+    );
+    // Manual upstream key must never appear anywhere in the response.
+    let raw = body.to_vec();
+    let text = String::from_utf8(raw).unwrap();
+    assert!(
+        !text.contains("manual-secret-key"),
+        "manual upstream key must not be exposed, got: {text}"
+    );
+}
+
+/// When an external sync submits no valid keys for a base_url, the existing
+/// auto_managed upstream record is preserved but its keys are cleared (becomes
+/// unroutable until valid keys are resupplied).
+#[tokio::test]
+async fn test_freekey_sync_empty_valid_set_preserves_upstream_clears_keys() {
+    let existing = vec![UpstreamConfig {
+        id: "auto-empty".to_string(),
+        name: "Auto Empty".to_string(),
+        base_url: "https://api.empty.example.com/v1".to_string(),
+        api_key: "old-key".to_string(),
+        api_keys: vec!["old-key-2".to_string()],
+        api_key_models: vec![ApiKeyModelConfig {
+            api_key: "old-key".to_string(),
+            supported_models: vec!["gpt-4".to_string()],
+        }],
+        supported_models: vec!["gpt-4".to_string()],
+        auto_managed: true,
+        protocol: UpstreamProtocol::ChatCompletions,
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // All keys for this base_url are invalid.
+    let payload = json!({
+        "source": "freekey",
+        "base_url": "https://api.empty.example.com/v1",
+        "keys": [
+            { "key": "old-key", "model": "gpt-4", "status": "invalid" }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/integrations/freekey/sync")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "auto-empty")
+        .expect("upstream record must be preserved");
+
+    // Record preserved, identity intact.
+    assert_eq!(upstream.id, "auto-empty");
+    assert!(upstream.auto_managed);
+    // Keys cleared: empty api_keys, empty api_key, empty api_key_models.
+    assert!(
+        upstream.api_keys.is_empty(),
+        "api_keys should be cleared, got {:?}",
+        upstream.api_keys
+    );
+    assert!(
+        upstream.api_key.is_empty(),
+        "legacy api_key field should be cleared, got {:?}",
+        upstream.api_key
+    );
+    assert!(
+        upstream.api_key_models.is_empty(),
+        "api_key_models should be cleared, got {:?}",
+        upstream.api_key_models
+    );
+    assert!(
+        upstream.available_keys().is_empty(),
+        "no keys should be available, got {:?}",
+        upstream.available_keys()
     );
 }

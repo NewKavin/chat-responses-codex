@@ -72,9 +72,10 @@ the gateway keeps per host before opening new sockets.
 fresh model-probe snapshot. Keep it separate from `DASHBOARD_CACHE_TTL_SECONDS`,
 which controls how long the backend reuses the cached probe result before
 calling upstreams again.
-`UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` controls how often the backend refreshes
-per-key model mappings from upstream `/v1/models`. Keep it separate from the browser
-refresh interval and from `DASHBOARD_CACHE_TTL_SECONDS`.
+`UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` is deprecated: the background auto-sync
+loop was removed. Per-key model mappings are now refreshed only when an admin
+explicitly triggers "获取模型" (discover-models). The field is retained for
+backward compatibility and has no effect.
 
 ## Build The Image
 

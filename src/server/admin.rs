@@ -549,6 +549,38 @@ pub(super) async fn admin_list_models(State(state): State<AppState>) -> impl Int
     .into_response()
 }
 
+/// List keys of auto-managed upstreams only.
+///
+/// Exposes the stored key sets for external sync scripts to read, probe, and
+/// resubmit. Manual upstreams are never exposed here.
+pub(super) async fn admin_list_upstream_keys(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let snapshot = state.snapshot().await;
+    let mut entries: Vec<Value> = Vec::new();
+    for upstream in snapshot.upstreams.iter().filter(|u| u.auto_managed) {
+        let mut api_keys = upstream.api_keys.clone();
+        if !upstream.api_key.is_empty()
+            && !api_keys.iter().any(|k| k == &upstream.api_key)
+        {
+            api_keys.insert(0, upstream.api_key.clone());
+        }
+        api_keys = api_keys
+            .into_iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect::<Vec<_>>();
+        entries.push(json!({
+            "id": upstream.id,
+            "name": upstream.name,
+            "base_url": upstream.base_url,
+            "api_keys": api_keys,
+            "last_synced_at": upstream.last_synced_at,
+        }));
+    }
+    Json(json!({ "upstreams": entries })).into_response()
+}
+
 pub(super) async fn admin_get_announcement(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "announcement": state.snapshot().await.announcement,
@@ -725,20 +757,22 @@ fn freekey_key_valid(item: &FreekeySyncKeyPayload) -> bool {
 }
 
 /// Sync freekey upstream keys from external script.
+///
+/// The external script is the source of truth for key validity: it probes keys
+/// and reports each as `status: "valid"` or invalid. The backend performs no
+/// probing here — it trusts the payload and applies replace semantics per
+/// base_url: submitted valid keys replace the stored set (preserving existing
+/// model mappings for surviving keys), invalid/absent keys are removed.
 pub(super) async fn admin_sync_freekey_upstreams(
     State(state): State<AppState>,
     Json(payload): Json<FreekeySyncPayload>,
 ) -> impl IntoResponse {
-    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
     let source = payload.source.unwrap_or_else(|| "freekey".to_string());
     let base_url = payload.base_url.unwrap_or_default().trim().to_string();
     let mut imports = Vec::new();
 
     for item in payload.keys {
-        if !freekey_key_valid(&item) {
-            continue;
-        }
-
+        let valid = freekey_key_valid(&item);
         let Some(key) = item.key.map(|value| value.trim().to_string()) else {
             continue;
         };
@@ -772,59 +806,8 @@ pub(super) async fn admin_sync_freekey_upstreams(
             base_url: item_base_url,
             api_key: key,
             model,
+            valid,
         });
-    }
-
-    // Concurrently validate all keys against their respective base_urls.
-    let mut invalid_keys: Vec<Value> = Vec::new();
-    if !imports.is_empty() {
-        // Group keys by base_url for validation.
-        let mut by_base_url: HashMap<String, Vec<String>> = HashMap::new();
-        for item in &imports {
-            by_base_url
-                .entry(item.base_url.clone())
-                .or_default()
-                .push(item.api_key.clone());
-        }
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(admin_timeout))
-            .build()
-            .unwrap_or_default();
-
-        let mut valid_key_set: HashSet<String> = HashSet::new();
-        for (base_url, keys) in &by_base_url {
-            // Dedup keys per base_url.
-            let mut unique_keys: Vec<String> = keys.clone();
-            {
-                let mut seen = HashSet::new();
-                unique_keys.retain(|k| seen.insert(k.clone()));
-            }
-            let results = fetch_models_from_upstream_keys_concurrently(
-                &client,
-                base_url,
-                &unique_keys,
-                admin_timeout,
-            )
-            .await;
-            for result in &results {
-                if result.error.is_none() {
-                    valid_key_set.insert(result.key.clone());
-                } else {
-                    invalid_keys.push(json!({
-                        "base_url": base_url,
-                        "key_prefix": result.key_prefix,
-                        "error": result.error,
-                    }));
-                }
-            }
-        }
-
-        // Only filter invalid keys when at least one key validated successfully.
-        // If ALL keys failed, keep them all (upstream may be temporarily unreachable).
-        if !valid_key_set.is_empty() {
-            imports.retain(|item| valid_key_set.contains(&item.api_key));
-        }
     }
 
     let synced_at = unix_seconds();
@@ -833,15 +816,12 @@ pub(super) async fn admin_sync_freekey_upstreams(
         .await
     {
         Ok(result) => {
-            let mut response = json!({
+            let response = json!({
                 "created": result.created,
                 "updated": result.updated,
                 "skipped": result.skipped,
                 "source": source,
             });
-            if !invalid_keys.is_empty() {
-                response["invalid_keys"] = json!(invalid_keys);
-            }
             (StatusCode::OK, Json(response)).into_response()
         }
         Err(error) => (
@@ -1383,142 +1363,17 @@ pub(super) async fn admin_get_upstream(
 }
 
 /// Update upstream by ID
+///
+/// No probing: the frontend submits the desired key set (with
+/// `_replace_api_keys=true` for edits) and the backend persists it directly.
+/// Model discovery happens separately via the discover-models endpoint.
 pub(super) async fn admin_update_upstream(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(mut updates): Json<serde_json::Value>,
+    Json(updates): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
-    // Collect new keys from the payload for concurrent validation.
-    let mut new_keys: Vec<String> = Vec::new();
-    if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
-        for v in api_keys {
-            if let Some(key) = v.as_str() {
-                let key = key.trim().to_string();
-                if !key.is_empty() {
-                    new_keys.push(key);
-                }
-            }
-        }
-    }
-    if let Some(key) = updates.get("api_key").and_then(|v| v.as_str()) {
-        let key = key.trim().to_string();
-        if !key.is_empty() {
-            new_keys.push(key);
-        }
-    }
-    if let Some(api_key_models) = updates.get("api_key_models").and_then(|v| v.as_array()) {
-        for entry in api_key_models {
-            if let Some(key) = entry.get("api_key").and_then(|v| v.as_str()) {
-                let key = key.trim().to_string();
-                if !key.is_empty() {
-                    new_keys.push(key);
-                }
-            }
-        }
-    }
-    // Dedup.
-    {
-        let mut seen = HashSet::new();
-        new_keys.retain(|k| seen.insert(k.clone()));
-    }
-
-    // Collect existing keys from the stored upstream and validate them together.
-    let mut invalid_keys: Vec<Value> = Vec::new();
-    let snapshot = state.snapshot().await;
-    if let Some(upstream) = snapshot.upstreams.iter().find(|u| u.id == id) {
-        let base_url = upstream.base_url.clone();
-        // Gather existing keys from the upstream record.
-        let existing_keys = upstream.available_keys();
-        drop(snapshot);
-
-        // When the caller requested replace mode (frontend edited the key list
-        // and wants the submitted set to fully replace the stored set), only
-        // validate the keys the caller actually submitted. Merging existing
-        // keys here would resurrect keys the user just deleted whenever they
-        // are still valid upstream-side.
-        let replace_mode = updates
-            .get("_replace_api_keys")
-            .and_then(|v| v.as_bool())
-            == Some(true);
-
-        let all_keys: Vec<String> = if replace_mode {
-            new_keys.clone()
-        } else {
-            // Legacy merge behavior: keep existing keys and add new ones.
-            let mut merged: Vec<String> = existing_keys.clone();
-            let mut seen: HashSet<String> = existing_keys.iter().cloned().collect();
-            for key in new_keys {
-                if seen.insert(key.clone()) {
-                    merged.push(key);
-                }
-            }
-            merged
-        };
-
-        if !all_keys.is_empty() {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(admin_timeout))
-                .build()
-                .unwrap_or_default();
-
-            let results = fetch_models_from_upstream_keys_concurrently(
-                &client,
-                &base_url,
-                &all_keys,
-                admin_timeout,
-            )
-            .await;
-            let mut valid_keys: HashSet<String> = HashSet::new();
-            let mut valid_key_models: HashMap<String, Vec<String>> = HashMap::new();
-            for result in &results {
-                if result.error.is_none() {
-                    valid_keys.insert(result.key.clone());
-                    if !result.models.is_empty() {
-                        valid_key_models.insert(result.key.clone(), result.models.clone());
-                    }
-                } else {
-                    invalid_keys.push(json!({
-                        "key_prefix": result.key_prefix,
-                        "error": result.error,
-                    }));
-                }
-            }
-
-            // Only filter invalid keys when at least one key validated successfully.
-            // If ALL keys failed (e.g. upstream temporarily unreachable), keep them all.
-            if !valid_keys.is_empty() {
-                // Build replacement arrays for api_keys and api_key_models.
-                let mut replacement_api_keys: Vec<String> = valid_keys.iter().cloned().collect();
-                replacement_api_keys.sort();
-
-                let mut replacement_api_key_models: Vec<Value> = Vec::new();
-                for key in &replacement_api_keys {
-                    let models = valid_key_models.get(key).cloned().unwrap_or_default();
-                    replacement_api_key_models.push(json!({
-                        "api_key": key,
-                        "supported_models": models,
-                    }));
-                }
-
-                // Use _replace_api_keys flag to tell update_upstream_by_id to replace instead of merge.
-                updates["api_keys"] = json!(replacement_api_keys);
-                updates["api_key_models"] = json!(replacement_api_key_models);
-                // Clear the legacy api_key field to avoid duplication.
-                updates.as_object_mut().unwrap().remove("api_key");
-                updates["_replace_api_keys"] = json!(true);
-            }
-        }
-    }
-
     match state.update_upstream_by_id(&id, updates).await {
-        Ok(updated_upstream) => {
-            let mut response = json!(updated_upstream);
-            if !invalid_keys.is_empty() {
-                response["invalid_keys"] = json!(invalid_keys);
-            }
-            Json(response).into_response()
-        }
+        Ok(updated_upstream) => Json(json!(updated_upstream)).into_response(),
         Err(UpstreamMutationError::NotFound(message)) => (
             StatusCode::NOT_FOUND,
             Json(json!({
