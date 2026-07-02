@@ -6,7 +6,7 @@ import {
   parseGatewayModels,
   parseSSELine,
   type UploadedFileContext
-} from './playground'
+} from '../../src/utils/playground'
 
 describe('playground model parsing', () => {
   it('deduplicates and trims model ids from gateway response', () => {

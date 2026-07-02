@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import router from './index'
+import router from '../../src/router/index'
 
 describe('router', () => {
   it('registers the admin and portal model probe routes', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { groupTopBreakdownItems, sortBreakdownItems } from './dashboardCharts'
+import { groupTopBreakdownItems, sortBreakdownItems } from '../../src/utils/dashboardCharts'
 
 describe('dashboardCharts', () => {
   it('sorts breakdown items by value descending and name ascending', () => {

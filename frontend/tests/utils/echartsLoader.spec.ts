@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { __resetEchartsLoaderForTests, loadEcharts } from './echartsLoader'
+import { __resetEchartsLoaderForTests, loadEcharts } from '../../src/utils/echartsLoader'
 
 describe('echartsLoader', () => {
   it('caches the same import promise and resolves echarts module', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatInferenceStrength } from './logDisplay'
+import { formatInferenceStrength } from '../../src/utils/logDisplay'
 
 describe('formatInferenceStrength', () => {
   it('returns the trimmed raw value when present', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatPercentageTwoDecimals } from './percentage'
+import { formatPercentageTwoDecimals } from '../../src/utils/percentage'
 
 describe('formatPercentageTwoDecimals', () => {
   it('keeps two decimals with standard rounding', () => {

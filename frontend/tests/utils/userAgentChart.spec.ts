@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildUserAgentChartSummary } from './userAgentChart'
+import { buildUserAgentChartSummary } from '../../src/utils/userAgentChart'
 
 describe('user agent chart summary', () => {
   it('keeps aggregate downstream summary without using request counts', () => {

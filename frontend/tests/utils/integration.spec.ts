@@ -14,7 +14,7 @@ import {
   extractGatewayModelSlugs,
   rankModelSlugsByUsage,
   sortPortalModelStats
-} from './integration'
+} from '../../src/utils/integration'
 
 describe('integration config generators', () => {
   it('builds a gateway base url from an origin and trims trailing slash', () => {

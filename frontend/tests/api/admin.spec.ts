@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { adminApi, adminHttp, createAdminApiClient, hasUsableAdminToken, splitDashboardResponse } from './admin'
+import { adminApi, adminHttp, createAdminApiClient, hasUsableAdminToken, splitDashboardResponse } from '../../src/api/admin'
 import type { DashboardSummaryResponse } from '@/types'
 
 describe('admin api auth behavior', () => {

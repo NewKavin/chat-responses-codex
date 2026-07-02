@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import config from './vite.config'
+import config from '../vite.config'
 
 describe('vite proxy config', () => {
   it('proxies API requests to the gateway on port 3001', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from './keyUtils'
+import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '../../src/utils/keyUtils'
 
 describe('key utils', () => {
   it('accepts only non-empty plaintext keys', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createHighlightedCodeRenderer, registeredHighlightLanguages } from './highlight'
+import { createHighlightedCodeRenderer, registeredHighlightLanguages } from '../../src/utils/highlight'
 
 describe('highlight helper', () => {
   it('registers a small explicit language set', () => {

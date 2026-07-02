@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildAnnouncementSeenKey, shouldShowAnnouncement } from './announcement'
+import { buildAnnouncementSeenKey, shouldShowAnnouncement } from '../../src/utils/announcement'
 
 describe('announcement helpers', () => {
   it('builds the seen key from employee id', () => {

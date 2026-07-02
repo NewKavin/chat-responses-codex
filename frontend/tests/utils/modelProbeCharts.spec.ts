@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sortProbeChannels, sortProbeModels } from './modelProbeCharts'
+import { sortProbeChannels, sortProbeModels } from '../../src/utils/modelProbeCharts'
 
 describe('modelProbeCharts', () => {
   it('sorts probe channels with healthy channels first', () => {

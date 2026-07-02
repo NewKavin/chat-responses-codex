@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { portalApi, portalHttp } from './portal'
+import { portalApi, portalHttp } from '../../src/api/portal'
 
 describe('portal api', () => {
   it('calls the key read endpoint', async () => {

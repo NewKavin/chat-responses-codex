@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolvePortalQuotaModelSlugs } from './portalQuotaModels'
+import { resolvePortalQuotaModelSlugs } from '../../src/utils/portalQuotaModels'
 
 describe('resolvePortalQuotaModelSlugs', () => {
   it('prefers the configured allowlist when it is present', () => {

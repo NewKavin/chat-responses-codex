@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { DailyStats } from '@/types'
-import { buildUsageHistoryBuckets } from './usageHistoryChart'
+import { buildUsageHistoryBuckets } from '../../src/utils/usageHistoryChart'
 
 describe('usage history chart buckets', () => {
   it('keeps chronological buckets and fills missing days', () => {

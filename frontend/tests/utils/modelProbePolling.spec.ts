@@ -3,7 +3,7 @@ import {
   DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS,
   getModelProbeRefreshDelayMs,
   normalizeModelProbeRefreshIntervalSeconds
-} from './modelProbePolling'
+} from '../../src/utils/modelProbePolling'
 
 describe('modelProbePolling', () => {
   it('uses the backend-provided refresh interval when it is valid', () => {
