@@ -1,6 +1,7 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
-    unix_seconds, AppConfig, AppState, DownstreamConfig, PersistedState, UsageLog,
+    unix_seconds, AppConfig, AppState, DownstreamAdmissionRejection, DownstreamConfig,
+    PersistedState, UsageLog,
 };
 use tempfile::tempdir;
 
@@ -64,9 +65,17 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
     let downstream = state.snapshot().await.downstreams[0].clone();
     let admission = state.reserve_downstream_request(&downstream).await;
 
+    let rejection = admission.expect_err("daily token quota should reject exhausted keys");
     assert!(
-        admission.is_err(),
-        "token quota should reject requests once the daily budget is used"
+        matches!(
+            rejection,
+            DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                limit: 10,
+                used: 10,
+                ..
+            }
+        ),
+        "unexpected admission rejection: {rejection:?}"
     );
 }
 

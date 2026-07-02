@@ -452,7 +452,8 @@ async fn test_upstreams_update_modifies_existing_upstream() {
     let updated_upstream = json!({
         "name": "Updated Upstream 1",
         "base_url": "https://api.updated.com",
-        "supported_models": ["gpt-4", "gpt-4-turbo"]
+        "supported_models": ["gpt-4", "gpt-4-turbo"],
+        "strip_nonstandard_chat_fields": true
     });
 
     let response = app
@@ -483,6 +484,7 @@ async fn test_upstreams_update_modifies_existing_upstream() {
     assert_eq!(upstream.name, "Updated Upstream 1");
     assert_eq!(upstream.base_url, "https://api.updated.com");
     assert_eq!(upstream.supported_models.len(), 2);
+    assert!(upstream.strip_nonstandard_chat_fields);
 }
 
 #[tokio::test]
@@ -989,7 +991,9 @@ async fn test_admin_freekey_sync_only_imports_valid_status() {
     let mut available = upstream.available_keys();
     available.sort();
     assert_eq!(available, vec!["valid-key".to_string()]);
-    assert!(!upstream.available_keys().contains(&"invalid-key".to_string()));
+    assert!(!upstream
+        .available_keys()
+        .contains(&"invalid-key".to_string()));
 }
 
 #[tokio::test]

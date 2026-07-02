@@ -71,6 +71,13 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["message"], "model not allowed");
+    assert_eq!(payload["error"]["type"], "gateway_access_denied");
+    assert_eq!(payload["error"]["code"], "gateway_model_not_allowed");
+    assert_eq!(payload["error"]["param"], Value::Null);
+    assert_eq!(payload["error"]["details"]["scope"], "gateway");
 
     let snapshot = state.snapshot().await;
     assert_eq!(
@@ -81,6 +88,10 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
     let log = &snapshot.usage_logs[0];
     assert_eq!(log.status_code, 403);
     assert_eq!(log.endpoint, "/v1/chat/completions");
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("gateway_model_not_allowed")
+    );
     assert!(
         log.error_message
             .as_deref()
@@ -88,6 +99,337 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
             .contains("model not allowed"),
         "unexpected log error message: {:?}",
         log.error_message
+    );
+}
+
+#[tokio::test]
+async fn malformed_chat_json_returns_openai_error_envelope() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{\"model\":\"gpt-4.1-mini\","))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["type"], "invalid_request_error");
+    assert_eq!(payload["error"]["code"], "gateway_invalid_request");
+    assert_eq!(payload["error"]["param"], Value::Null);
+}
+
+#[tokio::test]
+async fn missing_model_with_valid_key_is_logged_as_invalid_request() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "gateway_invalid_request");
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.status_code, StatusCode::BAD_REQUEST.as_u16());
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("gateway_invalid_request")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
+    with_proxy_env_cleared(|| async move {
+        let sensitive = "SECRET_PROMPT_BODY_SHOULD_NOT_LEAK";
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({
+                        "error": {
+                            "message": format!("expecting , delimiter near {sensitive}"),
+                            "type": "badrequesterror",
+                            "code": 400
+                        }
+                    })),
+                )
+            }),
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{}", address),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-5.1-ca".into()],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-5.1-ca".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "gpt-5.1-ca",
+                            "messages": [{"role": "user", "content": sensitive}],
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response_text = String::from_utf8(response_body.to_vec()).unwrap();
+        assert!(
+            !response_text.contains(sensitive),
+            "gateway response leaked upstream echoed payload: {response_text}"
+        );
+        let payload: Value = serde_json::from_str(&response_text).unwrap();
+        assert_eq!(
+            payload["error"]["code"], "upstream_request_rejected",
+            "unexpected upstream rejection payload: {payload}"
+        );
+        assert_eq!(payload["error"]["details"]["scope"], "upstream");
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.usage_logs.len(), 1);
+        assert_eq!(
+            snapshot.usage_logs[0].error_category.as_deref(),
+            Some("upstream_request_rejected")
+        );
+        let persisted_error = snapshot.usage_logs[0]
+            .error_message
+            .as_deref()
+            .unwrap_or_default();
+        assert!(
+            !persisted_error.contains(sensitive),
+            "usage log leaked upstream echoed payload: {persisted_error}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn downstream_daily_token_quota_error_has_safe_code_and_log_category() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let downstream_key = generate_downstream_key("gw");
+    let now = chat_responses_codex::state::unix_seconds();
+    let state: PersistedState = serde_json::from_value(json!({
+        "upstreams": [{
+            "id": "up-1",
+            "name": "primary",
+            "base_url": "http://127.0.0.1:9",
+            "api_key": "upstream-secret",
+            "protocol": "ChatCompletions",
+            "protocols": ["ChatCompletions"],
+            "supported_models": ["gpt-4.1-mini"],
+            "active": true,
+            "failure_count": 0
+        }],
+        "downstreams": [{
+            "id": "down-1",
+            "name": "team-a",
+            "hash": downstream_key.hash.clone(),
+            "plaintext_key": downstream_key.plaintext.clone(),
+            "model_allowlist": ["gpt-4.1-mini"],
+            "rate_limit_enabled": true,
+            "per_minute_limit": 60,
+            "max_concurrency": 10,
+            "daily_token_limit": 10,
+            "monthly_token_limit": 100,
+            "ip_allowlist": [],
+            "expires_at": null,
+            "active": true
+        }],
+        "usage_logs": [{
+            "id": "log-1",
+            "downstream_key_id": "down-1",
+            "upstream_key_id": "up-1",
+            "endpoint": "/v1/chat/completions",
+            "model": "gpt-4.1-mini",
+            "request_id": "REQ-1",
+            "status_code": 200,
+            "prompt_tokens": 4,
+            "completion_tokens": 6,
+            "total_tokens": 10,
+            "latency_ms": 12,
+            "created_at": now
+        }]
+    }))
+    .unwrap();
+    let state = AppState::new(state, state_path, AppConfig::default());
+
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    assert!(retry_after > 0, "Retry-After should be present");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"]["code"],
+        "gateway_daily_token_quota_exceeded"
+    );
+    assert_eq!(payload["error"]["details"]["quota"], "daily_tokens");
+    assert_eq!(payload["error"]["details"]["limit"], 10);
+    assert_eq!(payload["error"]["details"]["used"], 10);
+
+    let snapshot = state.snapshot().await;
+    let log = snapshot
+        .usage_logs
+        .iter()
+        .find(|log| log.request_id != "REQ-1")
+        .expect("quota rejection should be logged");
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("gateway_daily_token_quota_exceeded")
     );
 }
 
@@ -350,7 +692,7 @@ async fn downstream_chat_request_routes_via_exact_model_name_when_supported_mode
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn downstream_chat_request_downgrades_xhigh_reasoning_for_deepseek_v4_pro() {
+async fn downstream_chat_request_maps_xhigh_reasoning_to_max_for_deepseek_v4_pro() {
     with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();
@@ -381,8 +723,8 @@ async fn downstream_chat_request_downgrades_xhigh_reasoning_for_deepseek_v4_pro(
                                 .as_ref()
                                 .and_then(|body| body.get("reasoning_effort"))
                                 .and_then(|value| value.as_str()),
-                            Some("high"),
-                            "gateway should downgrade unsupported xhigh reasoning for deepseek-ai/deepseek-v4-pro"
+                            Some("max"),
+                            "gateway should map Codex xhigh reasoning to DeepSeek V4 max reasoning"
                         );
 
                         (
@@ -488,7 +830,7 @@ async fn downstream_chat_request_downgrades_xhigh_reasoning_for_deepseek_v4_pro(
                 .as_ref()
                 .and_then(|body| body.get("reasoning_effort"))
                 .and_then(|value| value.as_str()),
-            Some("high")
+            Some("max")
         );
     })
     .await;
@@ -622,10 +964,8 @@ async fn downstream_chat_request_normalizes_missing_required_arrays_in_real_clin
             "/tmp/mock-cline/002-request.json"
         )))
         .unwrap();
-        let body: serde_json::Value = serde_json::from_str(
-            fixture["body"].as_str().expect("fixture body string"),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(fixture["body"].as_str().expect("fixture body string")).unwrap();
 
         let app = build_router(state.clone());
         let request = Request::builder()
@@ -3365,6 +3705,7 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
                         slug: "gpt-4.1-mini".into(),
                         context_limit: 400,
                         output_reserve: 80,
+                        max_output_tokens: 0,
                         context_group: String::new(),
                     }],                    active: true,
                     failure_count: 0,
@@ -3519,12 +3860,14 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
                             slug: "MiniMax2.7".into(),
                             context_limit: 220,
                             output_reserve: 80,
+                            max_output_tokens: 0,
                             context_group: "minimax".into(),
                         },
                         ModelContextConfig {
                             slug: "MiniMax2.7-Long".into(),
                             context_limit: 1200,
                             output_reserve: 80,
+                            max_output_tokens: 0,
                             context_group: "minimax".into(),
                         },
                     ],
@@ -3662,6 +4005,7 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
                         slug: "gpt-4.1-mini".into(),
                         context_limit: 260,
                         output_reserve: 80,
+                        max_output_tokens: 0,
                         context_group: String::new(),
                     }],
                     active: true,
@@ -6859,7 +7203,10 @@ async fn stream_interruption_marks_interrupted_not_success() {
     // The upstream emitted a content chunk but no usage/[DONE], so the drop
     // path classifies this as a client cancel before billable output rather
     // than the generic stream_interrupted bucket.
-    assert_eq!(log.error_category.as_deref(), Some("stream_client_cancelled"));
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("stream_client_cancelled")
+    );
     assert!(
         log.error_message
             .as_deref()
@@ -6890,7 +7237,14 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 (
                     StatusCode::OK,
                     headers,
-                    "data: {\"response\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n\ndata: [DONE]\n\n",
+                    concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}]}}\n\n",
+                        "data: [DONE]\n\n",
+                    ),
                 )
             }),
         );
@@ -7009,7 +7363,14 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 (
                     StatusCode::OK,
                     headers,
-                    "data: {\"response\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n\ndata: [DONE]\n\n",
+                    concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}]}}\n\n",
+                        "data: [DONE]\n\n",
+                    ),
                 )
             }),
         );
@@ -7130,7 +7491,11 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
         .usage_logs
         .last()
         .expect("expected usage log entry");
-    assert_eq!(log.status_code, 200);
+    assert_eq!(
+        log.status_code, 200,
+        "unexpected translated stream log error: {:?} / {:?}",
+        log.error_category, log.error_message
+    );
     assert_eq!(log.error_category.as_deref(), None);
     assert_eq!(log.error_message.as_deref(), None);
 }
@@ -7246,31 +7611,25 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let mut body = response.into_body();
-    let body_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match body.frame().await {
-                Some(Ok(frame)) => {
-                    let bytes = frame.into_data().expect("expected data frame");
-                    if bytes
-                        .windows(b"[DONE]".len())
-                        .any(|window| window == b"[DONE]")
-                    {
-                        return Ok::<(), String>(());
-                    }
-                }
-                Some(Err(error)) => return Err(error.to_string()),
-                None => return Err("stream unexpectedly ended before timing out".to_string()),
-            }
-        }
-    })
+    let body = tokio::time::timeout(
+        Duration::from_secs(3),
+        to_bytes(response.into_body(), usize::MAX),
+    )
     .await
-    .expect("stream did not time out in time");
-
-    let body_error = body_result.expect_err("stream unexpectedly completed before timing out");
+    .expect("stream did not time out in time")
+    .expect("stream timeout should be emitted as a structured SSE frame");
+    let body_text = String::from_utf8_lossy(&body);
     assert!(
-        body_error.contains("idle timeout"),
-        "unexpected stream error: {body_error}"
+        body_text.contains("\"code\":\"stream_idle_timeout\""),
+        "stream idle timeout should include a machine-readable code, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("\"category\":\"stream_idle_timeout\""),
+        "stream idle timeout should include a searchable category, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("data: [DONE]"),
+        "stream idle timeout should terminate the SSE stream, got: {body_text}"
     );
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
@@ -7311,7 +7670,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
             let stream = stream::once(async {
                 tokio::time::sleep(Duration::from_millis(2_200)).await;
                 Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n",
+                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 ))
             });
             (StatusCode::OK, headers, Body::from_stream(stream))
@@ -7459,7 +7818,11 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
         .usage_logs
         .last()
         .expect("expected usage log entry");
-    assert_eq!(log.status_code, 200);
+    assert_eq!(
+        log.status_code, 200,
+        "unexpected translated stream log error: {:?} / {:?}",
+        log.error_category, log.error_message
+    );
     assert_eq!(log.error_category.as_deref(), None);
     assert_eq!(log.error_message.as_deref(), None);
 }
@@ -7486,7 +7849,7 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
             let stream = stream::once(async {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n",
+                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 ))
             });
             (StatusCode::OK, headers, Body::from_stream(stream))
@@ -7602,7 +7965,9 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
                     keepalive_count += 1;
                 } else {
                     assert!(
-                        std::str::from_utf8(&bytes).unwrap().contains("chat.completion.chunk"),
+                        std::str::from_utf8(&bytes)
+                            .unwrap()
+                            .contains("chat.completion.chunk"),
                         "expected real chunk"
                     );
                     saw_real_chunk = true;
@@ -7614,7 +7979,10 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
         }
     }
 
-    assert!(saw_real_chunk, "expected to receive the real upstream chunk");
+    assert!(
+        saw_real_chunk,
+        "expected to receive the real upstream chunk"
+    );
     assert!(
         keepalive_count >= 1,
         "expected at least 1 keepalive frame before real chunk, got {keepalive_count}"
@@ -7623,22 +7991,21 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
     // Wait for the stream to fully drain (the upstream chunk completed
     // at 30s and the body Drop + log flush may take another moment).
     // Use a generous timeout because the stream path is long.
-    let snapshot =
-        tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                let snapshots = state.upstream_runtime_snapshots().await;
-                let in_flight = snapshots
-                    .get("up-1")
-                    .map(|snapshot| snapshot.in_flight)
-                    .unwrap_or_default();
-                if in_flight == 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let snapshots = state.upstream_runtime_snapshots().await;
+            let in_flight = snapshots
+                .get("up-1")
+                .map(|snapshot| snapshot.in_flight)
+                .unwrap_or_default();
+            if in_flight == 0 {
+                break;
             }
-        })
-        .await
-        .ok();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .ok();
 
     // Core assertions already covered: keepalive frames arrived, real
     // chunk arrived after 30s upstream silence. Skip usage-log validation
@@ -7758,31 +8125,25 @@ async fn stream_max_duration_interrupts_hung_stream() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let mut body = response.into_body();
-    let body_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match body.frame().await {
-                Some(Ok(frame)) => {
-                    let bytes = frame.into_data().expect("expected data frame");
-                    if bytes
-                        .windows(b"[DONE]".len())
-                        .any(|window| window == b"[DONE]")
-                    {
-                        return Ok::<(), String>(());
-                    }
-                }
-                Some(Err(error)) => return Err(error.to_string()),
-                None => return Err("stream unexpectedly ended before timing out".to_string()),
-            }
-        }
-    })
+    let body = tokio::time::timeout(
+        Duration::from_secs(3),
+        to_bytes(response.into_body(), usize::MAX),
+    )
     .await
-    .expect("stream did not time out in time");
-
-    let body_error = body_result.expect_err("stream unexpectedly completed before timing out");
+    .expect("stream did not time out in time")
+    .expect("stream max duration should be emitted as a structured SSE frame");
+    let body_text = String::from_utf8_lossy(&body);
     assert!(
-        body_error.contains("max duration"),
-        "unexpected stream error: {body_error}"
+        body_text.contains("\"code\":\"stream_max_duration\""),
+        "stream max duration should include a machine-readable code, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("\"category\":\"stream_max_duration\""),
+        "stream max duration should include a searchable category, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("data: [DONE]"),
+        "stream max duration should terminate the SSE stream, got: {body_text}"
     );
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
@@ -8296,4 +8657,1110 @@ async fn downstream_chat_request_rejects_empty_success_body_with_bad_gateway() {
         );
     })
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn downstream_chat_request_allows_tool_call_success_with_empty_content_and_zero_tokens() {
+    with_proxy_env_cleared(|| async move {
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async move {
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-tool",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "gpt-4.1-mini",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "",
+                                    "tool_calls": [{
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "exec_command",
+                                            "arguments": "{\"cmd\":\"pwd\"}"
+                                        }
+                                    }]
+                                },
+                                "finish_reason": "tool_calls"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 0,
+                                "completion_tokens": 0,
+                                "total_tokens": 0
+                            }
+                        })),
+                    )
+                }),
+            )
+            .with_state(());
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": ["gpt-4.1-mini"],
+                "active": true,
+                "failure_count": 0
+            }],
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["gpt-4.1-mini"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
+        .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "gpt-4.1-mini",
+                    "messages": [{"role": "user", "content": "Use a tool"}],
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "description": "Run a command",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"cmd": {"type": "string"}},
+                                "required": ["cmd"]
+                            }
+                        }
+                    }],
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "tool-call-only success must not be treated as empty: {payload}"
+        );
+        assert_eq!(
+            payload["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "exec_command"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_stream_request_rejects_empty_json_success_before_synthesizing_sse() {
+    with_proxy_env_cleared(|| async move {
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async move {
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "msg_empty_stream",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "claude-sonnet-4-5-20250929",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": ""},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 0,
+                                "completion_tokens": 0,
+                                "total_tokens": 0
+                            }
+                        })),
+                    )
+                }),
+            )
+            .with_state(());
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": ["claude-sonnet-4-5-20250929"],
+                "active": true,
+                "failure_count": 0
+            }],
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["claude-sonnet-4-5-20250929"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
+        .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "claude-sonnet-4-5-20250929",
+                    "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+                    "max_tokens": 16,
+                    "stream": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "stream response should remain SSE once headers are sent, got {status}: {body_text}"
+        );
+        assert!(
+            body_text.contains("\"message\":\"upstream returned an empty response body"),
+            "stream should emit an actionable SSE error frame, got: {body_text}"
+        );
+        assert!(
+            body_text.contains("\"code\":\"upstream_empty_response\""),
+            "stream SSE error frame should include a machine-readable code, got: {body_text}"
+        );
+        assert!(
+            body_text.contains("\"category\":\"upstream_empty_response\""),
+            "stream SSE error frame should include a log/search category, got: {body_text}"
+        );
+        assert!(
+            !body_text.contains("\"content\":\"\""),
+            "empty JSON success must not be synthesized as an empty content chunk: {body_text}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_stream_request_rejects_empty_upstream_sse_success_before_done() {
+    with_proxy_env_cleared(|| async move {
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async move {
+                    let chunks = vec![
+                        Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                            "data: {}\n\n",
+                            json!({
+                                "id": "chatcmpl-empty-sse",
+                                "object": "chat.completion.chunk",
+                                "created": 1,
+                                "model": "claude-sonnet-4-5-20250929",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"role": "assistant", "content": ""},
+                                    "finish_reason": null
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 3,
+                                    "completion_tokens": 0,
+                                    "total_tokens": 3
+                                }
+                            })
+                        ))),
+                        Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                    ];
+
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(stream::iter(chunks)),
+                    )
+                }),
+            )
+            .with_state(());
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state: PersistedState = serde_json::from_value(json!({
+            "upstreams": [{
+                "id": "up-1",
+                "name": "primary",
+                "base_url": format!("http://{}", address),
+                "api_key": "upstream-secret",
+                "protocol": "ChatCompletions",
+                "supported_models": ["claude-sonnet-4-5-20250929"],
+                "active": true,
+                "failure_count": 0
+            }],
+            "downstreams": [{
+                "id": "down-1",
+                "name": "team-a",
+                "hash": downstream_key.hash.clone(),
+                "plaintext_key": downstream_key.plaintext.clone(),
+                "model_allowlist": ["claude-sonnet-4-5-20250929"],
+                "per_minute_limit": 60,
+                "daily_token_limit": null,
+                "monthly_token_limit": null,
+                "ip_allowlist": [],
+                "expires_at": null,
+                "active": true
+            }],
+            "usage_logs": []
+        }))
+        .unwrap();
+        let state = AppState::new(state, state_path, AppConfig::default());
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "claude-sonnet-4-5-20250929",
+                    "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+                    "max_tokens": 16,
+                    "stream": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_text = String::from_utf8_lossy(&body);
+        assert!(
+            body_text.contains("\"code\":\"upstream_empty_response\""),
+            "empty upstream SSE completion should emit a structured error frame, got: {body_text}"
+        );
+        assert!(
+            body_text.contains("\"category\":\"upstream_empty_response\""),
+            "empty upstream SSE completion should be searchable by category, got: {body_text}"
+        );
+        assert!(
+            body_text.contains("data: [DONE]"),
+            "structured SSE error should still terminate the stream, got: {body_text}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "claude-opus-4-7",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "ok"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{}", address),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["claude-opus-4-7".into()],
+                    default_model_context: None,
+                    model_contexts: vec![ModelContextConfig {
+                        slug: "claude-opus-4-7".into(),
+                        context_limit: 200_000,
+                        output_reserve: 4096,
+                        max_output_tokens: 32_768,
+                        context_group: String::new(),
+                    }],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["claude-opus-4-7".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", downstream_key.plaintext))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "claude-opus-4-7",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 65536,
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = capture.lock().unwrap().clone();
+        let request_body = captured.request_body.expect("upstream should have received the request");
+
+        // The excessive max_tokens (65536) should have been clamped to the configured cap (32768)
+        assert_eq!(
+            request_body["max_tokens"].as_u64(),
+            Some(32768),
+            "max_tokens should be clamped to configured max_output_tokens cap"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn max_output_tokens_cap_zero_passes_through() {
+    with_proxy_env_cleared(|| async move {
+        let capture = Arc::new(Mutex::new(RequestCapture::default()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture_clone = capture.clone();
+
+        let upstream_app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "ok"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{}", address),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    default_model_context: None,
+                    model_contexts: vec![ModelContextConfig {
+                        slug: "gpt-4.1-mini".into(),
+                        context_limit: 200_000,
+                        output_reserve: 4096,
+                        max_output_tokens: 0,
+                        context_group: String::new(),
+                    }],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", downstream_key.plaintext))
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "gpt-4.1-mini",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1000,
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = capture.lock().unwrap().clone();
+        let request_body = captured.request_body.expect("upstream should have received the request");
+
+        // max_output_tokens=0 means no cap, so max_tokens should pass through unchanged
+        assert_eq!(
+            request_body["max_tokens"].as_u64(),
+            Some(1000),
+            "max_tokens should pass through when max_output_tokens cap is 0"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strict_chat_compatibility_strips_codex_fields_but_preserves_tools_for_glm() {
+    with_proxy_env_cleared(|| async move {
+        let request_body = json!({
+            "model": "ZhipuAI/GLM-5.1",
+            "messages": [{"role": "user", "content": "use the tool"}],
+            "max_output_tokens": 4096,
+            "reasoning_effort": "xhigh",
+            "service_tier": "auto",
+            "safety_identifier": "safe-user",
+            "prompt_cache_key": "cache-key",
+            "prompt_cache_retention": "24h",
+            "client_metadata": {"client": "codex"},
+            "store": true,
+            "metadata": {"trace": "abc"},
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 2
+            },
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "user": "downstream-user",
+            "verbosity": "high",
+            "text": {"verbosity": "high"},
+            "stream_options": {"include_usage": true},
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Lookup a value",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"}
+                        }
+                    }
+                }
+            }],
+            "tool_choice": "auto",
+            "stream": false
+        });
+
+        let captured = capture_single_chat_request("ZhipuAI/GLM-5.1", true, request_body).await;
+
+        for key in [
+            "reasoning_effort",
+            "service_tier",
+            "safety_identifier",
+            "prompt_cache_key",
+            "prompt_cache_retention",
+            "client_metadata",
+            "store",
+            "metadata",
+            "usage",
+            "input_tokens",
+            "output_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "user",
+            "verbosity",
+            "text",
+            "max_output_tokens",
+            "max_completion_tokens",
+        ] {
+            assert!(
+                captured.get(key).is_none(),
+                "{key} should not be sent to a strict GLM ChatCompletions upstream: {captured}"
+            );
+        }
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(4096));
+        assert_eq!(captured["stream_options"]["include_usage"], true);
+        assert_eq!(captured["tool_choice"], "auto");
+        assert_eq!(captured["tools"][0]["type"], "function");
+        assert_eq!(
+            captured["tools"][0]["function"]["parameters"]["required"],
+            json!([])
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strict_chat_compatibility_uses_max_completion_tokens_for_minimax() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "MiniMax/MiniMax-M2.7",
+            true,
+            json!({
+                "model": "MiniMax/MiniMax-M2.7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 8192,
+                "reasoning_effort": "high",
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_completion_tokens"].as_u64(), Some(8192));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("max_tokens").is_none());
+        assert!(captured.get("reasoning_effort").is_none());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strict_chat_compatibility_maps_deepseek_v4_reasoning_effort() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "deepseek-ai/DeepSeek-V4-Pro",
+            true,
+            json!({
+                "model": "deepseek-ai/DeepSeek-V4-Pro",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 2048,
+                "reasoning_effort": "xhigh",
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(2048));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("max_completion_tokens").is_none());
+        assert_eq!(captured["reasoning_effort"], "max");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strict_chat_compatibility_uses_max_completion_tokens_for_qwen() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "Qwen/Qwen3-235B-A22B",
+            true,
+            json!({
+                "model": "Qwen/Qwen3-235B-A22B",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 3072,
+                "reasoning_effort": "high",
+                "stream": false,
+                "stream_options": {"include_usage": true}
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_completion_tokens"].as_u64(), Some(3072));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("max_tokens").is_none());
+        assert!(captured.get("reasoning_effort").is_none());
+        assert_eq!(captured["stream_options"]["include_usage"], true);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn known_chat_model_compatibility_applies_without_strict_flag_for_glm() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "GLM-5.1",
+            false,
+            json!({
+                "model": "GLM-5.1",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 1024,
+                "reasoning_effort": "high",
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(1024));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("max_completion_tokens").is_none());
+        assert!(captured.get("reasoning_effort").is_none());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn glm_5_2_chat_compatibility_preserves_supported_reasoning_effort() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "GLM-5.2",
+            false,
+            json!({
+                "model": "GLM-5.2",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 1024,
+                "reasoning_effort": "xhigh",
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(1024));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert_eq!(captured["reasoning_effort"], "xhigh");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn known_proxy_model_compatibility_applies_without_strict_flag_for_claude_label() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "claude-sonnet-4-5-20250929",
+            false,
+            json!({
+                "model": "claude-sonnet-4-5-20250929",
+                "messages": [{"role": "user", "content": "use a tool"}],
+                "max_output_tokens": 2048,
+                "reasoning_effort": "high",
+                "verbosity": "high",
+                "stream": false,
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "inspect",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"}
+                            }
+                        }
+                    }
+                }],
+                "tool_choice": "auto"
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(2048));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("reasoning_effort").is_none());
+        assert!(captured.get("verbosity").is_none());
+        assert_eq!(captured["tool_choice"], "auto");
+        assert_eq!(captured["tools"][0]["function"]["name"], "inspect");
+        assert_eq!(
+            captured["tools"][0]["function"]["parameters"]["required"],
+            json!([])
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn third_party_chat_proxy_compatibility_applies_to_generic_gpt_alias() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "gpt-5.1-ca",
+            false,
+            json!({
+                "model": "gpt-5.1-ca",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 1536,
+                "reasoning_effort": "high",
+                "service_tier": "auto",
+                "verbosity": "high",
+                "metadata": {"trace": "abc"},
+                "user": "audit-user",
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(1536));
+        for key in [
+            "max_output_tokens",
+            "reasoning_effort",
+            "service_tier",
+            "verbosity",
+        ] {
+            assert!(
+                captured.get(key).is_none(),
+                "{key} should be removed for a third-party ChatCompletions proxy: {captured}"
+            );
+        }
+        assert_eq!(captured["metadata"], json!({"trace": "abc"}));
+        assert_eq!(captured["user"], "audit-user");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strict_third_party_chat_proxy_strips_metadata_and_user() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "gpt-5.1-ca",
+            true,
+            json!({
+                "model": "gpt-5.1-ca",
+                "messages": [{"role": "user", "content": "hi"}],
+                "metadata": {"trace": "abc"},
+                "user": "audit-user",
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert!(
+            captured.get("metadata").is_none(),
+            "metadata should be removed only when strict cleanup is enabled: {captured}"
+        );
+        assert!(
+            captured.get("user").is_none(),
+            "user should be removed only when strict cleanup is enabled: {captured}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_compatibility_preserves_explicit_max_tokens_over_max_output_tokens() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "GLM-5.1",
+            false,
+            json!({
+                "model": "GLM-5.1",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1000,
+                "max_output_tokens": 4096,
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(1000));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("max_completion_tokens").is_none());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_compatibility_preserves_explicit_max_completion_tokens_over_max_output_tokens() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "MiniMax/MiniMax-M2.7",
+            false,
+            json!({
+                "model": "MiniMax/MiniMax-M2.7",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_completion_tokens": 1000,
+                "max_output_tokens": 4096,
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_completion_tokens"].as_u64(), Some(1000));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("max_tokens").is_none());
+    })
+    .await;
+}
+
+async fn capture_single_chat_request(
+    model: &str,
+    strip_nonstandard_chat_fields: bool,
+    request_body: Value,
+) -> Value {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+    let response_model = model.to_string();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                      request: Request<Body>| {
+                    let response_model = response_model.clone();
+                    async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.request_body = Some(payload);
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": response_model,
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "ok"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                    }
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.to_string()],
+                active: true,
+                failure_count: 0,
+                strip_nonstandard_chat_fields,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.to_string()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(request_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured = capture
+        .lock()
+        .unwrap()
+        .request_body
+        .clone()
+        .expect("upstream should have received the request");
+    captured
 }

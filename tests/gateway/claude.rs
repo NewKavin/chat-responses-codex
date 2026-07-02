@@ -38,11 +38,328 @@ fn parse_sse_event_data(payload: &str) -> Vec<(Option<String>, serde_json::Value
     parse_sse_events(payload)
         .into_iter()
         .map(|event| {
-            let data = serde_json::from_str(&event.data)
-                .unwrap_or_else(|err| panic!("failed to parse SSE data as JSON: {err}: {}", event.data));
+            let data = serde_json::from_str(&event.data).unwrap_or_else(|err| {
+                panic!("failed to parse SSE data as JSON: {err}: {}", event.data)
+            });
             (event.event, data)
         })
         .collect()
+}
+
+#[tokio::test]
+async fn claude_gateway_error_uses_anthropic_error_envelope() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["claude-allowed".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["claude-allowed".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", downstream_key.plaintext)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "claude-denied",
+                        "max_tokens": 16,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "permission_error");
+    assert_eq!(payload["error"]["message"], "model not allowed");
+    assert_eq!(payload["error"]["code"], "gateway_model_not_allowed");
+    assert_eq!(payload["error"]["details"]["scope"], "gateway");
+}
+
+#[tokio::test]
+async fn claude_request_conversion_error_does_not_echo_tool_payload() {
+    let sensitive = "SECRET_CLAUDE_TOOL_PAYLOAD_SHOULD_NOT_LEAK";
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "unused-before-conversion")
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "claude-test",
+                        "max_tokens": 16,
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "tools": [sensitive]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        !response_text.contains(sensitive),
+        "Claude conversion error leaked request payload: {response_text}"
+    );
+    let payload: Value = serde_json::from_str(&response_text).unwrap();
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "invalid_request_error");
+    assert_eq!(payload["error"]["code"], "gateway_invalid_request");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claude_response_conversion_error_uses_anthropic_envelope_without_upstream_tool_payload() {
+    with_proxy_env_cleared(|| async move {
+        let sensitive = "SECRET_UPSTREAM_TOOL_CALL_SHOULD_NOT_LEAK";
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |_request: Request<Body>| async move {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-bad-tool",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [sensitive]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 9,
+                            "completion_tokens": 3,
+                            "total_tokens": 12
+                        }
+                    })),
+                )
+            }),
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{}", address),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("x-api-key", downstream_key.plaintext)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "gpt-4.1-mini",
+                            "max_tokens": 16,
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response_text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            !response_text.contains(sensitive),
+            "Claude conversion error leaked upstream tool payload: {response_text}"
+        );
+        let payload: Value = serde_json::from_str(&response_text).unwrap();
+        assert_eq!(payload["type"], "error");
+        assert_eq!(payload["error"]["type"], "api_error");
+        assert_eq!(payload["error"]["code"], "upstream_invalid_response");
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.usage_logs.len(), 1);
+        let log = &snapshot.usage_logs[0];
+        assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
+        assert_eq!(
+            log.error_category.as_deref(),
+            Some("upstream_invalid_response")
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn claude_messages_malformed_json_returns_anthropic_error_envelope() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "key-any")
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{\"model\":\"claude-test\","))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "invalid_request_error");
+    assert_eq!(payload["error"]["code"], "gateway_invalid_request");
+}
+
+#[tokio::test]
+async fn claude_count_tokens_malformed_json_returns_anthropic_error_envelope() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages/count_tokens")
+                .header("x-api-key", "key-any")
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{\"model\":\"claude-test\","))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "invalid_request_error");
+    assert_eq!(payload["error"]["code"], "gateway_invalid_request");
 }
 
 #[tokio::test]
@@ -652,8 +969,7 @@ async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic
     let text = events
         .iter()
         .filter(|(event, data)| {
-            event.as_deref() == Some("content_block_delta")
-                && data["delta"]["type"] == "text_delta"
+            event.as_deref() == Some("content_block_delta") && data["delta"]["type"] == "text_delta"
         })
         .filter_map(|(_, data)| data["delta"]["text"].as_str())
         .collect::<String>();
@@ -1267,7 +1583,8 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
                 "max_tokens": 1024,
                 "stream": true,
                 "messages": [{"role": "user", "content": "hi"}]
-            })).unwrap(),
+            }))
+            .unwrap(),
         ))
         .unwrap();
 
@@ -1378,7 +1695,8 @@ async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
                 "max_tokens": 100,
                 "stop_sequences": ["STOP", "END"],
                 "messages": [{"role": "user", "content": "hi"}]
-            })).unwrap(),
+            }))
+            .unwrap(),
         ))
         .unwrap();
 

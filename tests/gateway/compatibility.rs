@@ -64,7 +64,6 @@ async fn v1_models_endpoint_returns_available_models() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-
 }
 
 #[tokio::test]
@@ -87,6 +86,7 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
                     slug: model_slug.to_string(),
                     context_limit: 272_000,
                     output_reserve: 2_048,
+                    max_output_tokens: 0,
                     context_group: String::new(),
                 }],
                 active: true,
@@ -149,8 +149,13 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["supports_reasoning_summaries"], true);
     assert_eq!(model["default_reasoning_level"], "high");
     {
-        let levels = model["supported_reasoning_levels"].as_array().expect("supported_reasoning_levels array");
-        let efforts: Vec<&str> = levels.iter().map(|v| v["effort"].as_str().unwrap()).collect();
+        let levels = model["supported_reasoning_levels"]
+            .as_array()
+            .expect("supported_reasoning_levels array");
+        let efforts: Vec<&str> = levels
+            .iter()
+            .map(|v| v["effort"].as_str().unwrap())
+            .collect();
         assert_eq!(efforts, ["low", "medium", "high", "xhigh"]);
     }
     assert_eq!(model["default_reasoning_summary"], "auto");
@@ -185,6 +190,7 @@ async fn v1_models_endpoint_omits_xhigh_for_deepseek_v4_pro() {
                     slug: model_slug.to_string(),
                     context_limit: 272_000,
                     output_reserve: 2_048,
+                    max_output_tokens: 0,
                     context_group: String::new(),
                 }],
                 active: true,
@@ -244,6 +250,9 @@ async fn v1_models_endpoint_omits_xhigh_for_deepseek_v4_pro() {
     let levels = model["supported_reasoning_levels"]
         .as_array()
         .expect("supported_reasoning_levels array");
-    let efforts: Vec<&str> = levels.iter().map(|v| v["effort"].as_str().unwrap()).collect();
+    let efforts: Vec<&str> = levels
+        .iter()
+        .map(|v| v["effort"].as_str().unwrap())
+        .collect();
     assert_eq!(efforts, ["low", "medium", "high"]);
 }

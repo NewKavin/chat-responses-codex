@@ -19,14 +19,12 @@
             collapse-tags
             collapse-tags-tooltip
           >
-            <el-option label="200 (成功)" :value="200" />
-            <el-option label="400 (错误请求)" :value="400" />
-            <el-option label="401 (未授权)" :value="401" />
-            <el-option label="403 (拒绝访问)" :value="403" />
-            <el-option label="404 (未找到)" :value="404" />
-            <el-option label="429 (限流)" :value="429" />
-            <el-option label="500 (服务器错误)" :value="500" />
-            <el-option label="502 (上游网关错误)" :value="502" />
+            <el-option
+              v-for="option in statusCodeOptions"
+              :key="option.value"
+              :label="`${option.value} (${option.label})`"
+              :value="option.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="错误分类">
@@ -39,23 +37,18 @@
             collapse-tags
             collapse-tags-tooltip
           >
-            <el-option label="stream_client_cancelled (客户端取消，无输出)" value="stream_client_cancelled" />
-            <el-option label="stream_incomplete_close (下游断连，已有部分输出)" value="stream_incomplete_close" />
-            <el-option label="stream_interrupted (下游断连，未分类)" value="stream_interrupted" />
-            <el-option
-              label="stream_upstream_body_decode_error (上游响应解码失败)"
-              value="stream_upstream_body_decode_error"
-            />
-            <el-option
-              label="stream_upstream_read_error (上游流读取失败)"
-              value="stream_upstream_read_error"
-            />
-            <el-option
-              label="stream_upstream_timeout (上游流超时)"
-              value="stream_upstream_timeout"
-            />
-            <el-option label="stream_idle_timeout (空闲超时)" value="stream_idle_timeout" />
-            <el-option label="stream_max_duration (最大时长)" value="stream_max_duration" />
+            <el-option-group
+              v-for="group in errorCategoryGroups"
+              :key="group.label"
+              :label="group.label"
+            >
+              <el-option
+                v-for="option in group.options"
+                :key="option.value"
+                :label="`${option.value} (${option.label})`"
+                :value="option.value"
+              />
+            </el-option-group>
           </el-select>
         </el-form-item>
         <el-form-item label="模型">
@@ -89,6 +82,19 @@
           <el-button type="primary" @click="handleFilterChange">筛选</el-button>
         </el-form-item>
       </el-form>
+
+      <div class="category-quick-filters">
+        <el-button size="small" @click="clearErrorCategories">全部错误</el-button>
+        <el-button
+          v-for="group in errorCategoryGroups"
+          :key="group.label"
+          size="small"
+          :type="isCategoryGroupActive(group) ? 'primary' : 'default'"
+          @click="applyCategoryGroup(group)"
+        >
+          {{ group.label }}
+        </el-button>
+      </div>
 
       <el-alert
         title="提示"
@@ -235,6 +241,79 @@ import { formatInferenceStrength } from '@/utils/logDisplay'
 const loading = ref(false)
 const logs = ref<UsageLog[]>([])
 
+const statusCodeOptions = [
+  { value: 200, label: '成功' },
+  { value: 400, label: '错误请求' },
+  { value: 401, label: '未授权' },
+  { value: 403, label: '拒绝访问' },
+  { value: 404, label: '未找到' },
+  { value: 429, label: '限流' },
+  { value: 499, label: '客户端断开' },
+  { value: 500, label: '服务器错误' },
+  { value: 502, label: '上游网关错误' },
+  { value: 503, label: '上游临时不可用' },
+  { value: 504, label: '上游超时' }
+]
+
+const errorCategoryGroups = [
+  {
+    label: '网关访问',
+    options: [
+      { value: 'gateway_auth_invalid', label: '认证无效' },
+      { value: 'gateway_key_expired', label: 'Key 已过期' },
+      { value: 'gateway_ip_not_allowed', label: 'IP 不允许' },
+      { value: 'gateway_model_not_allowed', label: '模型不允许' },
+      { value: 'gateway_no_routable_upstream', label: '无可路由上游' },
+      { value: 'gateway_invalid_request', label: '请求无效' },
+      { value: 'gateway_response_history_invalid', label: '响应历史无效' }
+    ]
+  },
+  {
+    label: '网关配额',
+    options: [
+      { value: 'gateway_per_minute_limit_exceeded', label: '分钟请求限额' },
+      { value: 'gateway_request_quota_exceeded', label: '窗口请求限额' },
+      { value: 'gateway_daily_token_quota_exceeded', label: '日 Token 限额' },
+      { value: 'gateway_monthly_token_quota_exceeded', label: '月 Token 限额' },
+      { value: 'gateway_concurrency_full', label: '下游并发已满' }
+    ]
+  },
+  {
+    label: '上游反馈',
+    options: [
+      { value: 'upstream_auth_error', label: '上游认证错误' },
+      { value: 'upstream_rate_limited', label: '上游限流' },
+      { value: 'upstream_concurrency_full', label: '上游并发已满' },
+      { value: 'upstream_protocol_unsupported', label: '上游协议不支持' },
+      { value: 'upstream_context_limit', label: '上下文超限' },
+      { value: 'upstream_request_rejected', label: '上游拒绝请求' },
+      { value: 'upstream_temporary_unavailable', label: '上游临时不可用' }
+    ]
+  },
+  {
+    label: '上游响应',
+    options: [
+      { value: 'upstream_timeout', label: '上游超时' },
+      { value: 'upstream_network_error', label: '上游网络错误' },
+      { value: 'upstream_invalid_response', label: '上游响应无效' },
+      { value: 'upstream_empty_response', label: '上游空响应' }
+    ]
+  },
+  {
+    label: '流式中断',
+    options: [
+      { value: 'stream_client_cancelled', label: '客户端取消，无输出' },
+      { value: 'stream_incomplete_close', label: '下游断连，已有部分输出' },
+      { value: 'stream_interrupted', label: '下游断连，未分类' },
+      { value: 'stream_upstream_body_decode_error', label: '上游响应解码失败' },
+      { value: 'stream_upstream_read_error', label: '上游流读取失败' },
+      { value: 'stream_upstream_timeout', label: '上游流超时' },
+      { value: 'stream_idle_timeout', label: '空闲超时' },
+      { value: 'stream_max_duration', label: '最大时长' }
+    ]
+  }
+]
+
 const filters = ref({
   status_codes: [] as number[],
   error_categories: [] as string[],
@@ -345,6 +424,21 @@ const handleFilterChange = () => {
   loadData()
 }
 
+const applyCategoryGroup = (group: typeof errorCategoryGroups[number]) => {
+  filters.value.error_categories = group.options.map(option => option.value)
+  handleFilterChange()
+}
+
+const clearErrorCategories = () => {
+  filters.value.error_categories = []
+  handleFilterChange()
+}
+
+const isCategoryGroupActive = (group: typeof errorCategoryGroups[number]) => {
+  const current = new Set(filters.value.error_categories)
+  return group.options.length > 0 && group.options.every(option => current.has(option.value))
+}
+
 const loadData = async () => {
   try {
     loading.value = true
@@ -352,12 +446,12 @@ const loadData = async () => {
       page: number
       page_size: number
       time_range: string
-    status_codes?: string
-    error_categories?: string
-    model?: string
-    start_time?: number
-    end_time?: number
-  } = {
+      status_codes?: string
+      error_categories?: string
+      model?: string
+      start_time?: number
+      end_time?: number
+    } = {
       page: pagination.value.page,
       page_size: pagination.value.page_size,
       time_range: filters.value.time_range
@@ -411,6 +505,17 @@ onMounted(() => {
 
 .filter-form {
   margin-bottom: 20px;
+}
+
+.category-quick-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.category-quick-filters .el-button {
+  margin-left: 0;
 }
 
 .api-cell {

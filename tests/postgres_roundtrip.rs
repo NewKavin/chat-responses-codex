@@ -52,7 +52,8 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
                 "default_model_context": null,
                 "auto_managed": false,
                 "managed_source": null,
-                "last_synced_at": 0
+                "last_synced_at": 0,
+                "strip_nonstandard_chat_fields": true
             }
         ],
         "downstreams": [],
@@ -117,6 +118,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         protect_premium_quota: false,
         active: true,
         failure_count: 2,
+        strip_nonstandard_chat_fields: true,
         ..Default::default()
     };
     let downstream = DownstreamConfig {
@@ -383,11 +385,13 @@ async fn postgres_roundtrip_preserves_global_context_profiles() {
                 slug: "  glm-4.1-mini  ".to_string(),
                 context_limit: 8192,
                 output_reserve: 2048,
+                max_output_tokens: 0,
                 context_group: " glm ".to_string(),
             }],
             default_model_context: Some(DefaultModelContextConfig {
                 context_limit: 4096,
                 output_reserve: 1024,
+                max_output_tokens: 0,
                 context_group: " glm ".to_string(),
             }),
         },
@@ -482,11 +486,7 @@ async fn postgres_roundtrip_preserves_response_history() {
         ),
     ]);
 
-    state.store_response_history(
-        response_id.clone(),
-        items.clone(),
-        request_state.clone(),
-    );
+    state.store_response_history(response_id.clone(), items.clone(), request_state.clone());
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let persisted_entry = loop {

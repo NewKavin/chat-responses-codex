@@ -21,6 +21,7 @@ export interface BatchCreateUpstreamPayload {
   protocol?: string
   protocols?: string[]
   active?: boolean
+  strip_nonstandard_chat_fields?: boolean
 }
 
 export interface BatchCreateUpstreamResult {

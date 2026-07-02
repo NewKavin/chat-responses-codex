@@ -91,6 +91,7 @@ export interface UpstreamConfig {
   auto_managed?: boolean
   managed_source?: string | null
   last_synced_at?: number
+  strip_nonstandard_chat_fields: boolean
   runtime_state?: UpstreamRuntimeState
   _replace_api_keys?: boolean
 }
@@ -116,12 +117,14 @@ export interface ModelContextConfig {
   slug: string
   context_limit: number
   output_reserve: number
+  max_output_tokens: number
   context_group: string
 }
 
 export interface DefaultModelContext {
   context_limit: number
   output_reserve: number
+  max_output_tokens: number
   context_group: string
 }
 

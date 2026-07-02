@@ -485,10 +485,15 @@ impl AppState {
                                 .get("context_group")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default();
+                            let max_output_tokens = value
+                                .get("max_output_tokens")
+                                .and_then(parse_u64_flexible)
+                                .unwrap_or(0) as u32;
                             Some(ModelContextConfig {
                                 slug: slug.to_string(),
                                 context_limit: context_limit as u32,
                                 output_reserve: output_reserve as u32,
+                                max_output_tokens,
                                 context_group: context_group.to_string(),
                             })
                         })
@@ -506,9 +511,14 @@ impl AppState {
                                 .get("output_reserve")
                                 .and_then(parse_u64_flexible)
                                 .unwrap_or(default_model_context_output_reserve() as u64);
+                            let max_output_tokens = default_model_context_updates
+                                .get("max_output_tokens")
+                                .and_then(parse_u64_flexible)
+                                .unwrap_or(0) as u32;
                             Some(DefaultModelContextConfig {
                                 context_limit: context_limit.unwrap_or(0) as u32,
                                 output_reserve: output_reserve as u32,
+                                max_output_tokens,
                                 context_group: default_model_context_updates
                                     .get("context_group")
                                     .and_then(|v| v.as_str())
@@ -584,6 +594,12 @@ impl AppState {
                 }
                 if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
                     upstream.active = active;
+                }
+                if let Some(strip_nonstandard_chat_fields) = updates
+                    .get("strip_nonstandard_chat_fields")
+                    .and_then(|v| v.as_bool())
+                {
+                    upstream.strip_nonstandard_chat_fields = strip_nonstandard_chat_fields;
                 }
 
                 upstream.normalize_for_storage();

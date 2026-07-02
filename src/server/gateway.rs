@@ -1,33 +1,33 @@
 use super::admin::*;
 use super::concurrency_retry;
 use super::portal::*;
+use crate::keys::verify_downstream_key;
 use crate::protocol::{
     chat_request_to_responses_payload, chat_response_to_responses_payload,
     responses_request_to_chat_payload, responses_response_to_chat_payload, ProtocolError,
     StreamTranslator,
 };
-use crate::keys::verify_downstream_key;
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, AppConfig, AppState,
-    GlobalContextProfile, UpstreamConfig, UsageLog,
+    DownstreamAdmissionRejection, GlobalContextProfile, UpstreamConfig, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
-use axum::extract::{ConnectInfo, Json, Query, State};
+use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::{stream, StreamExt};
-use tokio::sync::mpsc;
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::time::Instant as TokioInstant;
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
@@ -85,6 +85,65 @@ struct DispatchResult {
     request_id: String,
     usage: (u64, u64, u64),
     usage_log_timing: UsageLogTiming,
+    usage_log_context: Option<GatewayUsageLogContext>,
+}
+
+#[derive(Clone)]
+struct GatewayUsageLogContext {
+    state: AppState,
+    request_id: String,
+    downstream_id: String,
+    downstream_name: String,
+    upstream_id: String,
+    upstream_name: Option<String>,
+    endpoint: String,
+    model: String,
+    inference_strength: Option<String>,
+    user_agent: Option<String>,
+    started: Instant,
+}
+
+impl std::fmt::Debug for GatewayUsageLogContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayUsageLogContext")
+            .field("request_id", &self.request_id)
+            .field("downstream_id", &self.downstream_id)
+            .field("upstream_id", &self.upstream_id)
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl GatewayUsageLogContext {
+    async fn emit(
+        self,
+        status_code: StatusCode,
+        error_message: Option<String>,
+        error_category: Option<String>,
+        usage: (u64, u64, u64),
+    ) {
+        append_gateway_usage_log(
+            &self.state,
+            &self.request_id,
+            &self.downstream_id,
+            &self.downstream_name,
+            &self.upstream_id,
+            self.upstream_name.as_deref(),
+            &self.endpoint,
+            &self.model,
+            self.inference_strength.as_deref(),
+            self.user_agent.as_deref(),
+            status_code,
+            error_message,
+            error_category,
+            usage.0,
+            usage.1,
+            usage.2,
+            self.started,
+        )
+        .await;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +286,72 @@ fn stream_usage_from_value(value: &Value) -> Option<(u64, u64, u64)> {
         .map(usage_from_usage_value)
 }
 
+fn stream_event_has_usable_output(event: &Value) -> bool {
+    chat_stream_event_has_usable_output(event) || responses_stream_event_has_usable_output(event)
+}
+
+fn chat_stream_event_has_usable_output(event: &Value) -> bool {
+    event
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                choice
+                    .get("delta")
+                    .or_else(|| choice.get("message"))
+                    .is_some_and(chat_message_has_usable_output)
+            })
+        })
+}
+
+fn responses_stream_event_has_usable_output(event: &Value) -> bool {
+    if value_has_non_empty_text(event.get("delta")) {
+        return true;
+    }
+
+    if event
+        .get("item")
+        .is_some_and(responses_output_item_has_usable_output)
+    {
+        return true;
+    }
+
+    event
+        .get("response")
+        .and_then(|response| response.get("output"))
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(responses_output_item_has_usable_output))
+}
+
+fn stream_output_tokens_are_zero_or_unknown(usage: Option<(u64, u64, u64)>) -> bool {
+    usage
+        .map(|(_, completion_tokens, _)| completion_tokens == 0)
+        .unwrap_or(true)
+}
+
+fn upstream_empty_response_error() -> GatewayError {
+    GatewayError::upstream_invalid_response(
+        "upstream returned an empty response body (no content, zero tokens)",
+        "upstream_empty_response",
+    )
+}
+
+fn stream_gateway_error(
+    status: StatusCode,
+    message: impl Into<String>,
+    category: &'static str,
+) -> GatewayError {
+    GatewayError::classified(
+        status,
+        message,
+        "upstream_error",
+        category,
+        category,
+        None,
+        Some(json!({ "scope": "upstream" })),
+    )
+}
+
 fn parse_u64_token(value: &Value) -> Option<u64> {
     match value {
         Value::Number(number) => number
@@ -279,16 +404,29 @@ fn metric_exceeds_ratio(value: f64, baseline: f64, ratio: f64) -> bool {
 }
 
 fn should_rollback_downstream_reservation(error: &GatewayError) -> bool {
-    matches!(
-        error,
+    match error {
         GatewayError::TooManyRequests { .. }
-            | GatewayError::ConcurrencyFull { .. }
-            | GatewayError::Upstream(_)
-            | GatewayError::GatewayTimeout(_)
-            | GatewayError::TemporaryUpstreamUnavailable(_)
-    )
+        | GatewayError::ConcurrencyFull { .. }
+        | GatewayError::Upstream(_)
+        | GatewayError::GatewayTimeout(_)
+        | GatewayError::TemporaryUpstreamUnavailable(_) => true,
+        GatewayError::Classified { status, meta, .. } => {
+            meta.category.starts_with("upstream_")
+                && (*status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+        }
+        _ => false,
+    }
 }
 
+#[derive(Debug)]
+struct GatewayErrorMeta {
+    error_type: &'static str,
+    code: &'static str,
+    category: &'static str,
+    details: Option<Value>,
+}
+
+#[allow(dead_code)]
 #[derive(Debug)]
 enum GatewayError {
     Unauthorized(String),
@@ -305,6 +443,12 @@ enum GatewayError {
     Upstream(String),
     GatewayTimeout(String),
     TemporaryUpstreamUnavailable(String),
+    Classified {
+        status: StatusCode,
+        message: String,
+        retry_after_seconds: Option<u64>,
+        meta: GatewayErrorMeta,
+    },
 }
 
 impl std::fmt::Display for GatewayError {
@@ -318,6 +462,7 @@ impl std::fmt::Display for GatewayError {
             | GatewayError::TemporaryUpstreamUnavailable(message) => f.write_str(message),
             GatewayError::TooManyRequests { message, .. } => f.write_str(message),
             GatewayError::ConcurrencyFull { message, .. } => f.write_str(message),
+            GatewayError::Classified { message, .. } => f.write_str(message),
         }
     }
 }
@@ -336,28 +481,366 @@ impl GatewayError {
             GatewayError::Upstream(_) => StatusCode::BAD_GATEWAY,
             GatewayError::GatewayTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             GatewayError::TemporaryUpstreamUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            GatewayError::Classified { status, .. } => *status,
+        }
+    }
+
+    fn classified(
+        status: StatusCode,
+        message: impl Into<String>,
+        error_type: &'static str,
+        code: &'static str,
+        category: &'static str,
+        retry_after_seconds: Option<u64>,
+        details: Option<Value>,
+    ) -> Self {
+        Self::Classified {
+            status,
+            message: message.into(),
+            retry_after_seconds,
+            meta: GatewayErrorMeta {
+                error_type,
+                code,
+                category,
+                details,
+            },
+        }
+    }
+
+    fn gateway_forbidden(message: impl Into<String>, code: &'static str) -> Self {
+        Self::classified(
+            StatusCode::FORBIDDEN,
+            message,
+            "gateway_access_denied",
+            code,
+            code,
+            None,
+            Some(json!({ "scope": "gateway" })),
+        )
+    }
+
+    fn downstream_admission_rejection(rejection: DownstreamAdmissionRejection) -> Self {
+        match rejection {
+            DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+                retry_after_seconds,
+                limit,
+                used,
+            } => Self::classified(
+                StatusCode::TOO_MANY_REQUESTS,
+                "downstream per-minute request limit exceeded",
+                "gateway_quota_exceeded",
+                "gateway_per_minute_limit_exceeded",
+                "gateway_per_minute_limit_exceeded",
+                Some(retry_after_seconds),
+                Some(json!({
+                    "scope": "gateway",
+                    "quota": "per_minute_requests",
+                    "limit": limit,
+                    "used": used,
+                    "retry_after_seconds": retry_after_seconds,
+                })),
+            ),
+            DownstreamAdmissionRejection::RequestQuotaExceeded {
+                retry_after_seconds,
+                limit,
+                used,
+                window_seconds,
+            } => Self::classified(
+                StatusCode::TOO_MANY_REQUESTS,
+                "downstream request quota exceeded",
+                "gateway_quota_exceeded",
+                "gateway_request_quota_exceeded",
+                "gateway_request_quota_exceeded",
+                Some(retry_after_seconds),
+                Some(json!({
+                    "scope": "gateway",
+                    "quota": "window_requests",
+                    "limit": limit,
+                    "used": used,
+                    "window_seconds": window_seconds,
+                    "retry_after_seconds": retry_after_seconds,
+                })),
+            ),
+            DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                retry_after_seconds,
+                limit,
+                used,
+            } => Self::classified(
+                StatusCode::TOO_MANY_REQUESTS,
+                "downstream daily token quota exceeded",
+                "gateway_quota_exceeded",
+                "gateway_daily_token_quota_exceeded",
+                "gateway_daily_token_quota_exceeded",
+                Some(retry_after_seconds),
+                Some(json!({
+                    "scope": "gateway",
+                    "quota": "daily_tokens",
+                    "limit": limit,
+                    "used": used,
+                    "retry_after_seconds": retry_after_seconds,
+                })),
+            ),
+            DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
+                retry_after_seconds,
+                limit,
+                used,
+            } => Self::classified(
+                StatusCode::TOO_MANY_REQUESTS,
+                "downstream monthly token quota exceeded",
+                "gateway_quota_exceeded",
+                "gateway_monthly_token_quota_exceeded",
+                "gateway_monthly_token_quota_exceeded",
+                Some(retry_after_seconds),
+                Some(json!({
+                    "scope": "gateway",
+                    "quota": "monthly_tokens",
+                    "limit": limit,
+                    "used": used,
+                    "retry_after_seconds": retry_after_seconds,
+                })),
+            ),
+        }
+    }
+
+    fn upstream_bad_request(message: impl Into<String>, status: StatusCode) -> Self {
+        Self::classified(
+            StatusCode::BAD_REQUEST,
+            message,
+            "upstream_error",
+            "upstream_request_rejected",
+            "upstream_request_rejected",
+            None,
+            Some(json!({
+                "scope": "upstream",
+                "upstream_status": status.as_u16(),
+            })),
+        )
+    }
+
+    fn upstream_context_limit(message: impl Into<String>, status: StatusCode) -> Self {
+        Self::classified(
+            StatusCode::BAD_REQUEST,
+            message,
+            "upstream_error",
+            "upstream_context_limit",
+            "upstream_context_limit",
+            None,
+            Some(json!({
+                "scope": "upstream",
+                "upstream_status": status.as_u16(),
+            })),
+        )
+    }
+
+    fn upstream_network_error(message: impl Into<String>) -> Self {
+        Self::classified(
+            StatusCode::BAD_GATEWAY,
+            message,
+            "upstream_error",
+            "upstream_network_error",
+            "upstream_network_error",
+            None,
+            Some(json!({ "scope": "upstream" })),
+        )
+    }
+
+    fn upstream_auth_error(message: impl Into<String>, status: StatusCode) -> Self {
+        Self::classified(
+            status,
+            message,
+            "upstream_error",
+            "upstream_auth_error",
+            "upstream_auth_error",
+            None,
+            Some(json!({
+                "scope": "upstream",
+                "upstream_status": status.as_u16(),
+            })),
+        )
+    }
+
+    fn upstream_timeout(message: impl Into<String>) -> Self {
+        Self::classified(
+            StatusCode::GATEWAY_TIMEOUT,
+            message,
+            "upstream_error",
+            "upstream_timeout",
+            "upstream_timeout",
+            None,
+            Some(json!({ "scope": "upstream" })),
+        )
+    }
+
+    fn upstream_temporary_unavailable(message: impl Into<String>, code: &'static str) -> Self {
+        Self::classified(
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "upstream_error",
+            code,
+            code,
+            None,
+            Some(json!({ "scope": "upstream" })),
+        )
+    }
+
+    fn upstream_invalid_response(message: impl Into<String>, code: &'static str) -> Self {
+        Self::classified(
+            StatusCode::BAD_GATEWAY,
+            message,
+            "upstream_error",
+            code,
+            code,
+            None,
+            Some(json!({ "scope": "upstream" })),
+        )
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            GatewayError::Unauthorized(message)
+            | GatewayError::Forbidden(message)
+            | GatewayError::BadRequest(message)
+            | GatewayError::Upstream(message)
+            | GatewayError::GatewayTimeout(message)
+            | GatewayError::TemporaryUpstreamUnavailable(message) => message,
+            GatewayError::TooManyRequests { message, .. } => message,
+            GatewayError::ConcurrencyFull { message, .. } => message,
+            GatewayError::Classified { message, .. } => message,
+        }
+    }
+
+    fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            GatewayError::TooManyRequests {
+                retry_after_seconds,
+                ..
+            }
+            | GatewayError::ConcurrencyFull {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
+            GatewayError::Classified {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
+            _ => None,
+        }
+    }
+
+    fn error_type(&self) -> &'static str {
+        match self {
+            GatewayError::Unauthorized(_) => "gateway_auth_error",
+            GatewayError::Forbidden(_) => "gateway_access_denied",
+            GatewayError::BadRequest(_) => "invalid_request_error",
+            GatewayError::TooManyRequests { .. } => "rate_limit_error",
+            GatewayError::ConcurrencyFull { .. } => "rate_limit_error",
+            GatewayError::Upstream(_) => "upstream_error",
+            GatewayError::GatewayTimeout(_) => "upstream_error",
+            GatewayError::TemporaryUpstreamUnavailable(_) => "upstream_error",
+            GatewayError::Classified { meta, .. } => meta.error_type,
+        }
+    }
+
+    fn anthropic_error_type(&self) -> &'static str {
+        match self.status_code() {
+            StatusCode::UNAUTHORIZED => "authentication_error",
+            StatusCode::FORBIDDEN => "permission_error",
+            StatusCode::NOT_FOUND => "not_found_error",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+            StatusCode::BAD_REQUEST => "invalid_request_error",
+            StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => "timeout_error",
+            StatusCode::SERVICE_UNAVAILABLE => "api_error",
+            _ if self.status_code().is_server_error() => "api_error",
+            _ => self.error_type(),
+        }
+    }
+
+    fn error_code(&self) -> &'static str {
+        match self {
+            GatewayError::Unauthorized(_) => "gateway_auth_invalid",
+            GatewayError::Forbidden(_) => "gateway_access_denied",
+            GatewayError::BadRequest(_) => "gateway_invalid_request",
+            GatewayError::TooManyRequests { .. } => "upstream_rate_limited",
+            GatewayError::ConcurrencyFull { .. } => "upstream_concurrency_full",
+            GatewayError::Upstream(_) => "upstream_invalid_response",
+            GatewayError::GatewayTimeout(_) => "upstream_timeout",
+            GatewayError::TemporaryUpstreamUnavailable(_) => "upstream_temporary_unavailable",
+            GatewayError::Classified { meta, .. } => meta.code,
+        }
+    }
+
+    fn error_category(&self) -> &'static str {
+        match self {
+            GatewayError::Classified { meta, .. } => meta.category,
+            _ => self.error_code(),
+        }
+    }
+
+    fn safe_details(&self) -> Value {
+        match self {
+            GatewayError::Classified { meta, .. } => meta
+                .details
+                .clone()
+                .unwrap_or_else(|| json!({ "scope": "gateway" })),
+            GatewayError::TooManyRequests {
+                retry_after_seconds,
+                ..
+            }
+            | GatewayError::ConcurrencyFull {
+                retry_after_seconds,
+                ..
+            } => json!({
+                "scope": "upstream",
+                "retry_after_seconds": retry_after_seconds,
+            }),
+            GatewayError::Upstream(_)
+            | GatewayError::GatewayTimeout(_)
+            | GatewayError::TemporaryUpstreamUnavailable(_) => json!({ "scope": "upstream" }),
+            _ => json!({ "scope": "gateway" }),
         }
     }
 
     fn into_response(self) -> Response {
-        let (status, message, retry_after_seconds) = match self {
-            GatewayError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message, None),
-            GatewayError::Forbidden(message) => (StatusCode::FORBIDDEN, message, None),
-            GatewayError::GatewayTimeout(message) => (StatusCode::GATEWAY_TIMEOUT, message, None),
-            GatewayError::TemporaryUpstreamUnavailable(message) => {
-                (StatusCode::SERVICE_UNAVAILABLE, message, None)
+        let message = self.message().to_string();
+        let error_type = self.error_type();
+        let error_code = self.error_code();
+        let details = self.safe_details();
+        let category = self.error_category();
+
+        self.into_json_response(json!({
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": Value::Null,
+                "code": error_code,
+                "details": details,
+                "category": category,
             }
-            GatewayError::BadRequest(message) => (StatusCode::BAD_REQUEST, message, None),
-            GatewayError::TooManyRequests {
-                message,
-                retry_after_seconds,
-            } => (StatusCode::TOO_MANY_REQUESTS, message, retry_after_seconds),
-            GatewayError::ConcurrencyFull {
-                message,
-                retry_after_seconds,
-            } => (StatusCode::TOO_MANY_REQUESTS, message, retry_after_seconds),
-            GatewayError::Upstream(message) => (StatusCode::BAD_GATEWAY, message, None),
-        };
+        }))
+    }
+
+    fn into_anthropic_response(self) -> Response {
+        let message = self.message().to_string();
+        let error_type = self.anthropic_error_type();
+        let error_code = self.error_code();
+        let details = self.safe_details();
+        let category = self.error_category();
+
+        self.into_json_response(json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": message,
+                "code": error_code,
+                "details": details,
+                "category": category,
+            }
+        }))
+    }
+
+    fn into_json_response(self, payload: Value) -> Response {
+        let status = self.status_code();
+        let retry_after_seconds = self.retry_after_seconds();
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -370,16 +853,7 @@ impl GatewayError {
             }
         }
 
-        (
-            status,
-            headers,
-            Json(json!({
-                "error": {
-                    "message": message,
-                }
-            })),
-        )
-            .into_response()
+        (status, headers, Json(payload)).into_response()
     }
 }
 
@@ -744,6 +1218,22 @@ const DEEPSEEK_V4_PRO_SUPPORTED_REASONING_LEVELS: [(&str, &str); 3] = [
     ("high", "Greater reasoning depth for complex problems"),
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatCompatibilityFamily {
+    DeepSeekV4,
+    Glm,
+    MiniMax,
+    OtherProxy,
+    Qwen,
+    Generic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatTokenLimitField {
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
 fn supported_reasoning_levels_for_model(model: &str) -> &'static [(&'static str, &'static str)] {
     match model {
         "deepseek-ai/deepseek-v4-pro" => &DEEPSEEK_V4_PRO_SUPPORTED_REASONING_LEVELS,
@@ -752,10 +1242,198 @@ fn supported_reasoning_levels_for_model(model: &str) -> &'static [(&'static str,
 }
 
 fn normalize_reasoning_effort_for_model(model: &str, effort: &str) -> Option<&'static str> {
-    match (model, effort) {
-        ("deepseek-ai/deepseek-v4-pro", "xhigh") => Some("high"),
+    if chat_compatibility_family(model) != ChatCompatibilityFamily::DeepSeekV4 {
+        return None;
+    }
+
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "xhigh" | "max" => Some("max"),
+        "low" | "medium" | "high" => Some("high"),
         _ => None,
     }
+}
+
+fn glm_model_supports_reasoning_effort(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    for (index, _) in normalized.match_indices("glm") {
+        let mut chars = normalized[index + 3..].chars().peekable();
+        while matches!(chars.peek(), Some(ch) if !ch.is_ascii_digit()) {
+            chars.next();
+        }
+
+        let mut major = String::new();
+        while let Some(ch) = chars.peek() {
+            if ch.is_ascii_digit() {
+                major.push(*ch);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        let Ok(major) = major.parse::<u32>() else {
+            continue;
+        };
+        if major > 5 {
+            return true;
+        }
+        if major < 5 {
+            continue;
+        }
+
+        while matches!(chars.peek(), Some('.' | '-' | '_')) {
+            chars.next();
+        }
+
+        let mut minor = String::new();
+        while let Some(ch) = chars.peek() {
+            if ch.is_ascii_digit() {
+                minor.push(*ch);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        if minor.parse::<u32>().unwrap_or_default() >= 2 {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn chat_compatibility_family(model: &str) -> ChatCompatibilityFamily {
+    let normalized = model.trim().to_ascii_lowercase();
+
+    if normalized.contains("deepseek-v4") {
+        return ChatCompatibilityFamily::DeepSeekV4;
+    }
+
+    if normalized.contains("minimax") {
+        return ChatCompatibilityFamily::MiniMax;
+    }
+
+    if normalized.contains("zhipu") || normalized.contains("glm") {
+        return ChatCompatibilityFamily::Glm;
+    }
+
+    if normalized.contains("qwen") || normalized.contains("qwq") || normalized.contains("qvq") {
+        return ChatCompatibilityFamily::Qwen;
+    }
+
+    if [
+        "anthropic",
+        "bytedance",
+        "claude",
+        "cohere",
+        "command-r",
+        "ernie",
+        "gemini",
+        "gemma",
+        "gpt-oss",
+        "grok",
+        "intern",
+        "kimi",
+        "llama",
+        "longcat",
+        "mistral",
+        "moonshot",
+        "nemotron",
+        "nvidia",
+        "paddlepaddle",
+        "seed-",
+        "smart-chat",
+        "step-",
+        "stepfun",
+        "xai",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+    {
+        return ChatCompatibilityFamily::OtherProxy;
+    }
+
+    ChatCompatibilityFamily::Generic
+}
+
+fn chat_token_limit_field_for_family(family: ChatCompatibilityFamily) -> ChatTokenLimitField {
+    match family {
+        ChatCompatibilityFamily::MiniMax | ChatCompatibilityFamily::Qwen => {
+            ChatTokenLimitField::MaxCompletionTokens
+        }
+        ChatCompatibilityFamily::DeepSeekV4
+        | ChatCompatibilityFamily::Glm
+        | ChatCompatibilityFamily::OtherProxy
+        | ChatCompatibilityFamily::Generic => ChatTokenLimitField::MaxTokens,
+    }
+}
+
+fn is_likely_official_openai_chat_upstream(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "api.openai.com" || host.ends_with(".openai.azure.com")
+}
+
+#[derive(Debug)]
+struct SafeUpstreamBodyDiagnostics {
+    json_bytes: usize,
+    top_level_field_count: usize,
+    message_count: Option<usize>,
+    tool_count: Option<usize>,
+    has_stream: bool,
+    has_reasoning_effort: bool,
+    has_max_output_tokens: bool,
+    has_max_tokens: bool,
+    has_max_completion_tokens: bool,
+    has_usage: bool,
+    has_input_tokens: bool,
+    has_output_tokens: bool,
+    has_prompt_tokens: bool,
+    has_completion_tokens: bool,
+}
+
+fn safe_upstream_body_diagnostics(body: &Value) -> SafeUpstreamBodyDiagnostics {
+    let object = body.as_object();
+    SafeUpstreamBodyDiagnostics {
+        json_bytes: serde_json::to_string(body)
+            .map(|serialized| serialized.len())
+            .unwrap_or_default(),
+        top_level_field_count: object.map(Map::len).unwrap_or_default(),
+        message_count: body.get("messages").and_then(Value::as_array).map(Vec::len),
+        tool_count: body.get("tools").and_then(Value::as_array).map(Vec::len),
+        has_stream: body.get("stream").is_some(),
+        has_reasoning_effort: body.get("reasoning_effort").is_some(),
+        has_max_output_tokens: body.get("max_output_tokens").is_some(),
+        has_max_tokens: body.get("max_tokens").is_some(),
+        has_max_completion_tokens: body.get("max_completion_tokens").is_some(),
+        has_usage: body.get("usage").is_some(),
+        has_input_tokens: body.get("input_tokens").is_some(),
+        has_output_tokens: body.get("output_tokens").is_some(),
+        has_prompt_tokens: body.get("prompt_tokens").is_some(),
+        has_completion_tokens: body.get("completion_tokens").is_some(),
+    }
+}
+
+fn safe_upstream_error_summary(
+    status: StatusCode,
+    upstream_error_code: Option<u16>,
+    feedback: UpstreamFeedbackClassification,
+) -> String {
+    let mut summary = format!(
+        "upstream status {}, classification {:?}",
+        status.as_u16(),
+        feedback
+    );
+    if let Some(code) = upstream_error_code {
+        summary.push_str(&format!(", upstream code {code}"));
+    }
+    summary
 }
 
 fn normalize_chat_tool_required_arrays(body: &mut Value) {
@@ -777,6 +1455,113 @@ fn normalize_chat_tool_required_arrays(body: &mut Value) {
         if !matches!(parameters.get("required"), Some(Value::Array(_))) {
             parameters.insert("required".into(), Value::Array(Vec::new()));
         }
+    }
+}
+
+/// Normalize the final ChatCompletions request for strict OpenAI-compatible
+/// proxies and provider families with documented field differences.
+///
+/// The protocol conversion layer intentionally stays provider-agnostic. This
+/// helper runs after model aliasing, context budgeting, stream options, and
+/// tool schema normalization, so it sees the exact payload that will be sent
+/// upstream. It removes only Codex/Responses/OpenAI extension fields known to
+/// upset strict proxy implementations while preserving standard Chat tool and
+/// streaming semantics.
+fn normalize_chat_payload_for_upstream_compatibility(
+    body: &mut Value,
+    model: &str,
+    upstream_base_url: &str,
+    strip_unknown_nonstandard_fields: bool,
+) {
+    let family = chat_compatibility_family(model);
+    let third_party_chat_proxy = !is_likely_official_openai_chat_upstream(upstream_base_url);
+    if family == ChatCompatibilityFamily::Generic
+        && !strip_unknown_nonstandard_fields
+        && !third_party_chat_proxy
+    {
+        return;
+    }
+
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+
+    for key in [
+        "service_tier",
+        "safety_identifier",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "client_metadata",
+        "store",
+        "verbosity",
+    ] {
+        object.remove(key);
+    }
+    if strip_unknown_nonstandard_fields {
+        for key in ["metadata", "user"] {
+            object.remove(key);
+        }
+    }
+    object.remove("text");
+
+    if family == ChatCompatibilityFamily::DeepSeekV4 {
+        if let Some(reasoning_effort) = object.get("reasoning_effort").and_then(Value::as_str) {
+            if let Some(normalized) = normalize_reasoning_effort_for_model(model, reasoning_effort)
+            {
+                object.insert(
+                    "reasoning_effort".into(),
+                    Value::String(normalized.to_string()),
+                );
+            } else {
+                object.remove("reasoning_effort");
+            }
+        }
+    } else if family != ChatCompatibilityFamily::Glm || !glm_model_supports_reasoning_effort(model)
+    {
+        object.remove("reasoning_effort");
+    }
+
+    let output_token_limit = object.remove("max_output_tokens");
+    match chat_token_limit_field_for_family(family) {
+        ChatTokenLimitField::MaxCompletionTokens => {
+            if object.contains_key("max_completion_tokens") {
+                object.remove("max_tokens");
+            } else if let Some(max_tokens) = object.remove("max_tokens") {
+                object.insert("max_completion_tokens".into(), max_tokens);
+            } else if let Some(output_token_limit) = output_token_limit {
+                object.insert("max_completion_tokens".into(), output_token_limit);
+            }
+        }
+        ChatTokenLimitField::MaxTokens => {
+            if object.contains_key("max_tokens") {
+                object.remove("max_completion_tokens");
+            } else if let Some(max_completion_tokens) = object.remove("max_completion_tokens") {
+                object.insert("max_tokens".into(), max_completion_tokens);
+            } else if let Some(output_token_limit) = output_token_limit {
+                object.insert("max_tokens".into(), output_token_limit);
+            }
+        }
+    }
+}
+
+fn strip_response_usage_fields_from_upstream_request(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+
+    for key in [
+        "usage",
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "input_tokens_details",
+        "output_tokens_details",
+        "prompt_tokens_details",
+        "completion_tokens_details",
+    ] {
+        object.remove(key);
     }
 }
 
@@ -814,9 +1599,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                     .context_config_for_model(&model)
                     .map(|c| c.context_limit as i64);
                 // Prefer the first non-None context window found.
-                model_contexts
-                    .entry(model)
-                    .or_insert(ctx);
+                model_contexts.entry(model).or_insert(ctx);
             }
         }
     }
@@ -827,16 +1610,15 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
         .into_iter()
         .map(|slug| {
             let context_window = model_contexts.get(&slug).copied().flatten();
-            let supported_reasoning_levels =
-                supported_reasoning_levels_for_model(&slug)
-                    .iter()
-                    .map(|(effort, description)| {
-                        json!({
-                            "effort": effort,
-                            "description": description
-                        })
+            let supported_reasoning_levels = supported_reasoning_levels_for_model(&slug)
+                .iter()
+                .map(|(effort, description)| {
+                    json!({
+                        "effort": effort,
+                        "description": description
                     })
-                    .collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
             json!({
                 "slug": slug,
                 "display_name": slug,
@@ -876,19 +1658,20 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return GatewayError::BadRequest("invalid json request body".into()).into_response();
+        }
+    };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if is_stream {
-        return dispatch_streaming_request(
-            state,
-            headers,
-            body.0,
-            EndpointKind::ChatCompletions,
-        )
-        .await;
+        return dispatch_streaming_request(state, headers, body, EndpointKind::ChatCompletions)
+            .await;
     }
-    match process_gateway_request(state, headers, body.0, EndpointKind::ChatCompletions).await {
+    match process_gateway_request(state, headers, body, EndpointKind::ChatCompletions).await {
         Ok(result) => dispatch_success(result),
         Err(error) => error.into_response(),
     }
@@ -897,19 +1680,19 @@ async fn chat_completions(
 async fn responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return GatewayError::BadRequest("invalid json request body".into()).into_response();
+        }
+    };
     let is_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if is_stream {
-        return dispatch_streaming_request(
-            state,
-            headers,
-            body.0,
-            EndpointKind::Responses,
-        )
-        .await;
+        return dispatch_streaming_request(state, headers, body, EndpointKind::Responses).await;
     }
-    match process_gateway_request(state, headers, body.0, EndpointKind::Responses).await {
+    match process_gateway_request(state, headers, body, EndpointKind::Responses).await {
         Ok(result) => dispatch_success(result),
         Err(error) => error.into_response(),
     }
@@ -918,32 +1701,54 @@ async fn responses(
 async fn claude_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return GatewayError::BadRequest("invalid json request body".into())
+                .into_anthropic_response();
+        }
+    };
     let claude_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let chat_payload = match claude_messages_to_chat_payload(&body) {
         Ok(payload) => payload,
-        Err(message) => return GatewayError::BadRequest(message).into_response(),
+        Err(message) => return GatewayError::BadRequest(message).into_anthropic_response(),
     };
 
-    match process_gateway_request(state, headers, chat_payload, EndpointKind::ChatCompletions).await
+    match process_gateway_request_inner(
+        state,
+        headers,
+        chat_payload,
+        EndpointKind::ChatCompletions,
+        true,
+    )
+    .await
     {
-        Ok(result) => dispatch_claude_success(result, claude_stream),
-        Err(error) => error.into_response(),
+        Ok(result) => dispatch_claude_success(result, claude_stream).await,
+        Err(error) => error.into_anthropic_response(),
     }
 }
 
 async fn claude_count_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return GatewayError::BadRequest("invalid json request body".into())
+                .into_anthropic_response();
+        }
+    };
     let Ok(secret) = downstream_secret_from_headers(&headers) else {
         return GatewayError::Unauthorized("missing authorization header or x-api-key".into())
-            .into_response();
+            .into_anthropic_response();
     };
     let Some(downstream) = state.downstream_for_secret(&secret).await else {
-        return GatewayError::Unauthorized("invalid downstream key".into()).into_response();
+        return GatewayError::Unauthorized("invalid downstream key".into())
+            .into_anthropic_response();
     };
 
     let model = body
@@ -952,10 +1757,11 @@ async fn claude_count_tokens(
         .ok_or_else(|| GatewayError::BadRequest("missing model".into()));
     let model = match model {
         Ok(model) => model,
-        Err(error) => return error.into_response(),
+        Err(error) => return error.into_anthropic_response(),
     };
     if !portal_model_is_allowed(downstream.model_allowlist.as_slice(), model) {
-        return GatewayError::Forbidden("model not allowed".into()).into_response();
+        return GatewayError::gateway_forbidden("model not allowed", "gateway_model_not_allowed")
+            .into_anthropic_response();
     }
 
     let messages = body
@@ -964,7 +1770,7 @@ async fn claude_count_tokens(
         .ok_or_else(|| GatewayError::BadRequest("missing messages".into()));
     let messages = match messages {
         Ok(messages) => messages,
-        Err(error) => return error.into_response(),
+        Err(error) => return error.into_anthropic_response(),
     };
 
     let mut character_count = 0u64;
@@ -1068,12 +1874,11 @@ impl ResponseHistoryContext {
 
         let mut items = self.history_input_items.clone();
         items.extend(output.iter().cloned());
-        self.state
-            .store_response_history(
-                response_id.to_string(),
-                items,
-                self.history_request_state.clone(),
-            );
+        self.state.store_response_history(
+            response_id.to_string(),
+            items,
+            self.history_request_state.clone(),
+        );
         true
     }
 }
@@ -1093,9 +1898,9 @@ fn normalize_responses_input_items(input: &Value) -> Result<Vec<Value>, GatewayE
         })]),
         Value::Array(items) => Ok(items.clone()),
         Value::Object(_) => Ok(vec![input.clone()]),
-        other => Err(GatewayError::BadRequest(format!(
-            "unsupported responses input payload: {other}"
-        ))),
+        _ => Err(GatewayError::BadRequest(
+            "unsupported responses input payload".into(),
+        )),
     }
 }
 
@@ -1137,15 +1942,20 @@ async fn prepare_response_history_context(
 
     let effective_input_items = if let Some(previous_response_id) = previous_response_id.as_deref()
     {
-        let prior_history =
-            state
-                .response_history(previous_response_id)
-                .await
-                .ok_or_else(|| {
-                    GatewayError::BadRequest(format!(
-                        "unknown previous_response_id \"{previous_response_id}\"; cached response history is unavailable (it may have expired or the gateway may have restarted)"
-                    ))
-                })?;
+        let prior_history = state
+            .response_history(previous_response_id)
+            .await
+            .ok_or_else(|| {
+                GatewayError::classified(
+                    StatusCode::BAD_REQUEST,
+                    "unknown previous_response_id; cached response history is unavailable",
+                    "invalid_request_error",
+                    "gateway_response_history_invalid",
+                    "gateway_response_history_invalid",
+                    None,
+                    Some(json!({ "scope": "gateway" })),
+                )
+            })?;
         let mut prior_items = prior_history.items;
         prior_items.extend(current_input_items);
         history_request_state = prior_history.request_state;
@@ -1371,8 +2181,7 @@ impl StreamWatchdog {
         if self.heartbeat_extensions_since_last_data == 0 {
             return base;
         }
-        let extension = self.heartbeat_interval
-            * self.heartbeat_extensions_since_last_data;
+        let extension = self.heartbeat_interval * self.heartbeat_extensions_since_last_data;
         base + extension
     }
 
@@ -1402,8 +2211,10 @@ impl StreamWatchdog {
         format!(
             "total={}s idle_elapsed={}s/{}s heartbeat_elapsed={}s/{}s hb_ext={}/{}",
             total_elapsed,
-            idle_elapsed, self.idle_timeout.as_secs(),
-            heartbeat_elapsed, self.heartbeat_interval.as_secs(),
+            idle_elapsed,
+            self.idle_timeout.as_secs(),
+            heartbeat_elapsed,
+            self.heartbeat_interval.as_secs(),
             self.heartbeat_extensions_since_last_data,
             self.max_heartbeat_extensions,
         )
@@ -1436,12 +2247,22 @@ async fn wait_for_upstream_chunk(
     }
 }
 
-#[allow(unused_assignments)]
 async fn process_gateway_request(
+    state: AppState,
+    headers: HeaderMap,
+    body: Value,
+    endpoint: EndpointKind,
+) -> Result<DispatchResult, GatewayError> {
+    process_gateway_request_inner(state, headers, body, endpoint, false).await
+}
+
+#[allow(unused_assignments)]
+async fn process_gateway_request_inner(
     state: AppState,
     headers: HeaderMap,
     mut body: Value,
     endpoint: EndpointKind,
+    defer_success_usage_log: bool,
 ) -> Result<DispatchResult, GatewayError> {
     let secret = downstream_secret_from_headers(&headers)?;
     let downstream = state
@@ -1452,6 +2273,14 @@ async fn process_gateway_request(
 
     let request_id = Uuid::new_v4().to_string();
     let request_path = endpoint.path();
+    let started = Instant::now();
+    let inference_strength = extract_inference_strength(&body);
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let response_history_context = if endpoint == EndpointKind::Responses {
         match prepare_response_history_context(&state, &mut body).await {
             Ok(context) => Some(context),
@@ -1469,17 +2298,15 @@ async fn process_gateway_request(
                     None,
                     request_path,
                     body_model,
-                    None,
-                    headers
-                        .get(header::USER_AGENT)
-                        .and_then(|value| value.to_str().ok()),
+                    inference_strength.as_deref(),
+                    user_agent.as_deref(),
                     error.status_code(),
                     Some(error.to_string()),
-                    None,
+                    Some(error.error_category().to_string()),
                     0,
                     0,
                     0,
-                    Instant::now(),
+                    started,
                 )
                 .await;
                 return Err(error);
@@ -1488,20 +2315,35 @@ async fn process_gateway_request(
     } else {
         None
     };
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
+    let model = match body.get("model").and_then(Value::as_str) {
+        Some(model) => model,
+        None => {
+            let error = GatewayError::BadRequest("missing model".into());
+            append_gateway_usage_log(
+                &state,
+                &request_id,
+                &downstream.id,
+                &downstream.name,
+                "",
+                None,
+                request_path,
+                "",
+                inference_strength.as_deref(),
+                user_agent.as_deref(),
+                error.status_code(),
+                Some(error.to_string()),
+                Some(error.error_category().to_string()),
+                0,
+                0,
+                0,
+                started,
+            )
+            .await;
+            return Err(error);
+        }
+    };
     let normalized_model = model;
-    let inference_strength = extract_inference_strength(&body);
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let started = Instant::now();
     tracing::info!(
         request_id = %request_id,
         downstream_key_id = %downstream.id,
@@ -1523,7 +2365,8 @@ async fn process_gateway_request(
                 expires_at,
                 "downstream key expired"
             );
-            let error = GatewayError::Forbidden("downstream key expired".into());
+            let error =
+                GatewayError::gateway_forbidden("downstream key expired", "gateway_key_expired");
             append_gateway_usage_log(
                 &state,
                 &request_id,
@@ -1537,7 +2380,7 @@ async fn process_gateway_request(
                 user_agent.as_deref(),
                 error.status_code(),
                 Some(error.to_string()),
-                None,
+                Some(error.error_category().to_string()),
                 0,
                 0,
                 0,
@@ -1564,7 +2407,7 @@ async fn process_gateway_request(
                 client_ip = %client_ip,
                 "client IP not allowed"
             );
-            let error = GatewayError::Forbidden("ip not allowed".into());
+            let error = GatewayError::gateway_forbidden("ip not allowed", "gateway_ip_not_allowed");
             append_gateway_usage_log(
                 &state,
                 &request_id,
@@ -1578,7 +2421,7 @@ async fn process_gateway_request(
                 user_agent.as_deref(),
                 error.status_code(),
                 Some(error.to_string()),
-                None,
+                Some(error.error_category().to_string()),
                 0,
                 0,
                 0,
@@ -1598,7 +2441,8 @@ async fn process_gateway_request(
             normalized_model = %normalized_model,
             "model not allowed"
         );
-        let error = GatewayError::Forbidden("model not allowed".into());
+        let error =
+            GatewayError::gateway_forbidden("model not allowed", "gateway_model_not_allowed");
         append_gateway_usage_log(
             &state,
             &request_id,
@@ -1612,7 +2456,7 @@ async fn process_gateway_request(
             user_agent.as_deref(),
             error.status_code(),
             Some(error.to_string()),
-            None,
+            Some(error.error_category().to_string()),
             0,
             0,
             0,
@@ -1622,7 +2466,8 @@ async fn process_gateway_request(
         return Err(error);
     }
 
-    if let Err(retry_after_seconds) = state.reserve_downstream_request(&downstream).await {
+    if let Err(rejection) = state.reserve_downstream_request(&downstream).await {
+        let retry_after_seconds = rejection.retry_after_seconds();
         tracing::warn!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -1630,12 +2475,9 @@ async fn process_gateway_request(
             original_model = %model,
             normalized_model = %normalized_model,
             retry_after_seconds,
-            "downstream per-minute request limit exceeded"
+            "downstream request admission rejected"
         );
-        let error = GatewayError::TooManyRequests {
-            message: "downstream per-minute request limit exceeded".into(),
-            retry_after_seconds: Some(retry_after_seconds),
-        };
+        let error = GatewayError::downstream_admission_rejection(rejection);
         append_gateway_usage_log(
             &state,
             &request_id,
@@ -1649,7 +2491,7 @@ async fn process_gateway_request(
             user_agent.as_deref(),
             error.status_code(),
             Some(error.to_string()),
-            None,
+            Some(error.error_category().to_string()),
             0,
             0,
             0,
@@ -1673,10 +2515,20 @@ async fn process_gateway_request(
             max_concurrency = downstream.max_concurrency,
             "downstream concurrency limit exceeded"
         );
-        let error = GatewayError::TooManyRequests {
-            message: "downstream concurrency limit exceeded".into(),
-            retry_after_seconds: Some(retry_after_seconds),
-        };
+        let error = GatewayError::classified(
+            StatusCode::TOO_MANY_REQUESTS,
+            "downstream concurrency limit exceeded",
+            "gateway_quota_exceeded",
+            "gateway_concurrency_full",
+            "gateway_concurrency_full",
+            Some(retry_after_seconds),
+            Some(json!({
+                "scope": "gateway",
+                "quota": "concurrent_requests",
+                "limit": downstream.max_concurrency.max(1),
+                "retry_after_seconds": retry_after_seconds,
+            })),
+        );
         append_gateway_usage_log(
             &state,
             &request_id,
@@ -1690,7 +2542,7 @@ async fn process_gateway_request(
             user_agent.as_deref(),
             error.status_code(),
             Some(error.to_string()),
-            None,
+            Some(error.error_category().to_string()),
             0,
             0,
             0,
@@ -2163,27 +3015,24 @@ async fn process_gateway_request(
                                 "upstream request completed"
                             );
                             if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
-                                let (prompt_tokens, completion_tokens, total_tokens) = result.usage;
-                                append_gateway_usage_log(
-                                    &state,
-                                    &request_id,
-                                    &downstream.id,
-                                    &downstream.name,
-                                    &upstream.id,
-                                    Some(&upstream.name),
-                                    request_path,
-                                    model,
-                                    inference_strength.as_deref(),
-                                    user_agent.as_deref(),
-                                    result.status,
-                                    None,
-                                    None,
-                                    prompt_tokens,
-                                    completion_tokens,
-                                    total_tokens,
+                                let context = GatewayUsageLogContext {
+                                    state: state.clone(),
+                                    request_id: request_id.clone(),
+                                    downstream_id: downstream.id.clone(),
+                                    downstream_name: downstream.name.clone(),
+                                    upstream_id: upstream.id.clone(),
+                                    upstream_name: Some(upstream.name.clone()),
+                                    endpoint: request_path.to_string(),
+                                    model: model.to_string(),
+                                    inference_strength: inference_strength.clone(),
+                                    user_agent: user_agent.clone(),
                                     started,
-                                )
-                                .await;
+                                };
+                                if defer_success_usage_log {
+                                    result.usage_log_context = Some(context);
+                                } else {
+                                    context.emit(result.status, None, None, result.usage).await;
+                                }
                             }
                             return Ok(result);
                         }
@@ -2416,6 +3265,25 @@ async fn process_gateway_request(
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
                             break;
                         }
+                        Err(error) if error.status_code() == StatusCode::BAD_REQUEST => {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                error = %error,
+                                error_category = %error.error_category(),
+                                "upstream rejected request payload"
+                            );
+                            last_error = Some(error);
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+                            break;
+                        }
                         Err(error) if attempt_stream && should_retry_without_stream(&error) => {
                             tracing::debug!(
                                 request_id = %request_id,
@@ -2495,7 +3363,7 @@ async fn process_gateway_request(
             user_agent.as_deref(),
             error.status_code(),
             Some(error.to_string()),
-            None,
+            Some(error.error_category().to_string()),
             0,
             0,
             0,
@@ -2537,7 +3405,7 @@ async fn process_gateway_request(
         user_agent.as_deref(),
         error.status_code(),
         Some(error.to_string()),
-        None,
+        Some(error.error_category().to_string()),
         0,
         0,
         0,
@@ -2648,9 +3516,9 @@ fn responses_request_to_chat_payload_with_fallback(body: &Value) -> Result<Value
 
 #[derive(Debug, Clone, Default)]
 struct ResponsesChatFallbackReport {
-    retained_tools: Vec<String>,
-    stripped_tools: Vec<String>,
-    tool_choice: Option<String>,
+    retained_tool_count: usize,
+    stripped_tool_count: usize,
+    has_tool_choice: bool,
     tool_choice_dropped: bool,
 }
 
@@ -2660,11 +3528,10 @@ fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallback
 
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {
         for tool in tools {
-            let summary = responses_tool_summary(tool);
             if responses_tool_requires_responses_upstream(tool) {
-                report.stripped_tools.push(summary);
+                report.stripped_tool_count += 1;
             } else {
-                report.retained_tools.push(summary);
+                report.retained_tool_count += 1;
                 if let Some(name) = responses_function_tool_name(tool) {
                     retained_function_tool_names.push(name);
                 }
@@ -2673,68 +3540,15 @@ fn responses_request_chat_fallback_report(body: &Value) -> ResponsesChatFallback
     }
 
     if let Some(tool_choice) = body.get("tool_choice") {
-        report.tool_choice = Some(responses_tool_choice_summary(tool_choice));
+        report.has_tool_choice = true;
         report.tool_choice_dropped = responses_tool_choice_requires_chat_fallback(
             tool_choice,
-            !report.retained_tools.is_empty(),
+            report.retained_tool_count > 0,
             &retained_function_tool_names,
         );
     }
 
     report
-}
-
-fn responses_tool_summary(tool: &Value) -> String {
-    let Some(object) = tool.as_object() else {
-        return serde_json::to_string(tool).unwrap_or_else(|_| format!("{tool}"));
-    };
-
-    if let Some(function) = object.get("function").and_then(Value::as_object) {
-        if let Some(name) = function.get("name").and_then(Value::as_str) {
-            return format!("function:{name}");
-        }
-        return "function".to_string();
-    }
-
-    if let Some(tool_type) = object.get("type").and_then(Value::as_str) {
-        if let Some(name) = object.get("name").and_then(Value::as_str) {
-            return format!("{tool_type}:{name}");
-        }
-        return tool_type.to_string();
-    }
-
-    if let Some(name) = object.get("name").and_then(Value::as_str) {
-        return format!("function:{name}");
-    }
-
-    serde_json::to_string(tool).unwrap_or_else(|_| format!("{tool}"))
-}
-
-fn responses_tool_choice_summary(tool_choice: &Value) -> String {
-    match tool_choice {
-        Value::String(choice) => choice.clone(),
-        Value::Object(object) => {
-            if let Some(function) = object.get("function").and_then(Value::as_object) {
-                if let Some(name) = function.get("name").and_then(Value::as_str) {
-                    return format!("function:{name}");
-                }
-            }
-
-            if let Some(tool_type) = object.get("type").and_then(Value::as_str) {
-                if let Some(name) = object.get("name").and_then(Value::as_str) {
-                    return format!("{tool_type}:{name}");
-                }
-                return tool_type.to_string();
-            }
-
-            if let Some(name) = object.get("name").and_then(Value::as_str) {
-                return format!("function:{name}");
-            }
-
-            serde_json::to_string(tool_choice).unwrap_or_else(|_| format!("{tool_choice}"))
-        }
-        _ => serde_json::to_string(tool_choice).unwrap_or_else(|_| format!("{tool_choice}")),
-    }
 }
 
 fn responses_function_tool_name(tool: &Value) -> Option<String> {
@@ -2813,6 +3627,8 @@ struct ContextBudgetReport {
     allowed_input_tokens: u64,
     context_limit: u32,
     output_reserve: u32,
+    max_output_tokens_cap: u32,
+    max_output_tokens_clamped: bool,
     trim_stats: ContextTrimStats,
     fallback_model: Option<String>,
 }
@@ -3155,6 +3971,26 @@ fn apply_context_budget_controls(
         }
     }
 
+    // Clamp max_tokens / max_output_tokens / max_completion_tokens if the
+    // upstream configured a `max_output_tokens` cap. This prevents sending
+    // an excessively large generation budget (e.g. Codex's default 65536)
+    // to upstreams that either don't support it or whose account balance
+    // cannot cover it, which would result in 402 / 400 errors.
+    let max_output_tokens_cap = config.max_output_tokens;
+    let mut max_output_tokens_clamped = false;
+    if max_output_tokens_cap > 0 {
+        if let Some(object) = payload.as_object_mut() {
+            for key in ["max_tokens", "max_output_tokens", "max_completion_tokens"] {
+                if let Some(current) = object.get(key).and_then(Value::as_u64) {
+                    if current > u64::from(max_output_tokens_cap) {
+                        object.insert(key.to_string(), Value::Number(max_output_tokens_cap.into()));
+                        max_output_tokens_clamped = true;
+                    }
+                }
+            }
+        }
+    }
+
     Some(ContextBudgetReport {
         estimated_input_tokens,
         estimated_input_tokens_after_trim: estimated_after_trim,
@@ -3162,6 +3998,8 @@ fn apply_context_budget_controls(
         allowed_input_tokens: allowed,
         context_limit,
         output_reserve,
+        max_output_tokens_cap,
+        max_output_tokens_clamped,
         trim_stats,
         fallback_model,
     })
@@ -3314,26 +4152,6 @@ fn extract_upstream_error_message(error_text: &str) -> String {
     error_text.to_string()
 }
 
-fn fallback_error_code_from_text(error_text: &str) -> Option<u16> {
-    let normalized = error_text.to_ascii_lowercase();
-    let mut tokens = normalized.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
-    while let Some(token) = tokens.next() {
-        if token == "code" {
-            if let Some(value) = tokens.next() {
-                if let Ok(code) = value.parse::<u16>() {
-                    return Some(code);
-                }
-            }
-            continue;
-        }
-
-        if let Ok(code) = token.parse::<u16>() {
-            return Some(code);
-        }
-    }
-    None
-}
-
 fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
     let payload = parse_upstream_error_payload(error_text);
     if let Some(code) = payload.code {
@@ -3353,7 +4171,7 @@ fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
         }
     }
 
-    fallback_error_code_from_text(error_text)
+    None
 }
 
 fn halve_generation_cap_for_context_retry(payload: &mut Value) -> Option<(&'static str, u64, u64)> {
@@ -3376,23 +4194,31 @@ fn should_try_next_key(error: &GatewayError) -> bool {
     // Key rotation is only useful for failures that may be credential-specific.
     // Shared upstream concurrency pressure should stay on the same key long
     // enough for the account-level backoff loop to retry first.
-    matches!(
-        error,
+    match error {
         GatewayError::Unauthorized(_)
-            | GatewayError::TooManyRequests { .. }
-            | GatewayError::GatewayTimeout(_)
-            | GatewayError::Upstream(_)
-            | GatewayError::TemporaryUpstreamUnavailable(_)
-    )
+        | GatewayError::TooManyRequests { .. }
+        | GatewayError::GatewayTimeout(_)
+        | GatewayError::Upstream(_)
+        | GatewayError::TemporaryUpstreamUnavailable(_) => true,
+        GatewayError::Classified { status, meta, .. } => {
+            meta.category == "upstream_auth_error"
+                || (meta.category.starts_with("upstream_")
+                    && (*status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()))
+        }
+        _ => false,
+    }
 }
 
 fn should_retry_without_stream(error: &GatewayError) -> bool {
-    matches!(
-        error,
+    match error {
         GatewayError::GatewayTimeout(_)
-            | GatewayError::Upstream(_)
-            | GatewayError::TemporaryUpstreamUnavailable(_)
-    )
+        | GatewayError::Upstream(_)
+        | GatewayError::TemporaryUpstreamUnavailable(_) => true,
+        GatewayError::Classified { status, meta, .. } => {
+            meta.category.starts_with("upstream_") && status.is_server_error()
+        }
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3430,7 +4256,7 @@ async fn send_to_upstream(
             if chat_fallback_requested {
                 fallback_reasons.push("no_responses_upstream_supports_model");
             }
-            if !fallback_report.stripped_tools.is_empty() {
+            if fallback_report.stripped_tool_count > 0 {
                 fallback_reasons.push("unsupported_tools");
             }
             if fallback_report.tool_choice_dropped {
@@ -3443,9 +4269,9 @@ async fn send_to_upstream(
                     path = %endpoint.path(),
                     original_model = %model,
                     normalized_model = %normalized_model,
-                    retained_tools = ?fallback_report.retained_tools,
-                    stripped_tools = ?fallback_report.stripped_tools,
-                    tool_choice = ?fallback_report.tool_choice,
+                    retained_tool_count = fallback_report.retained_tool_count,
+                    stripped_tool_count = fallback_report.stripped_tool_count,
+                    has_tool_choice = fallback_report.has_tool_choice,
                     tool_choice_dropped = fallback_report.tool_choice_dropped,
                     fallback_reasons = ?fallback_reasons,
                     "responses request downgraded to ChatCompletions"
@@ -3472,6 +4298,7 @@ async fn send_to_upstream(
     if let Some(object) = upstream_body.as_object_mut() {
         object.insert("model".into(), Value::String(final_upstream_model.clone()));
     }
+    strip_response_usage_fields_from_upstream_request(&mut upstream_body);
     tracing::info!(
         request_id = %request_id,
         downstream_key_id = %downstream_key_id,
@@ -3548,9 +4375,27 @@ async fn send_to_upstream(
             trimmed_blocks = report.trim_stats.truncated_blocks,
             compacted_entries = report.trim_stats.compacted_entries,
             tool_result_blocks = report.trim_stats.tool_result_blocks,
+            max_output_tokens_cap = report.max_output_tokens_cap,
+            max_output_tokens_clamped = report.max_output_tokens_clamped,
             fallback_model = ?report.fallback_model,
             "applied upstream context budgeting"
         );
+        if report.max_output_tokens_clamped {
+            tracing::warn!(
+                request_id = %request_id,
+                downstream_key_id = %downstream_key_id,
+                path = %endpoint.path(),
+                original_model = %model,
+                normalized_model = %normalized_model,
+                selected_upstream_id = %upstream.id,
+                selected_upstream_name = %upstream.name,
+                selected_upstream_protocol = ?upstream_protocol,
+                final_upstream_model = %final_upstream_model,
+                requested_output_tokens = report.requested_output_tokens,
+                max_output_tokens_cap = report.max_output_tokens_cap,
+                "clamped max_tokens to upstream max_output_tokens cap"
+            );
+        }
     }
 
     if upstream_protocol == UpstreamProtocol::ChatCompletions {
@@ -3590,6 +4435,25 @@ async fn send_to_upstream(
 
     if upstream_protocol == UpstreamProtocol::ChatCompletions {
         normalize_chat_tool_required_arrays(&mut upstream_body);
+    }
+
+    if upstream_protocol == UpstreamProtocol::ChatCompletions {
+        normalize_chat_payload_for_upstream_compatibility(
+            &mut upstream_body,
+            &final_upstream_model,
+            &upstream.base_url,
+            upstream.strip_nonstandard_chat_fields,
+        );
+        tracing::debug!(
+            request_id = %request_id,
+            downstream_key_id = %downstream_key_id,
+            path = %endpoint.path(),
+            selected_upstream_id = %upstream.id,
+            selected_upstream_name = %upstream.name,
+            final_upstream_model = %final_upstream_model,
+            strip_unknown_nonstandard_fields = upstream.strip_nonstandard_chat_fields,
+            "normalized chat payload for upstream compatibility"
+        );
     }
 
     let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream_protocol));
@@ -3635,7 +4499,7 @@ async fn send_to_upstream(
                     error = %error,
                     "upstream request failed"
                 );
-                GatewayError::Upstream(format!("upstream request failed: {error}"))
+                GatewayError::upstream_network_error(format!("upstream request failed: {error}"))
             })?,
             Err(_) => {
                 tracing::warn!(
@@ -3651,7 +4515,7 @@ async fn send_to_upstream(
                     header_timeout_seconds = response_header_timeout.as_secs(),
                     "upstream response header timeout"
                 );
-                return Err(GatewayError::GatewayTimeout(format!(
+                return Err(GatewayError::upstream_timeout(format!(
                     "upstream response header timeout after {}s",
                     response_header_timeout.as_secs()
                 )));
@@ -3666,10 +4530,9 @@ async fn send_to_upstream(
         // Get headers before consuming response with .text()
         let headers = response.headers().clone();
         let error_text = response.text().await.unwrap_or_default();
-        let upstream_error_message = extract_upstream_error_message(&error_text);
+        let raw_upstream_error_message = extract_upstream_error_message(&error_text);
         let upstream_error_is_bad_response_status_code =
-            upstream_error_message == "bad_response_status_code";
-        let error_excerpt = upstream_error_message.chars().take(512).collect::<String>();
+            raw_upstream_error_message == "bad_response_status_code";
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
         // Classify the upstream response to determine how to handle it
@@ -3678,6 +4541,8 @@ async fn send_to_upstream(
             &headers,
             Some(&error_text),
         );
+        let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback);
+        let upstream_error_message = error_excerpt.clone();
 
         tracing::warn!(
             request_id = %request_id,
@@ -3701,6 +4566,42 @@ async fn send_to_upstream(
                 .map(|report| report.requested_output_tokens),
             "upstream responded with a non-success status"
         );
+
+        // serde_json always produces syntactically valid JSON, so a 400 with a
+        // JSON-syntax error message from the upstream usually means an
+        // intermediate proxy or the upstream rejected a field. Keep this
+        // diagnostic structural only; prompts, tool arguments, and tool results
+        // must not be written to runtime logs.
+        if status.is_client_error() {
+            let diagnostics = safe_upstream_body_diagnostics(&upstream_body);
+            tracing::warn!(
+                request_id = %request_id,
+                downstream_key_id = %downstream_key_id,
+                path = %endpoint.path(),
+                original_model = %model,
+                normalized_model = %normalized_model,
+                selected_upstream_id = %upstream.id,
+                selected_upstream_name = %upstream.name,
+                selected_upstream_protocol = ?upstream_protocol,
+                url = %url,
+                status = status.as_u16(),
+                upstream_body_json_bytes = diagnostics.json_bytes,
+                upstream_body_top_level_field_count = diagnostics.top_level_field_count,
+                upstream_body_message_count = ?diagnostics.message_count,
+                upstream_body_tool_count = ?diagnostics.tool_count,
+                upstream_body_has_stream = diagnostics.has_stream,
+                upstream_body_has_reasoning_effort = diagnostics.has_reasoning_effort,
+                upstream_body_has_max_output_tokens = diagnostics.has_max_output_tokens,
+                upstream_body_has_max_tokens = diagnostics.has_max_tokens,
+                upstream_body_has_max_completion_tokens = diagnostics.has_max_completion_tokens,
+                upstream_body_has_usage = diagnostics.has_usage,
+                upstream_body_has_input_tokens = diagnostics.has_input_tokens,
+                upstream_body_has_output_tokens = diagnostics.has_output_tokens,
+                upstream_body_has_prompt_tokens = diagnostics.has_prompt_tokens,
+                upstream_body_has_completion_tokens = diagnostics.has_completion_tokens,
+                "upstream rejected request body; payload values withheld"
+            );
+        }
 
         // Handle context limit errors first (before feedback classification)
         if is_context_limit_error(&error_text) {
@@ -3726,12 +4627,12 @@ async fn send_to_upstream(
                     continue;
                 }
             }
-            return Err(GatewayError::BadRequest(format!(
+            return Err(GatewayError::upstream_context_limit(format!(
                 "upstream request exceeded the model context window; reduce prompt size or use a model with a larger context window (model={final_upstream_model}, upstream={}, status={}, detail={})",
                 upstream.name,
                 status.as_u16(),
                 error_excerpt
-            )));
+            ), status));
         }
 
         if !tool_choice_tool_retry_attempted
@@ -3764,25 +4665,28 @@ async fn send_to_upstream(
         // If we already retried without tools/tool_choice and still get bad_response_status_code,
         // the upstream simply doesn't support this model/request. Try next upstream.
         if tool_choice_tool_retry_attempted && upstream_error_is_bad_response_status_code {
-            return Err(GatewayError::TemporaryUpstreamUnavailable(format!(
-                "upstream rejected request (status {})",
-                status.as_u16()
-            )));
+            return Err(GatewayError::upstream_temporary_unavailable(
+                format!("upstream rejected request (status {})", status.as_u16()),
+                "upstream_protocol_unsupported",
+            ));
         }
 
         if matches!(status.as_u16(), 401 | 403) {
-            return Err(GatewayError::Unauthorized(if error_excerpt.is_empty() {
-                format!("upstream rejected request with status {}", status.as_u16())
-            } else {
-                format!("upstream rejected request: {error_excerpt}")
-            }));
+            return Err(GatewayError::upstream_auth_error(
+                if error_excerpt.is_empty() {
+                    format!("upstream rejected request with status {}", status.as_u16())
+                } else {
+                    format!("upstream rejected request: {error_excerpt}")
+                },
+                status,
+            ));
         }
 
         if matches!(
             feedback,
             UpstreamFeedbackClassification::ProtocolUnsupported
         ) {
-            return Err(GatewayError::TemporaryUpstreamUnavailable(
+            return Err(GatewayError::upstream_temporary_unavailable(
                 if error_excerpt.is_empty() {
                     format!(
                         "upstream does not support this model or endpoint (status {})",
@@ -3791,6 +4695,7 @@ async fn send_to_upstream(
                 } else {
                     format!("upstream does not support this model or endpoint: {error_excerpt}")
                 },
+                "upstream_protocol_unsupported",
             ));
         }
 
@@ -3802,7 +4707,7 @@ async fn send_to_upstream(
         if let Some(inner_code) = upstream_error_code {
             if (400..=499).contains(&inner_code) {
                 if upstream_is_server_error {
-                    return Err(GatewayError::TemporaryUpstreamUnavailable(
+                    return Err(GatewayError::upstream_temporary_unavailable(
                         if error_excerpt.is_empty() {
                             format!(
                                 "upstream server error (status {}) with nested client code {}",
@@ -3815,6 +4720,7 @@ async fn send_to_upstream(
                                 status.as_u16()
                             )
                         },
+                        "upstream_temporary_unavailable",
                     ));
                 }
 
@@ -3832,12 +4738,13 @@ async fn send_to_upstream(
                         retry_after_seconds: Some(retry_after_seconds),
                     });
                 }
-                return Err(GatewayError::BadRequest(
+                return Err(GatewayError::upstream_bad_request(
                     if upstream_error_message.is_empty() {
                         format!("upstream rejected request with status {inner_code}")
                     } else {
                         upstream_error_message
                     },
+                    status,
                 ));
             }
         }
@@ -3871,7 +4778,7 @@ async fn send_to_upstream(
             UpstreamFeedbackClassification::ProviderBusy
             | UpstreamFeedbackClassification::TemporaryUnavailable => {
                 // Return error to allow outer loop to try next upstream
-                return Err(GatewayError::TemporaryUpstreamUnavailable(
+                return Err(GatewayError::upstream_temporary_unavailable(
                     if error_excerpt.is_empty() {
                         format!(
                             "upstream temporarily unavailable (status {})",
@@ -3880,24 +4787,29 @@ async fn send_to_upstream(
                     } else {
                         format!("upstream temporarily unavailable: {error_excerpt}")
                     },
+                    "upstream_temporary_unavailable",
                 ));
             }
             UpstreamFeedbackClassification::ProtocolUnsupported => {
                 // Protocol not supported, return error to try next upstream
-                return Err(GatewayError::TemporaryUpstreamUnavailable(format!(
-                    "protocol not supported by upstream (status {})",
-                    status.as_u16()
-                )));
+                return Err(GatewayError::upstream_temporary_unavailable(
+                    format!(
+                        "protocol not supported by upstream (status {})",
+                        status.as_u16()
+                    ),
+                    "upstream_protocol_unsupported",
+                ));
             }
             UpstreamFeedbackClassification::Unknown => {
                 // Unknown error - pass through client errors (4xx) as BadRequest, server errors (5xx) as Upstream
                 if status.is_client_error() {
-                    return Err(GatewayError::BadRequest(
+                    return Err(GatewayError::upstream_bad_request(
                         if upstream_error_message.is_empty() {
                             format!("upstream rejected request with status {}", status.as_u16())
                         } else {
                             upstream_error_message
                         },
+                        status,
                     ));
                 } else {
                     return Err(GatewayError::Upstream(format!(
@@ -3968,10 +4880,15 @@ async fn send_to_upstream(
             }
         } else {
             let bytes = response.bytes().await.map_err(|error| {
-                GatewayError::Upstream(format!("failed to read upstream response: {error}"))
+                GatewayError::upstream_network_error(format!(
+                    "failed to read upstream response: {error}"
+                ))
             })?;
             let upstream_json: Value = serde_json::from_slice(&bytes).map_err(|error| {
-                GatewayError::Upstream(format!("upstream returned invalid json: {error}"))
+                GatewayError::upstream_invalid_response(
+                    format!("upstream returned invalid json: {error}"),
+                    "upstream_invalid_response",
+                )
             })?;
 
             let final_body = match (endpoint, upstream_protocol) {
@@ -3990,6 +4907,14 @@ async fn send_to_upstream(
             if let Some(context) = response_history_context.as_ref() {
                 context.store_from_response_body(&final_body);
             }
+
+            if status == StatusCode::OK && is_empty_success_response(&final_body) {
+                return Err(GatewayError::upstream_invalid_response(
+                    "upstream returned an empty response body (no content, zero tokens)",
+                    "upstream_empty_response",
+                ));
+            }
+
             usage_body = Some(final_body.clone());
             synthesize_stream_body(endpoint, &final_body)?
         };
@@ -4007,14 +4932,18 @@ async fn send_to_upstream(
                 .as_ref()
                 .map(usage_from_body)
                 .unwrap_or((0, 0, 0)),
+            usage_log_context: None,
         });
     }
 
     let bytes = response.bytes().await.map_err(|error| {
-        GatewayError::Upstream(format!("failed to read upstream response: {error}"))
+        GatewayError::upstream_network_error(format!("failed to read upstream response: {error}"))
     })?;
     let upstream_json: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        GatewayError::Upstream(format!("upstream returned invalid json: {error}"))
+        GatewayError::upstream_invalid_response(
+            format!("upstream returned invalid json: {error}"),
+            "upstream_invalid_response",
+        )
     })?;
 
     let body = match (endpoint, upstream_protocol) {
@@ -4035,8 +4964,9 @@ async fn send_to_upstream(
     let usage = usage_from_body(&body);
 
     if status == StatusCode::OK && is_empty_success_response(&body) {
-        return Err(GatewayError::Upstream(
-            "upstream returned an empty response body (no content, zero tokens)".into(),
+        return Err(GatewayError::upstream_invalid_response(
+            "upstream returned an empty response body (no content, zero tokens)",
+            "upstream_empty_response",
         ));
     }
 
@@ -4046,6 +4976,7 @@ async fn send_to_upstream(
         request_id: String::new(),
         usage,
         usage_log_timing: UsageLogTiming::Immediate,
+        usage_log_context: None,
     })
 }
 
@@ -4059,16 +4990,25 @@ fn no_routable_model_error(snapshot: &crate::state::PersistedState, model: &str)
     visible_models.sort();
     visible_models.dedup();
 
-    if visible_models.is_empty() {
-        GatewayError::BadRequest(format!(
+    let message = if visible_models.is_empty() {
+        format!(
             "model \"{model}\" is not configured on any active upstream; check supported_models"
-        ))
+        )
     } else {
-        GatewayError::BadRequest(format!(
+        format!(
             "model \"{model}\" is not configured on any active upstream; available models: {}; check supported_models",
             visible_models.join(", ")
-        ))
-    }
+        )
+    };
+    GatewayError::classified(
+        StatusCode::BAD_REQUEST,
+        message,
+        "invalid_request_error",
+        "gateway_no_routable_upstream",
+        "gateway_no_routable_upstream",
+        None,
+        Some(json!({ "scope": "gateway" })),
+    )
 }
 
 fn endpoint_for_upstream(protocol: UpstreamProtocol) -> &'static str {
@@ -4410,22 +5350,11 @@ fn is_empty_success_response(body: &Value) -> bool {
             return true;
         }
         for choice in choices {
-            let content = choice
-                .get("message")
-                .or_else(|| choice.get("delta"))
-                .and_then(|m| m.get("content"));
-            match content {
-                Some(Value::String(text)) if !text.is_empty() => return false,
-                Some(Value::Array(parts)) => {
-                    for part in parts {
-                        if let Some(t) = part.get("text").and_then(Value::as_str) {
-                            if !t.is_empty() {
-                                return false;
-                            }
-                        }
-                    }
+            let message = choice.get("message").or_else(|| choice.get("delta"));
+            if let Some(message) = message {
+                if chat_message_has_usable_output(message) {
+                    return false;
                 }
-                _ => {}
             }
         }
         return true;
@@ -4437,14 +5366,8 @@ fn is_empty_success_response(body: &Value) -> bool {
             return true;
         }
         for item in output {
-            if let Some(parts) = item.get("content").and_then(Value::as_array) {
-                for part in parts {
-                    if let Some(t) = part.get("text").and_then(Value::as_str) {
-                        if !t.is_empty() {
-                            return false;
-                        }
-                    }
-                }
+            if responses_output_item_has_usable_output(item) {
+                return false;
             }
         }
         return true;
@@ -4453,10 +5376,60 @@ fn is_empty_success_response(body: &Value) -> bool {
     false
 }
 
+fn chat_message_has_usable_output(message: &Value) -> bool {
+    value_has_non_empty_text(message.get("content"))
+        || value_has_non_empty_text(message.get("reasoning_content"))
+        || non_empty_array(message.get("tool_calls"))
+        || value_has_payload(message.get("function_call"))
+}
 
-fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
+fn responses_output_item_has_usable_output(item: &Value) -> bool {
+    if item.get("type").and_then(Value::as_str) == Some("function_call") {
+        return true;
+    }
+
+    value_has_non_empty_text(item.get("content"))
+        || non_empty_array(item.get("tool_calls"))
+        || value_has_payload(item.get("function_call"))
+}
+
+fn value_has_non_empty_text(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .any(|item| value_has_non_empty_text(Some(item))),
+        Some(Value::Object(object)) => object
+            .get("text")
+            .or_else(|| object.get("reasoning_content"))
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        _ => false,
+    }
+}
+
+fn non_empty_array(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+fn value_has_payload(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Null) | None => false,
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(object)) => !object.is_empty(),
+        Some(_) => true,
+    }
+}
+
+async fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
     let request_id = HeaderValue::from_str(&result.request_id)
         .unwrap_or_else(|_| HeaderValue::from_static("unknown"));
+    let status = result.status;
+    let usage = result.usage;
+    let mut usage_log_context = result.usage_log_context;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -4468,7 +5441,19 @@ fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
         DispatchBody::Json(body) => {
             let claude_body = match chat_completion_to_claude_message(&body) {
                 Ok(claude_body) => claude_body,
-                Err(error) => return error.into_response(),
+                Err(error) => {
+                    if let Some(context) = usage_log_context.take() {
+                        context
+                            .emit(
+                                error.status_code(),
+                                Some(error.to_string()),
+                                Some(error.error_category().to_string()),
+                                usage,
+                            )
+                            .await;
+                    }
+                    return error.into_anthropic_response();
+                }
             };
 
             if stream {
@@ -4485,23 +5470,53 @@ fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
                     HeaderValue::from_static("no"),
                 );
                 match claude_message_to_sse_body(&claude_body) {
-                    Ok(body) => (result.status, headers, body).into_response(),
-                    Err(error) => error.into_response(),
+                    Ok(body) => {
+                        if let Some(context) = usage_log_context.take() {
+                            context.emit(status, None, None, usage).await;
+                        }
+                        (status, headers, body).into_response()
+                    }
+                    Err(error) => {
+                        if let Some(context) = usage_log_context.take() {
+                            context
+                                .emit(
+                                    error.status_code(),
+                                    Some(error.to_string()),
+                                    Some(error.error_category().to_string()),
+                                    usage,
+                                )
+                                .await;
+                        }
+                        error.into_anthropic_response()
+                    }
                 }
             } else {
                 headers.insert(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
                 );
-                (result.status, headers, Json(claude_body)).into_response()
+                if let Some(context) = usage_log_context.take() {
+                    context.emit(status, None, None, usage).await;
+                }
+                (status, headers, Json(claude_body)).into_response()
             }
         }
         DispatchBody::Stream(body) => {
             if !stream {
-                return GatewayError::BadRequest(
+                let error = GatewayError::BadRequest(
                     "upstream returned a stream for a non-stream Claude request".into(),
-                )
-                .into_response();
+                );
+                if let Some(context) = usage_log_context.take() {
+                    context
+                        .emit(
+                            error.status_code(),
+                            Some(error.to_string()),
+                            Some(error.error_category().to_string()),
+                            usage,
+                        )
+                        .await;
+                }
+                return error.into_anthropic_response();
             }
 
             headers.insert(
@@ -4516,7 +5531,10 @@ fn dispatch_claude_success(result: DispatchResult, stream: bool) -> Response {
                 header::HeaderName::from_static("x-accel-buffering"),
                 HeaderValue::from_static("no"),
             );
-            (result.status, headers, claude_stream_body(body)).into_response()
+            if let Some(context) = usage_log_context.take() {
+                context.emit(status, None, None, usage).await;
+            }
+            (status, headers, claude_stream_body(body)).into_response()
         }
     }
 }
@@ -4857,7 +5875,10 @@ impl ClaudeStreamState {
                         }
                     }),
                 ));
-            } else if reasoning_content.is_empty() && self.thinking_block_started && !self.thinking_block_finished {
+            } else if reasoning_content.is_empty()
+                && self.thinking_block_started
+                && !self.thinking_block_finished
+            {
                 self.thinking_block_finished = true;
                 self.pending.push_back(claude_sse_event(
                     "content_block_stop",
@@ -4904,7 +5925,8 @@ impl ClaudeStreamState {
         }
 
         if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            self.stop_reason = Some(chat_finish_reason_to_claude_stop_reason(Some(finish_reason)).to_string());
+            self.stop_reason =
+                Some(chat_finish_reason_to_claude_stop_reason(Some(finish_reason)).to_string());
             self.finish_message();
         }
 
@@ -4976,7 +5998,10 @@ impl ClaudeStreamState {
         self.emit_tool_delta_parts(tool_index, call_id, name, partial_json)
     }
 
-    fn emit_legacy_function_call_delta(&mut self, function_call: &Value) -> Result<(), std::io::Error> {
+    fn emit_legacy_function_call_delta(
+        &mut self,
+        function_call: &Value,
+    ) -> Result<(), std::io::Error> {
         let call_id = function_call
             .get("id")
             .and_then(Value::as_str)
@@ -5452,7 +6477,7 @@ fn extract_claude_content_text(message: &Value) -> String {
 fn claude_tool_definition_to_chat_tool(tool: &Value) -> Result<Value, String> {
     let object = tool
         .as_object()
-        .ok_or_else(|| format!("invalid claude tool definition: {tool}"))?;
+        .ok_or_else(|| "invalid claude tool definition".to_string())?;
     let name = object
         .get("name")
         .and_then(Value::as_str)
@@ -5479,7 +6504,7 @@ fn claude_tool_choice_to_chat_tool_choice(tool_choice: &Value) -> Result<Value, 
             "auto" => Ok(Value::String("auto".into())),
             "any" => Ok(Value::String("required".into())),
             "none" => Ok(Value::String("none".into())),
-            other => Err(format!("unsupported claude tool_choice string: {other}")),
+            _ => Err("unsupported claude tool_choice string".to_string()),
         },
         Value::Object(object) => {
             let choice_type = object
@@ -5502,17 +6527,17 @@ fn claude_tool_choice_to_chat_tool_choice(tool_choice: &Value) -> Result<Value, 
                         }
                     }))
                 }
-                other => Err(format!("unsupported claude tool_choice type: {other}")),
+                _ => Err("unsupported claude tool_choice type".to_string()),
             }
         }
-        other => Err(format!("unsupported claude tool_choice: {other}")),
+        _ => Err("unsupported claude tool_choice".to_string()),
     }
 }
 
 fn claude_tool_use_to_chat_tool_call(block: &Value) -> Result<Value, String> {
     let object = block
         .as_object()
-        .ok_or_else(|| format!("invalid claude tool_use block: {block}"))?;
+        .ok_or_else(|| "invalid claude tool_use block".to_string())?;
     let id = object
         .get("id")
         .and_then(Value::as_str)
@@ -5541,7 +6566,7 @@ fn claude_tool_use_to_chat_tool_call(block: &Value) -> Result<Value, String> {
 fn claude_tool_result_to_chat_tool_message(block: &Value) -> Result<Value, String> {
     let object = block
         .as_object()
-        .ok_or_else(|| format!("invalid claude tool_result block: {block}"))?;
+        .ok_or_else(|| "invalid claude tool_result block".to_string())?;
     let tool_call_id = object
         .get("tool_use_id")
         .and_then(Value::as_str)
@@ -5557,7 +6582,7 @@ fn claude_tool_result_to_chat_tool_message(block: &Value) -> Result<Value, Strin
 fn chat_tool_call_to_claude_tool_use_block(tool_call: &Value) -> Result<Value, GatewayError> {
     let object = tool_call
         .as_object()
-        .ok_or_else(|| GatewayError::Upstream(format!("unsupported tool call: {tool_call}")))?;
+        .ok_or_else(|| GatewayError::Upstream("unsupported tool call".into()))?;
     let call_id = object
         .get("id")
         .or_else(|| object.get("call_id"))
@@ -5622,7 +6647,6 @@ fn extract_claude_system_text(system: &Value) -> String {
         _ => String::new(),
     }
 }
-
 
 /// Build a pre-connect SSE stream that sends keepalive frames to the downstream
 /// client while `process_gateway_request` runs in the background. This eliminates
@@ -5695,17 +6719,23 @@ fn early_keepalive_stream(
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    Some((Ok(sse_error_frame(&error.to_string())), EarlyStreamState::Done))
+                                                    Some((Ok(sse_gateway_error_frame(&error)), EarlyStreamState::Done))
                                                 }
                                             }
                                         }
                                     }
                                 }
                                 Some(Err(error)) => {
-                                    Some((Ok(sse_error_frame(&error.to_string())), EarlyStreamState::Done))
+                                    Some((Ok(sse_gateway_error_frame(&error)), EarlyStreamState::Done))
                                 }
                                 None => {
-                                    Some((Ok(sse_error_frame("request processing channel closed")), EarlyStreamState::Done))
+                                    Some((Ok(sse_error_frame(
+                                        "request processing channel closed",
+                                        "api_error",
+                                        "stream_processing_error",
+                                        "stream_processing_error",
+                                        json!({ "scope": "gateway" }),
+                                    )), EarlyStreamState::Done))
                                 }
                             }
                         }
@@ -5721,7 +6751,11 @@ fn early_keepalive_stream(
                         }
                     }
                 }
-                EarlyStreamState::DrainingBody { mut body, last_heartbeat_at, keepalive_interval } => {
+                EarlyStreamState::DrainingBody {
+                    mut body,
+                    last_heartbeat_at,
+                    keepalive_interval,
+                } => {
                     let deadline = last_heartbeat_at + keepalive_interval;
                     tokio::select! {
                         frame = StreamExt::next(&mut body) => {
@@ -5769,17 +6803,35 @@ enum EarlyStreamState {
 }
 
 /// Build an SSE error frame.
-fn sse_error_frame(message: &str) -> Bytes {
+fn sse_error_frame(
+    message: &str,
+    error_type: &str,
+    code: &str,
+    category: &str,
+    details: Value,
+) -> Bytes {
     let error_json = json!({
         "error": {
             "message": message,
+            "type": error_type,
+            "param": Value::Null,
+            "code": code,
+            "category": category,
+            "details": details,
         }
     });
     Bytes::from(format!("data: {}\n\ndata: [DONE]\n\n", error_json))
 }
 
-
-
+fn sse_gateway_error_frame(error: &GatewayError) -> Bytes {
+    sse_error_frame(
+        error.message(),
+        error.error_type(),
+        error.error_code(),
+        error.error_category(),
+        error.safe_details(),
+    )
+}
 
 /// Handle a streaming request by spawning `process_gateway_request` in the
 /// background and returning an early SSE keepalive stream. If the request
@@ -5792,7 +6844,10 @@ async fn dispatch_streaming_request(
     endpoint: EndpointKind,
 ) -> Response {
     let keepalive_interval = Duration::from_secs(
-        state.config.upstream_stream_keepalive_interval_seconds.max(1),
+        state
+            .config
+            .upstream_stream_keepalive_interval_seconds
+            .max(1),
     );
 
     let (tx, mut rx) = mpsc::channel::<Result<DispatchResult, GatewayError>>(1);
@@ -5903,6 +6958,7 @@ fn proxied_stream_body(
         response_history_stored: false,
         finished: false,
         semantic_completion_emitted: false,
+        usable_output_seen: false,
         usage_log_flushed: false,
         watchdog: StreamWatchdog::new(stream_timeouts),
     };
@@ -5910,7 +6966,7 @@ fn proxied_stream_body(
         if state.finished {
             state.flush_usage_log().await?;
             state.finalize_completion().await?;
-            return Ok(None);
+            return Ok::<Option<(Bytes, ProxiedStreamState)>, std::io::Error>(None);
         }
 
         match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
@@ -5919,13 +6975,30 @@ fn proxied_stream_body(
                 state.buffer.extend_from_slice(&chunk);
                 state.drain_usage_from_buffer()?;
                 if state.finished {
+                    if state.should_emit_empty_response_error() {
+                        let frame = state
+                            .finish_with_gateway_error(upstream_empty_response_error())
+                            .await;
+                        return Ok(Some((frame, state)));
+                    }
                     state.flush_usage_log().await?;
                     state.finalize_completion().await?;
+                } else if state.should_emit_empty_response_error() {
+                    let frame = state
+                        .finish_with_gateway_error(upstream_empty_response_error())
+                        .await;
+                    return Ok(Some((frame, state)));
                 }
                 Ok(Some((chunk, state)))
             }
             StreamReadOutcome::Chunk(Ok(None)) => {
                 state.finish_stream();
+                if state.should_emit_empty_response_error() {
+                    let frame = state
+                        .finish_with_gateway_error(upstream_empty_response_error())
+                        .await;
+                    return Ok(Some((frame, state)));
+                }
                 state.flush_usage_log().await?;
                 state.finalize_completion().await?;
                 Ok(None)
@@ -5937,7 +7010,16 @@ fn proxied_stream_body(
                 state
                     .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
                     .await;
-                Err(std::io::Error::other(error_message))
+                let (status, error_category) =
+                    classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+                let frame = state
+                    .finish_with_gateway_error(stream_gateway_error(
+                        status,
+                        error_message,
+                        error_category,
+                    ))
+                    .await;
+                Ok(Some((frame, state)))
             }
             StreamReadOutcome::Heartbeat => {
                 state.watchdog.record_heartbeat(TokioInstant::now());
@@ -5949,21 +7031,32 @@ fn proxied_stream_body(
                 let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
                 tracing::warn!("stream idle timeout: {}", debug_info);
                 state.mark_stream_interrupted(error_message.clone()).await;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    error_message,
-                ))
+                let frame = state
+                    .finish_with_gateway_error(stream_gateway_error(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        error_message,
+                        "stream_idle_timeout",
+                    ))
+                    .await;
+                Ok(Some((frame, state)))
             }
             StreamReadOutcome::MaxDurationExceeded => {
                 let now = TokioInstant::now();
                 let debug_info = state.watchdog.debug_state(now);
-                let error_message = format!("stream max duration exceeded before completion ({})", debug_info);
+                let error_message = format!(
+                    "stream max duration exceeded before completion ({})",
+                    debug_info
+                );
                 tracing::warn!("stream max duration: {}", debug_info);
                 state.mark_stream_interrupted(error_message.clone()).await;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    error_message,
-                ))
+                let frame = state
+                    .finish_with_gateway_error(stream_gateway_error(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        error_message,
+                        "stream_max_duration",
+                    ))
+                    .await;
+                Ok(Some((frame, state)))
             }
         }
     });
@@ -5981,6 +7074,7 @@ struct ProxiedStreamState {
     response_history_stored: bool,
     finished: bool,
     semantic_completion_emitted: bool,
+    usable_output_seen: bool,
     usage_log_flushed: bool,
     watchdog: StreamWatchdog,
 }
@@ -6008,6 +7102,9 @@ impl ProxiedStreamState {
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
+            if stream_event_has_usable_output(&event) {
+                self.usable_output_seen = true;
+            }
             if event.get("type").and_then(Value::as_str) == Some("response.completed") {
                 self.semantic_completion_emitted = true;
             }
@@ -6021,6 +7118,13 @@ impl ProxiedStreamState {
         }
 
         Ok(())
+    }
+
+    fn should_emit_empty_response_error(&self) -> bool {
+        !self.usage_log_flushed
+            && (self.finished || self.semantic_completion_emitted)
+            && !self.usable_output_seen
+            && stream_output_tokens_are_zero_or_unknown(self.usage)
     }
 
     fn finish_stream(&mut self) {
@@ -6053,6 +7157,31 @@ impl ProxiedStreamState {
             }
         }
         Ok(())
+    }
+
+    async fn finish_with_gateway_error(&mut self, error: GatewayError) -> Bytes {
+        let status = error.status_code();
+        let error_category = error.error_category();
+        let error_message = error.message().to_string();
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+
+        self.finished = true;
+        self.usage_log_flushed = true;
+        self.buffer.clear();
+
+        finalize_stream_error(
+            completion_context,
+            log_context,
+            usage,
+            status,
+            error_category,
+            error_message,
+        )
+        .await;
+
+        sse_gateway_error_frame(&error)
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {
@@ -6138,11 +7267,21 @@ fn translated_stream_body(
         response_history_stored: false,
         finished: false,
         semantic_completion_emitted: false,
+        usable_output_seen: false,
         usage_log_flushed: false,
         watchdog: StreamWatchdog::new(stream_timeouts),
     };
     let stream = stream::try_unfold(state, move |mut state| async move {
         loop {
+            if state.should_emit_empty_response_error() {
+                let frame = state
+                    .finish_with_gateway_error(upstream_empty_response_error())
+                    .await;
+                return Ok::<Option<(Bytes, TranslatedStreamState)>, std::io::Error>(Some((
+                    frame, state,
+                )));
+            }
+
             if let Some(bytes) = state.pending.pop_front() {
                 if state.finished {
                     state.flush_usage_log().await?;
@@ -6165,6 +7304,12 @@ fn translated_stream_body(
                 }
                 StreamReadOutcome::Chunk(Ok(None)) => {
                     state.finish_stream()?;
+                    if state.should_emit_empty_response_error() {
+                        let frame = state
+                            .finish_with_gateway_error(upstream_empty_response_error())
+                            .await;
+                        return Ok(Some((frame, state)));
+                    }
                     if let Some(bytes) = state.pending.pop_front() {
                         state.flush_usage_log().await?;
                         state.finalize_completion().await?;
@@ -6181,7 +7326,16 @@ fn translated_stream_body(
                     state
                         .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
                         .await;
-                    return Err(std::io::Error::other(error_message));
+                    let (status, error_category) =
+                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+                    let frame = state
+                        .finish_with_gateway_error(stream_gateway_error(
+                            status,
+                            error_message,
+                            error_category,
+                        ))
+                        .await;
+                    return Ok(Some((frame, state)));
                 }
                 StreamReadOutcome::Heartbeat => {
                     state.watchdog.record_heartbeat(TokioInstant::now());
@@ -6193,21 +7347,32 @@ fn translated_stream_body(
                     let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
                     tracing::warn!("stream idle timeout: {}", debug_info);
                     state.mark_stream_interrupted(error_message.clone()).await;
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        error_message,
-                    ));
+                    let frame = state
+                        .finish_with_gateway_error(stream_gateway_error(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            error_message,
+                            "stream_idle_timeout",
+                        ))
+                        .await;
+                    return Ok(Some((frame, state)));
                 }
                 StreamReadOutcome::MaxDurationExceeded => {
                     let now = TokioInstant::now();
                     let debug_info = state.watchdog.debug_state(now);
-                    let error_message = format!("stream max duration exceeded before completion ({})", debug_info);
+                    let error_message = format!(
+                        "stream max duration exceeded before completion ({})",
+                        debug_info
+                    );
                     tracing::warn!("stream max duration: {}", debug_info);
                     state.mark_stream_interrupted(error_message.clone()).await;
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        error_message,
-                    ));
+                    let frame = state
+                        .finish_with_gateway_error(stream_gateway_error(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            error_message,
+                            "stream_max_duration",
+                        ))
+                        .await;
+                    return Ok(Some((frame, state)));
                 }
             }
         }
@@ -6228,6 +7393,7 @@ struct TranslatedStreamState {
     response_history_stored: bool,
     finished: bool,
     semantic_completion_emitted: bool,
+    usable_output_seen: bool,
     usage_log_flushed: bool,
     watchdog: StreamWatchdog,
 }
@@ -6255,13 +7421,20 @@ impl TranslatedStreamState {
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
+            if stream_event_has_usable_output(&event) {
+                self.usable_output_seen = true;
+            }
             let translated = self
                 .translator
                 .translate_event(&event)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            if translated.iter().any(|item| {
-                item.get("type").and_then(Value::as_str) == Some("response.completed")
-            }) {
+            if translated.iter().any(stream_event_has_usable_output) {
+                self.usable_output_seen = true;
+            }
+            if translated
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("response.completed"))
+            {
                 self.semantic_completion_emitted = true;
             }
             if !self.response_history_stored {
@@ -6291,9 +7464,13 @@ impl TranslatedStreamState {
             .translator
             .finish()
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if translated.iter().any(|item| {
-            item.get("type").and_then(Value::as_str) == Some("response.completed")
-        }) {
+        if translated.iter().any(stream_event_has_usable_output) {
+            self.usable_output_seen = true;
+        }
+        if translated
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("response.completed"))
+        {
             self.semantic_completion_emitted = true;
         }
         if !self.response_history_stored {
@@ -6313,6 +7490,13 @@ impl TranslatedStreamState {
         self.finished = true;
         self.buffer.clear();
         Ok(())
+    }
+
+    fn should_emit_empty_response_error(&self) -> bool {
+        !self.usage_log_flushed
+            && (self.finished || self.semantic_completion_emitted)
+            && !self.usable_output_seen
+            && stream_output_tokens_are_zero_or_unknown(self.usage)
     }
 
     async fn flush_usage_log(&mut self) -> Result<(), std::io::Error> {
@@ -6336,6 +7520,32 @@ impl TranslatedStreamState {
             }
         }
         Ok(())
+    }
+
+    async fn finish_with_gateway_error(&mut self, error: GatewayError) -> Bytes {
+        let status = error.status_code();
+        let error_category = error.error_category();
+        let error_message = error.message().to_string();
+        let completion_context = self.completion_context.take();
+        let log_context = self.log_context.take();
+        let usage = self.usage;
+
+        self.finished = true;
+        self.usage_log_flushed = true;
+        self.pending.clear();
+        self.buffer.clear();
+
+        finalize_stream_error(
+            completion_context,
+            log_context,
+            usage,
+            status,
+            error_category,
+            error_message,
+        )
+        .await;
+
+        sse_gateway_error_frame(&error)
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {
@@ -6433,7 +7643,14 @@ fn sse_done_frame() -> Bytes {
 }
 
 fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
-    GatewayError::BadRequest(error.to_string())
+    match error {
+        ProtocolError::MissingField(field) => {
+            GatewayError::BadRequest(format!("protocol conversion failed: missing field {field}"))
+        }
+        ProtocolError::InvalidPayload(_) => {
+            GatewayError::BadRequest("protocol conversion failed: invalid payload shape".into())
+        }
+    }
 }
 
 fn next_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
@@ -6613,13 +7830,107 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn client_cancelled_before_output_is_categorized() {
         // Codex/user cancelled the turn before any upstream output arrived.
         let (status, category) =
             classify_stream_failure("client disconnected before any upstream output");
         assert_eq!(status, StatusCode::from_u16(499).unwrap());
         assert_eq!(category, "stream_client_cancelled");
+    }
+
+    #[test]
+    fn official_openai_chat_upstream_detection_is_limited_to_official_hosts() {
+        assert!(is_likely_official_openai_chat_upstream(
+            "https://api.openai.com/v1"
+        ));
+        assert!(is_likely_official_openai_chat_upstream(
+            "https://example.openai.azure.com/openai/deployments/test"
+        ));
+        assert!(!is_likely_official_openai_chat_upstream(
+            "https://api.openai.com.proxy.local/v1"
+        ));
+        assert!(!is_likely_official_openai_chat_upstream(
+            "https://example.openai.azure.com.evil/openai/deployments/test"
+        ));
+        assert!(!is_likely_official_openai_chat_upstream(
+            "https://api.chatanywhere.tech"
+        ));
+        assert!(!is_likely_official_openai_chat_upstream(
+            "https://huazi.de5.net"
+        ));
+    }
+
+    #[test]
+    fn safe_upstream_body_diagnostics_do_not_include_payload_values() {
+        let diagnostics = safe_upstream_body_diagnostics(&json!({
+            "model": "gpt-5.1-ca",
+            "messages": [{
+                "role": "user",
+                "content": "secret prompt that must not enter logs"
+            }],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup_secret",
+                    "arguments": "{\"token\":\"tool-secret\"}"
+                }
+            }],
+            "api_key": "request-secret",
+            "max_tokens": 1000,
+            "stream": true
+        }));
+
+        let rendered = format!("{diagnostics:?}");
+        assert!(rendered.contains("json_bytes"));
+        assert!(rendered.contains("message_count"));
+        assert!(rendered.contains("tool_count"));
+        for sensitive in [
+            "secret prompt",
+            "tool-secret",
+            "request-secret",
+            "lookup_secret",
+            "gpt-5.1-ca",
+        ] {
+            assert!(
+                !rendered.contains(sensitive),
+                "safe diagnostics must not include payload value {sensitive:?}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_upstream_error_summary_does_not_include_upstream_message_text() {
+        let upstream_message = "expecting , delimiter near SECRET_PROMPT_BODY_SHOULD_NOT_LEAK";
+        let summary = safe_upstream_error_summary(
+            StatusCode::BAD_REQUEST,
+            Some(400),
+            UpstreamFeedbackClassification::Unknown,
+        );
+
+        assert!(summary.contains("status 400"));
+        assert!(summary.contains("upstream code 400"));
+        assert!(
+            !summary.contains(upstream_message),
+            "safe summary must not include raw upstream error text: {summary}"
+        );
+        assert!(
+            !summary.contains("SECRET_PROMPT_BODY"),
+            "safe summary must not include echoed request content: {summary}"
+        );
+    }
+
+    #[test]
+    fn upstream_error_code_extraction_ignores_numbers_from_freeform_echoed_message() {
+        let error_text = json!({
+            "error": {
+                "message": "parse failed near {\"code\":\"1234\",\"token\":\"secret\"}",
+                "type": "badrequesterror"
+            }
+        })
+        .to_string();
+
+        assert_eq!(extract_upstream_error_code(&error_text), None);
     }
 
     #[test]

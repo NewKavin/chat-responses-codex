@@ -586,7 +586,13 @@ fn chat_response_converts_tool_calls_to_responses_output() {
         "usage": {
             "prompt_tokens": 1,
             "completion_tokens": 0,
-            "total_tokens": 1
+            "total_tokens": 1,
+            "prompt_tokens_details": {
+                "cached_tokens": 1
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 0
+            }
         }
     });
 
@@ -599,9 +605,19 @@ fn chat_response_converts_tool_calls_to_responses_output() {
     assert_eq!(converted["output"][0]["call_id"], "call_1");
     assert_eq!(converted["output"][0]["name"], "get_weather");
     assert_eq!(converted["output"][0]["arguments"], "{\"city\":\"Paris\"}");
-    assert_eq!(converted["usage"]["prompt_tokens"], 1);
-    assert_eq!(converted["usage"]["completion_tokens"], 0);
+    assert_eq!(converted["usage"]["input_tokens"], 1);
+    assert_eq!(converted["usage"]["output_tokens"], 0);
     assert_eq!(converted["usage"]["total_tokens"], 1);
+    assert!(converted["usage"].get("prompt_tokens").is_none());
+    assert!(converted["usage"].get("completion_tokens").is_none());
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cached_tokens"],
+        1
+    );
+    assert_eq!(
+        converted["usage"]["output_tokens_details"]["reasoning_tokens"],
+        0
+    );
 }
 
 #[test]
@@ -657,7 +673,13 @@ fn responses_response_converts_tool_calls_to_chat_payload() {
         "usage": {
             "input_tokens": 1,
             "output_tokens": 0,
-            "total_tokens": 1
+            "total_tokens": 1,
+            "input_tokens_details": {
+                "cached_tokens": 1
+            },
+            "output_tokens_details": {
+                "reasoning_tokens": 0
+            }
         }
     });
 
@@ -679,6 +701,16 @@ fn responses_response_converts_tool_calls_to_chat_payload() {
     assert_eq!(converted["usage"]["prompt_tokens"], 1);
     assert_eq!(converted["usage"]["completion_tokens"], 0);
     assert_eq!(converted["usage"]["total_tokens"], 1);
+    assert!(converted["usage"].get("input_tokens").is_none());
+    assert!(converted["usage"].get("output_tokens").is_none());
+    assert_eq!(
+        converted["usage"]["prompt_tokens_details"]["cached_tokens"],
+        1
+    );
+    assert_eq!(
+        converted["usage"]["completion_tokens_details"]["reasoning_tokens"],
+        0
+    );
 }
 
 #[test]
@@ -716,8 +748,7 @@ fn responses_response_rejects_multiple_assistant_messages_for_chat_payload() {
         ]
     });
 
-    let error =
-        responses_response_to_chat_payload(&responses).expect_err("conversion should fail");
+    let error = responses_response_to_chat_payload(&responses).expect_err("conversion should fail");
     assert!(error
         .to_string()
         .contains("multiple assistant messages are not supported"));
@@ -804,6 +835,79 @@ fn responses_stream_translator_ignores_reasoning_items_with_completed_usage() {
             .as_str()
             .is_some_and(|reason| reason == "stop")
     }));
+}
+
+#[test]
+fn chat_stream_translator_maps_completed_usage_to_responses_usage() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let delta = json!({
+        "id": "chatcmpl-stream",
+        "created": 1,
+        "model": "GLM-5.1",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "content": "OK"
+            }
+        }]
+    });
+    translator
+        .translate_event(&delta)
+        .expect("delta should translate");
+
+    let final_chunk = json!({
+        "id": "chatcmpl-stream",
+        "created": 1,
+        "model": "GLM-5.1",
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+            "prompt_tokens_details": {
+                "cached_tokens": 3
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 1
+            }
+        }
+    });
+
+    let events = translator
+        .translate_event(&final_chunk)
+        .expect("final chunk should translate");
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("expected response.completed event");
+
+    assert_eq!(completed["response"]["usage"]["input_tokens"], 10);
+    assert_eq!(completed["response"]["usage"]["output_tokens"], 2);
+    assert_eq!(completed["response"]["usage"]["total_tokens"], 12);
+    assert!(completed["response"]["usage"]
+        .get("prompt_tokens")
+        .is_none());
+    assert!(completed["response"]["usage"]
+        .get("completion_tokens")
+        .is_none());
+    assert_eq!(
+        completed["response"]["usage"]["input_tokens_details"]["cached_tokens"],
+        3
+    );
+    assert_eq!(
+        completed["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+        1
+    );
 }
 
 #[test]
@@ -949,7 +1053,10 @@ fn chat_request_to_responses_forwards_reasoning_effort() {
     });
     let result = chat_request_to_responses_payload(&input).unwrap();
     let reasoning = result.get("reasoning").and_then(|r| r.as_object()).unwrap();
-    assert_eq!(reasoning.get("effort").and_then(|v| v.as_str()), Some("high"));
+    assert_eq!(
+        reasoning.get("effort").and_then(|v| v.as_str()),
+        Some("high")
+    );
 }
 
 #[test]

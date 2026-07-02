@@ -69,6 +69,7 @@ impl UpstreamConfig {
                 slug: model.trim().to_string(),
                 context_limit: config.context_limit,
                 output_reserve: config.output_reserve,
+                max_output_tokens: config.max_output_tokens,
                 context_group: config.context_group.clone(),
             })
             .or_else(|| {
@@ -78,6 +79,7 @@ impl UpstreamConfig {
                         slug: model.trim().to_string(),
                         context_limit: config.context_limit,
                         output_reserve: config.output_reserve,
+                        max_output_tokens: config.max_output_tokens,
                         context_group: config.context_group.clone(),
                     })
             })

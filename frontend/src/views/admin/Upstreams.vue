@@ -34,6 +34,13 @@
             {{ displayKeyCount(row) }} 个
           </template>
         </el-table-column>
+        <el-table-column label="兼容清理" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="row.strip_nonstandard_chat_fields" type="success" size="small">强制</el-tag>
+            <el-tag v-else-if="isAutoChatCompatibility(row)" type="info" size="small">自动</el-tag>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         
         <el-table-column label="高端模型保护" min-width="160">
           <template #default="{ row }">
@@ -103,6 +110,10 @@
             <el-option label="Responses" value="Responses" />
           </el-select>
         </el-form-item>
+        <el-form-item label="兼容清理">
+          <el-switch v-model="form.strip_nonstandard_chat_fields" />
+          <span class="form-hint">第三方 Chat 上游会自动保守清理；打开后对该上游强制清理 Codex/Responses 扩展字段</span>
+        </el-form-item>
 
         <!-- 模型配置 -->
         <el-divider>模型配置</el-divider>
@@ -155,6 +166,10 @@
               <el-input-number v-model="form.default_model_context!.output_reserve" :min="0" :max="2000000" />
               <span class="form-hint">输入 0 时自动回退到网关默认预留值</span>
             </el-form-item>
+            <el-form-item label="最大输出">
+              <el-input-number v-model="form.default_model_context!.max_output_tokens" :min="0" :max="2000000" />
+              <span class="form-hint">对 max_tokens 做上限裁剪，0 表示不限制。可避免请求超出上游额度或模型能力</span>
+            </el-form-item>
             <el-form-item label="上下文分组">
               <el-input v-model="form.default_model_context!.context_group" placeholder="可选: 与模型分组一致时可自动切换更大上下文模型" />
             </el-form-item>
@@ -179,6 +194,11 @@
               <el-table-column label="输出预留" width="160">
                 <template #default="{ row }">
                   <el-input-number v-model="row.output_reserve" :min="0" :max="2000000" />
+                </template>
+              </el-table-column>
+              <el-table-column label="最大输出" width="160">
+                <template #default="{ row }">
+                  <el-input-number v-model="row.max_output_tokens" :min="0" :max="2000000" />
                 </template>
               </el-table-column>
               <el-table-column label="上下文分组" min-width="180">
@@ -281,6 +301,7 @@ const form = ref<Partial<UpstreamConfig>>({
   default_model_context: {
     context_limit: 200000,
     output_reserve: 4096,
+    max_output_tokens: 0,
     context_group: ''
   },
   active: true,
@@ -289,6 +310,7 @@ const form = ref<Partial<UpstreamConfig>>({
   priority: 0,
   premium_models: [],
   protect_premium_quota: false,
+  strip_nonstandard_chat_fields: false,
   failure_count: 0
 })
 
@@ -326,6 +348,7 @@ const addModelContext = () => {
     slug: '',
     context_limit: 200000,
     output_reserve: 4096,
+    max_output_tokens: 0,
     context_group: ''
   })
 }
@@ -335,11 +358,13 @@ const clearDefaultContextConfig = () => {
     form.value.default_model_context = {
       context_limit: 0,
       output_reserve: 0,
+      max_output_tokens: 0,
       context_group: ''
     }
   } else {
     form.value.default_model_context.context_limit = 0
     form.value.default_model_context.output_reserve = 0
+    form.value.default_model_context.max_output_tokens = 0
     form.value.default_model_context.context_group = ''
   }
   clearDefaultContext.value = true
@@ -397,6 +422,15 @@ const resolveProtocols = (value: Partial<UpstreamConfig>): UpstreamConfig['proto
 
 const displayProtocols = (value: UpstreamConfig) => resolveProtocols(value)
 
+const isOfficialOpenAIBaseUrl = (baseUrl?: string) => {
+  const value = String(baseUrl || '').trim().toLowerCase()
+  return value.includes('://api.openai.com') || value.includes('.openai.azure.com')
+}
+
+const isAutoChatCompatibility = (value: UpstreamConfig) => {
+  return displayProtocols(value).includes('ChatCompletions') && !isOfficialOpenAIBaseUrl(value.base_url)
+}
+
 const displayKeyCount = (value: UpstreamConfig) => {
   const keys = [
     value.api_key,
@@ -425,6 +459,7 @@ const handleCreate = () => {
     default_model_context: {
       context_limit: 200000,
       output_reserve: 4096,
+      max_output_tokens: 0,
       context_group: ''
     },
     active: true,
@@ -433,6 +468,7 @@ const handleCreate = () => {
     priority: 0,
     premium_models: [],
     protect_premium_quota: false,
+    strip_nonstandard_chat_fields: false,
     failure_count: 0
   }
   dialogVisible.value = true
@@ -454,13 +490,14 @@ const handleCopy = (row: UpstreamConfig) => {
     supported_models: [...(row.supported_models || [])],
     default_model_context: row.default_model_context
       ? { ...row.default_model_context }
-      : { context_limit: 200000, output_reserve: 4096, context_group: '' },
+      : { context_limit: 200000, output_reserve: 4096, max_output_tokens: 0, context_group: '' },
     active: row.active,
     model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
     model_contexts: row.model_contexts ? [...row.model_contexts] : [],
     priority: row.priority,
     premium_models: [...(row.premium_models || [])],
     protect_premium_quota: row.protect_premium_quota,
+    strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
     failure_count: 0
   }
   dialogVisible.value = true
@@ -488,6 +525,7 @@ const handleEdit = (row: UpstreamConfig) => {
     })),
     protocol: protocols[0] as UpstreamConfig['protocol'],
     protocols,
+    strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
     default_model_context: row.default_model_context
       ? {
           ...row.default_model_context
@@ -495,6 +533,7 @@ const handleEdit = (row: UpstreamConfig) => {
       : {
           context_limit: 200000,
           output_reserve: 4096,
+          max_output_tokens: 0,
           context_group: ''
         },
     model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
@@ -520,6 +559,7 @@ const handleSubmit = async () => {
         slug: String(item.slug || '').trim(),
         context_limit: Number(item.context_limit || 0),
         output_reserve: Number(item.output_reserve || 0),
+        max_output_tokens: Number(item.max_output_tokens || 0),
         context_group: String(item.context_group || '').trim()
       }))
       .filter(item => item.slug.length > 0 && item.context_limit > 0)
@@ -527,17 +567,20 @@ const handleSubmit = async () => {
       const context = submitData.default_model_context
       const context_limit = Number(context.context_limit || 0)
       const output_reserve = Number(context.output_reserve || 0)
+      const max_output_tokens = Number(context.max_output_tokens || 0)
       const context_group = String(context.context_group || '').trim()
       if (context_limit > 0) {
         submitData.default_model_context = {
           context_limit,
           output_reserve,
+          max_output_tokens,
           context_group
         }
       } else {
         submitData.default_model_context = {
           context_limit: 0,
           output_reserve: 0,
+          max_output_tokens: 0,
           context_group: ''
         }
         if (!clearDefaultContext.value) {
@@ -548,6 +591,7 @@ const handleSubmit = async () => {
     const protocols = resolveProtocols(submitData)
     submitData.protocols = protocols
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
+    submitData.strip_nonstandard_chat_fields = Boolean(submitData.strip_nonstandard_chat_fields)
     
     if (dialogMode.value === 'create') {
       submitData.id = ''
@@ -576,7 +620,8 @@ const handleSubmit = async () => {
           keys: apiKeys,
           protocol: protocols[0] ? String(protocols[0]) : 'ChatCompletions',
           protocols: protocols.map(p => String(p)),
-          active: submitData.active
+          active: submitData.active,
+          strip_nonstandard_chat_fields: Boolean(submitData.strip_nonstandard_chat_fields)
         }
 
         const response = await adminApi.createUpstreamsBatch(batchPayload)

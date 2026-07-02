@@ -108,6 +108,7 @@ pub(super) fn normalized_model_contexts(
             slug,
             context_limit,
             output_reserve,
+            max_output_tokens: config.max_output_tokens,
             context_group: config.context_group.trim().to_string(),
         });
     }
@@ -135,6 +136,7 @@ pub(super) fn normalized_default_model_context(
     Some(DefaultModelContextConfig {
         context_limit,
         output_reserve,
+        max_output_tokens: context.max_output_tokens,
         context_group: context.context_group.trim().to_string(),
     })
 }

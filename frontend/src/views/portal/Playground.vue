@@ -130,6 +130,9 @@
             <el-icon :size="20"><MagicStick /></el-icon>
           </div>
           <div class="chat-message-body">
+            <div v-if="streamStatusText" class="chat-stream-status">
+              {{ streamStatusText }}
+            </div>
             <details v-if="streamingReasoning" class="chat-reasoning" open>
               <summary class="chat-reasoning-summary">
                 <el-icon :size="14"><MagicStick /></el-icon>
@@ -137,7 +140,7 @@
               </summary>
               <div class="chat-reasoning-content markdown-body" v-html="renderMarkdown(streamingReasoning)"></div>
             </details>
-            <div class="chat-message-content markdown-body" v-html="renderMarkdown(streamingContent)"></div>
+            <div v-if="streamingContent" class="chat-message-content markdown-body" v-html="renderMarkdown(streamingContent)"></div>
             <span class="typing-cursor"></span>
           </div>
         </div>
@@ -194,7 +197,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ChatDotRound, Close, Delete, Link, MagicStick, Promotion, User } from '@element-plus/icons-vue'
 import { Marked } from 'marked'
 import { portalApi } from '@/api/portal'
@@ -204,10 +207,12 @@ import {
   buildPlaygroundChatPayload,
   extractChatCompletionText,
   extractChatCompletionUsage,
+  formatPlaygroundStreamStatus,
   inferenceStrengthOptions,
   parseGatewayModels,
   parseSSELine,
   type PlaygroundMessage,
+  type PlaygroundStreamPhase,
   type UploadedFileContext
 } from '@/utils/playground'
 
@@ -241,7 +246,7 @@ const isLoading = ref(true)
 const question = ref('')
 const selectedModel = ref('')
 const temperature = ref(0.7)
-const maxTokens = ref(200000)
+const maxTokens = ref(16384)
 const inferenceStrength = ref<(typeof inferenceStrengthOptions)[number]>('high')
 const modelOptions = ref<string[]>([])
 const downstreamKey = ref('')
@@ -254,11 +259,24 @@ const messagesContainerRef = ref<HTMLElement | null>(null)
 const sidebarCollapsed = ref(false)
 const streamingContent = ref('')
 const streamingReasoning = ref('')
+const streamPhase = ref<PlaygroundStreamPhase>('connecting')
+const streamElapsedSeconds = ref(0)
+const streamKeepaliveCount = ref(0)
+let streamStartedAt = 0
+let streamTimer: number | undefined
 
 const MAX_FILE_SIZE_BYTES = 1024 * 1024
 
 const gatewayBaseUrl = computed(() => window.location.origin.replace(/\/+$/, ''))
 const isBusy = computed(() => isSending.value || isLoading.value)
+const streamStatusText = computed(() => {
+  if (!isSending.value) return ''
+  return formatPlaygroundStreamStatus({
+    phase: streamPhase.value,
+    elapsedSeconds: streamElapsedSeconds.value,
+    keepaliveCount: streamKeepaliveCount.value
+  })
+})
 
 const sendDisabled = computed(() => {
   if (isBusy.value) return true
@@ -285,6 +303,24 @@ const scrollToBottom = () => {
 
 watch(() => messages.value.length, scrollToBottom)
 watch(streamingContent, scrollToBottom)
+watch(streamingReasoning, scrollToBottom)
+
+const startStreamTimer = () => {
+  stopStreamTimer()
+  streamStartedAt = Date.now()
+  streamElapsedSeconds.value = 0
+  streamKeepaliveCount.value = 0
+  streamPhase.value = 'connecting'
+  streamTimer = window.setInterval(() => {
+    streamElapsedSeconds.value = Math.floor((Date.now() - streamStartedAt) / 1000)
+  }, 1000)
+}
+
+const stopStreamTimer = () => {
+  if (streamTimer === undefined) return
+  window.clearInterval(streamTimer)
+  streamTimer = undefined
+}
 
 const formatFileSize = (size: number) => {
   if (size < 1024) return `${size} B`
@@ -478,6 +514,12 @@ const formatUsage = (usage: ReturnType<typeof extractChatCompletionUsage>) => {
   return `tokens: in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens}`
 }
 
+const formatStreamError = (chunk: NonNullable<ReturnType<typeof parseSSELine>>) => {
+  const details = [chunk.errorCategory, chunk.errorCode].filter(Boolean).join(' / ')
+  if (!details) return chunk.errorMessage || '流式响应返回错误'
+  return `${chunk.errorMessage || '流式响应返回错误'}（${details}）`
+}
+
 const handleInputKeydown = (event: KeyboardEvent) => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
@@ -498,6 +540,7 @@ const sendQuestion = async () => {
   }
 
   isSending.value = true
+  startStreamTimer()
   statusMessage.value = ''
   const userMessage = toDisplayMessageContent(prompt, uploadedPayload)
   const history = toHistoryMessages()
@@ -549,6 +592,7 @@ const sendQuestion = async () => {
 
       const decoder = new TextDecoder()
       let buffer = ''
+      streamPhase.value = 'waiting'
 
       while (true) {
         const { done, value } = await reader.read()
@@ -561,11 +605,21 @@ const sendQuestion = async () => {
         for (const line of lines) {
           const chunk = parseSSELine(line)
           if (!chunk) continue
+          if (chunk.errorMessage) {
+            throw new Error(formatStreamError(chunk))
+          }
           if (chunk.done) continue
+          if (chunk.keepalive) {
+            streamKeepaliveCount.value += 1
+            streamPhase.value = 'waiting'
+            continue
+          }
           if (chunk.reasoningContent) {
+            streamPhase.value = 'thinking'
             streamingReasoning.value += chunk.reasoningContent
           }
           if (chunk.content) {
+            streamPhase.value = 'generating'
             streamingContent.value += chunk.content
             finalContent = streamingContent.value
           }
@@ -578,10 +632,18 @@ const sendQuestion = async () => {
       for (const line of buffer.split('\n')) {
         const chunk = parseSSELine(line)
         if (!chunk) continue
+        if (chunk.errorMessage) {
+          throw new Error(formatStreamError(chunk))
+        }
+        if (chunk.keepalive || chunk.done) {
+          continue
+        }
         if (chunk.reasoningContent) {
+          streamPhase.value = 'thinking'
           streamingReasoning.value += chunk.reasoningContent
         }
         if (chunk.content) {
+          streamPhase.value = 'generating'
           streamingContent.value += chunk.content
           finalContent = streamingContent.value
         }
@@ -600,7 +662,7 @@ const sendQuestion = async () => {
     streamingReasoning.value = ''
     messages.value.push({
       role: 'assistant',
-      content: finalContent || '（模型返回空内容）',
+      content: finalContent || (finalReasoning ? '（模型仅返回思考过程，未返回正文）' : '（模型返回空内容）'),
       reasoning: finalReasoning || undefined,
       usageText: formatUsage(finalUsage)
     })
@@ -618,6 +680,7 @@ const sendQuestion = async () => {
     })
     setStatus(message, 'error')
   } finally {
+    stopStreamTimer()
     isSending.value = false
   }
 }
@@ -627,6 +690,9 @@ const clearConversation = () => {
   uploadedFiles.value = []
   streamingContent.value = ''
   streamingReasoning.value = ''
+  streamPhase.value = 'connecting'
+  streamElapsedSeconds.value = 0
+  streamKeepaliveCount.value = 0
   statusMessage.value = ''
   statusType.value = 'info'
 }
@@ -665,6 +731,10 @@ const loadInitialData = async () => {
 
 onMounted(() => {
   void loadInitialData()
+})
+
+onBeforeUnmount(() => {
+  stopStreamTimer()
 })
 </script>
 
@@ -837,6 +907,21 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.chat-stream-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  color: #606266;
+  font-size: 12px;
+  line-height: 1.5;
+  background: #f4f6f8;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 

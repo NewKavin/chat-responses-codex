@@ -135,6 +135,13 @@ pub struct UpstreamConfig {
     pub managed_source: Option<String>,
     #[serde(default)]
     pub last_synced_at: u64,
+    /// When true, the gateway strips non-standard ChatCompletions fields
+    /// (e.g. `service_tier`, `safety_identifier`, `prompt_cache_key`,
+    /// `reasoning_effort`, `store`, `verbosity`) before sending to this
+    /// upstream. Helps with upstreams/proxies that corrupt the JSON body
+    /// when they encounter unrecognized fields.
+    #[serde(default)]
+    pub strip_nonstandard_chat_fields: bool,
 }
 
 impl Default for UpstreamConfig {
@@ -165,6 +172,7 @@ impl Default for UpstreamConfig {
             auto_managed: false,
             managed_source: None,
             last_synced_at: 0,
+            strip_nonstandard_chat_fields: false,
         }
     }
 }
@@ -189,6 +197,11 @@ pub struct ModelContextConfig {
     pub context_limit: u32,
     #[serde(default = "default_model_context_output_reserve")]
     pub output_reserve: u32,
+    /// Optional cap on `max_tokens`/`max_output_tokens` sent to upstream.
+    /// When the client requests more than this, the gateway clamps it down.
+    /// 0 means no cap (passthrough).
+    #[serde(default)]
+    pub max_output_tokens: u32,
     #[serde(default)]
     pub context_group: String,
 }
@@ -198,6 +211,10 @@ pub struct DefaultModelContextConfig {
     pub context_limit: u32,
     #[serde(default = "default_model_context_output_reserve")]
     pub output_reserve: u32,
+    /// Optional cap on `max_tokens`/`max_output_tokens` sent to upstream.
+    /// 0 means no cap (passthrough).
+    #[serde(default)]
+    pub max_output_tokens: u32,
     #[serde(default)]
     pub context_group: String,
 }

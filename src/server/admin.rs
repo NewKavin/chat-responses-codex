@@ -553,16 +553,12 @@ pub(super) async fn admin_list_models(State(state): State<AppState>) -> impl Int
 ///
 /// Exposes the stored key sets for external sync scripts to read, probe, and
 /// resubmit. Manual upstreams are never exposed here.
-pub(super) async fn admin_list_upstream_keys(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub(super) async fn admin_list_upstream_keys(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
     let mut entries: Vec<Value> = Vec::new();
     for upstream in snapshot.upstreams.iter().filter(|u| u.auto_managed) {
         let mut api_keys = upstream.api_keys.clone();
-        if !upstream.api_key.is_empty()
-            && !api_keys.iter().any(|k| k == &upstream.api_key)
-        {
+        if !upstream.api_key.is_empty() && !api_keys.iter().any(|k| k == &upstream.api_key) {
             api_keys.insert(0, upstream.api_key.clone());
         }
         api_keys = api_keys
@@ -859,6 +855,8 @@ pub(super) struct BatchCreateUpstreamPayload {
     max_concurrency: u32,
     #[serde(default = "default_batch_active")]
     active: bool,
+    #[serde(default)]
+    strip_nonstandard_chat_fields: bool,
 }
 
 fn default_batch_requests_per_minute() -> u32 {
@@ -1158,9 +1156,11 @@ pub(super) async fn admin_create_upstreams_batch(
         auto_managed: true,
         managed_source: Some("batch".to_string()),
         last_synced_at: now,
+        strip_nonstandard_chat_fields: payload.strip_nonstandard_chat_fields,
         default_model_context: Some(DefaultModelContextConfig {
             context_limit: 200_000,
             output_reserve: 4096,
+            max_output_tokens: 0,
             context_group: "".to_string(),
         }),
         ..Default::default()

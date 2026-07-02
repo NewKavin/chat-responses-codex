@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlaygroundChatPayload,
   extractChatCompletionText,
+  formatPlaygroundStreamStatus,
   parseGatewayModels,
   parseSSELine,
   type UploadedFileContext
@@ -182,7 +183,63 @@ describe('playground response extraction', () => {
   })
 })
 
+describe('formatPlaygroundStreamStatus', () => {
+  it('shows a connected waiting state when only keepalives arrived', () => {
+    expect(
+      formatPlaygroundStreamStatus({
+        phase: 'waiting',
+        elapsedSeconds: 12,
+        keepaliveCount: 3
+      })
+    ).toBe('已连接，等待模型首个输出 12s')
+  })
+
+  it('shows thinking and generating states when output has started', () => {
+    expect(
+      formatPlaygroundStreamStatus({
+        phase: 'thinking',
+        elapsedSeconds: 8,
+        keepaliveCount: 1
+      })
+    ).toBe('思考中 8s')
+    expect(
+      formatPlaygroundStreamStatus({
+        phase: 'generating',
+        elapsedSeconds: 9,
+        keepaliveCount: 1
+      })
+    ).toBe('生成中 9s')
+  })
+})
+
 describe('parseSSELine', () => {
+  it('marks chat keepalive comments as stream activity', () => {
+    const chunk = parseSSELine(': keepalive')
+    expect(chunk).not.toBeNull()
+    expect(chunk!.keepalive).toBe(true)
+    expect(chunk!.content).toBe('')
+    expect(chunk!.done).toBe(false)
+  })
+
+  it('marks empty data objects as keepalive activity', () => {
+    const chunk = parseSSELine('data: {}')
+    expect(chunk).not.toBeNull()
+    expect(chunk!.keepalive).toBe(true)
+    expect(chunk!.content).toBe('')
+    expect(chunk!.done).toBe(false)
+  })
+
+  it('extracts structured stream error frames', () => {
+    const line =
+      'data: {"error":{"message":"upstream quota exceeded","type":"upstream_error","code":"quota_exceeded","category":"upstream_rate_limited"}}'
+    const chunk = parseSSELine(line)
+    expect(chunk).not.toBeNull()
+    expect(chunk!.errorMessage).toBe('upstream quota exceeded')
+    expect(chunk!.errorType).toBe('upstream_error')
+    expect(chunk!.errorCode).toBe('quota_exceeded')
+    expect(chunk!.errorCategory).toBe('upstream_rate_limited')
+  })
+
   it('extracts reasoning_content delta from deepseek-style stream chunks', () => {
     const line = 'data: {"choices":[{"index":0,"delta":{"reasoning_content":"思考中","content":""}}]}'
     const chunk = parseSSELine(line)

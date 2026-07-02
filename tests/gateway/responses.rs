@@ -157,6 +157,131 @@ async fn downstream_responses_supports_configured_portal_models() {
 }
 
 #[tokio::test]
+async fn downstream_responses_allows_function_call_success_with_zero_output_tokens() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(|| async move {
+            (
+                StatusCode::OK,
+                axum::Json(json!({
+                    "id": "resp-tool",
+                    "object": "response",
+                    "created": 1,
+                    "model": "gpt-4.1-mini",
+                    "output": [{
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": "{\"cmd\":\"pwd\"}"
+                    }],
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0
+                    }
+                })),
+            )
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "input": "Use a tool",
+                        "tools": [{
+                            "type": "function",
+                            "name": "exec_command",
+                            "description": "Run a command",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"cmd": {"type": "string"}},
+                                "required": ["cmd"]
+                            }
+                        }],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "function-call-only response must not be treated as empty: {payload}"
+    );
+    assert_eq!(payload["output"][0]["type"], "function_call");
+    assert_eq!(payload["output"][0]["name"], "exec_command");
+}
+
+#[tokio::test]
 async fn downstream_models_supports_configured_portal_models_listed_as_upstream_catalog() {
     let models_hit = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
@@ -688,51 +813,60 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new()
-        .route(
-            "/v1/responses",
-            post(
-                move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                      request: Request<Body>| async move {
-                    let (parts, body) = request.into_parts();
-                    let body = to_bytes(body, usize::MAX).await.unwrap();
-                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    let mut lock = capture.lock().unwrap();
-                    lock.path = parts.uri.path().to_string();
-                    lock.authorization = parts
-                        .headers
-                        .get(header::AUTHORIZATION)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string);
-                    lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/responses",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                    let initial_chunks = stream::iter(vec![
-                        Ok::<Bytes, std::io::Error>(Bytes::from(format!(
-                            "data: {}\n\n",
-                            json!({
-                                "type": "response.completed",
-                                "response": {
-                                    "id": "resp-stream",
-                                    "object": "response",
-                                    "output": []
-                                }
-                            })
-                        ))),
-                    ]);
-                    let delayed_done = stream::once(async {
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"))
-                    });
+                        let initial_chunks =
+                            stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "type": "response.completed",
+                                    "response": {
+                                        "id": "resp-stream",
+                                        "object": "response",
+                                        "output": [{
+                                            "id": "msg-1",
+                                            "type": "message",
+                                            "role": "assistant",
+                                            "content": [{
+                                                "type": "output_text",
+                                                "text": "OK",
+                                                "annotations": []
+                                            }]
+                                        }]
+                                    }
+                                })
+                            )))]);
+                        let delayed_done = stream::once(async {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"))
+                        });
 
-                    (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "text/event-stream")],
-                        Body::from_stream(initial_chunks.chain(delayed_done)),
-                    )
-                },
-            ),
-        )
-        .with_state(capture_clone);
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(initial_chunks.chain(delayed_done)),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -832,13 +966,18 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
         .usage_logs
         .last()
         .expect("expected usage log entry");
-    assert_eq!(log.status_code, 200);
+    assert_eq!(
+        log.status_code, 200,
+        "unexpected translated stream log error: {:?} / {:?}",
+        log.error_category, log.error_message
+    );
     assert_eq!(log.error_category.as_deref(), None);
     assert_eq!(log.error_message.as_deref(), None);
 }
 
 #[tokio::test]
-async fn downstream_responses_stream_preserves_multiple_output_items_when_upstream_returns_json_response() {
+async fn downstream_responses_stream_preserves_multiple_output_items_when_upstream_returns_json_response(
+) {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -846,69 +985,71 @@ async fn downstream_responses_stream_preserves_multiple_output_items_when_upstre
     let address = listener.local_addr().unwrap();
     let capture_clone = capture.clone();
 
-    let upstream_app = Router::new().route(
-        "/v1/responses",
-        post(
-            move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                  request: Request<Body>| async move {
-                let (parts, body) = request.into_parts();
-                let body = to_bytes(body, usize::MAX).await.unwrap();
-                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut lock = capture.lock().unwrap();
-                lock.path = parts.uri.path().to_string();
-                lock.authorization = parts
-                    .headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                lock.request_body = Some(payload);
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/responses",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload);
 
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "id": "resp-json",
-                        "object": "response",
-                        "created": 1,
-                        "model": "gpt-4.1-mini",
-                        "output": [
-                            {
-                                "id": "msg-1",
-                                "type": "message",
-                                "status": "completed",
-                                "role": "assistant",
-                                "content": [
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "resp-json",
+                                "object": "response",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "output": [
                                     {
-                                        "type": "output_text",
-                                        "text": "Hi",
-                                        "annotations": []
-                                    }
-                                ]
-                            },
-                            {
-                                "id": "msg-2",
-                                "type": "message",
-                                "status": "completed",
-                                "role": "assistant",
-                                "content": [
+                                        "id": "msg-1",
+                                        "type": "message",
+                                        "status": "completed",
+                                        "role": "assistant",
+                                        "content": [
+                                            {
+                                                "type": "output_text",
+                                                "text": "Hi",
+                                                "annotations": []
+                                            }
+                                        ]
+                                    },
                                     {
-                                        "type": "output_text",
-                                        "text": "Bye",
-                                        "annotations": []
+                                        "id": "msg-2",
+                                        "type": "message",
+                                        "status": "completed",
+                                        "role": "assistant",
+                                        "content": [
+                                            {
+                                                "type": "output_text",
+                                                "text": "Bye",
+                                                "annotations": []
+                                            }
+                                        ]
                                     }
-                                ]
-                            }
-                        ],
-                        "usage": {
-                            "input_tokens": 2,
-                            "output_tokens": 3,
-                            "total_tokens": 5
-                        }
-                    })),
-                )
-            },
-        ),
-    )
-    .with_state(capture_clone);
+                                ],
+                                "usage": {
+                                    "input_tokens": 2,
+                                    "output_tokens": 3,
+                                    "total_tokens": 5
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
 
     tokio::spawn(async move {
         axum::serve(listener, upstream_app).await.unwrap();
@@ -1553,7 +1694,8 @@ async fn downstream_responses_stream_is_translated_from_chat_stream_with_flat_to
 }
 
 #[tokio::test]
-async fn downstream_responses_previous_response_id_replays_prior_state_and_output_history_for_chat_upstream() {
+async fn downstream_responses_previous_response_id_replays_prior_state_and_output_history_for_chat_upstream(
+) {
     let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
     let call_count = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
@@ -1752,7 +1894,9 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
         .unwrap();
 
     assert_eq!(first_response.status(), StatusCode::OK);
-    let first_body = to_bytes(first_response.into_body(), usize::MAX).await.unwrap();
+    let first_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let first_text = String::from_utf8(first_body.to_vec()).unwrap();
     assert!(first_text.contains("response.completed"));
     assert!(first_text.contains("\"id\":\"chatcmpl-prev\""));
@@ -1792,13 +1936,18 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
         .unwrap();
 
     assert_eq!(second_response.status(), StatusCode::OK);
-    let _second_body = to_bytes(second_response.into_body(), usize::MAX).await.unwrap();
+    let _second_body = to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
 
     let captured = capture.lock().unwrap().clone();
     assert_eq!(captured.len(), 2);
     let second_request_body = captured[1].request_body.clone().unwrap();
     let messages = second_request_body["messages"].as_array().unwrap();
-    assert_eq!(second_request_body["tools"][0]["function"]["name"], "exec_command");
+    assert_eq!(
+        second_request_body["tools"][0]["function"]["name"],
+        "exec_command"
+    );
     assert_eq!(messages.len(), 5);
     assert_eq!(messages[0]["role"], "system");
     assert_eq!(messages[0]["content"], "You are a shell assistant.");
@@ -1815,6 +1964,104 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
     assert_eq!(messages[3]["content"], "/home/kavin");
     assert_eq!(messages[4]["role"], "user");
     assert_eq!(messages[4]["content"], "Continue");
+}
+
+#[tokio::test]
+async fn downstream_responses_unknown_previous_response_id_is_safe_and_categorized() {
+    let sensitive = "SECRET_PREVIOUS_RESPONSE_ID_SHOULD_NOT_LEAK";
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "previous_response_id": sensitive,
+                        "input": "Continue"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        !response_text.contains(sensitive),
+        "Responses history error leaked previous_response_id: {response_text}"
+    );
+    let payload: Value = serde_json::from_str(&response_text).unwrap();
+    assert_eq!(payload["error"]["code"], "gateway_response_history_invalid");
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.status_code, 400);
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("gateway_response_history_invalid")
+    );
+    assert!(
+        !log.error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains(sensitive),
+        "usage log leaked previous_response_id: {:?}",
+        log.error_message
+    );
 }
 
 #[tokio::test]
@@ -2998,7 +3245,15 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
         .body(Body::from(
             json!({
                 "model": "gpt-4.1-mini",
-                "input": "Hello"
+                "input": "Hello",
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2
+                },
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "prompt_tokens": 10,
+                "completion_tokens": 2
             })
             .to_string(),
         ))
@@ -3017,7 +3272,20 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
         captured.authorization.as_deref(),
         Some("Bearer upstream-secret")
     );
-    assert_eq!(captured.request_body.unwrap()["model"], "gpt-4.1-mini");
+    let request_body = captured.request_body.unwrap();
+    assert_eq!(request_body["model"], "gpt-4.1-mini");
+    for key in [
+        "usage",
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+    ] {
+        assert!(
+            request_body.get(key).is_none(),
+            "{key} should not be sent to a native Responses upstream: {request_body}"
+        );
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -4697,7 +4965,10 @@ async fn stream_interruption_marks_interrupted_not_success() {
     // The upstream emitted a content chunk but no usage/[DONE], so the drop
     // path classifies this as a client cancel before billable output rather
     // than the generic stream_interrupted bucket.
-    assert_eq!(log.error_category.as_deref(), Some("stream_client_cancelled"));
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("stream_client_cancelled")
+    );
     assert!(
         log.error_message
             .as_deref()
@@ -4728,7 +4999,14 @@ async fn translated_stream_disconnect_releases_runtime_state() {
                 (
                     StatusCode::OK,
                     headers,
-                    "data: {\"response\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n\ndata: [DONE]\n\n",
+                    concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}]}}\n\n",
+                        "data: [DONE]\n\n",
+                    ),
                 )
             }),
         );
@@ -4847,7 +5125,14 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
                 (
                     StatusCode::OK,
                     headers,
-                    "data: {\"response\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n\ndata: [DONE]\n\n",
+                    concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Hello\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"claude-3-5-sonnet\",\"output\":[{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\",\"annotations\":[]}]}]}}\n\n",
+                        "data: [DONE]\n\n",
+                    ),
                 )
             }),
         );
@@ -4968,7 +5253,11 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
         .usage_logs
         .last()
         .expect("expected usage log entry");
-    assert_eq!(log.status_code, 200);
+    assert_eq!(
+        log.status_code, 200,
+        "unexpected translated stream log error: {:?} / {:?}",
+        log.error_category, log.error_message
+    );
     assert_eq!(log.error_category.as_deref(), None);
     assert_eq!(log.error_message.as_deref(), None);
 }
@@ -5153,7 +5442,10 @@ async fn translated_chat_to_responses_drop_after_completed_event_is_logged_as_su
         }
     }
 
-    assert!(saw_completed, "expected translated stream to emit response.completed");
+    assert!(
+        saw_completed,
+        "expected translated stream to emit response.completed"
+    );
     assert!(
         !saw_done,
         "test expected to drop before the translated [DONE] frame arrived"
@@ -5283,31 +5575,25 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let mut body = response.into_body();
-    let body_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match body.frame().await {
-                Some(Ok(frame)) => {
-                    let bytes = frame.into_data().expect("expected data frame");
-                    if bytes
-                        .windows(b"[DONE]".len())
-                        .any(|window| window == b"[DONE]")
-                    {
-                        return Ok::<(), String>(());
-                    }
-                }
-                Some(Err(error)) => return Err(error.to_string()),
-                None => return Err("stream unexpectedly ended before timing out".to_string()),
-            }
-        }
-    })
+    let body = tokio::time::timeout(
+        Duration::from_secs(3),
+        to_bytes(response.into_body(), usize::MAX),
+    )
     .await
-    .expect("stream did not time out in time");
-
-    let body_error = body_result.expect_err("stream unexpectedly completed before timing out");
+    .expect("stream did not time out in time")
+    .expect("stream timeout should be emitted as a structured SSE frame");
+    let body_text = String::from_utf8_lossy(&body);
     assert!(
-        body_error.contains("idle timeout"),
-        "unexpected stream error: {body_error}"
+        body_text.contains("\"code\":\"stream_idle_timeout\""),
+        "stream idle timeout should include a machine-readable code, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("\"category\":\"stream_idle_timeout\""),
+        "stream idle timeout should include a searchable category, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("data: [DONE]"),
+        "stream idle timeout should terminate the SSE stream, got: {body_text}"
     );
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
@@ -5348,7 +5634,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
             let stream = stream::once(async {
                 tokio::time::sleep(Duration::from_millis(2_200)).await;
                 Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n",
+                    b"data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 ))
             });
             (StatusCode::OK, headers, Body::from_stream(stream))
@@ -5614,31 +5900,25 @@ async fn stream_max_duration_interrupts_hung_stream() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let mut body = response.into_body();
-    let body_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match body.frame().await {
-                Some(Ok(frame)) => {
-                    let bytes = frame.into_data().expect("expected data frame");
-                    if bytes
-                        .windows(b"[DONE]".len())
-                        .any(|window| window == b"[DONE]")
-                    {
-                        return Ok::<(), String>(());
-                    }
-                }
-                Some(Err(error)) => return Err(error.to_string()),
-                None => return Err("stream unexpectedly ended before timing out".to_string()),
-            }
-        }
-    })
+    let body = tokio::time::timeout(
+        Duration::from_secs(3),
+        to_bytes(response.into_body(), usize::MAX),
+    )
     .await
-    .expect("stream did not time out in time");
-
-    let body_error = body_result.expect_err("stream unexpectedly completed before timing out");
+    .expect("stream did not time out in time")
+    .expect("stream max duration should be emitted as a structured SSE frame");
+    let body_text = String::from_utf8_lossy(&body);
     assert!(
-        body_error.contains("max duration"),
-        "unexpected stream error: {body_error}"
+        body_text.contains("\"code\":\"stream_max_duration\""),
+        "stream max duration should include a machine-readable code, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("\"category\":\"stream_max_duration\""),
+        "stream max duration should include a searchable category, got: {body_text}"
+    );
+    assert!(
+        body_text.contains("data: [DONE]"),
+        "stream max duration should terminate the SSE stream, got: {body_text}"
     );
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;

@@ -83,7 +83,7 @@ fn gateway_state_example_exposes_live_model_ids_exactly() {
 fn app_config_defaults_stream_watchdog_settings() {
     let config = AppConfig::default();
 
-    assert_eq!(config.upstream_stream_keepalive_interval_seconds, 10);
+    assert_eq!(config.upstream_stream_keepalive_interval_seconds, 3);
     assert_eq!(config.upstream_stream_idle_timeout_seconds, 1_800);
     assert_eq!(config.upstream_stream_max_duration_seconds, 86_400);
     assert_eq!(config.model_probe_refresh_interval_seconds, 15);

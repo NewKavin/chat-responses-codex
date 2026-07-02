@@ -588,6 +588,7 @@ impl AppState {
                         slug: model.clone(),
                         context_limit: cfg.context_limit,
                         output_reserve: cfg.output_reserve,
+                        max_output_tokens: 0,
                         context_group: cfg.context_group.clone(),
                     });
             }

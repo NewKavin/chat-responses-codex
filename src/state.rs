@@ -1102,7 +1102,7 @@ impl AppState {
     pub async fn reserve_downstream_request(
         &self,
         downstream: &DownstreamConfig,
-    ) -> Result<(), u64> {
+    ) -> Result<(), DownstreamAdmissionRejection> {
         if !downstream.rate_limit_enabled {
             return Ok(());
         }
@@ -1139,7 +1139,11 @@ impl AppState {
                 .find(|timestamp| *timestamp >= minute_start)
                 .unwrap_or(now);
             let retry_after = oldest.saturating_add(60).saturating_sub(now).max(1);
-            return Err(retry_after);
+            return Err(DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+                retry_after_seconds: retry_after,
+                limit: downstream.per_minute_limit,
+                used: minute_count as u32,
+            });
         }
 
         if let Some(request_quota_window_seconds) = request_quota_window_seconds {
@@ -1159,7 +1163,12 @@ impl AppState {
                     .saturating_add(request_quota_window_seconds)
                     .saturating_sub(now)
                     .max(1);
-                return Err(retry_after);
+                return Err(DownstreamAdmissionRejection::RequestQuotaExceeded {
+                    retry_after_seconds: retry_after,
+                    limit: request_quota_requests,
+                    used: quota_count as u32,
+                    window_seconds: request_quota_window_seconds,
+                });
             }
         }
 
@@ -1179,8 +1188,6 @@ impl AppState {
                 }
             }
 
-            let mut retry_after_seconds = 0u64;
-
             if let Some(daily_token_limit) = downstream.daily_token_limit {
                 let daily_used = token_window
                     .iter()
@@ -1193,15 +1200,20 @@ impl AppState {
                     .map(|event| event.tokens)
                     .sum::<u64>();
                 if daily_used >= daily_token_limit.max(1) {
-                    retry_after_seconds =
-                        retry_after_seconds.max(downstream_token_retry_after_seconds(
-                            token_window,
-                            now,
-                            DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
-                            daily_used
-                                .saturating_add(1)
-                                .saturating_sub(daily_token_limit.max(1)),
-                        ));
+                    let retry_after_seconds = downstream_token_retry_after_seconds(
+                        token_window,
+                        now,
+                        DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
+                        daily_used
+                            .saturating_add(1)
+                            .saturating_sub(daily_token_limit.max(1)),
+                    )
+                    .max(1);
+                    return Err(DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                        retry_after_seconds,
+                        limit: daily_token_limit.max(1),
+                        used: daily_used,
+                    });
                 }
             }
 
@@ -1217,20 +1229,21 @@ impl AppState {
                     .map(|event| event.tokens)
                     .sum::<u64>();
                 if monthly_used >= monthly_token_limit.max(1) {
-                    retry_after_seconds =
-                        retry_after_seconds.max(downstream_token_retry_after_seconds(
-                            token_window,
-                            now,
-                            DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
-                            monthly_used
-                                .saturating_add(1)
-                                .saturating_sub(monthly_token_limit.max(1)),
-                        ));
+                    let retry_after_seconds = downstream_token_retry_after_seconds(
+                        token_window,
+                        now,
+                        DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
+                        monthly_used
+                            .saturating_add(1)
+                            .saturating_sub(monthly_token_limit.max(1)),
+                    )
+                    .max(1);
+                    return Err(DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
+                        retry_after_seconds,
+                        limit: monthly_token_limit.max(1),
+                        used: monthly_used,
+                    });
                 }
-            }
-
-            if retry_after_seconds > 0 {
-                return Err(retry_after_seconds.max(1));
             }
         }
 
@@ -1719,6 +1732,54 @@ struct RoutingAffinityEntry {
 pub(crate) struct QuotaEvent {
     pub(crate) created_at: u64,
     pub(crate) cost: f64,
+}
+
+#[derive(Debug, Clone)]
+pub enum DownstreamAdmissionRejection {
+    PerMinuteLimitExceeded {
+        retry_after_seconds: u64,
+        limit: u32,
+        used: u32,
+    },
+    RequestQuotaExceeded {
+        retry_after_seconds: u64,
+        limit: u32,
+        used: u32,
+        window_seconds: u64,
+    },
+    DailyTokenQuotaExceeded {
+        retry_after_seconds: u64,
+        limit: u64,
+        used: u64,
+    },
+    MonthlyTokenQuotaExceeded {
+        retry_after_seconds: u64,
+        limit: u64,
+        used: u64,
+    },
+}
+
+impl DownstreamAdmissionRejection {
+    pub fn retry_after_seconds(&self) -> u64 {
+        match self {
+            DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+                retry_after_seconds,
+                ..
+            }
+            | DownstreamAdmissionRejection::RequestQuotaExceeded {
+                retry_after_seconds,
+                ..
+            }
+            | DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                retry_after_seconds,
+                ..
+            }
+            | DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
+                retry_after_seconds,
+                ..
+            } => (*retry_after_seconds).max(1),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

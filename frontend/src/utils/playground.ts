@@ -242,6 +242,30 @@ export const extractChatCompletionUsage = (body: unknown) => {
   }
 }
 
+export type PlaygroundStreamPhase = 'connecting' | 'waiting' | 'thinking' | 'generating'
+
+export const formatPlaygroundStreamStatus = ({
+  phase,
+  elapsedSeconds,
+  keepaliveCount
+}: {
+  phase: PlaygroundStreamPhase
+  elapsedSeconds: number
+  keepaliveCount: number
+}): string => {
+  const seconds = Math.max(0, Math.floor(elapsedSeconds))
+  if (phase === 'thinking') {
+    return `思考中 ${seconds}s`
+  }
+  if (phase === 'generating') {
+    return `生成中 ${seconds}s`
+  }
+  if (phase === 'waiting' || keepaliveCount > 0) {
+    return `已连接，等待模型首个输出 ${seconds}s`
+  }
+  return `正在连接模型 ${seconds}s`
+}
+
 export interface StreamChunk {
   content: string
   reasoningContent?: string
@@ -250,12 +274,25 @@ export interface StreamChunk {
     completion_tokens: number
     total_tokens: number
   }
+  keepalive?: boolean
+  errorMessage?: string
+  errorType?: string
+  errorCode?: string
+  errorCategory?: string
   done: boolean
 }
 
 export const parseSSELine = (line: string): StreamChunk | null => {
   const trimmed = line.trim()
-  if (!trimmed || !trimmed.startsWith('data:')) {
+  if (!trimmed) {
+    return null
+  }
+
+  if (trimmed.startsWith(':')) {
+    return { content: '', keepalive: true, done: false }
+  }
+
+  if (!trimmed.startsWith('data:')) {
     return null
   }
 
@@ -266,6 +303,41 @@ export const parseSSELine = (line: string): StreamChunk | null => {
 
   try {
     const parsed = JSON.parse(data)
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Object.keys(parsed).length === 0
+    ) {
+      return { content: '', keepalive: true, done: false }
+    }
+
+    const error = parsed?.error
+    if (typeof error === 'string' && error.trim()) {
+      return { content: '', errorMessage: error.trim(), done: false }
+    }
+    if (error && typeof error === 'object') {
+      const message = typeof error.message === 'string' ? error.message.trim() : ''
+      const type = typeof error.type === 'string' ? error.type.trim() : undefined
+      const code = typeof error.code === 'string' ? error.code.trim() : undefined
+      const category =
+        typeof error.category === 'string'
+          ? error.category.trim()
+          : typeof parsed.category === 'string'
+            ? parsed.category.trim()
+            : undefined
+      if (message) {
+        return {
+          content: '',
+          errorMessage: message,
+          errorType: type || undefined,
+          errorCode: code || undefined,
+          errorCategory: category || undefined,
+          done: false
+        }
+      }
+    }
+
     const delta = parsed.choices?.[0]?.delta
     const content = typeof delta?.content === 'string' ? delta.content : ''
     const reasoningContent =

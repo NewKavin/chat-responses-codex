@@ -33,11 +33,13 @@ fn create_test_state() -> AppState {
                 slug: "glm-4.1-mini".to_string(),
                 context_limit: 8192,
                 output_reserve: 2048,
+                max_output_tokens: 0,
                 context_group: "glm".to_string(),
             }],
             default_model_context: Some(DefaultModelContextConfig {
                 context_limit: 4096,
                 output_reserve: 1024,
+                max_output_tokens: 0,
                 context_group: "glm".to_string(),
             }),
         },

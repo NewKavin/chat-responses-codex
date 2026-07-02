@@ -296,7 +296,7 @@ pub fn chat_response_to_responses_payload(input: &Value) -> Result<Value, Protoc
     output.insert("model".into(), Value::String(model.to_string()));
     output.insert("output".into(), Value::Array(output_items));
     if let Some(usage) = input.get("usage") {
-        output.insert("usage".into(), usage.clone());
+        output.insert("usage".into(), chat_usage_to_responses_usage(usage));
     }
     Ok(Value::Object(output))
 }
@@ -370,16 +370,77 @@ pub fn responses_response_to_chat_payload(input: &Value) -> Result<Value, Protoc
         }]),
     );
     if let Some(usage) = input.get("usage") {
-        output.insert(
-            "usage".into(),
-            json!({
-                "prompt_tokens": usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
-                "completion_tokens": usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
-                "total_tokens": usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(0)
-            }),
-        );
+        output.insert("usage".into(), responses_usage_to_chat_usage(usage));
     }
     Ok(Value::Object(output))
+}
+
+fn usage_token_count(usage: &Value, primary: &str, fallback: &str) -> u64 {
+    usage
+        .get(primary)
+        .or_else(|| usage.get(fallback))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn usage_total_tokens(usage: &Value, left: u64, right: u64) -> u64 {
+    usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| left.saturating_add(right))
+}
+
+fn chat_usage_to_responses_usage(usage: &Value) -> Value {
+    let input_tokens = usage_token_count(usage, "prompt_tokens", "input_tokens");
+    let output_tokens = usage_token_count(usage, "completion_tokens", "output_tokens");
+    let mut output = Map::new();
+    output.insert("input_tokens".into(), Value::Number(input_tokens.into()));
+    output.insert("output_tokens".into(), Value::Number(output_tokens.into()));
+    output.insert(
+        "total_tokens".into(),
+        Value::Number(usage_total_tokens(usage, input_tokens, output_tokens).into()),
+    );
+    if let Some(details) = usage
+        .get("input_tokens_details")
+        .or_else(|| usage.get("prompt_tokens_details"))
+    {
+        output.insert("input_tokens_details".into(), details.clone());
+    }
+    if let Some(details) = usage
+        .get("output_tokens_details")
+        .or_else(|| usage.get("completion_tokens_details"))
+    {
+        output.insert("output_tokens_details".into(), details.clone());
+    }
+    Value::Object(output)
+}
+
+fn responses_usage_to_chat_usage(usage: &Value) -> Value {
+    let prompt_tokens = usage_token_count(usage, "input_tokens", "prompt_tokens");
+    let completion_tokens = usage_token_count(usage, "output_tokens", "completion_tokens");
+    let mut output = Map::new();
+    output.insert("prompt_tokens".into(), Value::Number(prompt_tokens.into()));
+    output.insert(
+        "completion_tokens".into(),
+        Value::Number(completion_tokens.into()),
+    );
+    output.insert(
+        "total_tokens".into(),
+        Value::Number(usage_total_tokens(usage, prompt_tokens, completion_tokens).into()),
+    );
+    if let Some(details) = usage
+        .get("prompt_tokens_details")
+        .or_else(|| usage.get("input_tokens_details"))
+    {
+        output.insert("prompt_tokens_details".into(), details.clone());
+    }
+    if let Some(details) = usage
+        .get("completion_tokens_details")
+        .or_else(|| usage.get("output_tokens_details"))
+    {
+        output.insert("completion_tokens_details".into(), details.clone());
+    }
+    Value::Object(output)
 }
 
 fn string_field<'a>(value: &'a Value, field: &'static str) -> Result<&'a str, ProtocolError> {
@@ -1398,6 +1459,7 @@ struct ChatToResponsesState {
     text_item_id: Option<String>,
     text_item_added_emitted: bool,
     text_item_done_emitted: bool,
+    usage: Option<Value>,
     text: String,
     tool_calls: BTreeMap<usize, ChatToolCallState>,
 }
@@ -1424,6 +1486,7 @@ impl ChatToResponsesState {
             text_item_id: None,
             text_item_added_emitted: false,
             text_item_done_emitted: false,
+            usage: None,
             text: String::new(),
             tool_calls: BTreeMap::new(),
         }
@@ -1443,6 +1506,9 @@ impl ChatToResponsesState {
         };
 
         self.initialize_metadata(event);
+        if let Some(usage) = event.get("usage") {
+            self.usage = Some(chat_usage_to_responses_usage(usage));
+        }
         let mut output = Vec::new();
         let delta = choice.get("delta").unwrap_or(&Value::Null);
 
@@ -1519,6 +1585,7 @@ impl ChatToResponsesState {
             created_at,
             &model,
             self.completed_output_items(),
+            self.usage.clone(),
             self.next_sequence(),
         ));
         self.completed_emitted = true;
@@ -2440,19 +2507,24 @@ fn make_response_completed_event(
     created_at: u64,
     model: &str,
     output: Value,
+    usage: Option<Value>,
     sequence_number: u64,
 ) -> Value {
+    let mut response = Map::new();
+    response.insert("id".into(), Value::String(response_id.to_string()));
+    response.insert("object".into(), Value::String("response".to_string()));
+    response.insert("created_at".into(), Value::Number(created_at.into()));
+    response.insert("status".into(), Value::String("completed".to_string()));
+    response.insert("model".into(), Value::String(model.to_string()));
+    response.insert("output".into(), output);
+    if let Some(usage) = usage {
+        response.insert("usage".into(), usage);
+    }
+
     json!({
         "type": "response.completed",
         "sequence_number": sequence_number,
-        "response": {
-            "id": response_id,
-            "object": "response",
-            "created_at": created_at,
-            "status": "completed",
-            "model": model,
-            "output": output
-        }
+        "response": Value::Object(response)
     })
 }
 

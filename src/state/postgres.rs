@@ -65,7 +65,8 @@ impl PostgresStateStore {
                  COALESCE(request_quota_requests, request_quota_5h, 600), \
                  requests_per_minute, max_concurrency, priority, premium_only, \
                  protect_premium_quota, active, failure_count, \
-                 auto_managed, managed_source, last_synced_at, api_keys, api_key_models \
+                 auto_managed, managed_source, last_synced_at, api_keys, api_key_models, \
+                 strip_nonstandard_chat_fields \
                  FROM upstreams ORDER BY id",
                 &[],
             )
@@ -109,6 +110,7 @@ impl PostgresStateStore {
                 auto_managed: row.get::<_, bool>(17),
                 managed_source: row.get::<_, Option<String>>(18),
                 last_synced_at: row.get::<_, i64>(19) as u64,
+                strip_nonstandard_chat_fields: row.get::<_, bool>(22),
             });
         }
 
@@ -710,6 +712,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &(upstream.last_synced_at as i64),
             &api_keys_json,
             &api_key_models_json,
+            &upstream.strip_nonstandard_chat_fields,
         ];
         tx.execute(
             "INSERT INTO upstreams (
@@ -717,12 +720,13 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 request_quota_5h, default_model_context, request_quota_window_hours, request_quota_requests,
                 requests_per_minute, max_concurrency, priority, premium_only,
                 protect_premium_quota, active, failure_count,
-                auto_managed, managed_source, last_synced_at, api_keys, api_key_models
+                auto_managed, managed_source, last_synced_at, api_keys, api_key_models,
+                strip_nonstandard_chat_fields
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23
+                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -746,7 +750,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 managed_source = EXCLUDED.managed_source,
                 last_synced_at = EXCLUDED.last_synced_at,
                 api_keys = EXCLUDED.api_keys,
-                api_key_models = EXCLUDED.api_key_models",
+                api_key_models = EXCLUDED.api_key_models,
+                strip_nonstandard_chat_fields = EXCLUDED.strip_nonstandard_chat_fields",
             params,
         )
         .await
@@ -1252,6 +1257,8 @@ ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS api_keys TEXT NULL;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS api_key_models TEXT NULL;
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS strip_nonstandard_chat_fields BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS downstreams (
     id TEXT PRIMARY KEY,
