@@ -1,14 +1,32 @@
 import type { ModelProbeChannel, ModelProbeModel } from '@/types'
 
+export type ProbeStatusFilter = 'all' | 'healthy' | 'degraded' | 'offline'
+
+export interface ProbeChannelFilter {
+  query?: string
+  status?: ProbeStatusFilter
+}
+
 const statusRank = (status: ModelProbeChannel['status']) => {
   if (status === 'healthy') return 0
   if (status === 'degraded') return 1
   return 2
 }
 
-export const sortProbeChannels = (channels: ModelProbeChannel[]) =>
+const anomalyStatusRank = (status: ModelProbeChannel['status']) => {
+  if (status === 'offline') return 0
+  if (status === 'degraded') return 1
+  if (status === 'healthy') return 2
+  return 3
+}
+
+export const sortProbeChannels = (
+  channels: ModelProbeChannel[],
+  options: { anomalyFirst?: boolean } = {}
+) =>
   [...channels].sort((left, right) => {
-    const statusOrder = statusRank(left.status) - statusRank(right.status)
+    const rankStatus = options.anomalyFirst ? anomalyStatusRank : statusRank
+    const statusOrder = rankStatus(left.status) - rankStatus(right.status)
     if (statusOrder !== 0) return statusOrder
     return (
       left.upstream_name.localeCompare(right.upstream_name) ||
@@ -51,3 +69,39 @@ export const formatProbeStatusLabel = (status: ModelProbeChannel['status']) => {
   if (status === 'degraded') return '降级'
   return '离线'
 }
+
+export const filterProbeChannels = (
+  channels: ModelProbeChannel[],
+  { query = '', status = 'all' }: ProbeChannelFilter
+) => {
+  const normalizedQuery = query.trim().toLowerCase()
+
+  return channels.filter(channel => {
+    if (status !== 'all' && channel.status !== status) {
+      return false
+    }
+
+    if (!normalizedQuery) {
+      return true
+    }
+
+    const haystack = [
+      channel.upstream_id,
+      channel.upstream_name,
+      channel.key_prefix,
+      ...channel.models
+    ].join(' ').toLowerCase()
+    return haystack.includes(normalizedQuery)
+  })
+}
+
+export const buildProbeChartItems = (summary: {
+  healthy_channels: number
+  degraded_channels: number
+  offline_channels: number
+}) =>
+  [
+    { name: '健康', value: summary.healthy_channels },
+    { name: '降级', value: summary.degraded_channels },
+    { name: '离线', value: summary.offline_channels }
+  ].filter(item => item.value > 0)

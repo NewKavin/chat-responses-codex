@@ -242,6 +242,38 @@ export const extractChatCompletionUsage = (body: unknown) => {
   }
 }
 
+type UsageLike = {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+} | null | undefined
+
+export const formatPlaygroundUsageText = (usage: UsageLike) => {
+  if (!usage) return undefined
+  return `tokens: in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens}`
+}
+
+export const formatPlaygroundCompletionMeta = ({
+  model,
+  elapsedSeconds,
+  firstOutputSeconds,
+  usageText
+}: {
+  model: string
+  elapsedSeconds: number
+  firstOutputSeconds?: number
+  usageText?: string
+}) => {
+  const parts = [`模型 ${model}`, `总耗时 ${Math.max(0, Math.floor(elapsedSeconds))}s`]
+  if (typeof firstOutputSeconds === 'number') {
+    parts.push(`首包 ${Math.max(0, Math.floor(firstOutputSeconds))}s`)
+  }
+  if (usageText) {
+    parts.push(usageText)
+  }
+  return parts.join(' · ')
+}
+
 export type PlaygroundStreamPhase = 'connecting' | 'waiting' | 'thinking' | 'generating'
 
 export const formatPlaygroundStreamStatus = ({

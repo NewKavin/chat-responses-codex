@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlaygroundChatPayload,
   extractChatCompletionText,
+  formatPlaygroundCompletionMeta,
   formatPlaygroundStreamStatus,
+  formatPlaygroundUsageText,
   parseGatewayModels,
   parseSSELine,
   type UploadedFileContext
@@ -260,5 +262,26 @@ describe('parseSSELine', () => {
     const chunk = parseSSELine(line)
     expect(chunk!.content).toBe('hi')
     expect(chunk!.reasoningContent).toBeUndefined()
+  })
+})
+
+describe('playground display helpers', () => {
+  it('formats usage and elapsed metadata', () => {
+    expect(
+      formatPlaygroundUsageText({
+        prompt_tokens: 10,
+        completion_tokens: 20,
+        total_tokens: 30
+      })
+    ).toBe('tokens: in=10 out=20 total=30')
+
+    expect(
+      formatPlaygroundCompletionMeta({
+        model: 'glm-5.1',
+        elapsedSeconds: 12,
+        firstOutputSeconds: 5,
+        usageText: 'tokens: in=10 out=20 total=30'
+      })
+    ).toBe('模型 glm-5.1 · 总耗时 12s · 首包 5s · tokens: in=10 out=20 total=30')
   })
 })
