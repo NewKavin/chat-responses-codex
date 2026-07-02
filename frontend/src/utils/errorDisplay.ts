@@ -47,16 +47,33 @@ const extractOpenAiErrorParts = (body: unknown): ReadableErrorParts | undefined 
     return undefined
   }
 
-  const error = (body as { error?: unknown }).error
-  if (!error || typeof error !== 'object') {
-    return undefined
+  const payload = body as {
+    error?: unknown
+    message?: unknown
+    detail?: unknown
+    code?: unknown
+    category?: unknown
+    type?: unknown
+  }
+  const error = payload.error
+  if (typeof error === 'string') {
+    return { message: readString(error) }
+  }
+
+  if (error && typeof error === 'object') {
+    return {
+      message: readString((error as { message?: unknown }).message),
+      code: readString((error as { code?: unknown }).code),
+      category: readString((error as { category?: unknown }).category),
+      type: readString((error as { type?: unknown }).type)
+    }
   }
 
   return {
-    message: readString((error as { message?: unknown }).message),
-    code: readString((error as { code?: unknown }).code),
-    category: readString((error as { category?: unknown }).category),
-    type: readString((error as { type?: unknown }).type)
+    message: readString(payload.message) ?? readString(payload.detail),
+    code: readString(payload.code),
+    category: readString(payload.category),
+    type: readString(payload.type)
   }
 }
 

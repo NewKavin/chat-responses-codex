@@ -47,4 +47,14 @@ describe('error category display', () => {
     expect(summary.upstreamFeedback).toBe(1)
     expect(summary.streaming).toBe(1)
   })
+
+  it('counts categorized rows as failures even when status is successful', () => {
+    const summary = buildVisibleLogSummary([
+      { status_code: 200, error_category: 'gateway_daily_token_quota_exceeded' }
+    ])
+
+    expect(summary.failed).toBe(1)
+    expect(summary.gatewayQuota).toBe(1)
+    expect(summary.uncategorized).toBe(0)
+  })
 })

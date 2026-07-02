@@ -115,12 +115,12 @@ export const buildVisibleLogSummary = (
   }
 
   for (const log of logs) {
-    if (log.status_code < 400) {
+    const category = log.error_category?.trim()
+    if (log.status_code < 400 && !category) {
       continue
     }
 
     summary.failed += 1
-    const category = log.error_category?.trim()
     const groupKey = category ? categoryGroupByValue.get(category) : undefined
 
     if (groupKey === 'gateway_access') {
