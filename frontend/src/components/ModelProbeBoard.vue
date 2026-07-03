@@ -121,7 +121,33 @@
         </div>
       </template>
 
+      <div class="channel-toolbar">
+        <el-input
+          v-model="searchQuery"
+          class="channel-toolbar__search"
+          placeholder="搜索上游、Key 或模型"
+          clearable
+          size="small"
+        />
+        <el-radio-group v-model="statusFilter" size="small" class="channel-toolbar__status">
+          <el-radio-button
+            v-for="option in statusFilterOptions"
+            :key="option.value"
+            :label="option.value"
+          >
+            {{ option.label }}
+          </el-radio-button>
+        </el-radio-group>
+        <div class="channel-toolbar__switch">
+          <span>异常优先</span>
+          <el-switch v-model="anomalyFirst" size="small" />
+        </div>
+      </div>
+
       <div class="channel-grid" v-loading="loading">
+        <div v-if="!sortedChannels.length && !loading" class="channel-empty">
+          当前条件下暂无通道
+        </div>
         <article
           v-for="channel in sortedChannels"
           :key="`${channel.upstream_id}-${channel.key_prefix}`"
@@ -183,7 +209,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { loadEcharts } from '@/utils/echartsLoader'
 import type { ModelProbeResponse } from '@/types'
 import type { EChartsType } from 'echarts/core'
-import { groupTopProbeModels, formatProbeStatusLabel, sortProbeChannels } from '@/utils/modelProbeCharts'
+import {
+  buildProbeChartItems,
+  filterProbeChannels,
+  formatProbeStatusLabel,
+  groupTopProbeModels,
+  sortProbeChannels,
+  type ProbeStatusFilter
+} from '@/utils/modelProbeCharts'
 import { normalizeModelProbeRefreshIntervalSeconds } from '@/utils/modelProbePolling'
 
 const props = defineProps<{
@@ -193,6 +226,7 @@ const props = defineProps<{
   subtitle: string
   data: ModelProbeResponse
   loading?: boolean
+  errorMessage?: string
 }>()
 
 const statusChartRef = ref<HTMLElement>()
@@ -200,13 +234,32 @@ const coverageChartRef = ref<HTMLElement>()
 let statusChart: EChartsType | null = null
 let coverageChart: EChartsType | null = null
 
+const searchQuery = ref('')
+const statusFilter = ref<ProbeStatusFilter>('all')
+const anomalyFirst = ref(true)
+
 const loading = computed(() => props.loading ?? false)
-const hasError = computed(() => props.data.summary?.total_channels === 0 && !props.loading)
-const isEmpty = computed(() => props.data.summary?.total_channels === 0 && !props.loading && !hasError.value)
-const errorMessage = computed(() => '模型探测失败，请检查上游配置或稍后重试')
+const hasError = computed(() => Boolean(props.errorMessage && !loading.value))
+const isEmpty = computed(() => !hasError.value && props.data.summary?.total_channels === 0 && !loading.value)
+const errorMessage = computed(() => props.errorMessage || '模型探测失败，请检查上游配置或稍后重试')
 const summary = computed(() => props.data.summary)
-const sortedChannels = computed(() => sortProbeChannels(props.data.channels))
+const sortedChannels = computed(() =>
+  sortProbeChannels(
+    filterProbeChannels(props.data.channels, {
+      query: searchQuery.value,
+      status: statusFilter.value
+    }),
+    { anomalyFirst: anomalyFirst.value }
+  )
+)
 const modelCoverage = computed(() => groupTopProbeModels(props.data.models, 8))
+
+const statusFilterOptions: Array<{ label: string; value: ProbeStatusFilter }> = [
+  { label: '全部', value: 'all' },
+  { label: '健康', value: 'healthy' },
+  { label: '降级', value: 'degraded' },
+  { label: '离线', value: 'offline' }
+]
 
 const refreshedLabel = computed(() => {
   if (!props.data.refreshed_at) return '等待刷新'
@@ -239,21 +292,13 @@ const statusTagType = (status: string) => {
   return 'danger'
 }
 
-const buildStatusSeries = () => {
-  const items = [
-    { name: '健康', value: summary.value.healthy_channels },
-    { name: '降级', value: summary.value.degraded_channels },
-    { name: '离线', value: summary.value.offline_channels }
-  ].filter(item => item.value > 0)
-  return items.length > 0 ? items : [{ name: '暂无数据', value: 1 }]
-}
+const buildStatusSeries = () => buildProbeChartItems(summary.value)
 
 const buildCoverageSeries = () => {
-  const items = modelCoverage.value.items.map(item => ({
+  return modelCoverage.value.items.map(item => ({
     name: item.model,
     value: item.channel_count
   }))
-  return items.length > 0 ? items : [{ name: '暂无模型', value: 1 }]
 }
 
 const renderCharts = async () => {
@@ -263,6 +308,8 @@ const renderCharts = async () => {
     if (!statusChart) {
       statusChart = echarts.init(statusChartRef.value)
     }
+    const series = buildStatusSeries()
+    const hasData = series.length > 0
     statusChart.setOption({
       color: ['#18c29c', '#f59e0b', '#ef4444'],
       tooltip: { trigger: 'item' },
@@ -281,10 +328,24 @@ const renderCharts = async () => {
             formatter: '{b}\n{c}',
             color: '#334155'
           },
-          data: buildStatusSeries()
+          data: series
         }
-      ]
-    })
+      ],
+      graphic: hasData
+        ? []
+        : [
+            {
+              type: 'text',
+              left: 'center',
+              top: 'middle',
+              style: {
+                text: '暂无通道健康数据',
+                fill: '#94a3b8',
+                fontSize: 14
+              }
+            }
+          ]
+    }, { replaceMerge: ['series', 'graphic'] })
   }
 
   if (coverageChartRef.value) {
@@ -292,6 +353,7 @@ const renderCharts = async () => {
       coverageChart = echarts.init(coverageChartRef.value)
     }
     const series = buildCoverageSeries()
+    const hasData = series.length > 0
     coverageChart.setOption({
       grid: { left: 24, right: 20, top: 12, bottom: 24, containLabel: true },
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
@@ -317,8 +379,22 @@ const renderCharts = async () => {
             color: '#2563eb'
           }
         }
-      ]
-    })
+      ],
+      graphic: hasData
+        ? []
+        : [
+            {
+              type: 'text',
+              left: 'center',
+              top: 'middle',
+              style: {
+                text: '暂无模型覆盖数据',
+                fill: '#94a3b8',
+                fontSize: 14
+              }
+            }
+          ]
+    }, { replaceMerge: ['series', 'graphic'] })
   }
 }
 
@@ -498,10 +574,51 @@ onBeforeUnmount(() => {
   height: 360px;
 }
 
+.channel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.channel-toolbar__search {
+  width: 280px;
+  max-width: 100%;
+}
+
+.channel-toolbar__status {
+  flex-shrink: 0;
+}
+
+.channel-toolbar__switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+}
+
 .channel-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+}
+
+.channel-empty {
+  grid-column: 1 / -1;
+  padding: 28px;
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.72);
+  color: #64748b;
+  text-align: center;
+  font-size: 14px;
 }
 
 .channel-card {
@@ -547,6 +664,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  max-height: 108px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .channel-card__model-tag {
@@ -602,6 +722,16 @@ onBeforeUnmount(() => {
 
   .channel-card__metrics {
     grid-template-columns: 1fr;
+  }
+
+  .channel-toolbar {
+    align-items: stretch;
+  }
+
+  .channel-toolbar__search,
+  .channel-toolbar__status,
+  .channel-toolbar__switch {
+    width: 100%;
   }
 
   .probe-chart,

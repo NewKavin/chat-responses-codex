@@ -7,6 +7,7 @@
       subtitle="仅展示当前门户可见范围内的通道与模型快照。"
       :data="probeData"
       :loading="loading"
+      :error-message="loadError"
     />
   </div>
 </template>
@@ -23,6 +24,7 @@ import {
 } from '@/utils/modelProbePolling'
 
 const loading = ref(false)
+const loadError = ref('')
 const probeData = ref<ModelProbeResponse>({
   refreshed_at: 0,
   refresh_interval_seconds: DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS,
@@ -59,11 +61,13 @@ const scheduleRefresh = () => {
 const loadData = async () => {
   if (loading.value || isUnmounted) return
   try {
+    loadError.value = ''
     loading.value = true
     const { data } = await portalApi.getModelProbe()
     probeData.value = data
   } catch (error: any) {
     const errorMsg = error?.response?.data?.error?.message || '加载模型探测失败'
+    loadError.value = errorMsg
     ElMessage.error(errorMsg)
     // 保持原有数据，但标记为可能需要刷新
   } finally {

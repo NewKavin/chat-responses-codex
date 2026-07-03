@@ -72,6 +72,59 @@
       </div>
     </div>
 
+    <el-row :gutter="20" class="charts-grid model-health-grid">
+      <el-col :xs="24">
+        <el-card shadow="hover" class="chart-card model-health-card" v-loading="modelProbeLoading">
+          <template #header>
+            <div class="card-header card-header--trend">
+              <div>
+                <h2>模型探测健康</h2>
+                <p>通道模型探测快照，不影响主控制台数据加载。</p>
+              </div>
+              <div class="model-health-actions">
+                <el-tag effect="plain">轮询 {{ modelProbeRefreshIntervalLabel }}</el-tag>
+                <el-button :icon="View" type="primary" plain size="small" @click="openModelProbe">
+                  查看探测
+                </el-button>
+              </div>
+            </div>
+          </template>
+
+          <div class="chart-summary model-health-summary">
+            <div class="summary-chip summary-chip--success">
+              <strong>{{ modelProbeSummary.healthy_channels }}</strong>
+              <span>健康通道</span>
+            </div>
+            <div class="summary-chip summary-chip--warning">
+              <strong>{{ modelProbeSummary.degraded_channels }}</strong>
+              <span>降级通道</span>
+            </div>
+            <div class="summary-chip summary-chip--danger">
+              <strong>{{ modelProbeSummary.offline_channels }}</strong>
+              <span>离线通道</span>
+            </div>
+            <div class="summary-chip">
+              <strong>{{ modelProbeSummary.average_latency_ms }}ms</strong>
+              <span>平均探测耗时</span>
+            </div>
+            <div class="summary-chip summary-chip--wide">
+              <strong>{{ modelProbeRefreshedLabel }}</strong>
+              <span>最近探测</span>
+            </div>
+          </div>
+
+          <el-alert
+            v-if="modelProbeError"
+            :title="modelProbeError"
+            type="error"
+            show-icon
+            :closable="false"
+            class="model-health-alert"
+          />
+        </el-card>
+      </el-col>
+    </el-row>
+
     <el-row :gutter="20" class="charts-grid">
       <el-col :xs="24">
         <el-card shadow="hover" class="chart-card chart-card--trend">
@@ -241,20 +294,25 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, View } from '@element-plus/icons-vue'
 import { adminApi } from '@/api/admin'
-import type { DashboardAnalyticsRange, DashboardBreakdownItem, DashboardData } from '@/types'
+import type { DashboardAnalyticsRange, DashboardBreakdownItem, DashboardData, ModelProbeResponse } from '@/types'
 import { loadEcharts } from '@/utils/echartsLoader'
 import { buildUserAgentChartSummary } from '@/utils/userAgentChart'
 import { formatCompactNumber } from '@/utils/numberFormat'
 import { formatPercentageLabel } from '@/utils/percentage'
 import { groupTopBreakdownItems } from '@/utils/dashboardCharts'
+import { DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS } from '@/utils/modelProbePolling'
 import type { EChartsType } from 'echarts/core'
 
 type ChartRange = '1d' | '7d' | '30d'
 
+const router = useRouter()
 const loading = ref(false)
+const modelProbeLoading = ref(false)
+const modelProbeError = ref('')
 const chartRange = ref<ChartRange>('7d')
 const lastRefreshedAt = ref(0)
 
@@ -284,6 +342,23 @@ const analytics = ref<DashboardAnalyticsRange>({
   model_usage: [],
   downstream_usage: []
 })
+
+const createEmptyModelProbe = (): ModelProbeResponse => ({
+  refreshed_at: 0,
+  refresh_interval_seconds: DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS,
+  summary: {
+    total_channels: 0,
+    healthy_channels: 0,
+    offline_channels: 0,
+    degraded_channels: 0,
+    total_models: 0,
+    average_latency_ms: 0
+  },
+  channels: [],
+  models: []
+})
+
+const modelProbe = ref<ModelProbeResponse>(createEmptyModelProbe())
 
 const trendChartRef = ref<HTMLElement>()
 const modelUsageChartRef = ref<HTMLElement>()
@@ -319,7 +394,24 @@ const refreshedLabel = computed(() => {
   })
 })
 
+const modelProbeRefreshedLabel = computed(() => {
+  if (!modelProbe.value.refreshed_at) return '等待刷新'
+  return new Date(modelProbe.value.refreshed_at * 1000).toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
+})
+
+const modelProbeRefreshIntervalLabel = computed(
+  () => `${modelProbe.value.refresh_interval_seconds || DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS}s`
+)
+
 const chartSummary = computed(() => analytics.value.summary)
+const modelProbeSummary = computed(() => modelProbe.value.summary)
 
 const modelUsage = computed(() => groupTopBreakdownItems(analytics.value.model_usage, 7))
 const downstreamUsage = computed(() => groupTopBreakdownItems(analytics.value.downstream_usage, 8))
@@ -701,6 +793,21 @@ const initCharts = async () => {
   }
 }
 
+const loadModelProbe = async () => {
+  if (modelProbeLoading.value) return
+
+  try {
+    modelProbeLoading.value = true
+    modelProbeError.value = ''
+    const response = await adminApi.getModelProbe()
+    modelProbe.value = response.data
+  } catch (error: any) {
+    modelProbeError.value = error?.response?.data?.error?.message || '加载模型探测失败'
+  } finally {
+    modelProbeLoading.value = false
+  }
+}
+
 const loadDashboard = async () => {
   try {
     loading.value = true
@@ -710,6 +817,7 @@ const loadDashboard = async () => {
     lastRefreshedAt.value = Date.now()
     await nextTick()
     renderCharts()
+    void loadModelProbe()
   } catch (error) {
     ElMessage.error('加载数据失败')
   } finally {
@@ -720,6 +828,10 @@ const loadDashboard = async () => {
 const handleRangeChange = (value: ChartRange) => {
   chartRange.value = value
   loadDashboard()
+}
+
+const openModelProbe = () => {
+  void router.push('/admin/model-probe')
 }
 
 const handleResize = () => {
@@ -922,6 +1034,45 @@ onUnmounted(() => {
   margin-top: 18px;
 }
 
+.model-health-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.model-health-summary {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-bottom: 0;
+}
+
+.model-health-card .summary-chip strong {
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.summary-chip--success {
+  border-color: rgba(20, 184, 166, 0.24);
+}
+
+.summary-chip--warning {
+  border-color: rgba(245, 158, 11, 0.26);
+}
+
+.summary-chip--danger {
+  border-color: rgba(239, 68, 68, 0.24);
+}
+
+.summary-chip--wide {
+  min-width: 210px;
+}
+
+.model-health-alert {
+  margin-top: 14px;
+  border-radius: 12px;
+}
+
 .chart-card {
   border: none;
   border-radius: 22px;
@@ -1037,6 +1188,11 @@ onUnmounted(() => {
   .hero-panel__chips,
   .hero-panel__controls {
     justify-content: flex-start;
+  }
+
+  .model-health-actions {
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .chart--trend,
