@@ -1066,6 +1066,173 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     assert_eq!(log.error_message.as_deref(), None);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn native_responses_stream_keepalive_is_sse_comment_for_codex_clients() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(|_body: String| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            let stream = stream::once(async {
+                tokio::time::sleep(Duration::from_millis(2_200)).await;
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"gpt-4.1-mini\",\"output\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"OK\"}\n\n",
+                        "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"OK\"}\n\n",
+                        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\",\"annotations\":[]}]}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"created_at\":1,\"model\":\"gpt-4.1-mini\",\"output\":[{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\",\"annotations\":[]}]}]}}\n\n",
+                        "data: [DONE]\n\n",
+                    )
+                    .as_bytes(),
+                ))
+            });
+            (StatusCode::OK, headers, Body::from_stream(stream))
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let mut config = AppConfig::default();
+    config.upstream_stream_keepalive_interval_seconds = 1;
+    config.upstream_stream_idle_timeout_seconds = 2;
+    config.upstream_stream_max_duration_seconds = 10;
+    config.upstream_response_header_timeout_seconds = 1;
+    config.upstream_connect_timeout_seconds = 1;
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        config,
+    );
+
+    let app = build_router(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "input": "Hello"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let keepalive_bytes = Bytes::from_static(b": keepalive\n\n");
+
+    let first_frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("expected the first keepalive frame before the delayed Responses chunk")
+        .expect("expected first keepalive frame")
+        .expect("expected data frame");
+    let first_bytes = first_frame.into_data().expect("expected keepalive bytes");
+    assert_eq!(first_bytes, keepalive_bytes);
+    assert!(
+        !first_bytes.starts_with(b"data:"),
+        "Codex Responses keepalive must be an SSE comment, not a fake data event"
+    );
+
+    let mut saw_real_chunk = false;
+    let mut saw_stream_end = false;
+    for _ in 0..4 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("timed out waiting for the upstream Responses chunk or a keepalive");
+
+        match frame {
+            Some(Ok(frame)) => {
+                let bytes = frame.into_data().expect("expected stream bytes");
+                if bytes != keepalive_bytes {
+                    saw_real_chunk = true;
+                }
+            }
+            Some(Err(error)) => panic!("unexpected stream error: {error}"),
+            None => {
+                saw_stream_end = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        saw_real_chunk,
+        "expected the delayed upstream Responses chunk to complete the stream"
+    );
+    assert!(
+        saw_stream_end,
+        "expected the Responses stream to close cleanly after the upstream chunk"
+    );
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+}
+
 #[tokio::test]
 async fn stream_max_duration_interrupts_hung_stream() {
     let tempdir = tempdir().unwrap();

@@ -1603,6 +1603,131 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn claude_messages_stream_preserves_upstream_sse_comment_keepalive() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|_request: Request<Body>| async move {
+            let chunks = vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\n")),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"id\":\"chatcmpl-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"claude-compat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n",
+                )),
+                Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+            ];
+
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(stream::iter(chunks)),
+            )
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["claude-compat".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["claude-compat".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", downstream_key.plaintext)
+                .header("anthropic-version", "2023-06-01")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "claude-compat",
+                        "max_tokens": 64,
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    let mut body = response.into_body();
+    let first_frame = body
+        .frame()
+        .await
+        .expect("expected first Claude SSE frame")
+        .expect("expected first Claude SSE frame without body error");
+    let first_bytes = first_frame
+        .into_data()
+        .expect("expected first Claude SSE frame bytes");
+    assert_eq!(first_bytes, Bytes::from_static(b": keepalive\n\n"));
+    assert!(
+        !first_bytes.starts_with(b"data:"),
+        "Claude keepalive must stay at the SSE comment layer"
+    );
+
+    let rest = to_bytes(body, usize::MAX).await.unwrap();
+    let rest_text = String::from_utf8(rest.to_vec()).unwrap();
+    assert!(rest_text.contains("event: message_start"));
+    assert!(rest_text.contains("event: content_block_delta"));
+    assert!(rest_text.contains("event: message_stop"));
+}
+
 /// P1: Claude Messages stop_sequences should be translated to Chat Completions
 /// stop array. Currently the field is silently dropped.
 #[tokio::test]
