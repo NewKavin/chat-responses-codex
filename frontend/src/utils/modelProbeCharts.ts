@@ -17,7 +17,7 @@ const anomalyStatusRank = (status: ModelProbeChannel['status']) => {
   if (status === 'offline') return 0
   if (status === 'degraded') return 1
   if (status === 'healthy') return 2
-  return 3
+  return 1.5
 }
 
 export const sortProbeChannels = (

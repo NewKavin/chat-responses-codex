@@ -99,6 +99,35 @@ describe('model probe filtering', () => {
     expect(sortProbeChannels(channels, { anomalyFirst: true }).map(channel => channel.upstream_name)).toEqual(['Beta', 'Alpha'])
   })
 
+  it('treats unknown statuses as anomalies before healthy channels', () => {
+    const sorted = sortProbeChannels([
+      {
+        upstream_id: 'up-1',
+        upstream_name: 'Alpha',
+        key_prefix: 'ak-alpha',
+        status: 'healthy',
+        latency_ms: 100,
+        model_count: 1,
+        models: ['glm-5.1'],
+        last_probe_at: 1,
+        error: null
+      },
+      {
+        upstream_id: 'up-2',
+        upstream_name: 'Beta',
+        key_prefix: 'bk-beta',
+        status: 'unknown',
+        latency_ms: 0,
+        model_count: 0,
+        models: [],
+        last_probe_at: 1,
+        error: 'unexpected status'
+      }
+    ], { anomalyFirst: true })
+
+    expect(sorted.map(channel => channel.upstream_name)).toEqual(['Beta', 'Alpha'])
+  })
+
   it('returns no chart items for empty status data', () => {
     expect(buildProbeChartItems({ healthy_channels: 0, degraded_channels: 0, offline_channels: 0 })).toEqual([])
   })

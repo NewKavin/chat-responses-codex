@@ -3,6 +3,7 @@ export interface ReadableErrorSource {
   statusText?: string | null
   body?: unknown
   bodyText?: string | null
+  fallback?: string | null
 }
 
 interface ReadableErrorParts {
@@ -94,7 +95,11 @@ const getFallbackBodyText = ({ body, bodyText }: ReadableErrorSource) => {
     return body
   }
   if (body && typeof body === 'object') {
-    return JSON.stringify(body)
+    try {
+      return JSON.stringify(body)
+    } catch {
+      return undefined
+    }
   }
   return undefined
 }
@@ -107,10 +112,11 @@ export const extractReadableErrorMessage = (source: ReadableErrorSource) => {
 
   if (parts?.message) {
     const detail = [...new Set([parts?.category, parts?.code, parts?.type].filter(Boolean))].join(' / ')
-    const message = detail ? `${parts.message}（${detail}）` : parts.message
+    const readableMessage = summarizeErrorText(parts.message)
+    const message = detail ? `${readableMessage}（${detail}）` : readableMessage
     return statusPrefix ? `${statusPrefix}：${message}` : message
   }
 
-  const message = summarizeErrorText(getFallbackBodyText(source))
+  const message = summarizeErrorText(getFallbackBodyText(source) ?? source.fallback ?? '请求失败')
   return statusPrefix ? `${statusPrefix}：${message}` : message
 }

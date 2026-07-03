@@ -60,6 +60,35 @@ describe('errorDisplay', () => {
     ).toBe('502 Bad Gateway：upstream exploded')
   })
 
+  it('normalizes and summarizes structured error messages', () => {
+    const result = extractReadableErrorMessage({
+      status: 400,
+      statusText: 'Bad Request',
+      body: {
+        error: {
+          message: `line 1\nline 2 ${'x'.repeat(200)}`,
+          code: 'too_long'
+        }
+      }
+    })
+
+    expect(result).not.toContain('\n')
+    expect(result).toContain('400 Bad Request：line 1 line 2')
+    expect(result).toContain('（too_long）')
+    expect(result.length).toBeLessThan(260)
+  })
+
+  it('falls back safely when object bodies cannot be serialized', () => {
+    const body: any = {}
+    body.self = body
+    let result = ''
+
+    expect(() => {
+      result = extractReadableErrorMessage({ body, fallback: '请求失败' })
+    }).not.toThrow()
+    expect(result).toBe('请求失败')
+  })
+
   it('summarizes long plain text without breaking short messages', () => {
     expect(summarizeErrorText('short message')).toBe('short message')
     expect(summarizeErrorText('x'.repeat(220), 24)).toBe(`${'x'.repeat(24)}...`)
