@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlaygroundAssistantResult,
   buildPlaygroundChatPayload,
   extractChatCompletionText,
   formatPlaygroundCompletionMeta,
@@ -313,5 +314,52 @@ describe('playground display helpers', () => {
         usageText: 'tokens: in=10 out=20 total=30'
       })
     ).toBe('模型 glm-5.1 · 总耗时 12s · 首包 5s · tokens: in=10 out=20 total=30')
+  })
+
+  it('preserves non-empty assistant content without trimming markdown whitespace', () => {
+    const content = '  ```ts\n  const x = 1\n  ```  '
+
+    const result = buildPlaygroundAssistantResult({
+      model: 'glm-5.1',
+      content,
+      usage: null,
+      elapsedSeconds: 12,
+      firstOutputSeconds: 3
+    })
+
+    expect(result.isEmptyResponse).toBe(false)
+    expect(result.content).toBe(content)
+    expect(result.usageText).toBe('模型 glm-5.1 · 总耗时 12s · 首包 3s')
+  })
+
+  it('marks reasoning-only assistant results as empty responses with metadata', () => {
+    const result = buildPlaygroundAssistantResult({
+      model: 'glm-5.1',
+      content: '',
+      reasoning: '内部推理',
+      usage: null,
+      elapsedSeconds: 12,
+      firstOutputSeconds: 3
+    })
+
+    expect(result.content).toBe('（模型仅返回思考过程，未返回正文）')
+    expect(result.reasoning).toBe('内部推理')
+    expect(result.isEmptyResponse).toBe(true)
+    expect(result.usageText).toBe('模型 glm-5.1 · 总耗时 12s · 首包 3s')
+  })
+
+  it('marks blank assistant results as empty responses', () => {
+    const result = buildPlaygroundAssistantResult({
+      model: 'glm-5.1',
+      content: '',
+      reasoning: '',
+      usage: null,
+      elapsedSeconds: 12
+    })
+
+    expect(result.content).toBe('（模型返回空内容）')
+    expect(result.reasoning).toBeUndefined()
+    expect(result.isEmptyResponse).toBe(true)
+    expect(result.usageText).toBe('模型 glm-5.1 · 总耗时 12s')
   })
 })

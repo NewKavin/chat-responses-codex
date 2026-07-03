@@ -274,6 +274,43 @@ export const formatPlaygroundCompletionMeta = ({
   return parts.join(' · ')
 }
 
+export const buildPlaygroundAssistantResult = ({
+  model,
+  content,
+  reasoning,
+  usage,
+  elapsedSeconds,
+  firstOutputSeconds
+}: {
+  model: string
+  content: string
+  reasoning?: string
+  usage?: UsageLike
+  elapsedSeconds: number
+  firstOutputSeconds?: number
+}) => {
+  const usageText = formatPlaygroundUsageText(usage)
+  const meta = formatPlaygroundCompletionMeta({
+    model,
+    elapsedSeconds,
+    firstOutputSeconds,
+    usageText
+  })
+  const hasContent = Boolean(content.trim())
+  const hasReasoning = Boolean(reasoning?.trim())
+
+  return {
+    content: hasContent
+      ? content
+      : hasReasoning
+        ? '（模型仅返回思考过程，未返回正文）'
+        : '（模型返回空内容）',
+    reasoning: hasReasoning ? reasoning : undefined,
+    usageText: meta,
+    isEmptyResponse: !hasContent
+  }
+}
+
 export type PlaygroundStreamPhase = 'connecting' | 'waiting' | 'thinking' | 'generating'
 
 export const formatPlaygroundStreamStatus = ({

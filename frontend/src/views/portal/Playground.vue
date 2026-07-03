@@ -210,12 +210,11 @@ import { buildGatewayModelsEndpoint } from '@/utils/integration'
 import { createHighlightedCodeRenderer } from '@/utils/highlight'
 import { extractReadableErrorMessage } from '@/utils/errorDisplay'
 import {
+  buildPlaygroundAssistantResult,
   buildPlaygroundChatPayload,
   extractChatCompletionText,
   extractChatCompletionUsage,
-  formatPlaygroundCompletionMeta,
   formatPlaygroundStreamStatus,
-  formatPlaygroundUsageText,
   inferenceStrengthOptions,
   parseGatewayModels,
   parseSSELine,
@@ -338,6 +337,8 @@ const markFirstOutput = () => {
   firstOutputSeconds.value = Math.max(0, Math.floor((Date.now() - streamStartedAt) / 1000))
 }
 
+const getFinalElapsedSeconds = () => Math.max(0, Math.floor((Date.now() - streamStartedAt) / 1000))
+
 const formatFileSize = (size: number) => {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
@@ -350,7 +351,7 @@ const safeGetText = async (response: Response) => {
     status: response.status,
     statusText: response.statusText,
     bodyText: text,
-    fallback: `${response.status} ${response.statusText}`
+    fallback: '请求失败'
   })
 }
 
@@ -664,31 +665,26 @@ const sendQuestion = async () => {
       }
     } else {
       const json = await response.json()
+      markFirstOutput()
       finalContent = extractChatCompletionText(json)
       finalUsage = extractChatCompletionUsage(json)
     }
 
     const finalReasoning = streamingReasoning.value
-    const usageText = formatPlaygroundUsageText(finalUsage)
-    const meta = formatPlaygroundCompletionMeta({
+    const assistantResult = buildPlaygroundAssistantResult({
       model: selectedModel.value,
-      elapsedSeconds: streamElapsedSeconds.value,
-      firstOutputSeconds: firstOutputSeconds.value,
-      usageText
+      content: finalContent,
+      reasoning: finalReasoning,
+      usage: finalUsage,
+      elapsedSeconds: getFinalElapsedSeconds(),
+      firstOutputSeconds: firstOutputSeconds.value
     })
-    const isEmptyResponse = !finalContent.trim()
-    const content =
-      finalContent.trim() ||
-      (finalReasoning ? '（模型仅返回思考过程，未返回正文）' : '（模型返回空内容）')
 
     streamingContent.value = ''
     streamingReasoning.value = ''
     messages.value.push({
       role: 'assistant',
-      content,
-      reasoning: finalReasoning || undefined,
-      usageText: meta,
-      isEmptyResponse
+      ...assistantResult
     })
 
     setStatus('请求已完成', 'success')
