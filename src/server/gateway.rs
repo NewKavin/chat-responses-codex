@@ -38,6 +38,7 @@ mod compat;
 mod context;
 mod errors;
 mod stream;
+mod troubleshooting;
 mod upstream;
 
 use claude::*;
@@ -45,6 +46,7 @@ use compat::*;
 use context::*;
 use errors::*;
 use stream::*;
+use troubleshooting::*;
 use upstream::*;
 
 #[derive(RustEmbed)]
@@ -598,6 +600,13 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
+        .route(
+            "/api/admin/troubleshooting/run",
+            post(admin_troubleshooting_run).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
         // Portal API
         .route("/api/portal/login", post(portal_login))
         .route("/api/portal/overview", get(portal_overview))
@@ -608,6 +617,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
+        .route(
+            "/api/portal/troubleshooting/run",
+            post(portal_troubleshooting_run),
+        )
         // Frontend assets and SPA fallback
         .fallback(serve_frontend)
         .layer(
