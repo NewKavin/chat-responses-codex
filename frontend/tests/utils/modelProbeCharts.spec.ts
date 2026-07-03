@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildProbeChartItems,
   filterProbeChannels,
+  shouldShowProbeChannelEmpty,
   sortProbeChannels,
   sortProbeModels,
   type ProbeChannelFilter
@@ -130,5 +131,14 @@ describe('model probe filtering', () => {
 
   it('returns no chart items for empty status data', () => {
     expect(buildProbeChartItems({ healthy_channels: 0, degraded_channels: 0, offline_channels: 0 })).toEqual([])
+  })
+})
+
+describe('probe channel empty visibility', () => {
+  it('shows empty state only when not loading, not erroring, and no channels match', () => {
+    expect(shouldShowProbeChannelEmpty({ loading: false, hasError: false, channelCount: 0 })).toBe(true)
+    expect(shouldShowProbeChannelEmpty({ loading: true, hasError: false, channelCount: 0 })).toBe(false)
+    expect(shouldShowProbeChannelEmpty({ loading: false, hasError: true, channelCount: 0 })).toBe(false)
+    expect(shouldShowProbeChannelEmpty({ loading: false, hasError: false, channelCount: 1 })).toBe(false)
   })
 })

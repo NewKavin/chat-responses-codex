@@ -145,7 +145,7 @@
       </div>
 
       <div class="channel-grid" v-loading="loading">
-        <div v-if="!hasError && !sortedChannels.length && !loading" class="channel-empty">
+        <div v-if="showChannelEmpty" class="channel-empty">
           当前条件下暂无通道
         </div>
         <article
@@ -214,6 +214,7 @@ import {
   filterProbeChannels,
   formatProbeStatusLabel,
   groupTopProbeModels,
+  shouldShowProbeChannelEmpty,
   sortProbeChannels,
   type ProbeStatusFilter
 } from '@/utils/modelProbeCharts'
@@ -251,6 +252,13 @@ const sortedChannels = computed(() =>
     }),
     { anomalyFirst: anomalyFirst.value }
   )
+)
+const showChannelEmpty = computed(() =>
+  shouldShowProbeChannelEmpty({
+    loading: loading.value,
+    hasError: hasError.value,
+    channelCount: sortedChannels.value.length
+  })
 )
 const modelCoverage = computed(() => groupTopProbeModels(props.data.models, 8))
 

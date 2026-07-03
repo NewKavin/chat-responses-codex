@@ -105,3 +105,13 @@ export const buildProbeChartItems = (summary: {
     { name: '降级', value: summary.degraded_channels },
     { name: '离线', value: summary.offline_channels }
   ].filter(item => item.value > 0)
+
+export const shouldShowProbeChannelEmpty = ({
+  loading,
+  hasError,
+  channelCount
+}: {
+  loading: boolean
+  hasError: boolean
+  channelCount: number
+}) => !loading && !hasError && channelCount === 0

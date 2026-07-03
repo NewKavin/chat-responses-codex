@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { GraphicComponent } from 'echarts/components'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { __resetEchartsLoaderForTests, loadEcharts } from '../../src/utils/echartsLoader'
@@ -34,17 +33,5 @@ describe('echartsLoader', () => {
 
     const registeredComponents = echartsUseMock.mock.calls[0][0]
     expect(registeredComponents).toContain(GraphicComponent)
-  })
-})
-
-describe('ModelProbeBoard template safeguards', () => {
-  it('does not show the filtered empty message while an error is visible', () => {
-    const source = readFileSync(
-      new URL('../../src/components/ModelProbeBoard.vue', import.meta.url),
-      'utf8'
-    )
-
-    const emptyMessageCondition = source.match(/v-if="([^"]+)" class="channel-empty"/)?.[1]
-    expect(emptyMessageCondition).toContain('!hasError')
   })
 })
