@@ -1,11 +1,16 @@
 use crate::state::AppState;
+use axum::body::{to_bytes, Body};
 use axum::extract::{Json, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tower::ServiceExt;
 use uuid::Uuid;
+
+const DIAGNOSTIC_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
+const DIAGNOSTIC_RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,7 +83,7 @@ struct TroubleshootingResult {
     status: TroubleshootingStepStatus,
     http_status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error_category: Option<&'static str>,
+    error_category: Option<String>,
     details: String,
     suggestion: String,
     duration_ms: u64,
@@ -100,11 +105,12 @@ pub(super) async fn portal_troubleshooting_run(
         Err(response) => return response,
     };
 
-    run_troubleshooting_for_downstream(state, downstream_id, body).await
+    run_troubleshooting_for_downstream(state, downstream_id, body, headers).await
 }
 
 pub(super) async fn admin_troubleshooting_run(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<TroubleshootingRunRequest>,
 ) -> impl IntoResponse {
     let Some(downstream_id) = body
@@ -119,7 +125,7 @@ pub(super) async fn admin_troubleshooting_run(
             .into_response();
     };
 
-    run_troubleshooting_for_downstream(state, downstream_id, body).await
+    run_troubleshooting_for_downstream(state, downstream_id, body, headers).await
 }
 
 async fn extract_portal_downstream_id_from_bearer(
@@ -172,6 +178,7 @@ async fn run_troubleshooting_for_downstream(
     state: AppState,
     downstream_id: String,
     body: TroubleshootingRunRequest,
+    source_headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
     let snapshot = state.routing_snapshot().await;
@@ -197,7 +204,19 @@ async fn run_troubleshooting_for_downstream(
                     run_models_check(&state, downstream.plaintext_key.as_deref(), &body).await,
                 );
             }
-            _ => results.push(unimplemented_check(check)),
+            _ => {
+                results.push(
+                    run_internal_gateway_check(
+                        state.clone(),
+                        downstream.plaintext_key.as_deref(),
+                        body.client_profile,
+                        &body.model,
+                        check,
+                        &source_headers,
+                    )
+                    .await,
+                );
+            }
         }
     }
 
@@ -262,7 +281,7 @@ async fn run_models_check(
             id: "models",
             status: TroubleshootingStepStatus::Failed,
             http_status: StatusCode::FAILED_DEPENDENCY.as_u16(),
-            error_category: Some("gateway_downstream_key_unavailable"),
+            error_category: Some("gateway_downstream_key_unavailable".to_string()),
             details: "Downstream does not have a stored plaintext key for model visibility checks."
                 .to_string(),
             suggestion: "Rotate the downstream key before running troubleshooting.".to_string(),
@@ -306,7 +325,7 @@ async fn run_models_check(
             id: "models",
             status: TroubleshootingStepStatus::Failed,
             http_status: StatusCode::FORBIDDEN.as_u16(),
-            error_category: Some("gateway_model_not_allowed"),
+            error_category: Some("gateway_model_not_allowed".to_string()),
             details: format!("Model '{}' is not visible to this downstream.", body.model),
             suggestion: "Add the model to the downstream allowlist or choose an exposed model."
                 .to_string(),
@@ -327,27 +346,451 @@ async fn run_models_check(
     }
 }
 
-fn unimplemented_check(check: TroubleshootingCheck) -> TroubleshootingResult {
+async fn run_internal_gateway_check(
+    state: AppState,
+    plaintext_key: Option<&str>,
+    profile: TroubleshootingClientProfile,
+    model: &str,
+    check: TroubleshootingCheck,
+    source_headers: &HeaderMap,
+) -> TroubleshootingResult {
+    let started = Instant::now();
+    let Some(secret) = plaintext_key else {
+        return TroubleshootingResult {
+            id: check_id(check),
+            status: TroubleshootingStepStatus::Failed,
+            http_status: StatusCode::FAILED_DEPENDENCY.as_u16(),
+            error_category: Some("gateway_downstream_key_unavailable".to_string()),
+            details: "Downstream does not have a stored plaintext key for gateway diagnostics."
+                .to_string(),
+            suggestion: "Rotate the downstream key before running troubleshooting.".to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            protocol: check_protocol(check),
+            label: check_label(check),
+            summary: "Downstream key unavailable".to_string(),
+            copy_summary: format!(
+                "{} check failed for '{}': downstream plaintext key is unavailable",
+                check_label(check),
+                model
+            ),
+            log_filter: Some(json!({
+                "check": check_id(check),
+                "model": model,
+                "error_category": "gateway_downstream_key_unavailable",
+                "time_range": "1h"
+            })),
+        };
+    };
+
+    let (path, payload) = gateway_check_payload(check, model);
+    let request = match gateway_request(
+        secret,
+        Method::POST,
+        path,
+        payload,
+        profile_user_agent(profile),
+        source_headers,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return TroubleshootingResult {
+                id: check_id(check),
+                status: TroubleshootingStepStatus::Failed,
+                http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                error_category: Some("gateway_troubleshooting_request_build_failed".to_string()),
+                details: format!("Failed to build internal gateway request: {error}"),
+                suggestion: "Check troubleshooting request construction.".to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                protocol: check_protocol(check),
+                label: check_label(check),
+                summary: "Internal request build failed".to_string(),
+                copy_summary: format!(
+                    "{} check failed for '{}': internal request build failed",
+                    check_label(check),
+                    model
+                ),
+                log_filter: Some(json!({
+                    "check": check_id(check),
+                    "model": model,
+                    "error_category": "gateway_troubleshooting_request_build_failed",
+                    "time_range": "1h"
+                })),
+            };
+        }
+    };
+
+    match tokio::time::timeout(
+        DIAGNOSTIC_CHECK_TIMEOUT,
+        super::build_router(state).oneshot(request),
+    )
+    .await
+    {
+        Ok(Ok(response)) => result_from_gateway_response(check, model, started, response).await,
+        Err(_) => troubleshooting_timeout_result(
+            check,
+            model,
+            started,
+            StatusCode::GATEWAY_TIMEOUT.as_u16(),
+            "Internal gateway route timed out before returning a response.",
+        ),
+        Ok(Err(error)) => TroubleshootingResult {
+            id: check_id(check),
+            status: TroubleshootingStepStatus::Failed,
+            http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            error_category: Some("gateway_troubleshooting_route_failed".to_string()),
+            details: format!("Internal gateway route failed: {error}"),
+            suggestion: "Inspect gateway routing and middleware errors.".to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            protocol: check_protocol(check),
+            label: check_label(check),
+            summary: "Internal route failed".to_string(),
+            copy_summary: format!(
+                "{} check failed for '{}': internal route failed",
+                check_label(check),
+                model
+            ),
+            log_filter: Some(json!({
+                "check": check_id(check),
+                "model": model,
+                "error_category": "gateway_troubleshooting_route_failed",
+                "time_range": "1h"
+            })),
+        },
+    }
+}
+
+fn profile_user_agent(profile: TroubleshootingClientProfile) -> &'static str {
+    match profile {
+        TroubleshootingClientProfile::Cline => "chat2responses-troubleshooting/cline",
+        TroubleshootingClientProfile::Codex => "chat2responses-troubleshooting/codex",
+        TroubleshootingClientProfile::Opencode => "chat2responses-troubleshooting/opencode",
+        TroubleshootingClientProfile::ClaudeCode => "chat2responses-troubleshooting/claude-code",
+        TroubleshootingClientProfile::Hermes => "chat2responses-troubleshooting/hermes",
+        TroubleshootingClientProfile::OpenAiCompatible => {
+            "chat2responses-troubleshooting/openai-compatible"
+        }
+        TroubleshootingClientProfile::AnthropicCompatible => {
+            "chat2responses-troubleshooting/anthropic-compatible"
+        }
+    }
+}
+
+fn gateway_request(
+    secret: &str,
+    method: Method,
+    path: &str,
+    payload: Value,
+    user_agent: &str,
+    source_headers: &HeaderMap,
+) -> Result<Request<Body>, axum::http::Error> {
+    let forwarded_for = header::HeaderName::from_static("x-forwarded-for");
+    let real_ip = header::HeaderName::from_static("x-real-ip");
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::USER_AGENT, user_agent);
+
+    if let Some(value) = source_headers.get(&forwarded_for) {
+        builder = builder.header(forwarded_for, value.clone());
+    }
+    if let Some(value) = source_headers.get(&real_ip) {
+        builder = builder.header(real_ip, value.clone());
+    }
+
+    builder.body(Body::from(payload.to_string()))
+}
+
+fn gateway_check_payload(check: TroubleshootingCheck, model: &str) -> (&'static str, Value) {
+    match check {
+        TroubleshootingCheck::Chat => ("/v1/chat/completions", chat_payload(model, false)),
+        TroubleshootingCheck::ChatStream => ("/v1/chat/completions", chat_payload(model, true)),
+        TroubleshootingCheck::Responses => ("/v1/responses", responses_payload(model, false)),
+        TroubleshootingCheck::ResponsesStream => ("/v1/responses", responses_payload(model, true)),
+        TroubleshootingCheck::Messages => ("/v1/messages", messages_payload(model, false)),
+        TroubleshootingCheck::MessagesStream => ("/v1/messages", messages_payload(model, true)),
+        TroubleshootingCheck::CountTokens => {
+            ("/v1/messages/count_tokens", count_tokens_payload(model))
+        }
+        TroubleshootingCheck::Tools => ("/v1/chat/completions", tools_payload(model)),
+        TroubleshootingCheck::Models => unreachable!("models check does not use gateway payloads"),
+    }
+}
+
+fn chat_payload(model: &str, stream: bool) -> Value {
+    json!({
+        "model": model,
+        "stream": stream,
+        "messages": [
+            {"role": "user", "content": "Reply with OK for a gateway diagnostic."}
+        ]
+    })
+}
+
+fn responses_payload(model: &str, stream: bool) -> Value {
+    json!({
+        "model": model,
+        "stream": stream,
+        "input": "Reply with OK for a gateway diagnostic."
+    })
+}
+
+fn messages_payload(model: &str, stream: bool) -> Value {
+    json!({
+        "model": model,
+        "stream": stream,
+        "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "Reply with OK for a gateway diagnostic."}
+        ]
+    })
+}
+
+fn count_tokens_payload(model: &str) -> Value {
+    json!({
+        "model": model,
+        "messages": [
+            {"role": "user", "content": "Count this gateway diagnostic prompt."}
+        ]
+    })
+}
+
+fn tools_payload(model: &str) -> Value {
+    json!({
+        "model": model,
+        "messages": [
+            {"role": "user", "content": "Call the diagnostic tool if needed."}
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "diagnostic_echo",
+                    "description": "Echo a diagnostic string.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "Diagnostic text to echo."
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
+async fn result_from_gateway_response(
+    check: TroubleshootingCheck,
+    model: &str,
+    started: Instant,
+    response: Response,
+) -> TroubleshootingResult {
+    let status = response.status();
+    let http_status = status.as_u16();
+    let body = match tokio::time::timeout(
+        DIAGNOSTIC_CHECK_TIMEOUT,
+        to_bytes(response.into_body(), DIAGNOSTIC_RESPONSE_BODY_LIMIT),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Err(_) => {
+            return troubleshooting_timeout_result(
+                check,
+                model,
+                started,
+                http_status,
+                "Internal gateway response body timed out.",
+            );
+        }
+        Ok(Err(error)) => {
+            return TroubleshootingResult {
+                id: check_id(check),
+                status: TroubleshootingStepStatus::Failed,
+                http_status,
+                error_category: Some("gateway_troubleshooting_response_read_failed".to_string()),
+                details: format!("Failed to read internal gateway response body: {error}"),
+                suggestion: "Inspect gateway response body streaming errors.".to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                protocol: check_protocol(check),
+                label: check_label(check),
+                summary: "Response read failed".to_string(),
+                copy_summary: format!(
+                    "{} check failed for '{}': response read failed",
+                    check_label(check),
+                    model
+                ),
+                log_filter: Some(json!({
+                    "check": check_id(check),
+                    "model": model,
+                    "status": http_status,
+                    "error_category": "gateway_troubleshooting_response_read_failed",
+                    "time_range": "1h"
+                })),
+            };
+        }
+    };
+    let body_is_empty = body.is_empty();
+    let body_json = serde_json::from_slice::<Value>(&body).ok();
+    let error_category = if status.is_success() {
+        None
+    } else {
+        extract_error_category(body_json.as_ref())
+    };
+    let status_result = if status.is_success() {
+        if body_is_empty {
+            TroubleshootingStepStatus::Warning
+        } else {
+            TroubleshootingStepStatus::Passed
+        }
+    } else {
+        TroubleshootingStepStatus::Failed
+    };
+    let category_value = error_category.clone();
+
     TroubleshootingResult {
         id: check_id(check),
-        status: TroubleshootingStepStatus::Warning,
-        http_status: StatusCode::NOT_IMPLEMENTED.as_u16(),
-        error_category: Some("gateway_troubleshooting_check_not_implemented"),
-        details: "This troubleshooting check is not implemented yet.".to_string(),
-        suggestion: "Run the models check for current gateway visibility diagnostics.".to_string(),
-        duration_ms: 0,
-        protocol: check_id(check),
+        status: status_result,
+        http_status,
+        error_category,
+        details: gateway_result_details(status, body_is_empty, body_json.as_ref()),
+        suggestion: gateway_result_suggestion(status, body_is_empty),
+        duration_ms: started.elapsed().as_millis() as u64,
+        protocol: check_protocol(check),
         label: check_label(check),
-        summary: "Check not implemented".to_string(),
+        summary: gateway_result_summary(status, body_is_empty).to_string(),
+        copy_summary: gateway_copy_summary(check, model, status_result, http_status),
+        log_filter: Some(json!({
+            "check": check_id(check),
+            "model": model,
+            "status": http_status,
+            "error_category": category_value,
+            "time_range": "1h"
+        })),
+    }
+}
+
+fn troubleshooting_timeout_result(
+    check: TroubleshootingCheck,
+    model: &str,
+    started: Instant,
+    http_status: u16,
+    details: &str,
+) -> TroubleshootingResult {
+    TroubleshootingResult {
+        id: check_id(check),
+        status: TroubleshootingStepStatus::Timeout,
+        http_status,
+        error_category: Some("gateway_troubleshooting_timeout".to_string()),
+        details: details.to_string(),
+        suggestion: "The diagnostic stopped waiting before the gateway stream completed; inspect upstream latency, stream liveness, and timeout settings.".to_string(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        protocol: check_protocol(check),
+        label: check_label(check),
+        summary: "Diagnostic timed out".to_string(),
         copy_summary: format!(
-            "{} troubleshooting check is not implemented yet.",
-            check_label(check)
+            "{} check timed out for '{}'",
+            check_label(check),
+            model
         ),
         log_filter: Some(json!({
             "check": check_id(check),
-            "error_category": "gateway_troubleshooting_check_not_implemented",
+            "model": model,
+            "error_category": "gateway_troubleshooting_timeout",
             "time_range": "1h"
         })),
+    }
+}
+
+fn extract_error_category(body: Option<&Value>) -> Option<String> {
+    let body = body?;
+    body.pointer("/error/details/category")
+        .or_else(|| body.pointer("/error/category"))
+        .or_else(|| body.pointer("/error/code"))
+        .or_else(|| body.pointer("/error/type"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn gateway_result_details(
+    status: StatusCode,
+    body_is_empty: bool,
+    body_json: Option<&Value>,
+) -> String {
+    if status.is_success() {
+        if body_is_empty {
+            "Gateway route returned a successful HTTP status with an empty body.".to_string()
+        } else {
+            "Gateway route returned a successful HTTP status with a response body.".to_string()
+        }
+    } else if let Some(message) = body_json
+        .and_then(|body| body.pointer("/error/message"))
+        .and_then(Value::as_str)
+    {
+        format!("Gateway route returned HTTP {}: {message}", status.as_u16())
+    } else {
+        format!("Gateway route returned HTTP {}.", status.as_u16())
+    }
+}
+
+fn gateway_result_suggestion(status: StatusCode, body_is_empty: bool) -> String {
+    if status.is_success() {
+        if body_is_empty {
+            "Inspect upstream streaming/body handling for empty successful responses.".to_string()
+        } else {
+            "No action required.".to_string()
+        }
+    } else {
+        "Inspect the error category, gateway logs, downstream limits, and upstream compatibility."
+            .to_string()
+    }
+}
+
+fn gateway_result_summary(status: StatusCode, body_is_empty: bool) -> &'static str {
+    if status.is_success() {
+        if body_is_empty {
+            "Successful response was empty"
+        } else {
+            "Gateway route passed"
+        }
+    } else {
+        "Gateway route failed"
+    }
+}
+
+fn gateway_copy_summary(
+    check: TroubleshootingCheck,
+    model: &str,
+    status: TroubleshootingStepStatus,
+    http_status: u16,
+) -> String {
+    format!(
+        "{} check {} for '{}' with HTTP {}",
+        check_label(check),
+        match status {
+            TroubleshootingStepStatus::Passed => "passed",
+            TroubleshootingStepStatus::Warning => "warned",
+            TroubleshootingStepStatus::Failed => "failed",
+            TroubleshootingStepStatus::Timeout => "timed out",
+        },
+        model,
+        http_status
+    )
+}
+
+fn check_protocol(check: TroubleshootingCheck) -> &'static str {
+    match check {
+        TroubleshootingCheck::Models => "models",
+        TroubleshootingCheck::Chat
+        | TroubleshootingCheck::ChatStream
+        | TroubleshootingCheck::Tools => "chat_completions",
+        TroubleshootingCheck::Responses | TroubleshootingCheck::ResponsesStream => "responses",
+        TroubleshootingCheck::Messages | TroubleshootingCheck::MessagesStream => "messages",
+        TroubleshootingCheck::CountTokens => "messages_count_tokens",
     }
 }
 
