@@ -128,6 +128,30 @@ pub(super) async fn admin_troubleshooting_run(
     run_troubleshooting_for_downstream(state, downstream_id, body, headers).await
 }
 
+pub(super) async fn portal_troubleshooting_active_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let downstream_id = match extract_portal_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    Json(json!({
+        "active_requests": state.active_gateway_requests(Some(&downstream_id))
+    }))
+    .into_response()
+}
+
+pub(super) async fn admin_troubleshooting_active_requests(
+    State(state): State<AppState>,
+) -> Response {
+    Json(json!({
+        "active_requests": state.active_gateway_requests(None)
+    }))
+    .into_response()
+}
+
 async fn extract_portal_downstream_id_from_bearer(
     state: &AppState,
     headers: &HeaderMap,

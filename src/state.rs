@@ -83,6 +83,7 @@ pub use crate::util::{
 
 const RESPONSE_HISTORY_MAX_ENTRIES: usize = 2048;
 const RESPONSE_HISTORY_TTL_SECONDS: u64 = 12 * 60 * 60;
+const ACTIVE_REQUEST_USER_AGENT_MAX_BYTES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponseHistoryEntry {
@@ -167,6 +168,7 @@ pub struct AppState {
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
+    active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
     response_history: Arc<StdMutex<ResponseHistoryStore>>,
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
     routing_tie_breakers: Arc<StdMutex<HashMap<String, u64>>>,
@@ -320,6 +322,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
@@ -368,6 +371,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
@@ -410,6 +414,7 @@ impl AppState {
                 &downstream_usage_logs,
             ))),
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
@@ -525,6 +530,125 @@ impl AppState {
             .lock()
             .expect("admin session lock poisoned");
         sessions.remove(token);
+    }
+
+    pub fn start_active_gateway_request(&self, start: ActiveGatewayRequestStart) {
+        let now = unix_seconds();
+        let mut active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        active.insert(
+            start.request_id.clone(),
+            ActiveGatewayRequest {
+                request_id: start.request_id,
+                downstream_id: start.downstream_id,
+                downstream_name: start.downstream_name,
+                endpoint: start.endpoint,
+                model: start.model,
+                protocol: start.protocol,
+                user_agent: start.user_agent.map(truncate_active_request_user_agent),
+                upstream_id: None,
+                upstream_name: None,
+                started_at: now,
+                last_event_at: now,
+                status: "routing".to_string(),
+                error_category: None,
+            },
+        );
+    }
+
+    pub fn mark_active_gateway_request_upstream(
+        &self,
+        request_id: &str,
+        upstream_id: &str,
+        upstream_name: &str,
+    ) {
+        let now = unix_seconds();
+        let mut active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        if let Some(request) = active.get_mut(request_id) {
+            request.upstream_id = Some(upstream_id.to_string());
+            request.upstream_name = Some(upstream_name.to_string());
+            request.last_event_at = now;
+            request.status = "upstream".to_string();
+        }
+    }
+
+    pub fn touch_active_gateway_request(&self, request_id: &str) {
+        let now = unix_seconds();
+        let mut active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        if let Some(request) = active.get_mut(request_id) {
+            request.last_event_at = now;
+            request.status = "streaming".to_string();
+        }
+    }
+
+    pub fn finish_active_gateway_request(&self, request_id: &str) {
+        let mut active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        active.remove(request_id);
+    }
+
+    pub fn fail_active_gateway_request(
+        &self,
+        request_id: &str,
+        error_category: impl Into<String>,
+    ) {
+        let mut active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        if let Some(request) = active.get_mut(request_id) {
+            request.status = "error".to_string();
+            request.error_category = Some(error_category.into());
+            request.last_event_at = unix_seconds();
+        }
+    }
+
+    pub fn active_gateway_requests(
+        &self,
+        downstream_filter: Option<&str>,
+    ) -> Vec<ActiveGatewayRequestSnapshot> {
+        let now = unix_seconds();
+        let active = self
+            .active_requests
+            .lock()
+            .expect("active request lock poisoned");
+        let mut requests = active
+            .values()
+            .filter(|request| {
+                downstream_filter
+                    .map(|id| request.downstream_id == id)
+                    .unwrap_or(true)
+            })
+            .map(|request| ActiveGatewayRequestSnapshot {
+                request_id: request.request_id.clone(),
+                downstream_id: request.downstream_id.clone(),
+                downstream_name: request.downstream_name.clone(),
+                endpoint: request.endpoint.clone(),
+                model: request.model.clone(),
+                protocol: request.protocol.clone(),
+                user_agent: request.user_agent.clone(),
+                upstream_id: request.upstream_id.clone(),
+                upstream_name: request.upstream_name.clone(),
+                started_at: request.started_at,
+                last_event_at: request.last_event_at,
+                elapsed_seconds: now.saturating_sub(request.started_at),
+                idle_seconds: now.saturating_sub(request.last_event_at),
+                status: request.status.clone(),
+                error_category: request.error_category.clone(),
+            })
+            .collect::<Vec<_>>();
+        requests.sort_by_key(|request| std::cmp::Reverse(request.started_at));
+        requests
     }
 
     pub async fn snapshot(&self) -> PersistedState {
@@ -1683,6 +1807,19 @@ async fn load_usage_log_archive(path: &Path) -> io::Result<Vec<UsageLog>> {
     let bytes = fs::read(path).await?;
     Ok(serde_json::from_slice(&bytes).unwrap_or_default())
 }
+
+fn truncate_active_request_user_agent(user_agent: String) -> String {
+    if user_agent.len() <= ACTIVE_REQUEST_USER_AGENT_MAX_BYTES {
+        return user_agent;
+    }
+
+    let mut end = ACTIVE_REQUEST_USER_AGENT_MAX_BYTES;
+    while !user_agent.is_char_boundary(end) {
+        end -= 1;
+    }
+    user_agent[..end].to_string()
+}
+
 #[derive(Debug, Clone, Default)]
 struct UpstreamRuntimeState {
     in_flight: u32,
@@ -1720,6 +1857,53 @@ pub struct UpstreamRuntimeSnapshotWithFeedback {
     pub cooldown_remaining: u64,
     pub last_feedback_type: Option<String>,
     pub last_retry_after_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveGatewayRequestStart {
+    pub request_id: String,
+    pub downstream_id: String,
+    pub downstream_name: String,
+    pub endpoint: String,
+    pub model: String,
+    pub protocol: String,
+    pub user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveGatewayRequestSnapshot {
+    pub request_id: String,
+    pub downstream_id: String,
+    pub downstream_name: String,
+    pub endpoint: String,
+    pub model: String,
+    pub protocol: String,
+    pub user_agent: Option<String>,
+    pub upstream_id: Option<String>,
+    pub upstream_name: Option<String>,
+    pub started_at: u64,
+    pub last_event_at: u64,
+    pub elapsed_seconds: u64,
+    pub idle_seconds: u64,
+    pub status: String,
+    pub error_category: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveGatewayRequest {
+    request_id: String,
+    downstream_id: String,
+    downstream_name: String,
+    endpoint: String,
+    model: String,
+    protocol: String,
+    user_agent: Option<String>,
+    upstream_id: Option<String>,
+    upstream_name: Option<String>,
+    started_at: u64,
+    last_event_at: u64,
+    status: String,
+    error_category: Option<String>,
 }
 
 #[derive(Debug, Clone)]

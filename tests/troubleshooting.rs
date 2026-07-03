@@ -74,6 +74,74 @@ fn app_with_custom_upstream_and_ip_allowlist(
     (build_router(app_state), portal_key, "test".to_string())
 }
 
+fn app_with_two_downstreams(upstream_base_url: String) -> (axum::Router, String, String) {
+    app_with_two_downstreams_and_config(upstream_base_url, AppConfig::default())
+}
+
+fn app_with_two_downstreams_and_config(
+    upstream_base_url: String,
+    config: AppConfig,
+) -> (axum::Router, String, String) {
+    let first = generate_downstream_key("sk");
+    let second = generate_downstream_key("sk");
+    let first_key = first.plaintext.clone();
+    let second_key = second.plaintext.clone();
+    let state = PersistedState {
+        upstreams: vec![UpstreamConfig {
+            id: "upstream-1".to_string(),
+            name: "Primary".to_string(),
+            base_url: upstream_base_url,
+            api_key: "upstream-key".to_string(),
+            supported_models: vec!["GLM-5.1".to_string()],
+            active: true,
+            ..UpstreamConfig::default()
+        }],
+        downstreams: vec![
+            DownstreamConfig {
+                id: "test".to_string(),
+                name: "Test".to_string(),
+                hash: first.hash,
+                plaintext_key: Some(first.plaintext),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["GLM-5.1".to_string()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            },
+            DownstreamConfig {
+                id: "other".to_string(),
+                name: "Other".to_string(),
+                hash: second.hash,
+                plaintext_key: Some(second.plaintext),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["GLM-5.1".to_string()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            },
+        ],
+        usage_logs: vec![],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+    let app_state = AppState::new(state, unique_state_path(), config);
+    (build_router(app_state), first_key, second_key)
+}
+
 async fn spawn_diagnostic_upstream(capture: Arc<Mutex<Vec<CapturedDiagnosticRequest>>>) -> String {
     let app = Router::new().route(
         "/v1/chat/completions",
@@ -648,4 +716,305 @@ async fn portal_troubleshooting_stream_check_has_diagnostic_timeout() {
         payload["results"][0]["error_category"],
         "gateway_troubleshooting_timeout"
     );
+}
+
+#[tokio::test]
+async fn portal_active_requests_requires_auth() {
+    let (app, _, _) = app_with_model_state();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/portal/troubleshooting/active-requests")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn portal_active_requests_lists_only_current_downstream() {
+    let upstream_base_url = spawn_never_ending_stream_upstream().await;
+    let (app, first_key, second_key) = app_with_two_downstreams(upstream_base_url);
+    let stream_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "GLM-5.1",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hold stream open"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_response.status(), StatusCode::OK);
+
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/portal/troubleshooting/active-requests")
+                .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
+    let active = first_payload["active_requests"].as_array().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["downstream_id"], "test");
+    assert_eq!(active[0]["endpoint"], "/v1/chat/completions");
+    assert_eq!(active[0]["model"], "GLM-5.1");
+    assert!(active[0]["elapsed_seconds"].as_u64().is_some());
+    assert!(active[0]["idle_seconds"].as_u64().is_some());
+
+    let second_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/portal/troubleshooting/active-requests")
+                .header(header::AUTHORIZATION, format!("Bearer {second_key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let second_payload: Value = serde_json::from_slice(&second_body).unwrap();
+    assert_eq!(
+        second_payload["active_requests"].as_array().unwrap().len(),
+        0
+    );
+
+    drop(stream_response);
+    for _ in 0..20 {
+        let cleanup_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/portal/troubleshooting/active-requests")
+                    .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleanup_response.status(), StatusCode::OK);
+        let cleanup_body = to_bytes(cleanup_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let cleanup_payload: Value = serde_json::from_slice(&cleanup_body).unwrap();
+        if cleanup_payload["active_requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("active request should be removed after stream body is dropped");
+}
+
+#[tokio::test]
+async fn admin_active_requests_requires_auth() {
+    let (app, _, _) = app_with_model_state();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/admin/troubleshooting/active-requests")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn admin_active_requests_lists_all_downstreams() {
+    let upstream_base_url = spawn_never_ending_stream_upstream().await;
+    let (app, first_key, _) = app_with_two_downstreams(upstream_base_url);
+    let stream_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "GLM-5.1",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hold stream open"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_response.status(), StatusCode::OK);
+
+    let token = generate_admin_token("admin", &AppConfig::default().jwt_secret).unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/admin/troubleshooting/active-requests")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let active = payload["active_requests"].as_array().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["downstream_id"], "test");
+    assert_eq!(active[0]["upstream_id"], "upstream-1");
+}
+
+#[tokio::test]
+async fn portal_active_requests_truncates_long_user_agent() {
+    let upstream_base_url = spawn_never_ending_stream_upstream().await;
+    let (app, first_key, _) = app_with_two_downstreams(upstream_base_url);
+    let long_user_agent = format!("Cline/{}", "a".repeat(400));
+    let stream_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::USER_AGENT, long_user_agent)
+                .body(Body::from(
+                    json!({
+                        "model": "GLM-5.1",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hold stream open"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/portal/troubleshooting/active-requests")
+                .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let user_agent = payload["active_requests"][0]["user_agent"]
+        .as_str()
+        .unwrap();
+    assert!(
+        user_agent.len() <= 256,
+        "user_agent should be truncated, got {} bytes",
+        user_agent.len()
+    );
+}
+
+#[tokio::test]
+async fn portal_active_requests_clears_stream_after_idle_timeout() {
+    let upstream_base_url = spawn_never_ending_stream_upstream().await;
+    let mut config = AppConfig::default();
+    config.upstream_stream_keepalive_interval_seconds = 1;
+    config.upstream_stream_idle_timeout_seconds = 1;
+    config.upstream_stream_max_duration_seconds = 10;
+    let (app, first_key, _) = app_with_two_downstreams_and_config(upstream_base_url, config);
+
+    let stream_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "GLM-5.1",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "wait for idle timeout"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_response.status(), StatusCode::OK);
+
+    let stream_body = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        to_bytes(stream_response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("stream should end after idle timeout")
+    .unwrap();
+    let stream_text = String::from_utf8(stream_body.to_vec()).unwrap();
+    assert!(stream_text.contains("stream_idle_timeout"));
+
+    for _ in 0..20 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/portal/troubleshooting/active-requests")
+                    .header(header::AUTHORIZATION, format!("Bearer {first_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        if payload["active_requests"].as_array().unwrap().is_empty() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("active request should be removed after stream idle timeout");
 }

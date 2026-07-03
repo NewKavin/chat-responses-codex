@@ -1,20 +1,18 @@
 use super::*;
 
 #[test]
-fn sse_keepalive_frame_is_a_data_event_not_a_comment() {
-    // SSE comment frames (": keepalive\n\n") are silently dropped by
-    // client SSE parsers and do NOT reset client-side idle timers such as
-    // Codex's `stream_idle_timeout_ms`. The keepalive must carry a real
-    // `data:` field so downstream clients count it as stream activity.
+fn responses_keepalive_frame_is_a_comment_not_a_fake_openai_event() {
+    // OpenAI Responses streams are typed semantic events. Keepalive must stay
+    // at the SSE transport layer and must not inject a fake `data: {}` event.
     let frame = sse_keepalive_frame();
     let text = std::str::from_utf8(&frame).unwrap();
     assert!(
-        !text.starts_with(':'),
-        "keepalive frame must not be a comment, got: {text:?}"
+        text.starts_with(':'),
+        "responses keepalive frame must be a comment, got: {text:?}"
     );
     assert!(
-        text.contains("data:"),
-        "keepalive frame must include a data field, got: {text:?}"
+        !text.contains("data:"),
+        "responses keepalive frame must not include fake OpenAI data, got: {text:?}"
     );
     assert!(
         text.ends_with("\n\n"),

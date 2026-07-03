@@ -9,8 +9,8 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, portal_model_is_allowed, unix_seconds, AppConfig, AppState,
-    GlobalContextProfile, UpstreamConfig, UsageLog,
+    join_upstream_url, portal_model_is_allowed, unix_seconds, ActiveGatewayRequestStart, AppConfig,
+    AppState, GlobalContextProfile, UpstreamConfig, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -162,6 +162,47 @@ impl GatewayUsageLogContext {
     }
 }
 
+struct ActiveGatewayRequestGuard {
+    state: AppState,
+    request_id: String,
+    active: bool,
+}
+
+impl ActiveGatewayRequestGuard {
+    fn new(state: AppState, request_id: String) -> Self {
+        Self {
+            state,
+            request_id,
+            active: true,
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.active {
+            self.state.finish_active_gateway_request(&self.request_id);
+            self.active = false;
+        }
+    }
+
+    fn fail_and_finish(&mut self, error_category: &str) {
+        if self.active {
+            self.state
+                .fail_active_gateway_request(&self.request_id, error_category);
+            self.finish();
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for ActiveGatewayRequestGuard {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 #[derive(Clone, Copy)]
 struct StreamTimeouts {
     keepalive_interval: Duration,
@@ -227,6 +268,20 @@ impl std::fmt::Debug for StreamUsageLogContext {
 }
 
 impl StreamUsageLogContext {
+    fn touch_active_request(&self) {
+        self.state.touch_active_gateway_request(&self.request_id);
+    }
+
+    fn finish_active_request(&self) {
+        self.state.finish_active_gateway_request(&self.request_id);
+    }
+
+    fn fail_active_request(&self, error_category: &str) {
+        self.state
+            .fail_active_gateway_request(&self.request_id, error_category);
+        self.finish_active_request();
+    }
+
     async fn emit(self, usage: (u64, u64, u64)) {
         let StreamUsageLogContext {
             state,
@@ -607,6 +662,12 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
+        .route(
+            "/api/admin/troubleshooting/active-requests",
+            get(admin_troubleshooting_active_requests).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
+        )
         // Portal API
         .route("/api/portal/login", post(portal_login))
         .route("/api/portal/overview", get(portal_overview))
@@ -620,6 +681,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/portal/troubleshooting/run",
             post(portal_troubleshooting_run),
+        )
+        .route(
+            "/api/portal/troubleshooting/active-requests",
+            get(portal_troubleshooting_active_requests),
         )
         // Frontend assets and SPA fallback
         .fallback(serve_frontend)
@@ -1244,6 +1309,7 @@ async fn finalize_stream_error(
     }
 
     if let Some(mut log_context) = log_context {
+        log_context.fail_active_request(error_category);
         log_context.status = status;
         log_context.error_message = Some(error_message);
         log_context.error_category = Some(error_category.to_string());
@@ -1308,6 +1374,7 @@ fn spawn_stream_normal_completion_cleanup(
                 context.mark_success().await;
             }
             if let Some(mut ctx) = log_context {
+                ctx.finish_active_request();
                 ctx.status = StatusCode::OK;
                 ctx.error_message = None;
                 ctx.error_category = None;
@@ -1534,6 +1601,17 @@ async fn process_gateway_request_inner(
     };
     let normalized_model = model;
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    state.start_active_gateway_request(ActiveGatewayRequestStart {
+        request_id: request_id.clone(),
+        downstream_id: downstream.id.clone(),
+        downstream_name: downstream.name.clone(),
+        endpoint: request_path.to_string(),
+        model: model.to_string(),
+        protocol: format!("{:?}", endpoint.native_protocol()),
+        user_agent: user_agent.clone(),
+    });
+    let mut active_request_guard =
+        ActiveGatewayRequestGuard::new(state.clone(), request_id.clone());
     tracing::info!(
         request_id = %request_id,
         downstream_key_id = %downstream.id,
@@ -1577,6 +1655,7 @@ async fn process_gateway_request_inner(
                 started,
             )
             .await;
+            active_request_guard.fail_and_finish(error.error_category());
             return Err(error);
         }
     }
@@ -1618,6 +1697,7 @@ async fn process_gateway_request_inner(
                 started,
             )
             .await;
+            active_request_guard.fail_and_finish(error.error_category());
             return Err(error);
         }
     }
@@ -1653,6 +1733,7 @@ async fn process_gateway_request_inner(
             started,
         )
         .await;
+        active_request_guard.fail_and_finish(error.error_category());
         return Err(error);
     }
 
@@ -1688,6 +1769,7 @@ async fn process_gateway_request_inner(
             started,
         )
         .await;
+        active_request_guard.fail_and_finish(error.error_category());
         return Err(error);
     }
 
@@ -1739,6 +1821,7 @@ async fn process_gateway_request_inner(
             started,
         )
         .await;
+        active_request_guard.fail_and_finish(error.error_category());
         return Err(error);
     }
     let _downstream_concurrency_guard = if !request_stream {
@@ -2128,6 +2211,11 @@ async fn process_gateway_request_inner(
                         request_cost,
                         "reserved upstream capacity"
                     );
+                    state.mark_active_gateway_request_upstream(
+                        &request_id,
+                        &upstream.id,
+                        &upstream.name,
+                    );
 
                     let mut stream_completion_context = stream_completion_context.clone();
                     if let Some(ref mut ctx) = stream_completion_context {
@@ -2223,6 +2311,14 @@ async fn process_gateway_request_inner(
                                 } else {
                                     context.emit(result.status, None, None, result.usage).await;
                                 }
+                            }
+                            if matches!(
+                                result.usage_log_timing,
+                                UsageLogTiming::DeferredUntilStreamEnd
+                            ) {
+                                active_request_guard.disarm();
+                            } else {
+                                active_request_guard.finish();
                             }
                             return Ok(result);
                         }
@@ -2568,6 +2664,7 @@ async fn process_gateway_request_inner(
         if request_stream {
             state.release_downstream_concurrency(&downstream.id);
         }
+        active_request_guard.fail_and_finish(error.error_category());
         tracing::error!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -2614,6 +2711,7 @@ async fn process_gateway_request_inner(
     if request_stream {
         state.release_downstream_concurrency(&downstream.id);
     }
+    active_request_guard.fail_and_finish(error.error_category());
     // Keep the downstream reservation so the portal reflects that the gateway
     // actually received and processed one request attempt, even if no upstream
     // could be routed.

@@ -324,6 +324,9 @@ pub(super) fn proxied_stream_body(
         match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
             StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                 state.watchdog.record_upstream_activity(TokioInstant::now());
+                if let Some(log_context) = state.log_context.as_ref() {
+                    log_context.touch_active_request();
+                }
                 state.buffer.extend_from_slice(&chunk);
                 state.drain_usage_from_buffer()?;
                 if state.finished {
@@ -495,6 +498,7 @@ impl ProxiedStreamState {
 
         self.usage_log_flushed = true;
         if let Some(log_context) = self.log_context.take() {
+            log_context.finish_active_request();
             log_context.emit(self.usage.unwrap_or((0, 0, 0))).await;
         }
 
@@ -651,6 +655,9 @@ pub(super) fn translated_stream_body(
             match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
                 StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                     state.watchdog.record_upstream_activity(TokioInstant::now());
+                    if let Some(log_context) = state.log_context.as_ref() {
+                        log_context.touch_active_request();
+                    }
                     state.buffer.extend_from_slice(&chunk);
                     state.drain_buffer()?;
                 }
@@ -858,6 +865,7 @@ impl TranslatedStreamState {
 
         self.usage_log_flushed = true;
         if let Some(log_context) = self.log_context.take() {
+            log_context.finish_active_request();
             log_context.emit(self.usage.unwrap_or((0, 0, 0))).await;
         }
 
@@ -962,25 +970,11 @@ fn serialize_sse_data(value: &Value) -> Bytes {
 }
 
 pub(super) fn sse_keepalive_frame() -> Bytes {
-    // A real SSE `data:` event with no explicit `event:` line.
-    // SSE spec §9.2.4: if the `event:` field is absent, the event type
-    // defaults to "message". An empty JSON object `{}` is valid and
-    // harmless for every client, but carries enough payload to be
-    // counted as stream activity, resetting client-side idle timers
-    // such as Codex's `stream_idle_timeout_ms`.
-    //
-    // NOTE: Codex's production default is DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
-    // (5 minutes) in codex-rs/model-provider-info/src/lib.rs:26, NOT 5s. The 5_000
-    // value only appears in test helpers (provider_for() in model-provider/src/provider.rs:398).
-    // Keepalive interval (3s) is well within the 5min idle window; the 3s choice is
-    // conservative and not required to beat a 5s deadline.
-    //
-    // We previously used `event: response.ping` / `data: {"type":"response.ping"}`,
-    // but Codex's Responses SSE decoding layer silently drops `response.ping`
-    // events without resetting its higher-level idle deadline, which caused
-    // 499 `stream_client_cancelled` for slow models whose first byte takes
-    // longer than `stream_idle_timeout_ms`.
-    Bytes::from_static(b"data: {}\n\n")
+    // Keepalive is transport-level SSE, not an OpenAI Responses semantic event.
+    // Injecting `data: {}` creates a fake untyped Responses event that strict
+    // clients may ignore or log as invalid. A comment frame is valid SSE and
+    // keeps the byte stream active without changing protocol semantics.
+    Bytes::from_static(b": keepalive\n\n")
 }
 
 pub(super) fn sse_keepalive_frame_for_endpoint(endpoint: EndpointKind) -> Bytes {
