@@ -958,18 +958,87 @@ async fn downstream_chat_request_normalizes_missing_required_arrays_in_real_clin
         .unwrap();
         let state = AppState::new(state, state_path, AppConfig::default());
 
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tmp/mock-cline/002-request.json"
-        )))
-        .unwrap();
-        let body: serde_json::Value =
-            serde_json::from_str(fixture["body"].as_str().expect("fixture body string")).unwrap();
+        let body = json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Return exactly the single word pong."
+                }
+            ],
+            "stream": true,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "skills",
+                        "description": "Execute a skill within the main conversation.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "skill": { "type": "string" },
+                                "args": { "type": ["string", "null"] }
+                            },
+                            "required": ["skill"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "team_status",
+                        "description": "Return a snapshot of team members.",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "team_list_runs",
+                        "description": "List teammate runs.",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "team_await_runs",
+                        "description": "Wait for async teammate runs.",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "team_read_mailbox",
+                        "description": "Read the current agent mailbox.",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "team_cleanup",
+                        "description": "Clean up the team runtime.",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "team_list_outcomes",
+                        "description": "List team outcomes.",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
+                }
+            ]
+        });
 
         let app = build_router(state.clone());
         let request = Request::builder()
-            .method(fixture["method"].as_str().expect("fixture method"))
-            .uri(fixture["url"].as_str().expect("fixture url"))
+            .method("POST")
+            .uri("/v1/chat/completions")
             .header(
                 "Authorization",
                 format!("Bearer {}", downstream_key.plaintext),
