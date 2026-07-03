@@ -296,7 +296,7 @@ export const formatPlaygroundStreamStatus = ({
     return `正在连接模型 ${seconds}s`
   }
   if (phase === 'waiting' || keepaliveCount > 0) {
-    if (seconds > 30) {
+    if (seconds >= 30) {
       return `模型仍在处理，已等待首个输出 ${seconds}s`
     }
     return `已连接，等待模型首个输出 ${seconds}s`

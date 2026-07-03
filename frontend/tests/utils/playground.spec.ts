@@ -206,6 +206,16 @@ describe('formatPlaygroundStreamStatus', () => {
     ).toBe('模型仍在处理，已等待首个输出 31s')
   })
 
+  it('shows a long waiting state at exactly 30 seconds without first output', () => {
+    expect(
+      formatPlaygroundStreamStatus({
+        phase: 'waiting',
+        elapsedSeconds: 30,
+        keepaliveCount: 0
+      })
+    ).toBe('模型仍在处理，已等待首个输出 30s')
+  })
+
   it('keeps the connecting state while the stream has not connected', () => {
     expect(
       formatPlaygroundStreamStatus({
