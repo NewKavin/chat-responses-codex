@@ -145,7 +145,7 @@
       </div>
 
       <div class="channel-grid" v-loading="loading">
-        <div v-if="!sortedChannels.length && !loading" class="channel-empty">
+        <div v-if="!hasError && !sortedChannels.length && !loading" class="channel-empty">
           当前条件下暂无通道
         </div>
         <article

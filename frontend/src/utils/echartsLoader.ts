@@ -1,5 +1,6 @@
 import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import {
+  GraphicComponent,
   GridComponent,
   LegendComponent,
   TooltipComponent,
@@ -16,6 +17,7 @@ export const loadEcharts = (): Promise<EchartsModule> => {
       echarts.use([
         BarChart,
         CanvasRenderer,
+        GraphicComponent,
         GridComponent,
         LegendComponent,
         LineChart,

@@ -1,10 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { GraphicComponent } from 'echarts/components'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { __resetEchartsLoaderForTests, loadEcharts } from '../../src/utils/echartsLoader'
 
-describe('echartsLoader', () => {
-  it('caches the same import promise and resolves echarts module', async () => {
-    __resetEchartsLoaderForTests()
+const echartsUseMock = vi.hoisted(() => vi.fn())
 
+vi.mock('echarts/core', async importOriginal => {
+  const actual = await importOriginal<typeof import('echarts/core')>()
+  return {
+    ...actual,
+    use: echartsUseMock
+  }
+})
+
+describe('echartsLoader', () => {
+  beforeEach(() => {
+    __resetEchartsLoaderForTests()
+    echartsUseMock.mockClear()
+  })
+
+  it('caches the same import promise and resolves echarts module', async () => {
     const first = loadEcharts()
     const second = loadEcharts()
 
@@ -12,5 +27,24 @@ describe('echartsLoader', () => {
 
     const module = await first
     expect(typeof module.init).toBe('function')
+  })
+
+  it('registers the graphic component for chart empty states', async () => {
+    await loadEcharts()
+
+    const registeredComponents = echartsUseMock.mock.calls[0][0]
+    expect(registeredComponents).toContain(GraphicComponent)
+  })
+})
+
+describe('ModelProbeBoard template safeguards', () => {
+  it('does not show the filtered empty message while an error is visible', () => {
+    const source = readFileSync(
+      new URL('../../src/components/ModelProbeBoard.vue', import.meta.url),
+      'utf8'
+    )
+
+    const emptyMessageCondition = source.match(/v-if="([^"]+)" class="channel-empty"/)?.[1]
+    expect(emptyMessageCondition).toContain('!hasError')
   })
 })
