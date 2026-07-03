@@ -57,4 +57,13 @@ describe('error category display', () => {
     expect(summary.gatewayQuota).toBe(1)
     expect(summary.uncategorized).toBe(0)
   })
+
+  it('counts failed rows with unknown categories as uncategorized', () => {
+    const summary = buildVisibleLogSummary([
+      { status_code: 500, error_category: 'custom_provider_error' }
+    ])
+
+    expect(summary.failed).toBe(1)
+    expect(summary.uncategorized).toBe(1)
+  })
 })

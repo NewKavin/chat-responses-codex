@@ -94,4 +94,18 @@ describe('errorDisplay', () => {
     expect(summarizeErrorText('x'.repeat(220), 24)).toBe(`${'x'.repeat(24)}...`)
     expect(summarizeErrorText('')).toBe('-')
   })
+
+  it('summarizes long JSON text and blank values safely', () => {
+    const jsonText = JSON.stringify({
+      error: {
+        message: 'x'.repeat(220),
+        code: 'provider_error'
+      }
+    })
+
+    const summary = summarizeErrorText(jsonText, 40)
+
+    expect(summary).toBe(`${jsonText.slice(0, 40)}...`)
+    expect(summarizeErrorText('   ')).toBe('-')
+  })
 })

@@ -105,7 +105,30 @@
         日志按时间倒序展示。可以通过状态码、错误分类、模型和时间范围快速定位问题；推理强度按下游请求原值显示，下游调用/上游请求名称、计费模式与 User-Agent 均支持原始透传字段优先展示。
       </el-alert>
 
-      <el-table :data="tableRows" v-loading="loading" stripe>
+      <div class="summary-strip">
+        <div class="summary-item">
+          <span class="summary-label">当前页日志</span>
+          <strong>{{ visibleSummary.total }}</strong>
+        </div>
+        <div class="summary-item summary-item--failed">
+          <span class="summary-label">失败</span>
+          <strong>{{ visibleSummary.failed }}</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">网关配额</span>
+          <strong>{{ visibleSummary.gatewayQuota }}</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">上游反馈</span>
+          <strong>{{ visibleSummary.upstreamFeedback }}</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">流式中断</span>
+          <strong>{{ visibleSummary.streaming }}</strong>
+        </div>
+      </div>
+
+      <el-table :data="tableRows" v-loading="loading" stripe empty-text="当前筛选条件下暂无日志">
         <el-table-column label="时间" width="180">
           <template #default="{ row }">
             {{ formatTime(row.created_at) }}
@@ -193,14 +216,20 @@
         <el-table-column label="错误分类" width="240" show-overflow-tooltip>
           <template #default="{ row }">
             <el-tag v-if="row.error_category" size="small" type="danger" effect="plain">
-              {{ row.error_category }}
+              {{ row.errorCategoryLabel }}
             </el-tag>
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="错误信息" min-width="240" show-overflow-tooltip>
+        <el-table-column label="错误信息" min-width="240">
           <template #default="{ row }">
-            {{ row.error_message?.trim() || '-' }}
+            <el-tooltip
+              :disabled="!row.error_message?.trim()"
+              :content="row.error_message"
+              placement="top"
+            >
+              <span class="error-summary">{{ row.errorSummary }}</span>
+            </el-tooltip>
           </template>
         </el-table-column>
       </el-table>
@@ -236,7 +265,13 @@ import {
 } from '@element-plus/icons-vue'
 import { adminApi } from '@/api/admin'
 import type { UsageLog } from '@/types'
-import { formatInferenceStrength } from '@/utils/logDisplay'
+import {
+  buildVisibleLogSummary,
+  errorCategoryGroups,
+  formatErrorCategory,
+  formatInferenceStrength
+} from '@/utils/logDisplay'
+import { summarizeErrorText } from '@/utils/errorDisplay'
 
 const loading = ref(false)
 const logs = ref<UsageLog[]>([])
@@ -253,65 +288,6 @@ const statusCodeOptions = [
   { value: 502, label: '上游网关错误' },
   { value: 503, label: '上游临时不可用' },
   { value: 504, label: '上游超时' }
-]
-
-const errorCategoryGroups = [
-  {
-    label: '网关访问',
-    options: [
-      { value: 'gateway_auth_invalid', label: '认证无效' },
-      { value: 'gateway_key_expired', label: 'Key 已过期' },
-      { value: 'gateway_ip_not_allowed', label: 'IP 不允许' },
-      { value: 'gateway_model_not_allowed', label: '模型不允许' },
-      { value: 'gateway_no_routable_upstream', label: '无可路由上游' },
-      { value: 'gateway_invalid_request', label: '请求无效' },
-      { value: 'gateway_response_history_invalid', label: '响应历史无效' }
-    ]
-  },
-  {
-    label: '网关配额',
-    options: [
-      { value: 'gateway_per_minute_limit_exceeded', label: '分钟请求限额' },
-      { value: 'gateway_request_quota_exceeded', label: '窗口请求限额' },
-      { value: 'gateway_daily_token_quota_exceeded', label: '日 Token 限额' },
-      { value: 'gateway_monthly_token_quota_exceeded', label: '月 Token 限额' },
-      { value: 'gateway_concurrency_full', label: '下游并发已满' }
-    ]
-  },
-  {
-    label: '上游反馈',
-    options: [
-      { value: 'upstream_auth_error', label: '上游认证错误' },
-      { value: 'upstream_rate_limited', label: '上游限流' },
-      { value: 'upstream_concurrency_full', label: '上游并发已满' },
-      { value: 'upstream_protocol_unsupported', label: '上游协议不支持' },
-      { value: 'upstream_context_limit', label: '上下文超限' },
-      { value: 'upstream_request_rejected', label: '上游拒绝请求' },
-      { value: 'upstream_temporary_unavailable', label: '上游临时不可用' }
-    ]
-  },
-  {
-    label: '上游响应',
-    options: [
-      { value: 'upstream_timeout', label: '上游超时' },
-      { value: 'upstream_network_error', label: '上游网络错误' },
-      { value: 'upstream_invalid_response', label: '上游响应无效' },
-      { value: 'upstream_empty_response', label: '上游空响应' }
-    ]
-  },
-  {
-    label: '流式中断',
-    options: [
-      { value: 'stream_client_cancelled', label: '客户端取消，无输出' },
-      { value: 'stream_incomplete_close', label: '下游断连，已有部分输出' },
-      { value: 'stream_interrupted', label: '下游断连，未分类' },
-      { value: 'stream_upstream_body_decode_error', label: '上游响应解码失败' },
-      { value: 'stream_upstream_read_error', label: '上游流读取失败' },
-      { value: 'stream_upstream_timeout', label: '上游流超时' },
-      { value: 'stream_idle_timeout', label: '空闲超时' },
-      { value: 'stream_max_duration', label: '最大时长' }
-    ]
-  }
 ]
 
 const filters = ref({
@@ -345,9 +321,12 @@ interface DisplayLog extends UsageLog {
   userAgent: string
   downstreamName: string
   upstreamName: string
+  errorCategoryLabel: string
+  errorSummary: string
 }
 
 const tableRows = computed<DisplayLog[]>(() => logs.value.map(buildDisplayLog))
+const visibleSummary = computed(() => buildVisibleLogSummary(logs.value))
 
 const getStatusType = (statusCode: number) => {
   if (statusCode >= 200 && statusCode < 300) return 'success'
@@ -415,7 +394,9 @@ const buildDisplayLog = (log: UsageLog): DisplayLog => {
     requestCount,
     userAgent,
     downstreamName,
-    upstreamName
+    upstreamName,
+    errorCategoryLabel: formatErrorCategory(log.error_category),
+    errorSummary: summarizeErrorText(log.error_message, 160)
   }
 }
 
@@ -481,7 +462,11 @@ const loadData = async () => {
     pagination.value.total = data.total
     pagination.value.total_pages = data.total_pages
   } catch (error) {
-    ElMessage.error('加载日志失败')
+    const errorMsg =
+      (error as any)?.response?.data?.error?.message ||
+      (error as any)?.response?.data?.message ||
+      '加载日志失败'
+    ElMessage.error(errorMsg)
   } finally {
     loading.value = false
   }
@@ -571,5 +556,55 @@ onMounted(() => {
 
 .helper-text {
   margin-bottom: 20px;
+}
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.summary-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #f8f9fb;
+  color: #303133;
+}
+
+.summary-item strong {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.summary-item--failed strong {
+  color: #f56c6c;
+}
+
+.summary-label {
+  color: #606266;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.error-summary {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+@media (max-width: 960px) {
+  .summary-strip {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
 }
 </style>
