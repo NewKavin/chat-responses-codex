@@ -105,7 +105,7 @@
         日志按时间倒序展示。可以通过状态码、错误分类、模型和时间范围快速定位问题；推理强度按下游请求原值显示，下游调用/上游请求名称、计费模式与 User-Agent 均支持原始透传字段优先展示。
       </el-alert>
 
-      <div class="summary-strip">
+      <div class="log-summary-strip">
         <div class="summary-item">
           <span class="summary-label">当前页日志</span>
           <strong>{{ visibleSummary.total }}</strong>
@@ -226,6 +226,7 @@
             <el-tooltip
               :disabled="!row.error_message?.trim()"
               :content="row.error_message"
+              popper-class="log-error-tooltip"
               placement="top"
             >
               <span class="error-summary">{{ row.errorSummary }}</span>
@@ -465,6 +466,7 @@ const loadData = async () => {
     const errorMsg =
       (error as any)?.response?.data?.error?.message ||
       (error as any)?.response?.data?.message ||
+      (error instanceof Error && error.message) ||
       '加载日志失败'
     ElMessage.error(errorMsg)
   } finally {
@@ -558,9 +560,9 @@ onMounted(() => {
   margin-bottom: 20px;
 }
 
-.summary-strip {
+.log-summary-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 128px), 1fr));
   gap: 8px;
   margin-bottom: 16px;
 }
@@ -602,9 +604,11 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-@media (max-width: 960px) {
-  .summary-strip {
-    grid-template-columns: repeat(2, minmax(120px, 1fr));
-  }
+:global(.log-error-tooltip) {
+  max-width: min(720px, calc(100vw - 32px));
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.5;
 }
 </style>
