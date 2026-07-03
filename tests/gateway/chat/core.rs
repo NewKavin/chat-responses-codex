@@ -836,7 +836,7 @@ async fn downstream_chat_request_maps_xhigh_reasoning_to_max_for_deepseek_v4_pro
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn downstream_chat_request_normalizes_missing_required_arrays_in_real_cline_tools() {
+async fn downstream_chat_request_normalizes_missing_required_arrays_in_cline_like_tools() {
     with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();

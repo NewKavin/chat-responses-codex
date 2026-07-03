@@ -27,6 +27,7 @@ export const errorCategoryGroups: ErrorCategoryGroup[] = [
     label: '网关访问',
     options: [
       { value: 'gateway_auth_invalid', label: '认证无效' },
+      { value: 'gateway_access_denied', label: '访问被拒绝' },
       { value: 'gateway_key_expired', label: 'Key 已过期' },
       { value: 'gateway_ip_not_allowed', label: 'IP 不允许' },
       { value: 'gateway_model_not_allowed', label: '模型不允许' },
@@ -73,6 +74,7 @@ export const errorCategoryGroups: ErrorCategoryGroup[] = [
     key: 'streaming',
     label: '流式中断',
     options: [
+      { value: 'stream_processing_error', label: '流式处理错误' },
       { value: 'stream_client_cancelled', label: '客户端取消，无输出' },
       { value: 'stream_incomplete_close', label: '下游断连，已有部分输出' },
       { value: 'stream_interrupted', label: '下游断连，未分类' },
