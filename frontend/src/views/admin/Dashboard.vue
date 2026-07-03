@@ -14,9 +14,9 @@
         </div>
         <div class="hero-panel__controls">
           <el-radio-group v-model="chartRange" size="small" @change="handleRangeChange">
-            <el-radio-button label="1d">1 天</el-radio-button>
-            <el-radio-button label="7d">7 天</el-radio-button>
-            <el-radio-button label="30d">30 天</el-radio-button>
+            <el-radio-button label="1d" value="1d">1 天</el-radio-button>
+            <el-radio-button label="7d" value="7d">7 天</el-radio-button>
+            <el-radio-button label="30d" value="30d">30 天</el-radio-button>
           </el-radio-group>
           <el-button :icon="Refresh" :loading="loading" size="small" circle @click="loadDashboard" />
         </div>

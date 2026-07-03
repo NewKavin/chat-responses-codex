@@ -134,6 +134,7 @@
             v-for="option in statusFilterOptions"
             :key="option.value"
             :label="option.value"
+            :value="option.value"
           >
             {{ option.label }}
           </el-radio-button>

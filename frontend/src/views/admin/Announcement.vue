@@ -42,7 +42,12 @@
 
         <el-form-item label="等级">
           <el-radio-group v-model="form.level">
-            <el-radio-button v-for="option in levelOptions" :key="option.value" :label="option.value">
+            <el-radio-button
+              v-for="option in levelOptions"
+              :key="option.value"
+              :label="option.value"
+              :value="option.value"
+            >
               {{ option.label }}
             </el-radio-button>
           </el-radio-group>
