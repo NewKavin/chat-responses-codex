@@ -100,7 +100,12 @@
         <div
           v-for="(message, index) in messages"
           :key="`${message.role}-${index}`"
-          :class="['chat-message', `chat-message--${message.role}`, message.isError ? 'chat-message--error' : '']"
+          :class="[
+            'chat-message',
+            `chat-message--${message.role}`,
+            message.isError ? 'chat-message--error' : '',
+            message.isEmptyResponse ? 'chat-message--empty-response' : ''
+          ]"
         >
           <div class="chat-message-avatar">
             <el-icon v-if="message.role === 'user'" :size="20"><User /></el-icon>
@@ -203,11 +208,14 @@ import { Marked } from 'marked'
 import { portalApi } from '@/api/portal'
 import { buildGatewayModelsEndpoint } from '@/utils/integration'
 import { createHighlightedCodeRenderer } from '@/utils/highlight'
+import { extractReadableErrorMessage } from '@/utils/errorDisplay'
 import {
   buildPlaygroundChatPayload,
   extractChatCompletionText,
   extractChatCompletionUsage,
+  formatPlaygroundCompletionMeta,
   formatPlaygroundStreamStatus,
+  formatPlaygroundUsageText,
   inferenceStrengthOptions,
   parseGatewayModels,
   parseSSELine,
@@ -239,6 +247,7 @@ interface ConversationMessage {
   usageText?: string
   reasoning?: string
   isError?: boolean
+  isEmptyResponse?: boolean
 }
 
 const isSending = ref(false)
@@ -259,6 +268,7 @@ const messagesContainerRef = ref<HTMLElement | null>(null)
 const sidebarCollapsed = ref(false)
 const streamingContent = ref('')
 const streamingReasoning = ref('')
+const firstOutputSeconds = ref<number | undefined>(undefined)
 const streamPhase = ref<PlaygroundStreamPhase>('connecting')
 const streamElapsedSeconds = ref(0)
 const streamKeepaliveCount = ref(0)
@@ -311,6 +321,7 @@ const startStreamTimer = () => {
   streamElapsedSeconds.value = 0
   streamKeepaliveCount.value = 0
   streamPhase.value = 'connecting'
+  firstOutputSeconds.value = undefined
   streamTimer = window.setInterval(() => {
     streamElapsedSeconds.value = Math.floor((Date.now() - streamStartedAt) / 1000)
   }, 1000)
@@ -322,6 +333,11 @@ const stopStreamTimer = () => {
   streamTimer = undefined
 }
 
+const markFirstOutput = () => {
+  if (firstOutputSeconds.value !== undefined) return
+  firstOutputSeconds.value = Math.max(0, Math.floor((Date.now() - streamStartedAt) / 1000))
+}
+
 const formatFileSize = (size: number) => {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
@@ -330,16 +346,12 @@ const formatFileSize = (size: number) => {
 
 const safeGetText = async (response: Response) => {
   const text = await response.text()
-  if (!text) return `${response.status} ${response.statusText}`
-  try {
-    const payload = JSON.parse(text) as { error?: { message?: string } }
-    if (typeof payload?.error?.message === 'string' && payload.error.message.trim()) {
-      return payload.error.message
-    }
-  } catch {
-    // keep plain text
-  }
-  return text
+  return extractReadableErrorMessage({
+    status: response.status,
+    statusText: response.statusText,
+    bodyText: text,
+    fallback: `${response.status} ${response.statusText}`
+  })
 }
 
 const loadModels = async () => {
@@ -509,11 +521,6 @@ const onFileInputChange = async (event: Event) => {
   if (target.value) target.value = ''
 }
 
-const formatUsage = (usage: ReturnType<typeof extractChatCompletionUsage>) => {
-  if (!usage) return undefined
-  return `tokens: in=${usage.prompt_tokens} out=${usage.completion_tokens} total=${usage.total_tokens}`
-}
-
 const formatStreamError = (chunk: NonNullable<ReturnType<typeof parseSSELine>>) => {
   const details = [chunk.errorCategory, chunk.errorCode].filter(Boolean).join(' / ')
   if (!details) return chunk.errorMessage || '流式响应返回错误'
@@ -615,10 +622,12 @@ const sendQuestion = async () => {
             continue
           }
           if (chunk.reasoningContent) {
+            markFirstOutput()
             streamPhase.value = 'thinking'
             streamingReasoning.value += chunk.reasoningContent
           }
           if (chunk.content) {
+            markFirstOutput()
             streamPhase.value = 'generating'
             streamingContent.value += chunk.content
             finalContent = streamingContent.value
@@ -639,10 +648,12 @@ const sendQuestion = async () => {
           continue
         }
         if (chunk.reasoningContent) {
+          markFirstOutput()
           streamPhase.value = 'thinking'
           streamingReasoning.value += chunk.reasoningContent
         }
         if (chunk.content) {
+          markFirstOutput()
           streamPhase.value = 'generating'
           streamingContent.value += chunk.content
           finalContent = streamingContent.value
@@ -653,18 +664,31 @@ const sendQuestion = async () => {
       }
     } else {
       const json = await response.json()
-      finalContent = extractChatCompletionText(json) || '（模型返回空内容）'
+      finalContent = extractChatCompletionText(json)
       finalUsage = extractChatCompletionUsage(json)
     }
 
-    streamingContent.value = ''
     const finalReasoning = streamingReasoning.value
+    const usageText = formatPlaygroundUsageText(finalUsage)
+    const meta = formatPlaygroundCompletionMeta({
+      model: selectedModel.value,
+      elapsedSeconds: streamElapsedSeconds.value,
+      firstOutputSeconds: firstOutputSeconds.value,
+      usageText
+    })
+    const isEmptyResponse = !finalContent.trim()
+    const content =
+      finalContent.trim() ||
+      (finalReasoning ? '（模型仅返回思考过程，未返回正文）' : '（模型返回空内容）')
+
+    streamingContent.value = ''
     streamingReasoning.value = ''
     messages.value.push({
       role: 'assistant',
-      content: finalContent || (finalReasoning ? '（模型仅返回思考过程，未返回正文）' : '（模型返回空内容）'),
+      content,
       reasoning: finalReasoning || undefined,
-      usageText: formatUsage(finalUsage)
+      usageText: meta,
+      isEmptyResponse
     })
 
     setStatus('请求已完成', 'success')
@@ -693,6 +717,7 @@ const clearConversation = () => {
   streamPhase.value = 'connecting'
   streamElapsedSeconds.value = 0
   streamKeepaliveCount.value = 0
+  firstOutputSeconds.value = undefined
   statusMessage.value = ''
   statusType.value = 'info'
 }
@@ -983,6 +1008,12 @@ onBeforeUnmount(() => {
   border-radius: 12px 12px 12px 2px;
   border: 1px solid #fde2e2;
   white-space: pre-wrap;
+}
+
+.chat-message--empty-response .chat-message-content {
+  border-color: #f3d19e;
+  background: #fdf6ec;
+  color: #b88230;
 }
 
 .chat-message-file {
