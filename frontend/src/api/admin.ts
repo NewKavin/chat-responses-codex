@@ -2,6 +2,7 @@ import axios, { type AxiosResponse } from 'axios'
 import type {
   Announcement,
   AnnouncementLevel,
+  ActiveGatewayRequestsResponse,
   DashboardAnalyticsRange,
   DashboardData,
   DashboardSummaryResponse,
@@ -10,6 +11,8 @@ import type {
   LoginResponse,
   LogsResponse,
   ModelProbeResponse,
+  TroubleshootingRunRequest,
+  TroubleshootingRunResponse,
   UpstreamConfig
 } from '@/types'
 
@@ -173,6 +176,12 @@ export const adminApi = {
 
   // Models
   getModels: () => adminHttp.get<{ models: string[] }>('/admin/models'),
+
+  // Troubleshooting
+  runTroubleshooting: (data: TroubleshootingRunRequest) =>
+    adminHttp.post<TroubleshootingRunResponse>('/admin/troubleshooting/run', data),
+  getActiveTroubleshootingRequests: () =>
+    adminHttp.get<ActiveGatewayRequestsResponse>('/admin/troubleshooting/active-requests'),
 
   // Announcements
   getAnnouncement: () => adminHttp.get<AnnouncementResponse>('/admin/announcement'),

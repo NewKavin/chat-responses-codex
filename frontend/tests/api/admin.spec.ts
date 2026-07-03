@@ -108,6 +108,36 @@ describe('admin api auth behavior', () => {
       }
     })
   })
+
+  it('runs admin troubleshooting diagnostics', async () => {
+    const spy = vi.spyOn(adminHttp, 'post').mockResolvedValue({
+      data: { run_id: 'diag_1', results: [] }
+    } as never)
+
+    await adminApi.runTroubleshooting({
+      downstream_id: 'test',
+      client_profile: 'cline',
+      model: 'GLM-5.1',
+      checks: ['models']
+    })
+
+    expect(spy).toHaveBeenCalledWith('/admin/troubleshooting/run', {
+      downstream_id: 'test',
+      client_profile: 'cline',
+      model: 'GLM-5.1',
+      checks: ['models']
+    })
+  })
+
+  it('loads admin active troubleshooting requests', async () => {
+    const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: { active_requests: [] }
+    } as never)
+
+    await adminApi.getActiveTroubleshootingRequests()
+
+    expect(spy).toHaveBeenCalledWith('/admin/troubleshooting/active-requests')
+  })
 })
 
 describe('admin announcement api', () => {

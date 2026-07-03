@@ -25,6 +25,7 @@ const router = createRouter({
         { path: 'history', name: 'PortalHistory', component: () => import('@/views/portal/UsageHistory.vue') },
         { path: 'integration', name: 'PortalIntegration', component: () => import('@/views/portal/Integration.vue') },
         { path: 'playground', name: 'PortalPlayground', component: () => import('@/views/portal/Playground.vue') },
+        { path: 'troubleshooting', name: 'PortalTroubleshooting', component: () => import('@/views/portal/Troubleshooting.vue') },
         { path: 'key', name: 'PortalKeyManagement', component: () => import('@/views/portal/KeyManagement.vue') }
       ]
     },
@@ -65,6 +66,12 @@ const router = createRouter({
       path: '/admin/logs',
       name: 'AdminLogs',
       component: () => import('@/views/admin/Logs.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/admin/troubleshooting',
+      name: 'AdminTroubleshooting',
+      component: () => import('@/views/admin/Troubleshooting.vue'),
       meta: { requiresAuth: true }
     },
     {

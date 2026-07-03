@@ -5,7 +5,10 @@ import type {
   PortalModelStat,
   ModelProbeResponse,
   PortalQuota,
-  PortalUsageHistory
+  PortalUsageHistory,
+  ActiveGatewayRequestsResponse,
+  TroubleshootingRunRequest,
+  TroubleshootingRunResponse
 } from '@/types'
 
 export interface AnnouncementResponse {
@@ -61,6 +64,12 @@ export const portalApi = {
   getKey: () => portalHttp.get<{ plaintext_key: string | null }>('/portal/key'),
   getModels: () => portalHttp.get<PortalModelStat[]>('/portal/models'),
   rotateKey: () => portalHttp.post<{ plaintext_key: string }>('/portal/key/rotate'),
+
+  // Troubleshooting
+  runTroubleshooting: (data: TroubleshootingRunRequest) =>
+    portalHttp.post<TroubleshootingRunResponse>('/portal/troubleshooting/run', data),
+  getActiveTroubleshootingRequests: () =>
+    portalHttp.get<ActiveGatewayRequestsResponse>('/portal/troubleshooting/active-requests'),
 
   // Announcement
   getAnnouncement: () => portalHttp.get<AnnouncementResponse>('/portal/announcement')

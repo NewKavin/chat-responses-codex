@@ -307,6 +307,93 @@ export interface ModelProbeResponse {
 }
 
 // ============================================================================
+// Troubleshooting Types
+// ============================================================================
+
+export type TroubleshootingClientProfile =
+  | 'cline'
+  | 'codex'
+  | 'opencode'
+  | 'claude_code'
+  | 'hermes'
+  | 'open_ai_compatible'
+  | 'anthropic_compatible'
+
+export type TroubleshootingCheck =
+  | 'models'
+  | 'chat'
+  | 'chat_stream'
+  | 'responses'
+  | 'responses_stream'
+  | 'messages'
+  | 'messages_stream'
+  | 'count_tokens'
+  | 'tools'
+
+export type TroubleshootingStepStatus = 'passed' | 'warning' | 'failed' | 'timeout'
+
+export interface TroubleshootingRunRequest {
+  client_profile: TroubleshootingClientProfile
+  model: string
+  checks: TroubleshootingCheck[]
+  downstream_id?: string
+}
+
+export interface TroubleshootingStepResult {
+  id: string
+  label: string
+  status: TroubleshootingStepStatus
+  protocol: string
+  http_status: number
+  duration_ms: number
+  summary: string
+  details: string
+  error_category?: string | null
+  suggestion: string
+  copy_summary: string
+  log_filter?: Record<string, unknown> | null
+}
+
+export interface TroubleshootingRunResponse {
+  run_id: string
+  status: string
+  client_profile: TroubleshootingClientProfile
+  model: string
+  summary?: {
+    passed: number
+    warning: number
+    failed: number
+    timeout: number
+  }
+  results: TroubleshootingStepResult[]
+  duration_ms?: number
+  copy_summary?: string
+  log_filter?: string
+}
+
+export interface ActiveGatewayRequest {
+  request_id: string
+  downstream_id: string
+  downstream_name: string
+  endpoint: string
+  model: string
+  protocol: string
+  user_agent?: string | null
+  upstream_id?: string | null
+  upstream_name?: string | null
+  started_at: number
+  last_event_at: number
+  elapsed_seconds: number
+  idle_seconds: number
+  status: string
+  error_category?: string | null
+}
+
+export interface ActiveGatewayRequestsResponse {
+  active_requests: ActiveGatewayRequest[]
+}
+
+// ============================================================================
 // Announcement Types
 // ============================================================================
 
