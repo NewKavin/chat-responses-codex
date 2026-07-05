@@ -217,15 +217,19 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
             global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
-        AppConfig::default(),
+        AppConfig {
+            upstream_rate_limit_force_retry_enabled: false,
+            upstream_rate_limit_max_retry_after_seconds: 1,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
 
     // Make a request that triggers rate limiting
-    let response = app
-        .clone()
-        .oneshot(
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.clone().oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/chat/completions")
@@ -242,9 +246,11 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                     .to_string(),
                 ))
                 .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("rate-limit cooldown diagnostic request should not wait for retry-after")
+    .expect("rate-limit cooldown diagnostic request should complete");
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 

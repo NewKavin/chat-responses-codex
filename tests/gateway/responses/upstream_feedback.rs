@@ -241,14 +241,18 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
             global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
-        AppConfig::default(),
+        AppConfig {
+            upstream_rate_limit_force_retry_enabled: false,
+            upstream_rate_limit_max_retry_after_seconds: 1,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
 
-    let response = app
-        .clone()
-        .oneshot(
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.clone().oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/chat/completions")
@@ -265,12 +269,21 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
                     .to_string(),
                 ))
                 .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("429 cooldown test should not wait for retry-after")
+    .expect("429 cooldown test request should complete");
 
     // Should get 429 from upstream
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let snapshots = state.upstream_runtime_snapshots().await;
+    let snapshot = snapshots.get("up-1").unwrap();
+    assert!(
+        snapshot.cooldown_until > 0,
+        "cooldown_until should be set from retry-after"
+    );
 }
 
 #[tokio::test]

@@ -123,7 +123,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 completion_tokens: 0,
                 total_tokens: 0,
                 latency_ms: 50,
-                created_at: now - 86400, // 1 day ago
+                created_at: now - 86000, // within 1 day
             },
             UsageLog {
                 id: "log-5".to_string(),
@@ -145,7 +145,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 completion_tokens: 100,
                 total_tokens: 300,
                 latency_ms: 800,
-                created_at: now - 604800, // 7 days ago
+                created_at: now - 604000, // within 7 days
             },
         ],
         announcement: None,
@@ -464,7 +464,7 @@ async fn test_logs_list_supports_filtering_by_time_range() {
     let result: Value = serde_json::from_slice(&body).unwrap();
 
     let logs = result["logs"].as_array().unwrap();
-    // Boundary-inclusive filtering keeps the log exactly at 24h
+    // Includes logs inside the last 24 hours.
     assert_eq!(logs.len(), 4);
 }
 
