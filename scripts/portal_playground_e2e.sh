@@ -27,19 +27,19 @@ print_section() {
 }
 
 log_info() {
-  echo "[INFO] $*"
+  echo "[INFO] $*" >&2
 }
 
 log_pass() {
-  echo "[PASS] $*"
+  echo "[PASS] $*" >&2
 }
 
 log_warn() {
-  echo "[WARN] $*"
+  echo "[WARN] $*" >&2
 }
 
 log_fail() {
-  echo "[FAIL] $*"
+  echo "[FAIL] $*" >&2
   action_status=1
 }
 
