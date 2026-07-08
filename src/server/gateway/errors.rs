@@ -508,10 +508,91 @@ pub(super) fn safe_upstream_body_diagnostics(body: &Value) -> SafeUpstreamBodyDi
     }
 }
 
+/// Truncate a string to at most `max_chars` Unicode characters, appending an
+/// ellipsis if truncation occurred. Keeps log lines and downstream error
+/// messages bounded when a misbehaving upstream echoes oversized content.
+fn truncate_message(message: &str, max_chars: usize) -> String {
+    let trimmed = message.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut result: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
+    result.push('…');
+    result
+}
+
+/// Build the human-readable message that downstream clients (codex, opencode,
+/// hermes, claude code, …) will see in the `error.message` field.
+///
+/// The goal is clarity: the user must understand *why* the request failed.
+/// We surface the upstream's real error text when available (e.g.
+/// "This token has no access to model deepseek-v4-pro") and fall back to a
+/// concise status-based hint otherwise.
+pub(super) fn upstream_client_message(
+    status: StatusCode,
+    upstream_message: &str,
+) -> String {
+    let upstream_message = upstream_message.trim();
+    // Some upstreams return a generic code string (e.g.
+    // "bad_response_status_code") as the message — it carries no useful
+    // information for the end user, so drop it and use the status hint.
+    let upstream_message: &str = if upstream_message.eq_ignore_ascii_case("bad_response_status_code")
+        || upstream_message.is_empty()
+    {
+        ""
+    } else {
+        upstream_message
+    };
+
+    let status_hint = match status.as_u16() {
+        401 => "upstream authentication failed (invalid or expired API key)",
+        403 => "upstream denied access (API key lacks permission for this model or quota exhausted)",
+        404 | 405 => "upstream does not support this model or endpoint",
+        429 => "upstream rate limit exceeded (too many requests)",
+        c if (500..=599).contains(&c) => "upstream server error",
+        _ => "upstream rejected the request",
+    };
+
+    if upstream_message.is_empty() {
+        return format!("{status_hint} (status {})", status.as_u16());
+    }
+
+    // For auth (401/403), rate-limit (429), and server (5xx) errors the
+    // upstream message is typically a self-contained diagnostic (e.g. "invalid
+    // api key", "model not permitted") that does not echo request content, so
+    // it is safe and valuable to surface to the client.
+    let is_safe_to_surface = matches!(status.as_u16(), 401 | 403 | 429)
+        || status.is_server_error()
+        || status == StatusCode::NOT_FOUND
+        || status == StatusCode::METHOD_NOT_ALLOWED;
+
+    if is_safe_to_surface {
+        format!(
+            "{status_hint} (status {}): {}",
+            status.as_u16(),
+            truncate_message(upstream_message, 300)
+        )
+    } else {
+        // For other 4xx errors (e.g. 400) the upstream message may echo
+        // request/prompt content (e.g. "expecting , delimiter near <prompt>"),
+        // so we must NOT forward it to the client response. The truncated
+        // message is still preserved in the server log (error_excerpt) and
+        // usage_logs for operator diagnosis.
+        format!("{status_hint} (status {})", status.as_u16())
+    }
+}
+
+/// Build a diagnostic summary for an upstream non-success response.
+///
+/// The `upstream_message` is the structured error message extracted from the
+/// upstream response body (e.g. "This token has no access to model X"). It is
+/// truncated to a conservative length so that a misbehaving upstream that
+/// echoes request content cannot flood logs or leak large prompt payloads.
 pub(super) fn safe_upstream_error_summary(
     status: StatusCode,
     upstream_error_code: Option<u16>,
     feedback: UpstreamFeedbackClassification,
+    upstream_message: &str,
 ) -> String {
     let mut summary = format!(
         "upstream status {}, classification {:?}",
@@ -520,6 +601,12 @@ pub(super) fn safe_upstream_error_summary(
     );
     if let Some(code) = upstream_error_code {
         summary.push_str(&format!(", upstream code {code}"));
+    }
+    let trimmed_message = upstream_message.trim();
+    if !trimmed_message.is_empty() {
+        // Cap the excerpt so echoed prompt content or oversized error bodies
+        // cannot dominate log lines.
+        summary.push_str(&format!(", message: {:?}", truncate_message(trimmed_message, 200)));
     }
     summary
 }

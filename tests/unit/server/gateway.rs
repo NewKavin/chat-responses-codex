@@ -131,23 +131,44 @@ fn safe_upstream_body_diagnostics_do_not_include_payload_values() {
 }
 
 #[test]
-fn safe_upstream_error_summary_does_not_include_upstream_message_text() {
-    let upstream_message = "expecting , delimiter near SECRET_PROMPT_BODY_SHOULD_NOT_LEAK";
+fn safe_upstream_error_summary_includes_truncated_upstream_message() {
+    // A structured upstream error message (e.g. "This token has no access to
+    // model X") is valuable diagnostic information for the downstream client.
+    // It should be included in the summary so users can understand the real
+    // cause of the failure.
+    let upstream_message = "This token has no access to model deepseek-v4-pro";
     let summary = safe_upstream_error_summary(
         StatusCode::BAD_REQUEST,
         Some(400),
         UpstreamFeedbackClassification::Unknown,
+        upstream_message,
     );
 
     assert!(summary.contains("status 400"));
     assert!(summary.contains("upstream code 400"));
     assert!(
-        !summary.contains(upstream_message),
-        "safe summary must not include raw upstream error text: {summary}"
+        summary.contains(upstream_message),
+        "safe summary should include the upstream error message: {summary}"
     );
+}
+
+#[test]
+fn safe_upstream_error_summary_truncates_long_upstream_message() {
+    // An oversized upstream message (which might echo request content) must be
+    // truncated so it cannot flood logs or leak large prompt payloads.
+    let long_message = "SECRET_PROMPT_BODY_SHOULD_NOT_LEAK".repeat(50);
+    let summary = safe_upstream_error_summary(
+        StatusCode::BAD_REQUEST,
+        Some(400),
+        UpstreamFeedbackClassification::Unknown,
+        &long_message,
+    );
+
+    assert!(summary.contains("status 400"));
+    // The summary should be bounded — not contain the full oversized message.
     assert!(
-        !summary.contains("SECRET_PROMPT_BODY"),
-        "safe summary must not include echoed request content: {summary}"
+        summary.len() < long_message.len(),
+        "safe summary must truncate oversized upstream messages: {summary}"
     );
 }
 

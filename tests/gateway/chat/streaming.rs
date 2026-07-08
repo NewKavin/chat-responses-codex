@@ -1796,7 +1796,7 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(first_error.contains("upstream rate limited"));
+    assert!(first_error.contains("rate limit"));
 
     let second = app.oneshot(request()).await.unwrap();
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -1807,7 +1807,7 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
         .unwrap_or_default()
         .to_string();
     assert!(
-        second_error.contains("upstream rate limited"),
+        second_error.contains("rate limit"),
         "unexpected second error: {second_error}"
     );
     assert!(

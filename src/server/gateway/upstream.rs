@@ -138,14 +138,18 @@ pub(super) fn parse_upstream_error_payload(error_text: &str) -> ParsedUpstreamEr
 pub(super) fn extract_upstream_error_message(error_text: &str) -> String {
     let parsed = parse_upstream_error_payload(error_text);
 
-    if let Some(code) = parsed.code.as_deref() {
-        if code.parse::<u16>().is_err() && !code.is_empty() {
-            return code.to_string();
-        }
-    }
-
+    // Prefer the human-readable message field from the upstream error body.
+    // Only fall back to the code field when no message is present, because
+    // non-numeric codes such as "bad_response_status_code" carry no useful
+    // diagnostic information for the downstream client.
     if let Some(message) = parsed.message.filter(|message| !message.trim().is_empty()) {
         return message;
+    }
+
+    if let Some(code) = parsed.code.as_deref() {
+        if !code.is_empty() && code.parse::<u16>().is_err() {
+            return code.to_string();
+        }
     }
 
     error_text.to_string()
@@ -482,7 +486,7 @@ pub(super) async fn send_to_upstream(
                     error = %error,
                     "upstream request failed"
                 );
-                GatewayError::upstream_network_error(format!("upstream request failed: {error}"))
+                GatewayError::upstream_network_error(format!("upstream request failed (upstream {}: {}): {error}", upstream.name, url))
             })?,
             Err(_) => {
                 tracing::warn!(
@@ -499,8 +503,10 @@ pub(super) async fn send_to_upstream(
                     "upstream response header timeout"
                 );
                 return Err(GatewayError::upstream_timeout(format!(
-                    "upstream response header timeout after {}s",
-                    response_header_timeout.as_secs()
+                    "upstream response header timeout after {}s (upstream {}: {})",
+                    response_header_timeout.as_secs(),
+                    upstream.name,
+                    url
                 )));
             }
         };
@@ -514,8 +520,14 @@ pub(super) async fn send_to_upstream(
         let headers = response.headers().clone();
         let error_text = response.text().await.unwrap_or_default();
         let raw_upstream_error_message = extract_upstream_error_message(&error_text);
+        // Some upstreams (e.g. huazi) wrap the real error in a body whose
+        // `code`/`type` fields are the literal string "bad_response_status_code".
+        // That signals a request-format problem that may be caused by tools /
+        // tool_choice, so we detect it from the raw body rather than the
+        // extracted message (which now prefers the human-readable `message`
+        // field over the non-numeric `code`).
         let upstream_error_is_bad_response_status_code =
-            raw_upstream_error_message == "bad_response_status_code";
+            error_text.contains("bad_response_status_code");
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
         // Classify the upstream response to determine how to handle it
@@ -524,8 +536,13 @@ pub(super) async fn send_to_upstream(
             &headers,
             Some(&error_text),
         );
-        let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback);
-        let upstream_error_message = error_excerpt.clone();
+        // Log-facing excerpt: full diagnostic context (status, classification,
+        // upstream code, message) for operators reading the server log.
+        let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback, &raw_upstream_error_message);
+        // Client-facing message: the upstream's real error text (e.g.
+        // "This token has no access to model deepseek-v4-pro"). Falls back to
+        // a status-based hint when the upstream body had no parseable message.
+        let upstream_error_message = upstream_client_message(status, &raw_upstream_error_message);
 
         tracing::warn!(
             request_id = %request_id,
@@ -647,22 +664,25 @@ pub(super) async fn send_to_upstream(
 
         // If we already retried without tools/tool_choice and still get bad_response_status_code,
         // the upstream simply doesn't support this model/request. Try next upstream.
+        //
+        // However, if the persistent status is 401/403, the upstream is refusing
+        // authorization (bad API key or model not permitted for this key), not
+        // signalling a protocol/feature gap. Classifying that as
+        // upstream_protocol_unsupported (503) masks the real problem and prevents
+        // the outer loop from trying the next upstream/key. Surface it as an auth
+        // error instead.
         if tool_choice_tool_retry_attempted && upstream_error_is_bad_response_status_code {
+            if matches!(status.as_u16(), 401 | 403) {
+                return Err(GatewayError::upstream_auth_error(upstream_error_message.clone(), status));
+            }
             return Err(GatewayError::upstream_temporary_unavailable(
-                format!("upstream rejected request (status {})", status.as_u16()),
+                upstream_error_message.clone(),
                 "upstream_protocol_unsupported",
             ));
         }
 
         if matches!(status.as_u16(), 401 | 403) {
-            return Err(GatewayError::upstream_auth_error(
-                if error_excerpt.is_empty() {
-                    format!("upstream rejected request with status {}", status.as_u16())
-                } else {
-                    format!("upstream rejected request: {error_excerpt}")
-                },
-                status,
-            ));
+            return Err(GatewayError::upstream_auth_error(upstream_error_message.clone(), status));
         }
 
         if matches!(
@@ -670,14 +690,7 @@ pub(super) async fn send_to_upstream(
             UpstreamFeedbackClassification::ProtocolUnsupported
         ) {
             return Err(GatewayError::upstream_temporary_unavailable(
-                if error_excerpt.is_empty() {
-                    format!(
-                        "upstream does not support this model or endpoint (status {})",
-                        status.as_u16()
-                    )
-                } else {
-                    format!("upstream does not support this model or endpoint: {error_excerpt}")
-                },
+                upstream_error_message.clone(),
                 "upstream_protocol_unsupported",
             ));
         }
@@ -691,18 +704,7 @@ pub(super) async fn send_to_upstream(
             if (400..=499).contains(&inner_code) {
                 if upstream_is_server_error {
                     return Err(GatewayError::upstream_temporary_unavailable(
-                        if error_excerpt.is_empty() {
-                            format!(
-                                "upstream server error (status {}) with nested client code {}",
-                                status.as_u16(),
-                                inner_code
-                            )
-                        } else {
-                            format!(
-                                "upstream server error (status {}): {error_excerpt}",
-                                status.as_u16()
-                            )
-                        },
+                        upstream_error_message.clone(),
                         "upstream_temporary_unavailable",
                     ));
                 }
@@ -713,11 +715,7 @@ pub(super) async fn send_to_upstream(
                         state.config.upstream_rate_limit_default_retry_seconds,
                     );
                     return Err(GatewayError::TooManyRequests {
-                        message: if error_excerpt.is_empty() {
-                            format!("upstream rate limited (code {inner_code})")
-                        } else {
-                            format!("upstream rate limited: {error_excerpt}")
-                        },
+                        message: upstream_error_message.clone(),
                         retry_after_seconds: Some(retry_after_seconds),
                     });
                 }
@@ -740,21 +738,13 @@ pub(super) async fn send_to_upstream(
                     state.config.upstream_rate_limit_default_retry_seconds,
                 );
                 return Err(GatewayError::TooManyRequests {
-                    message: if error_excerpt.is_empty() {
-                        "upstream rate limited".into()
-                    } else {
-                        format!("upstream rate limited: {error_excerpt}")
-                    },
+                    message: upstream_error_message.clone(),
                     retry_after_seconds: Some(retry_after_seconds),
                 });
             }
             UpstreamFeedbackClassification::ConcurrencyFull => {
                 return Err(GatewayError::ConcurrencyFull {
-                    message: if error_excerpt.is_empty() {
-                        "upstream concurrency limit reached".into()
-                    } else {
-                        format!("upstream concurrency limit reached: {error_excerpt}")
-                    },
+                    message: upstream_error_message.clone(),
                     retry_after_seconds: None,
                 });
             }
@@ -762,48 +752,28 @@ pub(super) async fn send_to_upstream(
             | UpstreamFeedbackClassification::TemporaryUnavailable => {
                 // Return error to allow outer loop to try next upstream
                 return Err(GatewayError::upstream_temporary_unavailable(
-                    if error_excerpt.is_empty() {
-                        format!(
-                            "upstream temporarily unavailable (status {})",
-                            status.as_u16()
-                        )
-                    } else {
-                        format!("upstream temporarily unavailable: {error_excerpt}")
-                    },
+                    upstream_error_message.clone(),
                     "upstream_temporary_unavailable",
                 ));
             }
             UpstreamFeedbackClassification::ProtocolUnsupported => {
                 // Protocol not supported, return error to try next upstream
                 return Err(GatewayError::upstream_temporary_unavailable(
-                    format!(
-                        "protocol not supported by upstream (status {})",
-                        status.as_u16()
-                    ),
+                    upstream_error_message.clone(),
                     "upstream_protocol_unsupported",
                 ));
             }
             UpstreamFeedbackClassification::Unknown => {
-                // Unknown error - pass through client errors (4xx) as BadRequest, server errors (5xx) as Upstream
+                // Unknown error - pass through client errors (4xx) as BadRequest,
+                // server errors (5xx) as Upstream. The upstream_error_message
+                // already contains a clear, client-facing description.
                 if status.is_client_error() {
                     return Err(GatewayError::upstream_bad_request(
-                        if upstream_error_message.is_empty() {
-                            format!("upstream rejected request with status {}", status.as_u16())
-                        } else {
-                            upstream_error_message
-                        },
+                        upstream_error_message.clone(),
                         status,
                     ));
                 } else {
-                    return Err(GatewayError::Upstream(format!(
-                        "upstream responded with status {}{}",
-                        status,
-                        if upstream_error_message.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {upstream_error_message}")
-                        }
-                    )));
+                    return Err(GatewayError::Upstream(upstream_error_message.clone()));
                 }
             }
         }

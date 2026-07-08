@@ -493,3 +493,158 @@ struct RequestCapture {
     authorization: Option<String>,
     request_body: Option<serde_json::Value>,
 }
+
+#[tokio::test]
+async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error_not_protocol_unsupported() {
+    // Reproduces the 华子 upstream scenario: the upstream returns HTTP 403
+    // (auth/permission denied) on every attempt, but the body contains
+    // "bad_response_status_code" as the error code. The gateway must NOT
+    // misclassify this as upstream_protocol_unsupported (503). After the
+    // tool-removal retry still gets 403, it should surface as an auth error
+    // (403) so the outer loop can try the next upstream/key.
+    let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(move |State(capture): State<Arc<Mutex<Vec<RequestCapture>>>>,
+                          request: Request<Body>| {
+                    let capture = capture.clone();
+                    async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap();
+                        {
+                            let mut lock = capture.lock().unwrap();
+                            lock.push(RequestCapture {
+                                path: parts.uri.path().to_string(),
+                                authorization: parts
+                                    .headers
+                                    .get(header::AUTHORIZATION)
+                                    .and_then(|value| value.to_str().ok())
+                                    .map(str::to_string),
+                                request_body: Some(payload.clone()),
+                            });
+                        }
+                        // Every attempt returns 403 with bad_response_status_code,
+                        // simulating an upstream that rejects the API key / model
+                        // regardless of whether tools are present.
+                        (
+                            StatusCode::FORBIDDEN,
+                            axum::Json(json!({
+                                "error": {
+                                    "message": "{\"error\":{\"message\":\"openai_error\",\"type\":\"bad_response_status_code\",\"param\":\"\",\"code\":\"bad_response_status_code\"}}"
+                                }
+                            })),
+                        )
+                    }
+                }),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "input": "Need weather",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "Get the weather",
+                        "parameters": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "tool_choice": "required"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    // The upstream rejected with 403 on every attempt. This is an auth error,
+    // not a protocol-unsupported (503) situation.
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "persistent 403 from upstream should surface as 403 auth error, not 503"
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"]["code"], "upstream_auth_error",
+        "error category should be upstream_auth_error, not upstream_protocol_unsupported"
+    );
+
+    // The gateway first retries without tools (bad_response_status_code path),
+    // but when the second attempt also returns 403, it classifies the
+    // persistent failure as an auth error rather than protocol-unsupported.
+    let captures = capture.lock().unwrap().clone();
+    assert_eq!(captures.len(), 2);
+    assert!(captures[0].request_body.as_ref().unwrap().get("tools").is_some());
+    assert!(captures[1].request_body.as_ref().unwrap().get("tools").is_none());
+}

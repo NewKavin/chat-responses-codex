@@ -404,7 +404,7 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(first_error.contains("upstream rate limited"));
+    assert!(first_error.contains("rate limit"));
 
     let second = app.oneshot(request()).await.unwrap();
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -415,7 +415,7 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
         .unwrap_or_default()
         .to_string();
     assert!(
-        second_error.contains("upstream rate limited"),
+        second_error.contains("rate limit"),
         "unexpected second error: {second_error}"
     );
     assert!(
@@ -1281,4 +1281,109 @@ async fn provider_busy_body_marks_upstream_temporarily_unavailable() {
 
     // Should succeed by falling back to second upstream after first returns 503
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn upstream_network_error_message_includes_upstream_name_and_reason() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    // Bind to a port then immediately drop the listener so connection is refused.
+    let orphan_port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    };
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "my-upstream-name".into(),
+                base_url: format!("http://{}", orphan_port),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                default_model_context: None,
+                model_contexts: vec![],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                model_request_costs: vec![],
+                priority: 0,
+                premium_models: vec![],
+                premium_only: false,
+                protect_premium_quota: false,
+                active: true,
+                failure_count: 0,
+                strip_nonstandard_chat_fields: false,
+                api_keys: vec![],
+                api_key_models: vec![],
+                auto_managed: false,
+                managed_source: None,
+                last_synced_at: 0,
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    // Network errors surface as 502 Bad Gateway.
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = payload["error"]["message"].as_str().unwrap_or("");
+
+    // The error message must include the upstream name so users know WHICH
+    // upstream failed, not just a raw reqwest transport error.
+    assert!(
+        message.contains("my-upstream-name"),
+        "network error message should include upstream name, got: {message}"
+    );
 }
