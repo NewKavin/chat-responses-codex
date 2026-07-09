@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildTroubleshootingCopySummary,
+  getFallbackStageLabel,
   getActiveRequestHealth,
   getClientProfileDefaults,
   getTroubleshootingStatusMeta,
@@ -78,5 +79,13 @@ describe('troubleshooting utils', () => {
     expect(getTroubleshootingSuggestion('gateway_daily_token_quota_exceeded')).toContain('Token 限额')
     expect(getTroubleshootingSuggestion('upstream_rate_limited')).toContain('上游限流')
     expect(getTroubleshootingSuggestion('stream_idle_timeout')).toContain('流式')
+  })
+
+  it('formats compatibility matrix fallback stage labels', () => {
+    expect(getFallbackStageLabel('high_fidelity')).toBe('高保真')
+    expect(getFallbackStageLabel('extension_cleanup')).toBe('扩展字段清理')
+    expect(getFallbackStageLabel('tool_replay_reduction')).toBe('工具重放缩减')
+    expect(getFallbackStageLabel('history_compaction')).toBe('历史压缩')
+    expect(getFallbackStageLabel(undefined)).toBe('原生')
   })
 })

@@ -129,6 +129,35 @@ describe('admin api auth behavior', () => {
     })
   })
 
+  it('posts compatibility matrix runs through the admin api', async () => {
+    const spy = vi.spyOn(adminHttp, 'post').mockResolvedValue({
+      data: {
+        run_id: 'matrix_1',
+        downstream_id: 'test',
+        models: ['GLM-5.1'],
+        client_profiles: ['codex', 'opencode', 'hermes'],
+        summary: {
+          passed: 1,
+          warning: 1,
+          failed: 1
+        },
+        cells: [],
+        duration_ms: 1000,
+        copy_summary: 'compatibility matrix completed'
+      }
+    } as never)
+
+    await adminApi.runCompatibilityMatrix({
+      downstream_id: 'test',
+      client_profiles: ['codex', 'opencode', 'hermes']
+    })
+
+    expect(spy).toHaveBeenCalledWith('/admin/troubleshooting/matrix/run', {
+      downstream_id: 'test',
+      client_profiles: ['codex', 'opencode', 'hermes']
+    })
+  })
+
   it('loads admin active troubleshooting requests', async () => {
     const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
       data: { active_requests: [] }

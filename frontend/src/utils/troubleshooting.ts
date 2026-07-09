@@ -54,6 +54,20 @@ export const clientProfileDefaults: Record<TroubleshootingClientProfile, ClientP
 export const getClientProfileDefaults = (profile: TroubleshootingClientProfile) =>
   clientProfileDefaults[profile]
 
+export const matrixClientProfiles: TroubleshootingClientProfile[] = [
+  'codex',
+  'opencode',
+  'hermes'
+]
+
+export const getFallbackStageLabel = (stage?: string | null) => {
+  if (stage === 'high_fidelity') return '高保真'
+  if (stage === 'extension_cleanup') return '扩展字段清理'
+  if (stage === 'tool_replay_reduction') return '工具重放缩减'
+  if (stage === 'history_compaction') return '历史压缩'
+  return '原生'
+}
+
 export const getTroubleshootingStatusMeta = (status: TroubleshootingStepStatus) => {
   if (status === 'passed') return { label: '通过', type: 'success' as const }
   if (status === 'warning') return { label: '警告', type: 'warning' as const }

@@ -393,6 +393,44 @@ export interface ActiveGatewayRequestsResponse {
   active_requests: ActiveGatewayRequest[]
 }
 
+export interface CompatibilityMatrixRunRequest {
+  downstream_id: string
+  client_profiles?: TroubleshootingClientProfile[]
+  models?: string[]
+}
+
+export interface CompatibilityMatrixCell {
+  client_family: TroubleshootingClientProfile
+  model_slug: string
+  endpoint: string
+  selected_upstream_id?: string | null
+  selected_upstream_name?: string | null
+  selected_upstream_protocol?: string | null
+  protocol_transition?: string | null
+  fallback_stage?: string | null
+  status: TroubleshootingStepStatus
+  http_status: number
+  error_category?: string | null
+  summary: string
+  details: string
+  duration_ms: number
+}
+
+export interface CompatibilityMatrixRunResponse {
+  run_id: string
+  downstream_id: string
+  models: string[]
+  client_profiles: TroubleshootingClientProfile[]
+  summary: {
+    passed: number
+    warning: number
+    failed: number
+  }
+  cells: CompatibilityMatrixCell[]
+  duration_ms: number
+  copy_summary: string
+}
+
 // ============================================================================
 // Announcement Types
 // ============================================================================

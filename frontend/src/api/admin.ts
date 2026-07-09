@@ -3,6 +3,8 @@ import type {
   Announcement,
   AnnouncementLevel,
   ActiveGatewayRequestsResponse,
+  CompatibilityMatrixRunRequest,
+  CompatibilityMatrixRunResponse,
   DashboardAnalyticsRange,
   DashboardData,
   DashboardSummaryResponse,
@@ -180,6 +182,8 @@ export const adminApi = {
   // Troubleshooting
   runTroubleshooting: (data: TroubleshootingRunRequest) =>
     adminHttp.post<TroubleshootingRunResponse>('/admin/troubleshooting/run', data),
+  runCompatibilityMatrix: (data: CompatibilityMatrixRunRequest) =>
+    adminHttp.post<CompatibilityMatrixRunResponse>('/admin/troubleshooting/matrix/run', data),
   getActiveTroubleshootingRequests: () =>
     adminHttp.get<ActiveGatewayRequestsResponse>('/admin/troubleshooting/active-requests'),
 

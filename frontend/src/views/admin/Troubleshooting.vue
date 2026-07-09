@@ -1,18 +1,32 @@
 <template>
-  <TroubleshootingCenter
-    admin
-    :models="models"
-    :downstreams="downstreamOptions"
-    :run="runTroubleshooting"
-    :load-active="loadActive"
-  />
+  <div class="admin-troubleshooting-page">
+    <TroubleshootingCenter
+      admin
+      :models="models"
+      :downstreams="downstreamOptions"
+      :run="runTroubleshooting"
+      :load-active="loadActive"
+    />
+    <div class="matrix-panel-wrap">
+      <CompatibilityMatrixPanel
+        :downstreams="downstreamOptions"
+        :run-matrix="runCompatibilityMatrix"
+      />
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { adminApi } from '@/api/admin'
+import CompatibilityMatrixPanel from '@/components/CompatibilityMatrixPanel.vue'
 import TroubleshootingCenter from '@/components/TroubleshootingCenter.vue'
-import type { ActiveGatewayRequest, DownstreamConfig, TroubleshootingRunRequest } from '@/types'
+import type {
+  ActiveGatewayRequest,
+  CompatibilityMatrixRunRequest,
+  DownstreamConfig,
+  TroubleshootingRunRequest
+} from '@/types'
 
 const models = ref<string[]>([])
 const downstreams = ref<DownstreamConfig[]>([])
@@ -38,6 +52,11 @@ const runTroubleshooting = async (payload: TroubleshootingRunRequest) => {
   return data
 }
 
+const runCompatibilityMatrix = async (payload: CompatibilityMatrixRunRequest) => {
+  const { data } = await adminApi.runCompatibilityMatrix(payload)
+  return data
+}
+
 const loadActive = async (): Promise<ActiveGatewayRequest[]> => {
   const { data } = await adminApi.getActiveTroubleshootingRequests()
   return data.active_requests
@@ -45,3 +64,15 @@ const loadActive = async (): Promise<ActiveGatewayRequest[]> => {
 
 onMounted(loadData)
 </script>
+
+<style scoped>
+.admin-troubleshooting-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.matrix-panel-wrap {
+  padding: 0 20px 20px;
+}
+</style>
