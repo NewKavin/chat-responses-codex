@@ -128,6 +128,8 @@ impl UpstreamFeedbackClassification {
                 || body_lower.contains("streaming not supported")
                 || body_lower.contains("stream not supported")
                 || body_lower.contains("model not supported")
+                || body_lower.contains("model is not supported")
+                || body_lower.contains("not supported when using")
                 || body_lower.contains("unsupported model")
                 || body_lower.contains("model unsupported")
                 || body_lower.contains("model not found")

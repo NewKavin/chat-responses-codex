@@ -486,7 +486,10 @@ pub(super) async fn send_to_upstream(
                     error = %error,
                     "upstream request failed"
                 );
-                GatewayError::upstream_network_error(format!("upstream request failed (upstream {}: {}): {error}", upstream.name, url))
+                GatewayError::upstream_network_error(format!(
+                    "upstream request failed (upstream {}: {}): {error}",
+                    upstream.name, url
+                ))
             })?,
             Err(_) => {
                 tracing::warn!(
@@ -538,11 +541,17 @@ pub(super) async fn send_to_upstream(
         );
         // Log-facing excerpt: full diagnostic context (status, classification,
         // upstream code, message) for operators reading the server log.
-        let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback, &raw_upstream_error_message);
+        let error_excerpt = safe_upstream_error_summary(
+            status,
+            upstream_error_code,
+            feedback,
+            &raw_upstream_error_message,
+        );
         // Client-facing message: the upstream's real error text (e.g.
         // "This token has no access to model deepseek-v4-pro"). Falls back to
         // a status-based hint when the upstream body had no parseable message.
-        let upstream_error_message = upstream_client_message(status, &raw_upstream_error_message);
+        let upstream_error_message =
+            upstream_client_message(status, feedback, &raw_upstream_error_message);
 
         tracing::warn!(
             request_id = %request_id,
@@ -673,7 +682,10 @@ pub(super) async fn send_to_upstream(
         // error instead.
         if tool_choice_tool_retry_attempted && upstream_error_is_bad_response_status_code {
             if matches!(status.as_u16(), 401 | 403) {
-                return Err(GatewayError::upstream_auth_error(upstream_error_message.clone(), status));
+                return Err(GatewayError::upstream_auth_error(
+                    upstream_error_message.clone(),
+                    status,
+                ));
             }
             return Err(GatewayError::upstream_temporary_unavailable(
                 upstream_error_message.clone(),
@@ -682,7 +694,10 @@ pub(super) async fn send_to_upstream(
         }
 
         if matches!(status.as_u16(), 401 | 403) {
-            return Err(GatewayError::upstream_auth_error(upstream_error_message.clone(), status));
+            return Err(GatewayError::upstream_auth_error(
+                upstream_error_message.clone(),
+                status,
+            ));
         }
 
         if matches!(

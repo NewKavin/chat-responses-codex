@@ -42,13 +42,24 @@ pub(super) fn normalize_reasoning_effort_for_model(
     model: &str,
     effort: &str,
 ) -> Option<&'static str> {
-    if chat_compatibility_family(model) != ChatCompatibilityFamily::DeepSeekV4 {
-        return None;
-    }
-
-    match effort.trim().to_ascii_lowercase().as_str() {
-        "xhigh" | "max" => Some("max"),
-        "low" | "medium" | "high" => Some("high"),
+    match chat_compatibility_family(model) {
+        ChatCompatibilityFamily::DeepSeekV4 => match effort.trim().to_ascii_lowercase().as_str() {
+            "xhigh" | "max" => Some("max"),
+            "low" | "medium" | "high" => Some("high"),
+            _ => None,
+        },
+        ChatCompatibilityFamily::Glm => {
+            if !glm_model_supports_reasoning_effort(model) {
+                return None;
+            }
+            match effort.trim().to_ascii_lowercase().as_str() {
+                "xhigh" => Some("high"),
+                "low" => Some("low"),
+                "medium" => Some("medium"),
+                "high" => Some("high"),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -250,14 +261,16 @@ pub(super) fn normalize_chat_payload_for_upstream_compatibility(
     }
     object.remove("text");
 
-    if family == ChatCompatibilityFamily::DeepSeekV4 {
+    if family == ChatCompatibilityFamily::DeepSeekV4 || family == ChatCompatibilityFamily::Glm {
         if let Some(reasoning_effort) = object.get("reasoning_effort").and_then(Value::as_str) {
             if let Some(normalized) = normalize_reasoning_effort_for_model(model, reasoning_effort)
             {
-                object.insert(
-                    "reasoning_effort".into(),
-                    Value::String(normalized.to_string()),
-                );
+                if normalized != reasoning_effort {
+                    object.insert(
+                        "reasoning_effort".into(),
+                        Value::String(normalized.to_string()),
+                    );
+                }
             } else {
                 object.remove("reasoning_effort");
             }

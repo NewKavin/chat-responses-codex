@@ -328,6 +328,134 @@ async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
     .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn upstream_model_not_supported_message_is_classified_as_protocol_unsupported() {
+    with_proxy_env_cleared(|| async move {
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({
+                        "error": {
+                            "message": "The 'glm-5.2' model is not supported when using Codex with a ChatGPT account.",
+                            "type": "badrequesterror",
+                            "code": 400
+                        }
+                    })),
+                )
+            }),
+        );
+
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{}", address),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["glm-5.2".into()],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-1".into(),
+                    name: "team-a".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["glm-5.2".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "glm-5.2",
+                            "messages": [{"role": "user", "content": "Hello"}],
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"]["type"], "upstream_error");
+        assert_eq!(payload["error"]["code"], "upstream_protocol_unsupported");
+        assert_eq!(payload["error"]["category"], "upstream_protocol_unsupported");
+        assert_eq!(payload["error"]["details"]["scope"], "upstream");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("model is not supported"),
+            "unexpected downstream error payload: {payload}"
+        );
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.usage_logs.len(), 1);
+        let log = &snapshot.usage_logs[0];
+        assert_eq!(log.status_code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(
+            log.error_category.as_deref(),
+            Some("upstream_protocol_unsupported")
+        );
+        assert!(
+            log.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("model is not supported"),
+            "unexpected log error message: {:?}",
+            log.error_message
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn downstream_daily_token_quota_error_has_safe_code_and_log_category() {
     let tempdir = tempdir().unwrap();

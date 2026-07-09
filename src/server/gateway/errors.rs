@@ -530,13 +530,15 @@ fn truncate_message(message: &str, max_chars: usize) -> String {
 /// concise status-based hint otherwise.
 pub(super) fn upstream_client_message(
     status: StatusCode,
+    feedback: UpstreamFeedbackClassification,
     upstream_message: &str,
 ) -> String {
     let upstream_message = upstream_message.trim();
     // Some upstreams return a generic code string (e.g.
     // "bad_response_status_code") as the message — it carries no useful
     // information for the end user, so drop it and use the status hint.
-    let upstream_message: &str = if upstream_message.eq_ignore_ascii_case("bad_response_status_code")
+    let upstream_message: &str = if upstream_message
+        .eq_ignore_ascii_case("bad_response_status_code")
         || upstream_message.is_empty()
     {
         ""
@@ -546,7 +548,9 @@ pub(super) fn upstream_client_message(
 
     let status_hint = match status.as_u16() {
         401 => "upstream authentication failed (invalid or expired API key)",
-        403 => "upstream denied access (API key lacks permission for this model or quota exhausted)",
+        403 => {
+            "upstream denied access (API key lacks permission for this model or quota exhausted)"
+        }
         404 | 405 => "upstream does not support this model or endpoint",
         429 => "upstream rate limit exceeded (too many requests)",
         c if (500..=599).contains(&c) => "upstream server error",
@@ -564,7 +568,8 @@ pub(super) fn upstream_client_message(
     let is_safe_to_surface = matches!(status.as_u16(), 401 | 403 | 429)
         || status.is_server_error()
         || status == StatusCode::NOT_FOUND
-        || status == StatusCode::METHOD_NOT_ALLOWED;
+        || status == StatusCode::METHOD_NOT_ALLOWED
+        || feedback == UpstreamFeedbackClassification::ProtocolUnsupported;
 
     if is_safe_to_surface {
         format!(
@@ -606,7 +611,10 @@ pub(super) fn safe_upstream_error_summary(
     if !trimmed_message.is_empty() {
         // Cap the excerpt so echoed prompt content or oversized error bodies
         // cannot dominate log lines.
-        summary.push_str(&format!(", message: {:?}", truncate_message(trimmed_message, 200)));
+        summary.push_str(&format!(
+            ", message: {:?}",
+            truncate_message(trimmed_message, 200)
+        ));
     }
     summary
 }

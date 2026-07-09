@@ -67,6 +67,22 @@ fn test_model_not_supported_is_protocol_unsupported() {
 }
 
 #[test]
+fn test_model_is_not_supported_is_protocol_unsupported() {
+    let headers = reqwest::header::HeaderMap::new();
+    let classification = UpstreamFeedbackClassification::from_response(
+        400,
+        &headers,
+        Some(
+            r#"{"error": {"message": "The 'glm-5.2' model is not supported when using Codex with a ChatGPT account."}}"#,
+        ),
+    );
+    assert_eq!(
+        classification,
+        UpstreamFeedbackClassification::ProtocolUnsupported
+    );
+}
+
+#[test]
 fn test_generic_400_is_unknown() {
     let headers = reqwest::header::HeaderMap::new();
     let classification = UpstreamFeedbackClassification::from_response(400, &headers, None);

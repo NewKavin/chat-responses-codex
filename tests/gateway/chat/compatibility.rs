@@ -441,7 +441,7 @@ async fn known_chat_model_compatibility_applies_without_strict_flag_for_glm() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn glm_5_2_chat_compatibility_preserves_supported_reasoning_effort() {
+async fn glm_5_2_chat_compatibility_downgrades_xhigh_reasoning_for_third_party_proxy() {
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
             "GLM-5.2",
@@ -458,7 +458,7 @@ async fn glm_5_2_chat_compatibility_preserves_supported_reasoning_effort() {
 
         assert_eq!(captured["max_tokens"].as_u64(), Some(1024));
         assert!(captured.get("max_output_tokens").is_none());
-        assert_eq!(captured["reasoning_effort"], "xhigh");
+        assert_eq!(captured["reasoning_effort"], "high");
     })
     .await;
 }
