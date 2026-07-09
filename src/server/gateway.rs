@@ -1416,14 +1416,61 @@ fn infer_client_family(user_agent: Option<&str>, endpoint: EndpointKind) -> &'st
     }
 }
 
+fn responses_body_contains_tool_replay_semantics(body: &Value) -> bool {
+    if body.get("previous_response_id").is_some() {
+        return true;
+    }
+
+    let Some(items) = body.get("input").and_then(Value::as_array) else {
+        return false;
+    };
+
+    items.iter().any(|item| match item {
+        Value::Object(object) => {
+            matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("function_call" | "function_call_output")
+            ) || object.contains_key("tool_call_id")
+                || object.contains_key("tool_calls")
+                || matches!(
+                    object.get("role").and_then(Value::as_str),
+                    Some("tool" | "function")
+                )
+        }
+        _ => false,
+    })
+}
+
 fn initial_chat_fallback_stage(
     state: &AppState,
     downstream_id: &str,
     client_family: &str,
     model_slug: &str,
     upstream_id: &str,
+    source_body: &Value,
 ) -> ChatFallbackStage {
-    ChatFallbackStage::ORDERED
+    let should_skip_to_tool_replay_reduction =
+        responses_body_contains_tool_replay_semantics(source_body)
+            && state.fallback_stage_failure_count(
+                downstream_id,
+                client_family,
+                model_slug,
+                upstream_id,
+                ChatFallbackStage::HighFidelity.as_str(),
+            ) >= 3;
+
+    let start_index = if should_skip_to_tool_replay_reduction {
+        ChatFallbackStage::ORDERED
+            .iter()
+            .position(|stage| *stage == ChatFallbackStage::ToolReplayReduction)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    ChatFallbackStage::ORDERED[start_index..]
+        .iter()
+        .copied()
         .into_iter()
         .find(|stage| {
             state.fallback_stage_failure_count(
@@ -2512,6 +2559,9 @@ async fn process_gateway_request_inner(
                                 client_family,
                                 normalized_model,
                                 &upstream.id,
+                                original_responses_body
+                                    .as_ref()
+                                    .expect("responses requests should retain original body"),
                             );
                             tracing::info!(
                                 request_id = %request_id,
