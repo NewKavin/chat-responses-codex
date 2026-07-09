@@ -37,7 +37,11 @@ fn troubleshooting_test_config() -> AppConfig {
 }
 
 fn app_with_custom_upstream(upstream_base_url: String) -> (axum::Router, String, String) {
-    app_with_custom_upstream_and_ip_allowlist(upstream_base_url, vec![])
+    app_with_custom_upstream_and_ip_allowlist_and_config(
+        upstream_base_url,
+        vec![],
+        troubleshooting_test_config(),
+    )
 }
 
 fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> axum::Router {
@@ -82,6 +86,18 @@ fn app_with_custom_upstream_and_ip_allowlist(
     upstream_base_url: String,
     ip_allowlist: Vec<String>,
 ) -> (axum::Router, String, String) {
+    app_with_custom_upstream_and_ip_allowlist_and_config(
+        upstream_base_url,
+        ip_allowlist,
+        troubleshooting_test_config(),
+    )
+}
+
+fn app_with_custom_upstream_and_ip_allowlist_and_config(
+    upstream_base_url: String,
+    ip_allowlist: Vec<String>,
+    config: AppConfig,
+) -> (axum::Router, String, String) {
     let generated = generate_downstream_key("sk");
     let portal_key = generated.plaintext.clone();
     let state = PersistedState {
@@ -116,7 +132,7 @@ fn app_with_custom_upstream_and_ip_allowlist(
         announcement: None,
         global_context_profiles: std::collections::HashMap::new(),
     };
-    let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
+    let app_state = AppState::new(state, unique_state_path(), config);
     (build_router(app_state), portal_key, "test".to_string())
 }
 
@@ -1191,7 +1207,13 @@ async fn portal_troubleshooting_respects_forwarded_ip_allowlist() {
 #[tokio::test]
 async fn portal_troubleshooting_stream_check_has_diagnostic_timeout() {
     let upstream_base_url = spawn_never_ending_stream_upstream().await;
-    let (app, portal_key, _) = app_with_custom_upstream(upstream_base_url);
+    let mut config = troubleshooting_test_config();
+    config.troubleshooting_check_timeout_seconds = 1;
+    let (app, portal_key, _) = app_with_custom_upstream_and_ip_allowlist_and_config(
+        upstream_base_url,
+        vec![],
+        config,
+    );
     let token = login_portal(app.clone(), &portal_key).await;
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(5),

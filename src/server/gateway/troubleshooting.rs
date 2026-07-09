@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const DIAGNOSTIC_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const DIAGNOSTIC_RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
 pub(super) const TROUBLESHOOTING_ROUTE_CAPTURE_HEADER: &str =
     "x-chat2responses-troubleshooting-route";
@@ -779,6 +778,7 @@ async fn run_internal_gateway_check(
     source_headers: &HeaderMap,
 ) -> TroubleshootingResult {
     let started = Instant::now();
+    let check_timeout = Duration::from_secs(state.config.troubleshooting_check_timeout_seconds.max(1));
     let Some(secret) = plaintext_key else {
         return TroubleshootingResult {
             id: check_id(check),
@@ -845,13 +845,11 @@ async fn run_internal_gateway_check(
         }
     };
 
-    match tokio::time::timeout(
-        DIAGNOSTIC_CHECK_TIMEOUT,
-        super::build_router(state).oneshot(request),
-    )
-    .await
+    match tokio::time::timeout(check_timeout, super::build_router(state).oneshot(request)).await
     {
-        Ok(Ok(response)) => result_from_gateway_response(check, model, started, response).await,
+        Ok(Ok(response)) => {
+            result_from_gateway_response(check, model, started, response, check_timeout).await
+        }
         Err(_) => troubleshooting_timeout_result(
             check,
             model,
@@ -1063,12 +1061,13 @@ async fn result_from_gateway_response(
     model: &str,
     started: Instant,
     response: Response,
+    check_timeout: Duration,
 ) -> TroubleshootingResult {
     let status = response.status();
     let http_status = status.as_u16();
     let route_metadata = troubleshooting_route_metadata_from_headers(response.headers());
     let body = match tokio::time::timeout(
-        DIAGNOSTIC_CHECK_TIMEOUT,
+        check_timeout,
         to_bytes(response.into_body(), DIAGNOSTIC_RESPONSE_BODY_LIMIT),
     )
     .await

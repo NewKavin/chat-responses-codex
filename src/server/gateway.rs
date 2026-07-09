@@ -1194,19 +1194,6 @@ fn normalize_responses_input_items(input: &Value) -> Result<Vec<Value>, GatewayE
     }
 }
 
-fn responses_request_uses_builtin_tool_requiring_native_responses(body: &Value) -> bool {
-    body.get("tools")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|tool| {
-            matches!(
-                tool.get("type").and_then(Value::as_str),
-                Some("web_search" | "file_search" | "computer_use")
-            )
-        })
-}
-
 fn responses_input_item_is_chat_fallback_safe(item: &Value) -> bool {
     match item {
         Value::String(_) => true,
@@ -2128,36 +2115,6 @@ async fn process_gateway_request_inner(
             },
             "evaluated Responses routing strategy"
         );
-    }
-    if endpoint == EndpointKind::Responses
-        && chat_only_responses_fallback
-        && responses_request_uses_builtin_tool_requiring_native_responses(&body)
-    {
-        let error = GatewayError::BadRequest(
-            "built-in Responses tools such as web_search, file_search, and computer_use are not supported on chat-only upstreams".into(),
-        );
-        append_gateway_usage_log(
-            &state,
-            &request_id,
-            &downstream.id,
-            &downstream.name,
-            "",
-            None,
-            request_path,
-            model,
-            inference_strength.as_deref(),
-            user_agent.as_deref(),
-            error.status_code(),
-            Some(error.to_string()),
-            Some(error.error_category().to_string()),
-            0,
-            0,
-            0,
-            started,
-        )
-        .await;
-        active_request_guard.fail_and_finish(error.error_category());
-        return Err(error);
     }
     let original_responses_body = (endpoint == EndpointKind::Responses).then(|| body.clone());
     let response_history_context = if endpoint == EndpointKind::Responses

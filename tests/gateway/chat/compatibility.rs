@@ -367,7 +367,7 @@ async fn strict_chat_compatibility_uses_max_completion_tokens_for_minimax() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn strict_chat_compatibility_maps_deepseek_v4_reasoning_effort() {
+async fn strict_chat_compatibility_caps_deepseek_v4_reasoning_effort_at_high() {
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
             "deepseek-ai/DeepSeek-V4-Pro",
@@ -385,7 +385,31 @@ async fn strict_chat_compatibility_maps_deepseek_v4_reasoning_effort() {
         assert_eq!(captured["max_tokens"].as_u64(), Some(2048));
         assert!(captured.get("max_output_tokens").is_none());
         assert!(captured.get("max_completion_tokens").is_none());
-        assert_eq!(captured["reasoning_effort"], "max");
+        assert_eq!(captured["reasoning_effort"], "high");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn strict_chat_compatibility_preserves_supported_deepseek_v4_reasoning_effort() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "deepseek-v4-flash",
+            true,
+            json!({
+                "model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_output_tokens": 1024,
+                "reasoning_effort": "medium",
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert_eq!(captured["max_tokens"].as_u64(), Some(1024));
+        assert!(captured.get("max_output_tokens").is_none());
+        assert!(captured.get("max_completion_tokens").is_none());
+        assert_eq!(captured["reasoning_effort"], "medium");
     })
     .await;
 }

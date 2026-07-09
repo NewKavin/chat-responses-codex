@@ -192,9 +192,59 @@ async fn downstream_responses_request_with_bad_response_status_tool_choice_retry
 }
 
 #[tokio::test]
-async fn chat_only_responses_builtin_tools_fail_explicitly() {
+async fn chat_only_responses_builtin_tools_are_dropped_for_execution() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                      request: Request<Body>| async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let mut lock = capture.lock().unwrap();
+                    lock.path = parts.uri.path().to_string();
+                    lock.authorization = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    lock.request_body = Some(payload);
+
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "claude-haiku-4-5-20251001",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Hi"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })),
+                    )
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
 
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
@@ -202,7 +252,7 @@ async fn chat_only_responses_builtin_tools_fail_explicitly() {
             upstreams: vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "chat-only".into(),
-                base_url: "http://127.0.0.1:9".into(),
+                base_url: format!("http://{}", address),
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
@@ -254,7 +304,8 @@ async fn chat_only_responses_builtin_tools_fail_explicitly() {
                     {
                         "type": "web_search"
                     }
-                ]
+                ],
+                "tool_choice": "auto"
             })
             .to_string(),
         ))
@@ -262,14 +313,146 @@ async fn chat_only_responses_builtin_tools_fail_explicitly() {
 
     let response = app.oneshot(request).await.unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["error"]["code"], "gateway_invalid_request");
-    assert!(payload["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("web_search"));
+    assert_eq!(payload["output"][0]["content"][0]["text"], "Hi");
+
+    let captured = capture.lock().unwrap().clone();
+    let request_body = captured.request_body.unwrap();
+    assert!(request_body.get("tools").is_none());
+    assert!(request_body.get("tool_choice").is_none());
+}
+
+#[tokio::test]
+async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                      request: Request<Body>| async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let mut lock = capture.lock().unwrap();
+                    lock.path = parts.uri.path().to_string();
+                    lock.authorization = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    lock.request_body = Some(payload);
+
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-test",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "deepseek-v4-flash",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "Hi"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })),
+                    )
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "chat-only".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["deepseek-v4-flash".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["deepseek-v4-flash".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "deepseek-v4-flash",
+                "input": "hello",
+                "reasoning": {
+                    "effort": "xhigh"
+                },
+                "max_output_tokens": 512
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["output"][0]["content"][0]["text"], "Hi");
+
+    let captured = capture.lock().unwrap().clone();
+    let request_body = captured.request_body.unwrap();
+    assert_eq!(request_body["max_tokens"], 512);
+    assert_eq!(request_body["reasoning_effort"], "high");
 }
 
 #[tokio::test]

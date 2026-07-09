@@ -7,7 +7,7 @@ const DEFAULT_SUPPORTED_REASONING_LEVELS: [(&str, &str); 4] = [
     ("xhigh", "Extra high reasoning depth for complex problems"),
 ];
 
-const DEEPSEEK_V4_PRO_SUPPORTED_REASONING_LEVELS: [(&str, &str); 3] = [
+const DEEPSEEK_V4_SUPPORTED_REASONING_LEVELS: [(&str, &str); 3] = [
     ("low", "Fast responses with lighter reasoning"),
     ("medium", "Balances speed and reasoning depth"),
     ("high", "Greater reasoning depth for complex problems"),
@@ -32,8 +32,8 @@ pub(super) enum ChatTokenLimitField {
 pub(super) fn supported_reasoning_levels_for_model(
     model: &str,
 ) -> &'static [(&'static str, &'static str)] {
-    match model {
-        "deepseek-ai/deepseek-v4-pro" => &DEEPSEEK_V4_PRO_SUPPORTED_REASONING_LEVELS,
+    match chat_compatibility_family(model) {
+        ChatCompatibilityFamily::DeepSeekV4 => &DEEPSEEK_V4_SUPPORTED_REASONING_LEVELS,
         _ => &DEFAULT_SUPPORTED_REASONING_LEVELS,
     }
 }
@@ -44,8 +44,10 @@ pub(super) fn normalize_reasoning_effort_for_model(
 ) -> Option<&'static str> {
     match chat_compatibility_family(model) {
         ChatCompatibilityFamily::DeepSeekV4 => match effort.trim().to_ascii_lowercase().as_str() {
-            "xhigh" | "max" => Some("max"),
-            "low" | "medium" | "high" => Some("high"),
+            "xhigh" | "max" => Some("high"),
+            "low" => Some("low"),
+            "medium" => Some("medium"),
+            "high" => Some("high"),
             _ => None,
         },
         ChatCompatibilityFamily::Glm => {

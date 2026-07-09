@@ -819,7 +819,7 @@ async fn downstream_chat_request_routes_via_exact_model_name_when_supported_mode
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn downstream_chat_request_maps_xhigh_reasoning_to_max_for_deepseek_v4_pro() {
+async fn downstream_chat_request_caps_xhigh_reasoning_at_high_for_deepseek_v4() {
     with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));
         let tempdir = tempdir().unwrap();
@@ -850,8 +850,8 @@ async fn downstream_chat_request_maps_xhigh_reasoning_to_max_for_deepseek_v4_pro
                                 .as_ref()
                                 .and_then(|body| body.get("reasoning_effort"))
                                 .and_then(|value| value.as_str()),
-                            Some("max"),
-                            "gateway should map Codex xhigh reasoning to DeepSeek V4 max reasoning"
+                            Some("high"),
+                            "gateway should cap Codex xhigh reasoning at DeepSeek V4 high reasoning"
                         );
 
                         (
@@ -957,7 +957,7 @@ async fn downstream_chat_request_maps_xhigh_reasoning_to_max_for_deepseek_v4_pro
                 .as_ref()
                 .and_then(|body| body.get("reasoning_effort"))
                 .and_then(|value| value.as_str()),
-            Some("max")
+            Some("high")
         );
     })
     .await;
