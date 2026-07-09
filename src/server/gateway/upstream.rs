@@ -891,6 +891,7 @@ pub(super) async fn send_to_upstream(
             status,
             body: DispatchBody::Stream(body),
             request_id: String::new(),
+            response_headers: HeaderMap::new(),
             usage_log_timing: if usage_body.is_some() {
                 UsageLogTiming::Immediate
             } else {
@@ -942,6 +943,7 @@ pub(super) async fn send_to_upstream(
         status,
         body: DispatchBody::Json(body),
         request_id: String::new(),
+        response_headers: HeaderMap::new(),
         usage,
         usage_log_timing: UsageLogTiming::Immediate,
         usage_log_context: None,

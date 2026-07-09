@@ -100,6 +100,7 @@ struct DispatchResult {
     status: StatusCode,
     body: DispatchBody,
     request_id: String,
+    response_headers: HeaderMap,
     usage: (u64, u64, u64),
     usage_log_timing: UsageLogTiming,
     usage_log_context: Option<GatewayUsageLogContext>,
@@ -1545,6 +1546,7 @@ async fn process_gateway_request_inner(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let capture_route_metadata = troubleshooting_route_capture_requested(&headers);
     let response_history_context = if endpoint == EndpointKind::Responses {
         match prepare_response_history_context(&state, &mut body).await {
             Ok(context) => Some(context),
@@ -2265,6 +2267,15 @@ async fn process_gateway_request_inner(
 
                     match result {
                         Ok(mut result) => {
+                            if capture_route_metadata {
+                                append_troubleshooting_route_headers(
+                                    &mut result.response_headers,
+                                    &upstream.id,
+                                    &upstream.name,
+                                    protocol,
+                                    protocol_transition_label(endpoint, protocol),
+                                );
+                            }
                             // stream=true but upstream returned a non-SSE response:
                             // the gateway synthesizes a finite stream body locally,
                             // so release runtime slots right away.

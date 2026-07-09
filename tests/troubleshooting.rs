@@ -425,6 +425,118 @@ fn app_with_model_state() -> (axum::Router, String, String) {
     (build_router(app_state), portal_key, "test".to_string())
 }
 
+fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router, String, String) {
+    let generated = generate_downstream_key("sk");
+    let portal_key = generated.plaintext.clone();
+    let state = PersistedState {
+        upstreams: vec![
+            UpstreamConfig {
+                id: "chat-first".to_string(),
+                name: "Chat First".to_string(),
+                base_url: upstream_base_url.clone(),
+                api_key: "chat-key".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["GLM-5.1".to_string()],
+                active: true,
+                ..UpstreamConfig::default()
+            },
+            UpstreamConfig {
+                id: "responses-second".to_string(),
+                name: "Responses Second".to_string(),
+                base_url: upstream_base_url,
+                api_key: "responses-key".to_string(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["GLM-5.1".to_string()],
+                active: true,
+                ..UpstreamConfig::default()
+            },
+        ],
+        downstreams: vec![DownstreamConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["GLM-5.1".to_string()],
+            per_minute_limit: 60,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        usage_logs: vec![],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+    let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
+    (build_router(app_state), portal_key, "test".to_string())
+}
+
+fn app_with_priority_ranked_chat_upstreams(
+    upstream_base_url: String,
+) -> (axum::Router, String, String) {
+    let generated = generate_downstream_key("sk");
+    let portal_key = generated.plaintext.clone();
+    let state = PersistedState {
+        upstreams: vec![
+            UpstreamConfig {
+                id: "z-high-priority".to_string(),
+                name: "High Priority".to_string(),
+                base_url: upstream_base_url.clone(),
+                api_key: "high-key".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["GLM-5.1".to_string()],
+                priority: 100,
+                active: true,
+                ..UpstreamConfig::default()
+            },
+            UpstreamConfig {
+                id: "a-low-priority".to_string(),
+                name: "Low Priority".to_string(),
+                base_url: upstream_base_url,
+                api_key: "low-key".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["GLM-5.1".to_string()],
+                priority: 0,
+                active: true,
+                ..UpstreamConfig::default()
+            },
+        ],
+        downstreams: vec![DownstreamConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["GLM-5.1".to_string()],
+            per_minute_limit: 60,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        usage_logs: vec![],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+    let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
+    (build_router(app_state), portal_key, "test".to_string())
+}
+
 async fn login_portal(app: axum::Router, key: &str) -> String {
     let response = app
         .oneshot(
@@ -829,13 +941,11 @@ async fn admin_compatibility_matrix_requires_plaintext_key_for_implicit_models()
 }
 
 #[tokio::test]
-async fn admin_compatibility_matrix_forwards_source_headers_for_ip_allowlist_checks() {
+async fn admin_compatibility_matrix_forwards_source_headers_for_ip_allowlist_failures() {
     let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
     let upstream = spawn_diagnostic_upstream(capture.clone()).await;
-    let (app, _portal_key, downstream_id) = app_with_custom_upstream_and_ip_allowlist(
-        upstream,
-        vec!["203.0.113.10".to_string()],
-    );
+    let (app, _portal_key, downstream_id) =
+        app_with_custom_upstream_and_ip_allowlist(upstream, vec!["10.0.0.1".to_string()]);
     let admin_token = generate_admin_token("admin", "test_secret").unwrap();
 
     let response = app
@@ -845,7 +955,7 @@ async fn admin_compatibility_matrix_forwards_source_headers_for_ip_allowlist_che
                 .uri("/api/admin/troubleshooting/matrix/run")
                 .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
                 .header(header::CONTENT_TYPE, "application/json")
-                .header("x-forwarded-for", "203.0.113.10")
+                .header("x-forwarded-for", "203.0.113.9")
                 .body(Body::from(
                     json!({
                         "downstream_id": downstream_id,
@@ -863,7 +973,82 @@ async fn admin_compatibility_matrix_forwards_source_headers_for_ip_allowlist_che
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     let cell = payload["cells"].as_array().unwrap().first().unwrap();
-    assert_eq!(cell["status"], "passed");
+    assert_eq!(cell["status"], "failed");
+    assert_eq!(cell["error_category"], "gateway_ip_not_allowed");
+}
+
+#[tokio::test]
+async fn admin_compatibility_matrix_uses_gateway_protocol_selection_metadata() {
+    let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
+    let upstream = spawn_multi_protocol_diagnostic_upstream(capture.clone()).await;
+    let (app, _portal_key, downstream_id) = app_with_protocol_split_upstreams(upstream);
+    let admin_token = generate_admin_token("admin", "test_secret").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/troubleshooting/matrix/run")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "downstream_id": downstream_id,
+                        "client_profiles": ["codex"],
+                        "models": ["GLM-5.1"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let cell = payload["cells"].as_array().unwrap().first().unwrap();
+    assert_eq!(cell["selected_upstream_id"], "responses-second");
+    assert_eq!(cell["selected_upstream_name"], "Responses Second");
+    assert_eq!(cell["selected_upstream_protocol"], "responses");
+    assert_eq!(cell["protocol_transition"], "native");
+}
+
+#[tokio::test]
+async fn admin_compatibility_matrix_uses_gateway_candidate_ranking_metadata() {
+    let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
+    let upstream = spawn_diagnostic_upstream(capture.clone()).await;
+    let (app, _portal_key, downstream_id) = app_with_priority_ranked_chat_upstreams(upstream);
+    let admin_token = generate_admin_token("admin", "test_secret").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/troubleshooting/matrix/run")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "downstream_id": downstream_id,
+                        "client_profiles": ["opencode"],
+                        "models": ["GLM-5.1"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let cell = payload["cells"].as_array().unwrap().first().unwrap();
+    assert_eq!(cell["selected_upstream_id"], "z-high-priority");
+    assert_eq!(cell["selected_upstream_name"], "High Priority");
+    assert_eq!(cell["selected_upstream_protocol"], "chat_completions");
+    assert_eq!(cell["protocol_transition"], "native");
 }
 
 #[tokio::test]

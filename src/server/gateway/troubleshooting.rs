@@ -11,6 +11,14 @@ use uuid::Uuid;
 
 const DIAGNOSTIC_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const DIAGNOSTIC_RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
+pub(super) const TROUBLESHOOTING_ROUTE_CAPTURE_HEADER: &str =
+    "x-chat2responses-troubleshooting-route";
+const TROUBLESHOOTING_SELECTED_UPSTREAM_ID_HEADER: &str = "x-chat2responses-selected-upstream-id";
+const TROUBLESHOOTING_SELECTED_UPSTREAM_NAME_HEADER: &str =
+    "x-chat2responses-selected-upstream-name";
+const TROUBLESHOOTING_SELECTED_UPSTREAM_PROTOCOL_HEADER: &str =
+    "x-chat2responses-selected-upstream-protocol";
+const TROUBLESHOOTING_PROTOCOL_TRANSITION_HEADER: &str = "x-chat2responses-protocol-transition";
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +111,8 @@ struct TroubleshootingResult {
     copy_summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_filter: Option<Value>,
+    #[serde(skip_serializing)]
+    route_metadata: Option<TroubleshootingRouteMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +150,14 @@ struct CompatibilityMatrixCell {
     summary: String,
     details: String,
     duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TroubleshootingRouteMetadata {
+    selected_upstream_id: String,
+    selected_upstream_name: String,
+    selected_upstream_protocol: String,
+    protocol_transition: String,
 }
 
 pub(super) async fn portal_troubleshooting_run(
@@ -389,9 +407,7 @@ async fn run_compatibility_matrix(
             )
                 .into_response();
         };
-        state
-            .available_models_for_downstream(secret)
-            .await
+        state.available_models_for_downstream(secret).await
     } else {
         body.models
     };
@@ -511,7 +527,6 @@ async fn run_matrix_cell(
     }
 
     let endpoint = matrix_endpoint_for_profile(client_profile);
-    let selected_upstream = selected_upstream_for_matrix_model(&state, model, endpoint).await;
     let first_failure = results.iter().find(|(_, result)| {
         matches!(
             result.status,
@@ -525,6 +540,16 @@ async fn run_matrix_cell(
         .or(first_warning)
         .or_else(|| results.first())
         .map(|(_, result)| result);
+    let route_metadata = first_failure
+        .or(first_warning)
+        .or_else(|| {
+            results
+                .iter()
+                .find(|(_, result)| result.route_metadata.is_some())
+        })
+        .or_else(|| results.first())
+        .and_then(|(_, result)| result.route_metadata.as_ref());
+    let selected_upstream = selected_upstream_for_matrix_model(&state, model, endpoint).await;
 
     let status = if first_failure.is_some() {
         TroubleshootingStepStatus::Failed
@@ -559,16 +584,20 @@ async fn run_matrix_cell(
         endpoint,
         selected_upstream_id: selected_upstream
             .as_ref()
-            .map(|upstream| upstream.0.clone()),
+            .map(|upstream| upstream.0.clone())
+            .or_else(|| route_metadata.map(|metadata| metadata.selected_upstream_id.clone())),
         selected_upstream_name: selected_upstream
             .as_ref()
-            .map(|upstream| upstream.1.clone()),
+            .map(|upstream| upstream.1.clone())
+            .or_else(|| route_metadata.map(|metadata| metadata.selected_upstream_name.clone())),
         selected_upstream_protocol: selected_upstream
             .as_ref()
-            .map(|upstream| matrix_protocol_label(upstream.2).to_string()),
+            .map(|upstream| matrix_protocol_label(upstream.2).to_string())
+            .or_else(|| route_metadata.map(|metadata| metadata.selected_upstream_protocol.clone())),
         protocol_transition: selected_upstream
             .as_ref()
-            .map(|upstream| matrix_protocol_transition(endpoint, upstream.2).to_string()),
+            .map(|upstream| matrix_protocol_transition(endpoint, upstream.2).to_string())
+            .or_else(|| route_metadata.map(|metadata| metadata.protocol_transition.clone())),
         fallback_stage: None,
         status,
         http_status: reference
@@ -655,7 +684,9 @@ fn matrix_protocol_transition(
         ("/v1/chat/completions", crate::routing::UpstreamProtocol::Responses) => {
             "chat_to_responses"
         }
-        ("/v1/responses", crate::routing::UpstreamProtocol::ChatCompletions) => "responses_to_chat",
+        ("/v1/responses", crate::routing::UpstreamProtocol::ChatCompletions) => {
+            "responses_to_chat"
+        }
         _ => "native",
     }
 }
@@ -688,6 +719,7 @@ async fn run_models_check(
                 "error_category": "gateway_downstream_key_unavailable",
                 "time_range": "1h"
             })),
+            route_metadata: None,
         };
     };
 
@@ -709,6 +741,7 @@ async fn run_models_check(
                 "model": body.model.clone(),
                 "time_range": "1h"
             })),
+            route_metadata: None,
         }
     } else {
         TroubleshootingResult {
@@ -732,6 +765,7 @@ async fn run_models_check(
                 "error_category": "gateway_model_not_allowed",
                 "time_range": "1h"
             })),
+            route_metadata: None,
         }
     }
 }
@@ -769,6 +803,7 @@ async fn run_internal_gateway_check(
                 "error_category": "gateway_downstream_key_unavailable",
                 "time_range": "1h"
             })),
+            route_metadata: None,
         };
     };
 
@@ -805,6 +840,7 @@ async fn run_internal_gateway_check(
                     "error_category": "gateway_troubleshooting_request_build_failed",
                     "time_range": "1h"
                 })),
+                route_metadata: None,
             };
         }
     };
@@ -845,6 +881,7 @@ async fn run_internal_gateway_check(
                 "error_category": "gateway_troubleshooting_route_failed",
                 "time_range": "1h"
             })),
+            route_metadata: None,
         },
     }
 }
@@ -865,6 +902,53 @@ fn profile_user_agent(profile: TroubleshootingClientProfile) -> &'static str {
     }
 }
 
+pub(super) fn troubleshooting_route_capture_requested(headers: &HeaderMap) -> bool {
+    headers.contains_key(header::HeaderName::from_static(
+        TROUBLESHOOTING_ROUTE_CAPTURE_HEADER,
+    ))
+}
+
+pub(super) fn append_troubleshooting_route_headers(
+    headers: &mut HeaderMap,
+    upstream_id: &str,
+    upstream_name: &str,
+    upstream_protocol: crate::routing::UpstreamProtocol,
+    protocol_transition: &str,
+) {
+    insert_troubleshooting_route_header(
+        headers,
+        TROUBLESHOOTING_SELECTED_UPSTREAM_ID_HEADER,
+        upstream_id,
+    );
+    insert_troubleshooting_route_header(
+        headers,
+        TROUBLESHOOTING_SELECTED_UPSTREAM_NAME_HEADER,
+        upstream_name,
+    );
+    insert_troubleshooting_route_header(
+        headers,
+        TROUBLESHOOTING_SELECTED_UPSTREAM_PROTOCOL_HEADER,
+        match upstream_protocol {
+            crate::routing::UpstreamProtocol::ChatCompletions => "chat_completions",
+            crate::routing::UpstreamProtocol::Responses => "responses",
+        },
+    );
+    insert_troubleshooting_route_header(
+        headers,
+        TROUBLESHOOTING_PROTOCOL_TRANSITION_HEADER,
+        protocol_transition,
+    );
+}
+
+fn insert_troubleshooting_route_header(headers: &mut HeaderMap, name: &str, value: &str) {
+    if let (Ok(name), Ok(value)) = (
+        header::HeaderName::from_bytes(name.as_bytes()),
+        axum::http::HeaderValue::from_str(value),
+    ) {
+        headers.insert(name, value);
+    }
+}
+
 fn gateway_request(
     secret: &str,
     method: Method,
@@ -880,7 +964,8 @@ fn gateway_request(
         .uri(path)
         .header(header::AUTHORIZATION, format!("Bearer {secret}"))
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::USER_AGENT, user_agent);
+        .header(header::USER_AGENT, user_agent)
+        .header(TROUBLESHOOTING_ROUTE_CAPTURE_HEADER, "1");
 
     if let Some(value) = source_headers.get(&forwarded_for) {
         builder = builder.header(forwarded_for, value.clone());
@@ -981,6 +1066,7 @@ async fn result_from_gateway_response(
 ) -> TroubleshootingResult {
     let status = response.status();
     let http_status = status.as_u16();
+    let route_metadata = troubleshooting_route_metadata_from_headers(response.headers());
     let body = match tokio::time::timeout(
         DIAGNOSTIC_CHECK_TIMEOUT,
         to_bytes(response.into_body(), DIAGNOSTIC_RESPONSE_BODY_LIMIT),
@@ -1021,6 +1107,7 @@ async fn result_from_gateway_response(
                     "error_category": "gateway_troubleshooting_response_read_failed",
                     "time_range": "1h"
                 })),
+                route_metadata: None,
             };
         }
     };
@@ -1061,7 +1148,43 @@ async fn result_from_gateway_response(
             "error_category": category_value,
             "time_range": "1h"
         })),
+        route_metadata,
     }
+}
+
+fn troubleshooting_route_metadata_from_headers(
+    headers: &HeaderMap,
+) -> Option<TroubleshootingRouteMetadata> {
+    Some(TroubleshootingRouteMetadata {
+        selected_upstream_id: headers
+            .get(header::HeaderName::from_static(
+                TROUBLESHOOTING_SELECTED_UPSTREAM_ID_HEADER,
+            ))?
+            .to_str()
+            .ok()?
+            .to_string(),
+        selected_upstream_name: headers
+            .get(header::HeaderName::from_static(
+                TROUBLESHOOTING_SELECTED_UPSTREAM_NAME_HEADER,
+            ))?
+            .to_str()
+            .ok()?
+            .to_string(),
+        selected_upstream_protocol: headers
+            .get(header::HeaderName::from_static(
+                TROUBLESHOOTING_SELECTED_UPSTREAM_PROTOCOL_HEADER,
+            ))?
+            .to_str()
+            .ok()?
+            .to_string(),
+        protocol_transition: headers
+            .get(header::HeaderName::from_static(
+                TROUBLESHOOTING_PROTOCOL_TRANSITION_HEADER,
+            ))?
+            .to_str()
+            .ok()?
+            .to_string(),
+    })
 }
 
 fn troubleshooting_timeout_result(
@@ -1093,6 +1216,7 @@ fn troubleshooting_timeout_result(
             "error_category": "gateway_troubleshooting_timeout",
             "time_range": "1h"
         })),
+        route_metadata: None,
     }
 }
 

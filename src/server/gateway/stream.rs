@@ -195,6 +195,13 @@ pub(super) async fn dispatch_streaming_request(
     body: Value,
     endpoint: EndpointKind,
 ) -> Response {
+    if troubleshooting_route_capture_requested(&headers) {
+        return match process_gateway_request(state, headers, body, endpoint).await {
+            Ok(result) => dispatch_success(result),
+            Err(error) => error.into_response(),
+        };
+    }
+
     let keepalive_interval = Duration::from_secs(
         state
             .config
@@ -258,7 +265,7 @@ pub(super) fn dispatch_success(result: DispatchResult) -> Response {
 
     match result.body {
         DispatchBody::Json(body) => {
-            let mut headers = HeaderMap::new();
+            let mut headers = result.response_headers;
             headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
@@ -270,7 +277,7 @@ pub(super) fn dispatch_success(result: DispatchResult) -> Response {
             (result.status, headers, Json(body)).into_response()
         }
         DispatchBody::Stream(body) => {
-            let mut headers = HeaderMap::new();
+            let mut headers = result.response_headers;
             headers.insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/event-stream"),
