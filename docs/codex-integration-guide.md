@@ -231,7 +231,7 @@ Codex 里填的是网关地址，不是上游厂商地址。
 
 通常就是网关路由到的上游协议类型不对，或者模型没有在任何活跃上游的 `supported_models` 里出现。
 
-补充一点：如果上游是 `ChatCompletions`，网关只会把 `function` 工具转成 Chat 兼容格式；`web_search`、`file_search`、`computer_use` 这类 Responses 内置工具不会报错，但会被忽略，因为它们无法直接映射到传统 Chat 上游。
+补充一点：如果上游只支持 `ChatCompletions`，网关会尽量把标准 `function` 工具转成 Chat 兼容格式，并按阶段降级 Responses 扩展语义；但 `web_search`、`file_search`、`computer_use` 这类 Responses 内置工具不会再静默忽略，而是会明确返回“不支持 chat-only upstream”的兼容性错误。
 
 ## 第三步: 配置网关里的下游 key
 
