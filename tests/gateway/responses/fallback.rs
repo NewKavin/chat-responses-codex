@@ -192,72 +192,21 @@ async fn downstream_responses_request_with_bad_response_status_tool_choice_retry
 }
 
 #[tokio::test]
-async fn downstream_responses_request_with_non_function_tools_falls_back_to_chat() {
-    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+async fn chat_only_responses_builtin_tools_fail_explicitly() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let capture_clone = capture.clone();
-
-    let upstream_app =
-        Router::new()
-            .route(
-                "/v1/chat/completions",
-                post(
-                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
-                          request: Request<Body>| async move {
-                        let (parts, body) = request.into_parts();
-                        let body = to_bytes(body, usize::MAX).await.unwrap();
-                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                        let mut lock = capture.lock().unwrap();
-                        lock.path = parts.uri.path().to_string();
-                        lock.authorization = parts
-                            .headers
-                            .get(header::AUTHORIZATION)
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_string);
-                        lock.request_body = Some(payload);
-
-                        (
-                            StatusCode::OK,
-                            axum::Json(json!({
-                                "id": "chatcmpl-test",
-                                "object": "chat.completion",
-                                "created": 1,
-                                "model": "gpt-4.1-mini",
-                                "choices": [{
-                                    "index": 0,
-                                    "message": {"role": "assistant", "content": "Hi"},
-                                    "finish_reason": "stop"
-                                }],
-                                "usage": {
-                                    "prompt_tokens": 1,
-                                    "completion_tokens": 1,
-                                    "total_tokens": 2
-                                }
-                            })),
-                        )
-                    },
-                ),
-            )
-            .with_state(capture_clone);
-
-    tokio::spawn(async move {
-        axum::serve(listener, upstream_app).await.unwrap();
-    });
 
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
             upstreams: vec![UpstreamConfig {
                 id: "up-1".into(),
-                name: "primary".into(),
-                base_url: format!("http://{}", address),
+                name: "chat-only".into(),
+                base_url: "http://127.0.0.1:9".into(),
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
-                supported_models: vec!["gpt-4.1-mini".into()],
+                supported_models: vec!["claude-haiku-4-5-20251001".into()],
                 active: true,
                 failure_count: 0,
                 ..Default::default()
@@ -268,11 +217,9 @@ async fn downstream_responses_request_with_non_function_tools_falls_back_to_chat
                 hash: downstream_key.hash.clone(),
                 plaintext_key: Some(downstream_key.plaintext.clone()),
                 plaintext_key_prefix: None,
-                model_allowlist: vec!["gpt-4.1-mini".into()],
+                model_allowlist: vec!["claude-haiku-4-5-20251001".into()],
                 per_minute_limit: 60,
-
                 rate_limit_enabled: true,
-
                 max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
@@ -301,13 +248,152 @@ async fn downstream_responses_request_with_non_function_tools_falls_back_to_chat
         .header("Content-Type", "application/json")
         .body(Body::from(
             json!({
-                "model": "gpt-4.1-mini",
-                "input": "Need weather",
+                "model": "claude-haiku-4-5-20251001",
+                "input": "hello",
                 "tools": [
                     {
                         "type": "web_search"
                     }
                 ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "gateway_invalid_request");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("web_search"));
+}
+
+#[tokio::test]
+async fn downstream_responses_request_strips_parallel_tool_calls_for_chat_only_proxy_models() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app =
+        Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    move |State(capture): State<Arc<Mutex<RequestCapture>>>,
+                          request: Request<Body>| async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let mut lock = capture.lock().unwrap();
+                        lock.path = parts.uri.path().to_string();
+                        lock.authorization = parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        lock.request_body = Some(payload.clone());
+
+                        if payload.get("parallel_tool_calls").is_some() {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                axum::Json(json!({
+                                    "error": {
+                                        "message": "parallel_tool_calls unsupported"
+                                    }
+                                })),
+                            );
+                        }
+
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "claude-haiku-4-5-20251001",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Hi"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "claude-proxy".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["claude-haiku-4-5-20251001".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["claude-haiku-4-5-20251001".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "claude-haiku-4-5-20251001",
+                "input": "Hello",
+                "parallel_tool_calls": true
             })
             .to_string(),
         ))
@@ -324,10 +410,12 @@ async fn downstream_responses_request_with_non_function_tools_falls_back_to_chat
     assert_eq!(payload["output"][0]["content"][0]["text"], "Hi");
 
     let captured = capture.lock().unwrap().clone();
-    assert_eq!(captured.path, "/v1/chat/completions");
     let request_body = captured.request_body.unwrap();
-    assert_eq!(request_body["messages"][0]["content"], "Need weather");
-    assert!(request_body.get("tools").is_none());
+    assert_eq!(captured.path, "/v1/chat/completions");
+    assert!(
+        request_body.get("parallel_tool_calls").is_none(),
+        "parallel_tool_calls should be stripped before dispatching to a chat-only proxy upstream: {request_body}"
+    );
 }
 
 #[tokio::test]
@@ -495,7 +583,8 @@ struct RequestCapture {
 }
 
 #[tokio::test]
-async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error_not_protocol_unsupported() {
+async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error_not_protocol_unsupported(
+) {
     // Reproduces the 华子 upstream scenario: the upstream returns HTTP 403
     // (auth/permission denied) on every attempt, but the body contains
     // "bad_response_status_code" as the error code. The gateway must NOT
@@ -645,6 +734,16 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
     // persistent failure as an auth error rather than protocol-unsupported.
     let captures = capture.lock().unwrap().clone();
     assert_eq!(captures.len(), 2);
-    assert!(captures[0].request_body.as_ref().unwrap().get("tools").is_some());
-    assert!(captures[1].request_body.as_ref().unwrap().get("tools").is_none());
+    assert!(captures[0]
+        .request_body
+        .as_ref()
+        .unwrap()
+        .get("tools")
+        .is_some());
+    assert!(captures[1]
+        .request_body
+        .as_ref()
+        .unwrap()
+        .get("tools")
+        .is_none());
 }

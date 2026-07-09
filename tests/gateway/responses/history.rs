@@ -372,6 +372,285 @@ async fn downstream_responses_unknown_previous_response_id_is_safe_and_categoriz
 }
 
 #[tokio::test]
+async fn chat_only_high_fidelity_stage_is_skipped_after_three_identical_failures() {
+    let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(capture): State<Arc<Mutex<Vec<RequestCapture>>>>,
+                      request: Request<Body>| async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let mut lock = capture.lock().unwrap();
+                    lock.push(RequestCapture {
+                        path: parts.uri.path().to_string(),
+                        authorization: parts
+                            .headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                        request_body: Some(payload.clone()),
+                    });
+
+                    let messages = payload["messages"].as_array().cloned().unwrap_or_default();
+                    let has_tool_history = messages.iter().any(|message| {
+                        message.get("tool_call_id").is_some()
+                            || message.get("tool_calls").is_some()
+                            || matches!(
+                                message.get("role").and_then(Value::as_str),
+                                Some("tool" | "function")
+                            )
+                    });
+                    if has_tool_history || messages.len() > 2 {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({
+                                "error": {
+                                    "message": "{\"message\":\"Bedrock error message: The toolConfig field must be defined when using toolUse and toolResult content blocks.\",\"reason\":\"TOOL_CONFIG_MISSING\"}"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-next",
+                            "object": "chat.completion",
+                            "created": 2,
+                            "model": "claude-haiku-4-5-20251001",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "done"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 5,
+                                "completion_tokens": 1,
+                                "total_tokens": 6
+                            }
+                        })),
+                    )
+                        .into_response()
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "claude-proxy".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["claude-haiku-4-5-20251001".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["claude-haiku-4-5-20251001".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    state.store_response_history(
+        "chatcmpl-prev",
+        vec![
+            json!({
+                "role": "user",
+                "content": "Use pwd"
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            }),
+        ],
+        serde_json::Map::from_iter([
+            (
+                "instructions".to_string(),
+                Value::String("You are a shell assistant.".into()),
+            ),
+            (
+                "tools".to_string(),
+                json!([{
+                    "type": "function",
+                    "function": {
+                        "name": "exec_command",
+                        "description": "Run a shell command",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "cmd": {"type": "string"}
+                            },
+                            "required": ["cmd"],
+                            "additionalProperties": false
+                        }
+                    }
+                }]),
+            ),
+        ]),
+    );
+
+    let app = build_router(state.clone());
+    let issue_followup = || {
+        let app = app.clone();
+        let token = downstream_key.plaintext.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header(header::USER_AGENT, "Codex/1.0")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "claude-haiku-4-5-20251001",
+                            "previous_response_id": "chatcmpl-prev",
+                            "input": [
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": "call_1",
+                                    "output": "/home/kavin"
+                                },
+                                {
+                                    "role": "user",
+                                    "content": "Continue"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    for attempt in 0..3 {
+        let response = issue_followup().await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "attempt {} should still start from the high-fidelity stage",
+            attempt + 1
+        );
+        assert_eq!(
+            state.fallback_stage_failure_count(
+                "down-1",
+                "codex",
+                "claude-haiku-4-5-20251001",
+                "up-1",
+                "high_fidelity",
+            ),
+            (attempt + 1) as u8,
+        );
+    }
+
+    assert_eq!(
+        state.fallback_stage_failure_count(
+            "down-1",
+            "codex",
+            "claude-haiku-4-5-20251001",
+            "up-1",
+            "high_fidelity",
+        ),
+        3,
+    );
+
+    let fourth_response = issue_followup().await;
+    assert_eq!(fourth_response.status(), StatusCode::OK);
+    let fourth_body = to_bytes(fourth_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&fourth_body).unwrap();
+    assert_eq!(payload["output"][0]["type"], "message");
+    assert_eq!(payload["output"][0]["role"], "assistant");
+    assert_eq!(payload["output"][0]["content"][0]["text"], "done");
+
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.len(), 4);
+    for request in &captured[..3] {
+        let request_body = request.request_body.clone().unwrap();
+        let messages = request_body["messages"].as_array().unwrap();
+        assert!(
+            messages.len() > 2,
+            "high-fidelity stage should still replay history before the skip threshold: {request_body}"
+        );
+        assert!(
+            messages.iter().any(|message| {
+                message.get("tool_call_id").is_some()
+                    || message.get("tool_calls").is_some()
+                    || matches!(
+                        message.get("role").and_then(Value::as_str),
+                        Some("tool" | "function")
+                    )
+            }),
+            "high-fidelity stage should still include replayed tool history before the skip threshold: {request_body}"
+        );
+    }
+
+    let fourth_request_body = captured[3].request_body.clone().unwrap();
+    let messages = fourth_request_body["messages"].as_array().unwrap();
+    assert!(
+        messages.len() <= 2,
+        "the fourth identical request should skip the high-fidelity replay stage: {fourth_request_body}"
+    );
+    assert!(
+        messages.iter().all(|message| {
+            message.get("tool_call_id").is_none()
+                && message.get("tool_calls").is_none()
+                && !matches!(
+                    message.get("role").and_then(Value::as_str),
+                    Some("tool" | "function")
+                )
+        }),
+        "the fourth identical request should start after tool-history replay has been removed: {fourth_request_body}"
+    );
+}
+
+#[tokio::test]
 async fn downstream_responses_request_downgrades_developer_role_for_chat_upstream() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();

@@ -85,6 +85,23 @@ const RESPONSE_HISTORY_MAX_ENTRIES: usize = 2048;
 const RESPONSE_HISTORY_TTL_SECONDS: u64 = 12 * 60 * 60;
 const ACTIVE_REQUEST_USER_AGENT_MAX_BYTES: usize = 256;
 
+fn fallback_stage_failure_key(
+    downstream_id: &str,
+    client_family: &str,
+    model_slug: &str,
+    upstream_id: &str,
+    stage: &str,
+) -> String {
+    format!(
+        "{}::{}::{}::{}::{}",
+        downstream_id.trim().to_ascii_lowercase(),
+        client_family.trim().to_ascii_lowercase(),
+        model_slug.trim().to_ascii_lowercase(),
+        upstream_id.trim().to_ascii_lowercase(),
+        stage.trim().to_ascii_lowercase(),
+    )
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponseHistoryEntry {
     pub items: Vec<Value>,
@@ -170,6 +187,7 @@ pub struct AppState {
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
     active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
     response_history: Arc<StdMutex<ResponseHistoryStore>>,
+    fallback_stage_failures: Arc<StdMutex<HashMap<String, u8>>>,
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
     routing_tie_breakers: Arc<StdMutex<HashMap<String, u64>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
@@ -272,6 +290,72 @@ impl AppState {
         Some(entry)
     }
 
+    pub fn fallback_stage_failure_count(
+        &self,
+        downstream_id: &str,
+        client_family: &str,
+        model_slug: &str,
+        upstream_id: &str,
+        stage: &str,
+    ) -> u8 {
+        let key = fallback_stage_failure_key(
+            downstream_id,
+            client_family,
+            model_slug,
+            upstream_id,
+            stage,
+        );
+        self.fallback_stage_failures
+            .lock()
+            .expect("fallback stage failure lock poisoned")
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn record_fallback_stage_failure(
+        &self,
+        downstream_id: &str,
+        client_family: &str,
+        model_slug: &str,
+        upstream_id: &str,
+        stage: &str,
+    ) {
+        let key = fallback_stage_failure_key(
+            downstream_id,
+            client_family,
+            model_slug,
+            upstream_id,
+            stage,
+        );
+        let mut failures = self
+            .fallback_stage_failures
+            .lock()
+            .expect("fallback stage failure lock poisoned");
+        let entry = failures.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1).min(3);
+    }
+
+    pub fn clear_fallback_stage_failures(
+        &self,
+        downstream_id: &str,
+        client_family: &str,
+        model_slug: &str,
+        upstream_id: &str,
+    ) {
+        let prefix = format!(
+            "{}::{}::{}::{}::",
+            downstream_id.trim().to_ascii_lowercase(),
+            client_family.trim().to_ascii_lowercase(),
+            model_slug.trim().to_ascii_lowercase(),
+            upstream_id.trim().to_ascii_lowercase(),
+        );
+        self.fallback_stage_failures
+            .lock()
+            .expect("fallback stage failure lock poisoned")
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
     pub fn new_with_store(
         state: PersistedState,
         store_path: impl Into<PathBuf>,
@@ -324,6 +408,7 @@ impl AppState {
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
+            fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
@@ -373,6 +458,7 @@ impl AppState {
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
+            fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
@@ -416,6 +502,7 @@ impl AppState {
             downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
+            fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),

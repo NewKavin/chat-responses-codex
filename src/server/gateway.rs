@@ -83,6 +83,32 @@ impl EndpointKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ChatFallbackStage {
+    HighFidelity,
+    ExtensionCleanup,
+    ToolReplayReduction,
+    HistoryCompaction,
+}
+
+impl ChatFallbackStage {
+    const ORDERED: [Self; 4] = [
+        Self::HighFidelity,
+        Self::ExtensionCleanup,
+        Self::ToolReplayReduction,
+        Self::HistoryCompaction,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::HighFidelity => "high_fidelity",
+            Self::ExtensionCleanup => "extension_cleanup",
+            Self::ToolReplayReduction => "tool_replay_reduction",
+            Self::HistoryCompaction => "history_compaction",
+        }
+    }
+}
+
 #[derive(Debug)]
 enum DispatchBody {
     Json(Value),
@@ -666,9 +692,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/admin/troubleshooting/matrix/run",
-            post(admin_compatibility_matrix_run).route_layer(
-                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
-            ),
+            post(admin_compatibility_matrix_run).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
         )
         .route(
             "/api/admin/troubleshooting/active-requests",
@@ -1167,6 +1194,77 @@ fn normalize_responses_input_items(input: &Value) -> Result<Vec<Value>, GatewayE
     }
 }
 
+fn responses_request_uses_builtin_tool_requiring_native_responses(body: &Value) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|tool| {
+            matches!(
+                tool.get("type").and_then(Value::as_str),
+                Some("web_search" | "file_search" | "computer_use")
+            )
+        })
+}
+
+fn responses_input_item_is_chat_fallback_safe(item: &Value) -> bool {
+    match item {
+        Value::String(_) => true,
+        Value::Object(object) => {
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("function_call" | "function_call_output")
+            ) {
+                return false;
+            }
+            if object.contains_key("tool_call_id") || object.contains_key("tool_calls") {
+                return false;
+            }
+            !matches!(
+                object.get("role").and_then(Value::as_str),
+                Some("tool" | "function")
+            )
+        }
+        _ => false,
+    }
+}
+
+fn simplify_responses_input_for_chat_fallback(input: &Value) -> Value {
+    match input {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .filter(|item| responses_input_item_is_chat_fallback_safe(item))
+                .cloned()
+                .collect(),
+        ),
+        Value::Object(_) if responses_input_item_is_chat_fallback_safe(input) => input.clone(),
+        Value::String(_) => input.clone(),
+        _ => Value::Array(Vec::new()),
+    }
+}
+
+fn compact_responses_input_for_chat_fallback(input: &Value) -> Value {
+    match simplify_responses_input_for_chat_fallback(input) {
+        Value::Array(items) => items
+            .into_iter()
+            .rev()
+            .find(|item| match item {
+                Value::String(text) => !text.trim().is_empty(),
+                Value::Object(object) => object
+                    .get("content")
+                    .or_else(|| object.get("text"))
+                    .is_some_and(|value| value_has_payload(Some(value))),
+                _ => false,
+            })
+            .map(|item| Value::Array(vec![item]))
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        Value::String(text) if !text.trim().is_empty() => Value::Array(vec![Value::String(text)]),
+        Value::Object(object) => Value::Array(vec![Value::Object(object)]),
+        _ => Value::Array(Vec::new()),
+    }
+}
+
 fn capture_response_history_state(object: &Map<String, Value>) -> Map<String, Value> {
     let mut state = Map::new();
     for field in RESPONSE_HISTORY_STATE_FIELDS {
@@ -1186,6 +1284,14 @@ fn apply_response_history_state(object: &mut Map<String, Value>, state: &Map<Str
 async fn prepare_response_history_context(
     state: &AppState,
     body: &mut Value,
+) -> Result<ResponseHistoryContext, GatewayError> {
+    prepare_response_history_context_with_replay(state, body, true).await
+}
+
+async fn prepare_response_history_context_with_replay(
+    state: &AppState,
+    body: &mut Value,
+    replay_prior_history: bool,
 ) -> Result<ResponseHistoryContext, GatewayError> {
     let object = body
         .as_object_mut()
@@ -1219,12 +1325,16 @@ async fn prepare_response_history_context(
                     Some(json!({ "scope": "gateway" })),
                 )
             })?;
-        let mut prior_items = prior_history.items;
-        prior_items.extend(current_input_items);
         history_request_state = prior_history.request_state;
         history_request_state.extend(capture_response_history_state(object));
         apply_response_history_state(object, &history_request_state);
-        prior_items
+        if replay_prior_history {
+            let mut prior_items = prior_history.items;
+            prior_items.extend(current_input_items);
+            prior_items
+        } else {
+            current_input_items
+        }
     } else {
         current_input_items
     };
@@ -1237,6 +1347,130 @@ async fn prepare_response_history_context(
         history_input_items: effective_input_items,
         history_request_state,
     })
+}
+
+fn apply_chat_fallback_stage(body: &mut Value, stage: ChatFallbackStage) {
+    match stage {
+        ChatFallbackStage::HighFidelity => {}
+        ChatFallbackStage::ExtensionCleanup => {
+            strip_responses_chat_fallback_extensions(body);
+            if let Some(object) = body.as_object_mut() {
+                if let Some(input) = object.get("input").cloned() {
+                    object.insert(
+                        "input".into(),
+                        simplify_responses_input_for_chat_fallback(&input),
+                    );
+                }
+            }
+        }
+        ChatFallbackStage::ToolReplayReduction => {
+            apply_chat_fallback_stage(body, ChatFallbackStage::ExtensionCleanup);
+            if let Some(object) = body.as_object_mut() {
+                object.remove("tool_choice");
+            }
+        }
+        ChatFallbackStage::HistoryCompaction => {
+            apply_chat_fallback_stage(body, ChatFallbackStage::ToolReplayReduction);
+            if let Some(object) = body.as_object_mut() {
+                object.remove("tools");
+                if let Some(input) = object.get("input").cloned() {
+                    object.insert(
+                        "input".into(),
+                        compact_responses_input_for_chat_fallback(&input),
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn prepare_responses_chat_fallback_request(
+    state: &AppState,
+    source_body: &Value,
+    stage: ChatFallbackStage,
+) -> Result<(Value, ResponseHistoryContext), GatewayError> {
+    let mut body = source_body.clone();
+    let response_history_context = prepare_response_history_context_with_replay(
+        state,
+        &mut body,
+        matches!(stage, ChatFallbackStage::HighFidelity),
+    )
+    .await?;
+    apply_chat_fallback_stage(&mut body, stage);
+    Ok((body, response_history_context))
+}
+
+fn infer_client_family(user_agent: Option<&str>, endpoint: EndpointKind) -> &'static str {
+    let ua = user_agent.unwrap_or_default().trim().to_ascii_lowercase();
+    if ua.starts_with("codex") {
+        "codex"
+    } else if ua.starts_with("opencode") {
+        "opencode"
+    } else if ua.starts_with("hermes") {
+        "hermes"
+    } else {
+        match endpoint {
+            EndpointKind::Responses => "responses_generic",
+            EndpointKind::ChatCompletions => "chat_generic",
+        }
+    }
+}
+
+fn initial_chat_fallback_stage(
+    state: &AppState,
+    downstream_id: &str,
+    client_family: &str,
+    model_slug: &str,
+    upstream_id: &str,
+) -> ChatFallbackStage {
+    ChatFallbackStage::ORDERED
+        .into_iter()
+        .find(|stage| {
+            state.fallback_stage_failure_count(
+                downstream_id,
+                client_family,
+                model_slug,
+                upstream_id,
+                stage.as_str(),
+            ) < 3
+        })
+        .unwrap_or(ChatFallbackStage::HistoryCompaction)
+}
+
+fn should_advance_fallback_stage(status: StatusCode, error_text: &str) -> bool {
+    let normalized = error_text.to_ascii_lowercase();
+    status.is_client_error()
+        && (normalized.contains("tool_config_missing")
+            || normalized.contains("toolconfig")
+            || normalized.contains("content_length_exceeds_threshold")
+            || normalized.contains("content length exceeds threshold")
+            || normalized.contains("input is too long")
+            || normalized.contains("unsupported")
+            || normalized.contains("invalid request")
+            || normalized.contains("upstream rejected the request"))
+}
+
+fn maybe_record_chat_fallback_stage_failure(
+    state: &AppState,
+    downstream_id: &str,
+    client_family: &str,
+    model_slug: &str,
+    upstream_id: &str,
+    stage: Option<ChatFallbackStage>,
+    error: &GatewayError,
+) {
+    let Some(stage) = stage else {
+        return;
+    };
+    if should_advance_fallback_stage(error.status_code(), error.message()) {
+        state.record_fallback_stage_failure(
+            downstream_id,
+            client_family,
+            model_slug,
+            upstream_id,
+            stage.as_str(),
+        );
+    }
 }
 
 fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
@@ -1547,42 +1781,8 @@ async fn process_gateway_request_inner(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let capture_route_metadata = troubleshooting_route_capture_requested(&headers);
-    let response_history_context = if endpoint == EndpointKind::Responses {
-        match prepare_response_history_context(&state, &mut body).await {
-            Ok(context) => Some(context),
-            Err(error) => {
-                let body_model = body
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                append_gateway_usage_log(
-                    &state,
-                    &request_id,
-                    &downstream.id,
-                    &downstream.name,
-                    "",
-                    None,
-                    request_path,
-                    body_model,
-                    inference_strength.as_deref(),
-                    user_agent.as_deref(),
-                    error.status_code(),
-                    Some(error.to_string()),
-                    Some(error.error_category().to_string()),
-                    0,
-                    0,
-                    0,
-                    started,
-                )
-                .await;
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
-    let model = match body.get("model").and_then(Value::as_str) {
-        Some(model) => model,
+    let model_owned = match body.get("model").and_then(Value::as_str) {
+        Some(model) => model.to_string(),
         None => {
             let error = GatewayError::BadRequest("missing model".into());
             append_gateway_usage_log(
@@ -1608,6 +1808,7 @@ async fn process_gateway_request_inner(
             return Err(error);
         }
     };
+    let model = model_owned.as_str();
     let normalized_model = model;
     let request_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     state.start_active_gateway_request(ActiveGatewayRequestStart {
@@ -1852,14 +2053,18 @@ async fn process_gateway_request_inner(
         None
     };
 
-    let requires_responses_tooling =
-        endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
-    let fallback_to_chat = requires_responses_tooling
-        && !routing_snapshot.upstreams.iter().any(|upstream| {
+    let responses_upstream_available = endpoint == EndpointKind::Responses
+        && routing_snapshot.upstreams.iter().any(|upstream| {
             upstream.active
                 && upstream.supports_protocol(UpstreamProtocol::Responses)
                 && upstream.supports_model(model)
         });
+    let chat_only_responses_fallback =
+        endpoint == EndpointKind::Responses && !responses_upstream_available;
+    let requires_responses_tooling =
+        endpoint == EndpointKind::Responses && responses_request_requires_responses_upstream(&body);
+    let fallback_to_chat = requires_responses_tooling && chat_only_responses_fallback;
+    let client_family = infer_client_family(user_agent.as_deref(), endpoint);
     if requires_responses_tooling {
         tracing::info!(
             request_id = %request_id,
@@ -1877,6 +2082,69 @@ async fn process_gateway_request_inner(
             "evaluated Responses routing strategy"
         );
     }
+    if endpoint == EndpointKind::Responses
+        && chat_only_responses_fallback
+        && responses_request_uses_builtin_tool_requiring_native_responses(&body)
+    {
+        let error = GatewayError::BadRequest(
+            "built-in Responses tools such as web_search, file_search, and computer_use are not supported on chat-only upstreams".into(),
+        );
+        append_gateway_usage_log(
+            &state,
+            &request_id,
+            &downstream.id,
+            &downstream.name,
+            "",
+            None,
+            request_path,
+            model,
+            inference_strength.as_deref(),
+            user_agent.as_deref(),
+            error.status_code(),
+            Some(error.to_string()),
+            Some(error.error_category().to_string()),
+            0,
+            0,
+            0,
+            started,
+        )
+        .await;
+        active_request_guard.fail_and_finish(error.error_category());
+        return Err(error);
+    }
+    let original_responses_body = (endpoint == EndpointKind::Responses).then(|| body.clone());
+    let response_history_context = if endpoint == EndpointKind::Responses
+        && !chat_only_responses_fallback
+    {
+        match prepare_response_history_context(&state, &mut body).await {
+            Ok(context) => Some(context),
+            Err(error) => {
+                append_gateway_usage_log(
+                    &state,
+                    &request_id,
+                    &downstream.id,
+                    &downstream.name,
+                    "",
+                    None,
+                    request_path,
+                    model,
+                    inference_strength.as_deref(),
+                    user_agent.as_deref(),
+                    error.status_code(),
+                    Some(error.to_string()),
+                    Some(error.error_category().to_string()),
+                    0,
+                    0,
+                    0,
+                    started,
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
 
     let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
     let now = unix_seconds();
@@ -2233,13 +2501,79 @@ async fn process_gateway_request_inner(
                     let global_context_profile = state
                         .global_context_profile_for_upstream_base_url(&upstream.base_url)
                         .await;
+                    let (dispatch_body, dispatch_response_history_context, chat_fallback_stage) =
+                        if endpoint == EndpointKind::Responses
+                            && protocol == UpstreamProtocol::ChatCompletions
+                            && chat_only_responses_fallback
+                        {
+                            let stage = initial_chat_fallback_stage(
+                                &state,
+                                &downstream.id,
+                                client_family,
+                                normalized_model,
+                                &upstream.id,
+                            );
+                            tracing::info!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                client_family,
+                                fallback_stage = stage.as_str(),
+                                "selected chat-only Responses fallback stage"
+                            );
+                            match prepare_responses_chat_fallback_request(
+                                &state,
+                                original_responses_body
+                                    .as_ref()
+                                    .expect("responses requests should retain original body"),
+                                stage,
+                            )
+                            .await
+                            {
+                                Ok((prepared_body, prepared_history_context)) => (
+                                    prepared_body,
+                                    Some(prepared_history_context),
+                                    Some(stage),
+                                ),
+                                Err(error) => {
+                                    append_gateway_usage_log(
+                                        &state,
+                                        &request_id,
+                                        &downstream.id,
+                                        &downstream.name,
+                                        "",
+                                        None,
+                                        request_path,
+                                        model,
+                                        inference_strength.as_deref(),
+                                        user_agent.as_deref(),
+                                        error.status_code(),
+                                        Some(error.to_string()),
+                                        Some(error.error_category().to_string()),
+                                        0,
+                                        0,
+                                        0,
+                                        started,
+                                    )
+                                    .await;
+                                    active_request_guard.fail_and_finish(error.error_category());
+                                    return Err(error);
+                                }
+                            }
+                        } else {
+                            (body.clone(), response_history_context.clone(), None)
+                        };
 
                     let result = send_to_upstream(
                         &state,
                         &upstream,
                         api_key,
                         protocol,
-                        &body,
+                        &dispatch_body,
                         endpoint,
                         request_stream,
                         attempt_stream,
@@ -2251,10 +2585,10 @@ async fn process_gateway_request_inner(
                         &downstream.name,
                         inference_strength.as_deref(),
                         user_agent.as_deref(),
-                        fallback_to_chat,
+                        chat_only_responses_fallback,
                         global_context_profile.as_ref(),
                         stream_completion_context.clone(),
-                        response_history_context.clone(),
+                        dispatch_response_history_context.clone(),
                     )
                     .await;
 
@@ -2288,6 +2622,14 @@ async fn process_gateway_request_inner(
 
                             result.request_id = request_id.clone();
                             let completed_after_stream_fallback = request_stream && !attempt_stream;
+                            if chat_fallback_stage.is_some() {
+                                state.clear_fallback_stage_failures(
+                                    &downstream.id,
+                                    client_family,
+                                    normalized_model,
+                                    &upstream.id,
+                                );
+                            }
                             state.mark_upstream_success(&upstream.id).await.ok();
                             if use_routing_affinity {
                                 state.set_affinity_upstream(
@@ -2551,7 +2893,16 @@ async fn process_gateway_request_inner(
 
                             break;
                         }
-                        Err(GatewayError::BadRequest(error)) => {
+                        Err(error @ GatewayError::BadRequest(_)) => {
+                            maybe_record_chat_fallback_stage_failure(
+                                &state,
+                                &downstream.id,
+                                client_family,
+                                normalized_model,
+                                &upstream.id,
+                                chat_fallback_stage,
+                                &error,
+                            );
                             tracing::warn!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
@@ -2564,12 +2915,21 @@ async fn process_gateway_request_inner(
                                 error = %error,
                                 "upstream rejected request payload"
                             );
-                            last_error = Some(GatewayError::BadRequest(error));
+                            last_error = Some(error);
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
                             break;
                         }
                         Err(error) if error.status_code() == StatusCode::BAD_REQUEST => {
+                            maybe_record_chat_fallback_stage_failure(
+                                &state,
+                                &downstream.id,
+                                client_family,
+                                normalized_model,
+                                &upstream.id,
+                                chat_fallback_stage,
+                                &error,
+                            );
                             tracing::warn!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,

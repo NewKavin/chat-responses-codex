@@ -259,6 +259,9 @@ pub(super) fn normalize_chat_payload_for_upstream_compatibility(
             object.remove(key);
         }
     }
+    if third_party_chat_proxy {
+        object.remove("parallel_tool_calls");
+    }
     object.remove("text");
 
     if family == ChatCompatibilityFamily::DeepSeekV4 || family == ChatCompatibilityFamily::Glm {
@@ -299,6 +302,36 @@ pub(super) fn normalize_chat_payload_for_upstream_compatibility(
             } else if let Some(output_token_limit) = output_token_limit {
                 object.insert("max_tokens".into(), output_token_limit);
             }
+        }
+    }
+}
+
+pub(super) fn strip_responses_chat_fallback_extensions(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+
+    for key in [
+        "service_tier",
+        "safety_identifier",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "client_metadata",
+        "store",
+        "verbosity",
+        "parallel_tool_calls",
+        "text",
+    ] {
+        object.remove(key);
+    }
+
+    if let Some(stream_options) = object
+        .get_mut("stream_options")
+        .and_then(Value::as_object_mut)
+    {
+        stream_options.remove("include_obfuscation");
+        if stream_options.is_empty() {
+            object.remove("stream_options");
         }
     }
 }
