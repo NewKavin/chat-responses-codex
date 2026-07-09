@@ -1,226 +1,187 @@
-# High-Fidelity Client Compatibility Matrix Design
+# 高保真客户端兼容矩阵设计
 
-## Summary
+## 摘要
 
-Build a repeatable compatibility matrix for the `test` downstream that proves
-every exposed model can be called through the three client families the user
-cares about:
+为 `test` 下游构建一套可重复执行的客户端兼容矩阵，证明它当前暴露的每个模型都能通过用户关心的三类客户端链路发起调用：
 
 - Codex
 - opencode
 - Hermes
 
-The first version should prioritize execution reliability over perfect protocol
-fidelity, but only when the upstream forces a downgrade. The gateway should
-preserve as much Responses semantics as possible on the first attempt, then
-apply a staged fallback ladder for chat-only upstreams when those semantics are
-rejected.
+第一版的优先级是“尽量保真，但在上游强制拒绝时优先保证请求可执行”。也就是说，网关在第一跳应尽可能保留 Responses 语义；只有当命中的上游只支持 `ChatCompletions`，且明确拒绝这些语义时，才按阶段逐层降级。
 
-This design does not collapse model slugs into a canonical alias. If the
-downstream currently exposes multiple slugs for the same model family, those
-slugs remain separately visible and separately testable. Each slug must become
-individually usable.
+这份设计不把多个模型 slug 收敛成一个 canonical alias。只要下游当前暴露了多个 slug，即使它们属于同一模型家族，也必须继续分别展示、分别验证、分别保证可用。
 
-## Goals
+## 目标
 
-- Make every model currently exposed to downstream `test` callable through:
-  - Codex via `/v1/responses`
-  - opencode via `/v1/chat/completions`
-  - Hermes via the existing OpenAI-compatible chat path
-- Preserve a higher-fidelity Responses-to-Chat fallback path for Codex whenever
-  the selected upstream does not support native Responses.
-- Keep standard `function` tools working whenever they can be represented on a
-  chat-only upstream.
-- Explicitly reject Responses-native built-in tools such as `web_search`,
-  `file_search`, and `computer_use` when the selected upstream only supports
-  Chat Completions.
-- Add a repeatable compatibility matrix in the admin UI and a scriptable smoke
-  path so regressions can be detected after future changes.
+- 让 `test` 下游当前暴露的每个模型都能通过以下客户端链路调用：
+  - Codex：走 `/v1/responses`
+  - opencode：走 `/v1/chat/completions`
+  - Hermes：走现有的 OpenAI-compatible chat 路径
+- 在目标上游不支持原生 Responses 时，为 Codex 保留一条“尽量高保真”的 `Responses -> ChatCompletions` fallback 路径。
+- 只要能够表达，标准 `function` 工具就要尽量保留并继续可用。
+- 当目标上游只支持 `ChatCompletions` 时，对 `web_search`、`file_search`、`computer_use` 这类 Responses 内置工具要明确报不支持，而不是静默吞掉。
+- 提供一套可重复执行的兼容矩阵：
+  - 管理端可视化入口
+  - 仓库内脚本化 smoke 入口
+  这样后续每次改动都能复跑，及时发现回归。
 
-## Non-Goals
+## 非目标
 
-- Do not merge multiple model slugs into one canonical downstream model.
-- Do not add a new upstream protocol beyond the existing `ChatCompletions` and
-  `Responses` surfaces.
-- Do not silently invent fake support for Responses-native built-in tools on
-  chat-only upstreams.
-- Do not redesign downstream auth, upstream management, or the model probe UI.
-- Do not require provider-specific upstream configuration as a prerequisite for
-  the first version.
+- 不把多个模型 slug 合并成一个统一的下游模型名。
+- 不新增第三种上游协议类型，仍只围绕现有 `ChatCompletions` 和 `Responses` 处理。
+- 不为 Responses 内置工具伪造“看起来成功”的 chat-only 降级语义。
+- 不重做下游鉴权、上游管理、模型探测页等其它系统。
+- 第一版不要求先引入 provider 专属配置后才能落地。
 
-## Current State
+## 当前状态
 
-The current gateway already exposes all client-facing protocol surfaces needed
-for the target clients:
+当前网关对目标客户端所需的协议面已经齐备：
 
-- Codex uses `/v1/responses`
-- opencode uses `/v1/chat/completions`
-- Hermes uses the OpenAI-compatible chat path
+- Codex 使用 `/v1/responses`
+- opencode 使用 `/v1/chat/completions`
+- Hermes 使用现有 OpenAI-compatible chat 路径
 
-The main gaps are in protocol-preserving fallback behavior rather than missing
-routes.
+因此核心问题不是缺少 endpoint，而是 fallback 行为在高保真和可执行之间还没有被设计清楚。
 
-Observed failure classes:
+目前已经观察到的失败类型有四类：
 
-1. **Chat-only upstream fallback preserved too much Responses state**
-   - Recent changes caused `Responses -> ChatCompletions` fallback to replay
-     large `previous_response_id` histories, tool states, and tool outputs into
-     chat-only upstreams.
-   - This produced upstream rejections such as `CONTENT_LENGTH_EXCEEDS_THRESHOLD`
-     and `TOOL_CONFIG_MISSING`, even though a small chat-only request to the
-     same upstream would succeed.
+1. **chat-only 上游 fallback 时保留了过多 Responses 状态**
+   - 近期改动使 `Responses -> ChatCompletions` fallback 会把巨大的 `previous_response_id` 历史、工具状态和工具输出块继续重放给 chat-only 上游。
+   - 结果是同一个上游上，小型 chat 请求能成功，但高保真 fallback 却会触发 `CONTENT_LENGTH_EXCEEDS_THRESHOLD`、`TOOL_CONFIG_MISSING` 之类的 4xx。
 
-2. **Third-party chat proxies reject some OpenAI/Responses extension fields**
-   - At least one recent regression path involved `parallel_tool_calls`
-     surviving long enough to trigger upstream 400s in chat-only proxies.
+2. **第三方 chat proxy 会拒绝部分 OpenAI / Responses 扩展字段**
+   - 至少已经确认 `parallel_tool_calls` 在某些 chat-only proxy 上会触发 400。
+   - 这类字段不能默认长期透传到所有第三方 `ChatCompletions` upstream。
 
-3. **Different slugs for the same family route to different upstreams**
-   - Example: one active upstream exposes `deepseek-v4-flash`, while another
-     exposes `deepseek-ai/deepseek-v4-flash`.
-   - The first version must preserve both slugs instead of collapsing them, so
-     compatibility must be validated per slug.
+3. **同一家模型家族的不同 slug 会命中不同上游**
+   - 例如一个活跃上游只暴露 `deepseek-v4-flash`，另一个活跃上游只暴露 `deepseek-ai/deepseek-v4-flash`。
+   - 第一版必须保留这种差异，不能靠合并 slug 来掩盖问题，所以兼容性要按 slug 单独验证。
 
-4. **Some upstreams are healthy for chat but unstable or semantically broken**
-   - `claude-haiku-4-5-20251001` on one current chat-only upstream sometimes
-     returns a syntactically valid success envelope with empty content and zero
-     tokens.
-   - That is an upstream behavior problem, but the gateway must still classify
-     it clearly and avoid conflating it with protocol-conversion failures.
+4. **部分上游在 chat 面健康，但在语义上并不稳定**
+   - 例如某些 Claude slug 在某个 chat-only upstream 上会返回语法正确的 `200`，但内容为空、token 全为 0。
+   - 这属于上游行为问题，但网关必须明确分类，不能和协议转换失败混为一谈。
 
-## Design Principles
+## 设计原则
 
-1. **Preserve semantics first, degrade only on evidence**
-   - The first attempt should retain as much Responses meaning as safely
-     possible.
-   - Fallback degradation must be driven by concrete upstream rejection signals,
-     not by default pessimism.
+1. **优先保留语义，只有在证据明确时才降级**
+   - 第一跳应该尽量保留 Responses 语义。
+   - 只有在上游给出明确的协议/字段拒绝信号时，才按阶段剥离高风险语义。
 
-2. **Client compatibility is judged at the gateway boundary**
-   - The matrix should run real requests against the same `/v1/*` endpoints and
-     downstream auth path used by live clients.
-   - It should not bypass routing, quota checks, or stream handling.
+2. **客户端兼容性必须在网关真实边界上验证**
+   - 兼容矩阵必须走真实的 `/v1/*` 网关入口和真实下游鉴权。
+   - 不能绕过路由、配额、stream 逻辑，也不能伪造“本地直连上游成功”来代替网关兼容。
 
-3. **Per-slug compatibility, not per-family abstraction**
-   - If `deepseek-v4-flash` works and `deepseek-ai/deepseek-v4-flash` does not,
-     the matrix must report exactly that.
-   - The system must not hide that difference by silently rewriting one slug to
-     another for the first version.
+3. **按 slug 保证兼容，而不是按模型家族抽象兼容**
+   - 如果 `deepseek-v4-flash` 可用、`deepseek-ai/deepseek-v4-flash` 不可用，矩阵必须明确展示这种差异。
+   - 第一版不能通过静默重写 slug 把问题藏起来。
 
-4. **Unsupported built-in tool semantics must fail explicitly**
-   - `web_search`, `file_search`, and `computer_use` cannot be faithfully
-     mapped to chat-only upstreams.
-   - The gateway should say so directly instead of silently stripping them.
+4. **无法映射的内置工具必须显式失败**
+   - `web_search`、`file_search`、`computer_use` 这类 Responses 内置工具无法忠实映射到 chat-only upstream。
+   - 系统必须直接说明“不支持”，而不是假装成功。
 
-## Client Matrix Scope
+## 客户端矩阵范围
 
 ### Codex
 
-Codex must be tested through `/v1/responses`.
+Codex 必须通过 `/v1/responses` 验证。
 
-Required checks:
+必测项：
 
-- Basic non-stream request
-- Basic stream request
-- Standard `function` tool request
-- Long history request
-- `previous_response_id` continuation
-- Stream continuation / replay scenario
+- 基础非流式请求
+- 基础流式请求
+- 标准 `function` 工具请求
+- 长历史请求
+- `previous_response_id` 续写请求
+- 流式 continuation / replay 场景
 
-Codex-only note:
+Codex 特有说明：
 
-- `previous_response_id` is specific to Responses semantics and should be
-  tested only for Codex.
+- `previous_response_id` 是 Responses 专有语义，因此只要求在 Codex 链路上验证。
 
 ### opencode
 
-opencode must be tested through `/v1/chat/completions`.
+opencode 必须通过 `/v1/chat/completions` 验证。
 
-Required checks:
+必测项：
 
-- Basic non-stream request
-- Basic stream request
-- Standard `function` tool request
-- Long multi-turn history request
-- Chat-equivalent replay behavior where applicable
+- 基础非流式请求
+- 基础流式请求
+- 标准 `function` 工具请求
+- 长多轮历史请求
+- 能映射到 chat 语义的 replay 等价场景
 
 ### Hermes
 
-Hermes should be treated as an OpenAI-compatible chat client for the first
-version, following the existing `scripts/hermes.sh` path.
+Hermes 第一版按 OpenAI-compatible chat 客户端处理，沿用现有 `scripts/hermes.sh` 路径。
 
-Required checks:
+必测项：
 
-- Basic non-stream request
-- Basic stream request
-- Standard `function` tool request
-- Long multi-turn history request
+- 基础非流式请求
+- 基础流式请求
+- 标准 `function` 工具请求
+- 长多轮历史请求
 
-## Fallback Ladder
+## Fallback 梯度
 
-The fallback ladder applies only when:
+这套梯度只在以下前提下生效：
 
-- the downstream request is `Responses`
-- the selected model has no active `Responses` upstream candidate
-- the selected upstream path is therefore `ChatCompletions`
+- 下游请求是 `Responses`
+- 当前模型没有任何活跃的 `Responses` upstream 候选
+- 因此只能退到 `ChatCompletions` upstream
 
-### Stage 0: High-Fidelity Attempt
+### 第 0 阶段：高保真尝试
 
-Send the best available Responses-to-Chat translation, keeping:
+第一跳发送尽可能完整的 `Responses -> ChatCompletions` 转换结果，保留：
 
-- current-round user input
+- 当前轮用户输入
 - `instructions` / system prompt
-- standard `function` tools
-- `tool_choice` when representable
-- `reasoning_effort` when compatible
-- `response_format` / JSON schema when representable
-- `stream_options` fields that are known-safe
-- replayed history and `previous_response_id` state when present
+- 标准 `function` 工具
+- 可表达的 `tool_choice`
+- 可兼容的 `reasoning_effort`
+- 可表达的 `response_format` / JSON schema
+- 已知安全的 `stream_options`
+- 若存在，则保留重放历史与 `previous_response_id` 状态
 
-### Stage 1: Extension Cleanup
+### 第 1 阶段：扩展字段清理
 
-If the upstream rejects the request with a protocol/field-shaped 4xx, remove
-high-risk extension fields first:
+如果上游返回的是协议/字段形状的 4xx，先清理高风险扩展字段：
 
 - `parallel_tool_calls`
 - `stream_options.include_obfuscation`
-- other Responses/OpenAI extension fields already classified as unsafe for
-  third-party chat proxies
+- 其它已知会触发第三方 chat proxy 拒绝的 Responses / OpenAI 扩展字段
 
-### Stage 2: Tool Replay Reduction
+### 第 2 阶段：工具重放缩减
 
-If the upstream still rejects the request with a tool- or schema-shaped 4xx,
-keep standard `function` tools for the current turn when possible, but remove:
+如果上游继续因工具/Schema 类 4xx 拒绝请求，则尽量保留当前轮的标准 `function` 工具，但删除：
 
-- replayed tool outputs
-- replayed tool call state
-- chat messages with `tool_call_id`
-- replayed assistant tool-call blocks derived from `previous_response_id`
+- 重放出来的工具输出
+- 重放出来的工具调用状态
+- 带 `tool_call_id` 的 chat 消息
+- 由 `previous_response_id` 派生出的 assistant tool-call block
 
-This stage should still preserve the current-turn user request and any safe
-system prompt or prior plain-text conversation history.
+这一阶段仍应保留当前轮用户请求，以及安全的 system prompt 和可保留的纯文本历史。
 
-### Stage 3: History Compaction
+### 第 3 阶段：历史压缩
 
-If the upstream still rejects the request with context-length or payload-size
-4xx, compress the fallback payload down to the closest chat-equivalent request
-that preserves execution:
+如果上游仍然因为上下文长度或请求体体积拒绝请求，则将 fallback 压缩到最接近操练场可工作的 chat 语义：
 
-- keep system/instructions if present
-- keep only safe, plain-text user/assistant history needed for continuity
-- drop `previous_response_id`
-- drop replay-only Responses state
+- 保留 system / instructions（如果存在）
+- 只保留必要的纯文本 user / assistant 历史
+- 删除 `previous_response_id`
+- 删除 replay 专用的 Responses 状态
 
-### Stage 4: Explicit Failure
+### 第 4 阶段：显式失败
 
-If the upstream still rejects the request:
+如果上游到这一步仍然拒绝：
 
-- return the real classified gateway failure
-- record the fallback stage reached
-- show the exact compatibility layer that failed in the matrix output
+- 返回真实的网关分类错误
+- 记录本次到达的 fallback 阶段
+- 在兼容矩阵里明确显示失败发生在哪一层
 
-### Repeated Failure Memory
+### 重复失败记忆
 
-For each tuple of:
+对以下元组维护一份内存内的“高保真拒绝计数”：
 
 - downstream id
 - client family
@@ -228,71 +189,62 @@ For each tuple of:
 - upstream id
 - fallback stage
 
-keep an in-memory “high-fidelity rejection” counter.
+策略：
 
-Policy:
+- 第一次失败后，后续相同调用仍然继续尝试更高保真阶段。
+- 相同元组的高保真失败最多重试 3 次。
+- 当同一元组在同一阶段累计失败达到 3 次后，后续相同调用直接跳过这个已证明不可行的高保真阶段，从下一层较低阶段开始。
+- 只要任一较高保真阶段成功一次，就重置对应的失败记忆。
 
-- After the first failure, keep trying the higher-fidelity stage on later
-  identical calls.
-- Retry high-fidelity attempts up to 3 total identical failures.
-- Once the same tuple has failed 3 times, later identical calls should skip the
-  proven-bad higher-fidelity stage and start directly from the next lower stage.
-- A successful request at any stage resets the failure memory for the skipped
-  higher-fidelity path.
+这可以保证系统一开始是探索式的，但不会永远为同一种失败路径反复付出成本。
 
-This keeps the system exploratory at first, but prevents repeatedly paying the
-same protocol failure cost forever.
+## 不支持的内置工具
 
-## Unsupported Built-In Tools
+当命中的路径只能 fallback 到 chat-only upstream 时：
 
-When the selected path falls back to chat-only upstreams:
+- 标准 `function` 工具仍应尽量支持。
+- `web_search`、`file_search`、`computer_use` 必须返回明确的不兼容错误。
 
-- `function` tools remain supported when representable.
-- `web_search`, `file_search`, and `computer_use` must return an explicit
-  compatibility failure.
+错误文案至少需要说明：
 
-The error should explain:
+- 当前模型 / upstream 路径只支持 `ChatCompletions`
+- 请求中的内置 Responses 工具无法忠实映射
+- 用户需要更换模型 / upstream，或者移除这类内置工具
 
-- that the current model/upstream path only supports Chat Completions
-- that the requested built-in Responses tool cannot be faithfully mapped
-- that the user must choose another model/upstream or drop the built-in tool
+## 诊断入口
 
-## Diagnostic Entry Points
+### 管理端矩阵
 
-### Admin Matrix
+新增一个管理端兼容矩阵入口，能够：
 
-Add an admin troubleshooting/compatibility matrix entry point that can:
+- 选择下游（第一版默认覆盖 `test` 用例）
+- 选择一个或多个客户端家族
+- 对该下游当前通过 `/v1/models` 暴露出来的全部模型批量执行兼容检查
 
-- choose a downstream (defaulting to `test` for the initial use case)
-- choose one or more client families
-- run the compatibility matrix over all models currently exposed by that
-  downstream
+每个 “模型 x 客户端” 单元格至少展示：
 
-For each model/client combination, show:
+- 使用的 endpoint
+- 选中的 upstream
+- 实际走的是 `native` 还是 `responses_to_chat`
+- 到达的 fallback 阶段
+- 最终状态：`passed` / `warning` / `failed`
+- 失败时的网关错误分类
+- 简洁摘要和下一步建议
 
-- endpoint used
-- upstream selected
-- protocol path taken (`native` vs `responses_to_chat`)
-- fallback stage reached
-- final status (`passed`, `warning`, `failed`)
-- gateway error category when failed
-- concise summary and next action
+### 脚本化 smoke
 
-### Scripted Smoke
+在仓库内提供一个可脚本化执行的 smoke 入口，能够：
 
-Add a scriptable smoke entry point in the repo that:
+- 从本地部署实例解析目标下游 key
+- 拉取该下游实时 `/v1/models`
+- 对 `codex`、`opencode`、`hermes` 执行同一套兼容矩阵
+- 输出机器可读结果和人类可读摘要
 
-- resolves the target downstream key from the local deployment
-- fetches the live model list for that downstream
-- runs the configured matrix for `codex`, `opencode`, and `hermes`
-- emits machine-readable results plus a human-readable summary
+这个脚本是后续所有兼容性回归的基础验收工具，不能依赖管理端 UI 才能使用。
 
-This script is the regression harness for future changes and should be usable
-without the admin UI.
+## 结果模型
 
-## Result Model
-
-Each matrix result should include:
+每条矩阵结果至少包含：
 
 - `client_family`
 - `model_slug`
@@ -309,51 +261,47 @@ Each matrix result should include:
 - `details`
 - `duration_ms`
 
-Optional fields for debugging:
+可选调试字段：
 
 - `safe_payload_metrics`
-  - message count
-  - tool count
-  - whether reasoning_effort was present
-  - whether stream options were present
+  - message 数量
+  - tool 数量
+  - 是否包含 `reasoning_effort`
+  - 是否包含 `stream_options`
 - `skipped_stages`
-  - stages skipped because they previously failed 3 times for the same tuple
+  - 因“同类失败已累计 3 次”而被自动跳过的更高保真阶段
 
-## Verification Plan
+## 验证计划
 
-Required automated checks:
+必须补齐的自动化检查：
 
-- `protocol.rs` unit tests for the new fallback-safe transformations
-- `gateway` integration tests for:
-  - high-fidelity fallback success
-  - staged fallback after protocol-shaped 4xx
-  - repeated failure memory skipping high-fidelity after 3 failures
-  - explicit built-in tool failure on chat-only upstreams
-  - per-slug matrix behavior without canonical slug collapse
+- `protocol.rs` 单元测试，覆盖新的 fallback-safe 转换逻辑
+- `gateway` 集成测试，覆盖：
+  - 高保真 fallback 成功
+  - 命中协议类 4xx 后的分层降级
+  - 同类失败 3 次后的阶段跳过
+  - chat-only upstream 上对 Responses 内置工具的显式失败
+  - 在不合并 slug 的前提下，对每个 slug 单独验证矩阵结果
 
-Required runtime validation:
+必须补齐的运行时验证：
 
-- `test` downstream matrix against all live model slugs
-- spot-check at least:
-  - one chat-only Claude-family slug
-  - one chat-only DeepSeek-family slug
-  - one model already known to work through Codex fallback
+- 针对 `test` 下游，对全部 live model slug 执行客户端矩阵
+- 至少专项覆盖：
+  - 一个 Claude 家族的 chat-only slug
+  - 一个 DeepSeek 家族的 chat-only slug
+  - 一个当前已知能通过 Codex fallback 运行的模型
 
-## Risks
+## 风险
 
-- Preserving more Responses semantics for chat-only upstreams increases request
-  complexity and can reintroduce 4xx payload failures if the fallback ladder is
-  too permissive.
-- Some upstreams may fluctuate between empty-success, 4xx, and 5xx behaviors;
-  the matrix must distinguish provider instability from protocol incompatibility.
-- Keeping multiple slugs visible means operators may still need to understand
-  that similarly named models route differently.
+- 在 chat-only upstream 上尽量保留高保真 Responses 语义，会提高 payload 复杂度；如果梯度策略太宽松，可能再次引入 4xx。
+- 某些上游会在“空成功包 / 4xx / 5xx”之间波动，矩阵必须能把“协议问题”和“provider 本身不稳定”区分开。
+- 保留多个 slug 分别暴露意味着运维需要继续理解：即使是同一家模型家族，不同 slug 也可能路由到不同 upstream。
 
-## Open Questions
+## 开放问题
 
-None for this version. The approved direction is:
+本版本没有额外开放问题。当前已确认的边界是：
 
-- preserve separate slugs
-- preserve high-fidelity semantics as far as feasible
-- prioritize execution when forced to choose
-- explicitly reject built-in Responses tools on chat-only upstreams
+- 保留多个 slug 分别展示
+- 尽量保留高保真 Responses 语义
+- 必须优先保证请求可执行
+- 对 chat-only upstream 上无法映射的 Responses 内置工具显式报错
