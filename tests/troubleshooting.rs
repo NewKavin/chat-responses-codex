@@ -12,6 +12,7 @@ use chat_responses_codex::state::{
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -392,6 +393,57 @@ async fn spawn_never_ending_stream_upstream() -> String {
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
             }))
             .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{address}")
+}
+
+async fn spawn_flaky_stream_upstream(
+    capture: Arc<Mutex<Vec<CapturedDiagnosticRequest>>>,
+) -> String {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let capture = capture.clone();
+            let attempts = attempts.clone();
+            move |request: Request<Body>| {
+                let capture = capture.clone();
+                let attempts = attempts.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    capture.lock().unwrap().push(CapturedDiagnosticRequest {
+                        path: parts.uri.path().to_string(),
+                        body: payload.clone(),
+                    });
+
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({
+                                "error": {
+                                    "message": "Service temporarily unavailable"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n",
+                    )
+                        .into_response()
+                }
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1107,10 +1159,46 @@ async fn portal_troubleshooting_runs_chat_stream_and_tools_checks() {
         .iter()
         .find(|item| item.body.get("tools").is_some())
         .unwrap();
+    assert_eq!(tool_request.body["stream"], true);
+    assert!(tool_request.body.get("tool_choice").is_none());
     assert_eq!(
         tool_request.body["tools"][0]["function"]["parameters"]["required"],
-        json!([])
+        json!(["message"])
     );
+}
+
+#[tokio::test]
+async fn portal_troubleshooting_retries_transient_upstream_unavailable_for_stream_checks() {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let upstream_base_url = spawn_flaky_stream_upstream(capture.clone()).await;
+    let (app, portal_key, _) = app_with_custom_upstream(upstream_base_url);
+    let token = login_portal(app.clone(), &portal_key).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/portal/troubleshooting/run")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_profile": "cline",
+                        "model": "GLM-5.1",
+                        "checks": ["chat_stream"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["results"][0]["status"], "passed");
+
+    let captured = capture.lock().unwrap();
+    assert_eq!(captured.len(), 3);
 }
 
 #[tokio::test]

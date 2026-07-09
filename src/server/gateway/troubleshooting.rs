@@ -807,80 +807,95 @@ async fn run_internal_gateway_check(
         };
     };
 
-    let (path, payload) = gateway_check_payload(check, model);
-    let request = match gateway_request(
-        secret,
-        Method::POST,
-        path,
-        payload,
-        profile_user_agent(profile),
-        source_headers,
-    ) {
-        Ok(request) => request,
-        Err(error) => {
-            return TroubleshootingResult {
+    let max_attempts = 3usize;
+    let mut attempt = 0usize;
+    loop {
+        let (path, payload) = gateway_check_payload(check, model);
+        let request = match gateway_request(
+            secret,
+            Method::POST,
+            path,
+            payload,
+            profile_user_agent(profile),
+            source_headers,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return TroubleshootingResult {
+                    id: check_id(check),
+                    status: TroubleshootingStepStatus::Failed,
+                    http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    error_category: Some("gateway_troubleshooting_request_build_failed".to_string()),
+                    details: format!("Failed to build internal gateway request: {error}"),
+                    suggestion: "Check troubleshooting request construction.".to_string(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    protocol: check_protocol(check),
+                    label: check_label(check),
+                    summary: "Internal request build failed".to_string(),
+                    copy_summary: format!(
+                        "{} check failed for '{}': internal request build failed",
+                        check_label(check),
+                        model
+                    ),
+                    log_filter: Some(json!({
+                        "check": check_id(check),
+                        "model": model,
+                        "error_category": "gateway_troubleshooting_request_build_failed",
+                        "time_range": "1h"
+                    })),
+                    route_metadata: None,
+                };
+            }
+        };
+
+        let result = match tokio::time::timeout(
+            check_timeout,
+            super::build_router(state.clone()).oneshot(request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => {
+                result_from_gateway_response(check, model, started, response, check_timeout).await
+            }
+            Err(_) => troubleshooting_timeout_result(
+                check,
+                model,
+                started,
+                StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                "Internal gateway route timed out before returning a response.",
+            ),
+            Ok(Err(error)) => TroubleshootingResult {
                 id: check_id(check),
                 status: TroubleshootingStepStatus::Failed,
                 http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                error_category: Some("gateway_troubleshooting_request_build_failed".to_string()),
-                details: format!("Failed to build internal gateway request: {error}"),
-                suggestion: "Check troubleshooting request construction.".to_string(),
+                error_category: Some("gateway_troubleshooting_route_failed".to_string()),
+                details: format!("Internal gateway route failed: {error}"),
+                suggestion: "Inspect gateway routing and middleware errors.".to_string(),
                 duration_ms: started.elapsed().as_millis() as u64,
                 protocol: check_protocol(check),
                 label: check_label(check),
-                summary: "Internal request build failed".to_string(),
+                summary: "Internal route failed".to_string(),
                 copy_summary: format!(
-                    "{} check failed for '{}': internal request build failed",
+                    "{} check failed for '{}': internal route failed",
                     check_label(check),
                     model
                 ),
                 log_filter: Some(json!({
                     "check": check_id(check),
                     "model": model,
-                    "error_category": "gateway_troubleshooting_request_build_failed",
+                    "error_category": "gateway_troubleshooting_route_failed",
                     "time_range": "1h"
                 })),
                 route_metadata: None,
-            };
-        }
-    };
+            },
+        };
 
-    match tokio::time::timeout(check_timeout, super::build_router(state).oneshot(request)).await
-    {
-        Ok(Ok(response)) => {
-            result_from_gateway_response(check, model, started, response, check_timeout).await
+        attempt += 1;
+        if attempt >= max_attempts || !troubleshooting_result_is_retryable(&result) {
+            return result;
         }
-        Err(_) => troubleshooting_timeout_result(
-            check,
-            model,
-            started,
-            StatusCode::GATEWAY_TIMEOUT.as_u16(),
-            "Internal gateway route timed out before returning a response.",
-        ),
-        Ok(Err(error)) => TroubleshootingResult {
-            id: check_id(check),
-            status: TroubleshootingStepStatus::Failed,
-            http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            error_category: Some("gateway_troubleshooting_route_failed".to_string()),
-            details: format!("Internal gateway route failed: {error}"),
-            suggestion: "Inspect gateway routing and middleware errors.".to_string(),
-            duration_ms: started.elapsed().as_millis() as u64,
-            protocol: check_protocol(check),
-            label: check_label(check),
-            summary: "Internal route failed".to_string(),
-            copy_summary: format!(
-                "{} check failed for '{}': internal route failed",
-                check_label(check),
-                model
-            ),
-            log_filter: Some(json!({
-                "check": check_id(check),
-                "model": model,
-                "error_category": "gateway_troubleshooting_route_failed",
-                "time_range": "1h"
-            })),
-            route_metadata: None,
-        },
+
+        tokio::time::sleep(Duration::from_millis(200 * attempt as u64)).await;
     }
 }
 
@@ -1032,8 +1047,9 @@ fn count_tokens_payload(model: &str) -> Value {
 fn tools_payload(model: &str) -> Value {
     json!({
         "model": model,
+        "stream": true,
         "messages": [
-            {"role": "user", "content": "Call the diagnostic tool if needed."}
+            {"role": "user", "content": "Call the diagnostic tool now with message=OK."}
         ],
         "tools": [
             {
@@ -1048,12 +1064,30 @@ fn tools_payload(model: &str) -> Value {
                                 "type": "string",
                                 "description": "Diagnostic text to echo."
                             }
-                        }
+                        },
+                        "required": ["message"]
                     }
                 }
             }
         ]
     })
+}
+
+fn troubleshooting_result_is_retryable(result: &TroubleshootingResult) -> bool {
+    if matches!(
+        result.status,
+        TroubleshootingStepStatus::Passed | TroubleshootingStepStatus::Warning
+    ) {
+        return false;
+    }
+
+    matches!(
+        result.error_category.as_deref(),
+        Some(
+            "upstream_temporary_unavailable"
+                | "upstream_network_error"
+        )
+    )
 }
 
 async fn result_from_gateway_response(
