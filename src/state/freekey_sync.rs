@@ -91,6 +91,14 @@ pub(super) fn derive_supported_models(key_models: &[ApiKeyModelConfig]) -> Vec<S
     models
 }
 
+fn normalize_model_set(models: &[String]) -> HashSet<String> {
+    models
+        .iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect()
+}
+
 impl AppState {
     pub async fn sync_freekey_upstreams(
         &self,
@@ -365,8 +373,33 @@ impl AppState {
                 // Check for replace mode flag from admin_update_upstream key validation.
                 let replace_api_keys =
                     updates.get("_replace_api_keys").and_then(|v| v.as_bool()) == Some(true);
+                let replace_api_key_models = replace_api_keys
+                    && updates
+                        .get("api_key_models")
+                        .and_then(|v| v.as_array())
+                        .is_some();
 
                 if replace_api_keys {
+                    let explicit = updates
+                        .get("api_key")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let replacement_key_set: HashSet<String> = explicit
+                        .iter()
+                        .cloned()
+                        .chain(
+                            updates
+                                .get("api_keys")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty()),
+                        )
+                        .collect();
+
                     // Directly replace api_keys and api_key_models with validated keys.
                     if let Some(api_keys) = updates.get("api_keys").and_then(|v| v.as_array()) {
                         upstream.api_keys = api_keys
@@ -377,11 +410,6 @@ impl AppState {
                         // resurrect deleted keys via the routing fallback.
                         // Prefer an explicit api_key from the payload, else the
                         // first of the replacement set.
-                        let explicit = updates
-                            .get("api_key")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty());
                         upstream.api_key = explicit
                             .or_else(|| upstream.api_keys.first().cloned())
                             .unwrap_or_default();
@@ -399,14 +427,15 @@ impl AppState {
                                     .iter()
                                     .filter_map(|model| model.as_str().map(|s| s.to_string()))
                                     .collect::<Vec<_>>();
+                                if !replacement_key_set.contains(api_key) {
+                                    return None;
+                                }
                                 Some(ApiKeyModelConfig {
                                     api_key: api_key.to_string(),
                                     supported_models,
                                 })
                             })
                             .collect();
-                        upstream.supported_models =
-                            derive_supported_models(&upstream.api_key_models);
                     }
                 } else {
                     // Legacy merge behavior (only adds, never removes).
@@ -430,30 +459,54 @@ impl AppState {
                         upstream.api_keys = merge_api_keys(&upstream.api_keys, &incoming);
                     }
                 }
-                if let Some(api_key_models) =
+                if !replace_api_keys {
+                    if let Some(api_key_models) =
                     updates.get("api_key_models").and_then(|v| v.as_array())
-                {
-                    let incoming: Vec<ApiKeyModelConfig> = api_key_models
-                        .iter()
-                        .filter_map(|value| {
-                            let api_key = value.get("api_key").and_then(|v| v.as_str())?;
-                            let supported_models = value
-                                .get("supported_models")
-                                .and_then(|v| v.as_array())?
-                                .iter()
-                                .filter_map(|model| model.as_str().map(|s| s.to_string()))
-                                .collect::<Vec<_>>();
-                            Some(ApiKeyModelConfig {
-                                api_key: api_key.to_string(),
-                                supported_models,
+                    {
+                        let incoming: Vec<ApiKeyModelConfig> = api_key_models
+                            .iter()
+                            .filter_map(|value| {
+                                let api_key = value.get("api_key").and_then(|v| v.as_str())?;
+                                let supported_models = value
+                                    .get("supported_models")
+                                    .and_then(|v| v.as_array())?
+                                    .iter()
+                                    .filter_map(|model| model.as_str().map(|s| s.to_string()))
+                                    .collect::<Vec<_>>();
+                                Some(ApiKeyModelConfig {
+                                    api_key: api_key.to_string(),
+                                    supported_models,
+                                })
                             })
-                        })
-                        .collect();
-                    upstream.api_key_models =
-                        merge_api_key_models(&upstream.api_key_models, &incoming);
-                    upstream.supported_models = derive_supported_models(&upstream.api_key_models);
+                            .collect();
+                        upstream.api_key_models =
+                            merge_api_key_models(&upstream.api_key_models, &incoming);
+                        upstream.supported_models = derive_supported_models(&upstream.api_key_models);
+                    }
                 }
-                if updates.get("api_key_models").is_none() {
+                if replace_api_keys {
+                    if let Some(supported_models) =
+                        updates.get("supported_models").and_then(|v| v.as_array())
+                    {
+                        let supported_models = supported_models
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>();
+                        if normalize_model_set(&derive_supported_models(&upstream.api_key_models))
+                            != normalize_model_set(&supported_models)
+                        {
+                            // Discovery can refresh aggregate supported_models without also
+                            // refreshing per-key mappings. Keeping stale api_key_models would
+                            // make newly discovered models appear routable in the UI while the
+                            // gateway skips the upstream for lack of a mapped key.
+                            upstream.api_key_models.clear();
+                        }
+                        upstream.supported_models = supported_models;
+                    } else if replace_api_key_models {
+                        upstream.supported_models =
+                            derive_supported_models(&upstream.api_key_models);
+                    }
+                } else if updates.get("api_key_models").is_none() {
                     if let Some(supported_models) =
                         updates.get("supported_models").and_then(|v| v.as_array())
                     {

@@ -2330,6 +2330,104 @@ async fn test_update_replace_mode_syncs_legacy_api_key_field() {
     );
 }
 
+/// Reproduces the admin UI flow where an editor removes one key from the
+/// multiline field, clicks "获取模型", and then saves. The fetch call refreshes
+/// only `supported_models`; `api_key_models` stays stale until save.
+#[tokio::test]
+async fn test_update_replace_mode_prunes_stale_api_key_models_after_model_discovery() {
+    let existing = vec![UpstreamConfig {
+        id: "replace-discover-test".to_string(),
+        name: "Replace Discover Test".to_string(),
+        base_url: "https://api.replace-discover.example.com/v1".to_string(),
+        api_key: "key-a".to_string(),
+        api_keys: vec!["key-b".to_string(), "key-c".to_string()],
+        api_key_models: vec![
+            ApiKeyModelConfig {
+                api_key: "key-a".to_string(),
+                supported_models: vec!["gpt-4".to_string()],
+            },
+            ApiKeyModelConfig {
+                api_key: "key-b".to_string(),
+                supported_models: vec!["gpt-4".to_string()],
+            },
+            ApiKeyModelConfig {
+                api_key: "key-c".to_string(),
+                supported_models: vec!["gpt-4".to_string()],
+            },
+        ],
+        supported_models: vec!["gpt-4".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        active: true,
+        ..Default::default()
+    }];
+    let state = create_test_state_with_upstreams(existing);
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let update_payload = json!({
+        "api_key": "key-a",
+        "api_keys": ["key-b"],
+        "_replace_api_keys": true,
+        "api_key_models": [
+            { "api_key": "key-a", "supported_models": ["gpt-4"] },
+            { "api_key": "key-b", "supported_models": ["gpt-4"] },
+            { "api_key": "key-c", "supported_models": ["gpt-4"] }
+        ],
+        "supported_models": ["gpt-4", "gpt-4.1-mini"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/replace-discover-test")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&update_payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.id == "replace-discover-test")
+        .expect("updated upstream should exist");
+
+    let mut available = upstream.available_keys();
+    available.sort();
+    assert_eq!(
+        available,
+        vec!["key-a".to_string(), "key-b".to_string()],
+        "deleted key-c must not survive via stale api_key_models, got {:?}",
+        available
+    );
+    assert!(
+        upstream
+            .api_key_models
+            .iter()
+            .all(|item| item.api_key != "key-c"),
+        "stale key-c mapping should be pruned, got {:?}",
+        upstream.api_key_models
+    );
+    assert_eq!(
+        upstream.supported_models,
+        vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
+        "supported_models should keep the freshly discovered list even when api_key_models is stale"
+    );
+    let mut keys_for_new_model = upstream.keys_for_model("gpt-4.1-mini");
+    keys_for_new_model.sort();
+    assert_eq!(
+        keys_for_new_model,
+        vec!["key-a".to_string(), "key-b".to_string()],
+        "freshly discovered models must stay routable after replace-mode save"
+    );
+}
+
 /// The external key query endpoint must only return auto_managed upstreams;
 /// manual upstreams must never expose their keys.
 #[tokio::test]
