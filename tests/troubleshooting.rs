@@ -28,6 +28,13 @@ fn unique_state_path() -> PathBuf {
     ))
 }
 
+fn troubleshooting_test_config() -> AppConfig {
+    AppConfig {
+        jwt_secret: "test_secret".to_string(),
+        ..AppConfig::default()
+    }
+}
+
 fn app_with_custom_upstream(upstream_base_url: String) -> (axum::Router, String, String) {
     app_with_custom_upstream_and_ip_allowlist(upstream_base_url, vec![])
 }
@@ -70,18 +77,22 @@ fn app_with_custom_upstream_and_ip_allowlist(
         announcement: None,
         global_context_profiles: std::collections::HashMap::new(),
     };
-    let app_state = AppState::new(state, unique_state_path(), AppConfig::default());
+    let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())
 }
 
 fn app_with_two_downstreams(upstream_base_url: String) -> (axum::Router, String, String) {
-    app_with_two_downstreams_and_config(upstream_base_url, AppConfig::default())
+    app_with_two_downstreams_and_config(upstream_base_url, troubleshooting_test_config())
 }
 
 fn app_with_two_downstreams_and_config(
     upstream_base_url: String,
     config: AppConfig,
 ) -> (axum::Router, String, String) {
+    let config = AppConfig {
+        jwt_secret: "test_secret".to_string(),
+        ..config
+    };
     let first = generate_downstream_key("sk");
     let second = generate_downstream_key("sk");
     let first_key = first.plaintext.clone();
@@ -268,7 +279,7 @@ fn app_with_model_state() -> (axum::Router, String, String) {
         announcement: None,
         global_context_profiles: std::collections::HashMap::new(),
     };
-    let app_state = AppState::new(state, unique_state_path(), AppConfig::default());
+    let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())
 }
 
@@ -495,7 +506,7 @@ async fn admin_troubleshooting_requires_auth() {
 #[tokio::test]
 async fn admin_troubleshooting_requires_downstream_id() {
     let (app, _, _) = app_with_model_state();
-    let token = generate_admin_token("admin", &AppConfig::default().jwt_secret).unwrap();
+    let token = generate_admin_token("admin", "test_secret").unwrap();
     let response = app
         .oneshot(
             Request::builder()
@@ -517,7 +528,7 @@ async fn admin_troubleshooting_requires_downstream_id() {
 #[tokio::test]
 async fn admin_troubleshooting_models_check_passes_for_selected_downstream() {
     let (app, _, downstream_id) = app_with_model_state();
-    let token = generate_admin_token("admin", &AppConfig::default().jwt_secret).unwrap();
+    let token = generate_admin_token("admin", "test_secret").unwrap();
     let response = app
         .oneshot(
             Request::builder()
@@ -542,6 +553,67 @@ async fn admin_troubleshooting_models_check_passes_for_selected_downstream() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["results"][0]["status"], "passed");
+}
+
+#[tokio::test]
+async fn admin_compatibility_matrix_runs_for_all_exposed_models() {
+    let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
+    let upstream = spawn_diagnostic_upstream(capture.clone()).await;
+    let (app, _portal_key, downstream_id) = app_with_custom_upstream(upstream);
+    let admin_token = generate_admin_token("admin", "test_secret").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/troubleshooting/matrix/run")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "downstream_id": downstream_id,
+                        "client_profiles": ["codex", "opencode", "hermes"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["downstream_id"], "test");
+    assert_eq!(payload["models"], json!(["GLM-5.1"]));
+    assert_eq!(
+        payload["client_profiles"],
+        json!(["codex", "opencode", "hermes"])
+    );
+    assert_eq!(payload["cells"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn admin_compatibility_matrix_requires_downstream_id() {
+    let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
+    let upstream = spawn_diagnostic_upstream(capture.clone()).await;
+    let (app, _portal_key, _downstream_id) = app_with_custom_upstream(upstream);
+    let admin_token = generate_admin_token("admin", "test_secret").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/troubleshooting/matrix/run")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -880,7 +952,7 @@ async fn admin_active_requests_lists_all_downstreams() {
         .unwrap();
     assert_eq!(stream_response.status(), StatusCode::OK);
 
-    let token = generate_admin_token("admin", &AppConfig::default().jwt_secret).unwrap();
+    let token = generate_admin_token("admin", "test_secret").unwrap();
     let response = app
         .oneshot(
             Request::builder()

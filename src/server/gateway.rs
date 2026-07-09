@@ -664,6 +664,12 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/troubleshooting/matrix/run",
+            post(admin_compatibility_matrix_run).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
+        )
+        .route(
             "/api/admin/troubleshooting/active-requests",
             get(admin_troubleshooting_active_requests).route_layer(
                 axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),

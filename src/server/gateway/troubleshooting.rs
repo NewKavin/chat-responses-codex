@@ -56,6 +56,16 @@ pub(super) struct TroubleshootingRunRequest {
     downstream_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct CompatibilityMatrixRunRequest {
+    #[serde(default)]
+    downstream_id: String,
+    #[serde(default)]
+    client_profiles: Vec<TroubleshootingClientProfile>,
+    #[serde(default)]
+    models: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct TroubleshootingRunResponse {
     run_id: String,
@@ -95,6 +105,43 @@ struct TroubleshootingResult {
     log_filter: Option<Value>,
 }
 
+#[derive(Debug, Serialize)]
+struct CompatibilityMatrixRunResponse {
+    run_id: String,
+    downstream_id: String,
+    models: Vec<String>,
+    client_profiles: Vec<TroubleshootingClientProfile>,
+    summary: CompatibilityMatrixSummary,
+    cells: Vec<CompatibilityMatrixCell>,
+    duration_ms: u64,
+    copy_summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CompatibilityMatrixSummary {
+    passed: usize,
+    warning: usize,
+    failed: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CompatibilityMatrixCell {
+    client_family: TroubleshootingClientProfile,
+    model_slug: String,
+    endpoint: &'static str,
+    selected_upstream_id: Option<String>,
+    selected_upstream_name: Option<String>,
+    selected_upstream_protocol: Option<String>,
+    protocol_transition: Option<String>,
+    fallback_stage: Option<String>,
+    status: TroubleshootingStepStatus,
+    http_status: u16,
+    error_category: Option<String>,
+    summary: String,
+    details: String,
+    duration_ms: u64,
+}
+
 pub(super) async fn portal_troubleshooting_run(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -126,6 +173,21 @@ pub(super) async fn admin_troubleshooting_run(
     };
 
     run_troubleshooting_for_downstream(state, downstream_id, body, headers).await
+}
+
+pub(super) async fn admin_compatibility_matrix_run(
+    State(state): State<AppState>,
+    Json(body): Json<CompatibilityMatrixRunRequest>,
+) -> impl IntoResponse {
+    let Some(downstream_id) = Some(body.downstream_id.trim()).filter(|id| !id.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "downstream_id is required"}})),
+        )
+            .into_response();
+    };
+
+    run_compatibility_matrix(state, downstream_id.to_string(), body).await
 }
 
 pub(super) async fn portal_troubleshooting_active_requests(
@@ -263,6 +325,86 @@ async fn run_troubleshooting_for_downstream(
     .into_response()
 }
 
+async fn run_compatibility_matrix(
+    state: AppState,
+    downstream_id: String,
+    body: CompatibilityMatrixRunRequest,
+) -> Response {
+    let started = Instant::now();
+    let snapshot = state.routing_snapshot().await;
+    let Some(downstream) = snapshot
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == downstream_id && downstream.active)
+        .cloned()
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": "Downstream not found"}})),
+        )
+            .into_response();
+    };
+
+    let client_profiles = if body.client_profiles.is_empty() {
+        vec![
+            TroubleshootingClientProfile::Codex,
+            TroubleshootingClientProfile::Opencode,
+            TroubleshootingClientProfile::Hermes,
+        ]
+    } else {
+        body.client_profiles
+    };
+
+    let models = if body.models.is_empty() {
+        state
+            .available_models_for_downstream(
+                downstream.plaintext_key.as_deref().unwrap_or_default(),
+            )
+            .await
+    } else {
+        body.models
+    };
+
+    let mut cells = Vec::new();
+    for client_profile in &client_profiles {
+        for model in &models {
+            cells.push(run_matrix_cell(state.clone(), &downstream, *client_profile, model).await);
+        }
+    }
+
+    let summary = CompatibilityMatrixSummary {
+        passed: cells
+            .iter()
+            .filter(|cell| matches!(cell.status, TroubleshootingStepStatus::Passed))
+            .count(),
+        warning: cells
+            .iter()
+            .filter(|cell| matches!(cell.status, TroubleshootingStepStatus::Warning))
+            .count(),
+        failed: cells
+            .iter()
+            .filter(|cell| {
+                matches!(
+                    cell.status,
+                    TroubleshootingStepStatus::Failed | TroubleshootingStepStatus::Timeout
+                )
+            })
+            .count(),
+    };
+
+    Json(CompatibilityMatrixRunResponse {
+        run_id: Uuid::new_v4().to_string(),
+        downstream_id,
+        models,
+        client_profiles,
+        summary,
+        duration_ms: started.elapsed().as_millis() as u64,
+        copy_summary: "compatibility matrix completed".to_string(),
+        cells,
+    })
+    .into_response()
+}
+
 fn requested_checks(body: &TroubleshootingRunRequest) -> Vec<TroubleshootingCheck> {
     if !body.checks.is_empty() {
         return body.checks.clone();
@@ -291,6 +433,200 @@ fn requested_checks(body: &TroubleshootingRunRequest) -> Vec<TroubleshootingChec
                 TroubleshootingCheck::ChatStream,
             ]
         }
+    }
+}
+
+async fn run_matrix_cell(
+    state: AppState,
+    downstream: &crate::state::DownstreamConfig,
+    client_profile: TroubleshootingClientProfile,
+    model: &str,
+) -> CompatibilityMatrixCell {
+    let check_request = TroubleshootingRunRequest {
+        client_profile,
+        model: model.to_string(),
+        checks: Vec::new(),
+        downstream_id: Some(downstream.id.clone()),
+    };
+    let mut results = Vec::new();
+    let source_headers = HeaderMap::new();
+
+    for &check in matrix_checks_for_profile(client_profile) {
+        let result = match check {
+            TroubleshootingCheck::Models => {
+                run_models_check(&state, downstream.plaintext_key.as_deref(), &check_request).await
+            }
+            _ => {
+                run_internal_gateway_check(
+                    state.clone(),
+                    downstream.plaintext_key.as_deref(),
+                    client_profile,
+                    model,
+                    check,
+                    &source_headers,
+                )
+                .await
+            }
+        };
+        results.push((check, result));
+    }
+
+    let endpoint = matrix_endpoint_for_profile(client_profile);
+    let selected_upstream = selected_upstream_for_matrix_model(&state, model, endpoint).await;
+    let first_failure = results.iter().find(|(_, result)| {
+        matches!(
+            result.status,
+            TroubleshootingStepStatus::Failed | TroubleshootingStepStatus::Timeout
+        )
+    });
+    let first_warning = results
+        .iter()
+        .find(|(_, result)| matches!(result.status, TroubleshootingStepStatus::Warning));
+    let reference = first_failure
+        .or(first_warning)
+        .or_else(|| results.first())
+        .map(|(_, result)| result);
+
+    let status = if first_failure.is_some() {
+        TroubleshootingStepStatus::Failed
+    } else if first_warning.is_some() {
+        TroubleshootingStepStatus::Warning
+    } else {
+        TroubleshootingStepStatus::Passed
+    };
+
+    let summary = match status {
+        TroubleshootingStepStatus::Passed => {
+            format!("All {} compatibility checks passed", results.len())
+        }
+        TroubleshootingStepStatus::Warning => {
+            "Compatibility checks completed with warnings".to_string()
+        }
+        TroubleshootingStepStatus::Failed => "Compatibility checks failed".to_string(),
+        TroubleshootingStepStatus::Timeout => {
+            unreachable!("matrix cells collapse timeout into failed")
+        }
+    };
+
+    let details = results
+        .iter()
+        .map(|(check, result)| format!("{}: {}", check_label(*check), result.summary))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    CompatibilityMatrixCell {
+        client_family: client_profile,
+        model_slug: model.to_string(),
+        endpoint,
+        selected_upstream_id: selected_upstream
+            .as_ref()
+            .map(|upstream| upstream.0.clone()),
+        selected_upstream_name: selected_upstream
+            .as_ref()
+            .map(|upstream| upstream.1.clone()),
+        selected_upstream_protocol: selected_upstream
+            .as_ref()
+            .map(|upstream| matrix_protocol_label(upstream.2).to_string()),
+        protocol_transition: selected_upstream
+            .as_ref()
+            .map(|upstream| matrix_protocol_transition(endpoint, upstream.2).to_string()),
+        fallback_stage: None,
+        status,
+        http_status: reference
+            .map(|result| result.http_status)
+            .unwrap_or(StatusCode::OK.as_u16()),
+        error_category: reference.and_then(|result| result.error_category.clone()),
+        summary,
+        details,
+        duration_ms: results.iter().map(|(_, result)| result.duration_ms).sum(),
+    }
+}
+
+fn matrix_checks_for_profile(
+    profile: TroubleshootingClientProfile,
+) -> &'static [TroubleshootingCheck] {
+    match profile {
+        TroubleshootingClientProfile::Codex => &[
+            TroubleshootingCheck::Models,
+            TroubleshootingCheck::ResponsesStream,
+            TroubleshootingCheck::ChatStream,
+            TroubleshootingCheck::Tools,
+        ],
+        TroubleshootingClientProfile::Opencode | TroubleshootingClientProfile::Hermes => &[
+            TroubleshootingCheck::Models,
+            TroubleshootingCheck::ChatStream,
+            TroubleshootingCheck::Tools,
+        ],
+        _ => &[
+            TroubleshootingCheck::Models,
+            TroubleshootingCheck::ChatStream,
+        ],
+    }
+}
+
+fn matrix_endpoint_for_profile(profile: TroubleshootingClientProfile) -> &'static str {
+    match profile {
+        TroubleshootingClientProfile::Codex => "/v1/responses",
+        TroubleshootingClientProfile::Opencode
+        | TroubleshootingClientProfile::Hermes
+        | TroubleshootingClientProfile::Cline
+        | TroubleshootingClientProfile::ClaudeCode
+        | TroubleshootingClientProfile::OpenAiCompatible
+        | TroubleshootingClientProfile::AnthropicCompatible => "/v1/chat/completions",
+    }
+}
+
+async fn selected_upstream_for_matrix_model(
+    state: &AppState,
+    model: &str,
+    endpoint: &'static str,
+) -> Option<(String, String, crate::routing::UpstreamProtocol)> {
+    let protocol = match endpoint {
+        "/v1/responses" => crate::routing::UpstreamProtocol::Responses,
+        _ => crate::routing::UpstreamProtocol::ChatCompletions,
+    };
+
+    state
+        .routing_snapshot()
+        .await
+        .upstreams
+        .into_iter()
+        .filter(|upstream| upstream.active && upstream.supports_model(model))
+        .find_map(|upstream| {
+            let selected_protocol = if upstream.supports_protocol(protocol) {
+                protocol
+            } else if upstream.supports_protocol(crate::routing::UpstreamProtocol::Responses) {
+                crate::routing::UpstreamProtocol::Responses
+            } else if upstream.supports_protocol(crate::routing::UpstreamProtocol::ChatCompletions)
+            {
+                crate::routing::UpstreamProtocol::ChatCompletions
+            } else {
+                return None;
+            };
+
+            Some((upstream.id, upstream.name, selected_protocol))
+        })
+}
+
+fn matrix_protocol_label(protocol: crate::routing::UpstreamProtocol) -> &'static str {
+    match protocol {
+        crate::routing::UpstreamProtocol::ChatCompletions => "chat_completions",
+        crate::routing::UpstreamProtocol::Responses => "responses",
+    }
+}
+
+fn matrix_protocol_transition(
+    endpoint: &'static str,
+    upstream_protocol: crate::routing::UpstreamProtocol,
+) -> &'static str {
+    match (endpoint, upstream_protocol) {
+        ("/v1/chat/completions", crate::routing::UpstreamProtocol::ChatCompletions) => "native",
+        ("/v1/responses", crate::routing::UpstreamProtocol::Responses) => "native",
+        ("/v1/chat/completions", crate::routing::UpstreamProtocol::Responses) => {
+            "chat_to_responses"
+        }
+        ("/v1/responses", crate::routing::UpstreamProtocol::ChatCompletions) => "responses_to_chat",
+        _ => "native",
     }
 }
 
