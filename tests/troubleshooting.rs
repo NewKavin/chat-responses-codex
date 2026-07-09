@@ -5,6 +5,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chat_responses_codex::auth::generate_admin_token;
 use chat_responses_codex::keys::generate_downstream_key;
+use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig,
@@ -37,6 +38,44 @@ fn troubleshooting_test_config() -> AppConfig {
 
 fn app_with_custom_upstream(upstream_base_url: String) -> (axum::Router, String, String) {
     app_with_custom_upstream_and_ip_allowlist(upstream_base_url, vec![])
+}
+
+fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> axum::Router {
+    let generated = generate_downstream_key("sk");
+    let state = PersistedState {
+        upstreams: vec![UpstreamConfig {
+            id: "upstream-1".to_string(),
+            name: "Primary".to_string(),
+            base_url: upstream_base_url,
+            api_key: "upstream-key".to_string(),
+            supported_models: vec!["GLM-5.1".to_string()],
+            active: true,
+            ..UpstreamConfig::default()
+        }],
+        downstreams: vec![DownstreamConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            hash: generated.hash,
+            plaintext_key: None,
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["GLM-5.1".to_string()],
+            per_minute_limit: 60,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        usage_logs: vec![],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+    let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
+    build_router(app_state)
 }
 
 fn app_with_custom_upstream_and_ip_allowlist(
@@ -198,6 +237,109 @@ async fn spawn_diagnostic_upstream(capture: Arc<Mutex<Vec<CapturedDiagnosticRequ
             }
         }),
     );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{address}")
+}
+
+async fn spawn_multi_protocol_diagnostic_upstream(
+    capture: Arc<Mutex<Vec<CapturedDiagnosticRequest>>>,
+) -> String {
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post({
+                let capture = capture.clone();
+                move |request: Request<Body>| {
+                    let capture = capture.clone();
+                    async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: Value = serde_json::from_slice(&body).unwrap();
+                        let model = payload
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .unwrap_or("GLM-5.1")
+                            .to_string();
+                        capture.lock().unwrap().push(CapturedDiagnosticRequest {
+                            path: parts.uri.path().to_string(),
+                            body: payload.clone(),
+                        });
+
+                        if payload.get("stream").and_then(Value::as_bool) == Some(true) {
+                            (
+                                [(header::CONTENT_TYPE, "text/event-stream")],
+                                "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n",
+                            )
+                                .into_response()
+                        } else {
+                            Json(json!({
+                                "id": "chatcmpl-test",
+                                "object": "chat.completion",
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "OK"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            }))
+                            .into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/responses",
+            post({
+                let capture = capture.clone();
+                move |request: Request<Body>| {
+                    let capture = capture.clone();
+                    async move {
+                        let (parts, body) = request.into_parts();
+                        let body = to_bytes(body, usize::MAX).await.unwrap();
+                        let payload: Value = serde_json::from_slice(&body).unwrap();
+                        let model = payload
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .unwrap_or("GLM-5.1")
+                            .to_string();
+                        capture.lock().unwrap().push(CapturedDiagnosticRequest {
+                            path: parts.uri.path().to_string(),
+                            body: payload.clone(),
+                        });
+
+                        if payload.get("stream").and_then(Value::as_bool) == Some(true) {
+                            (
+                                [(header::CONTENT_TYPE, "text/event-stream")],
+                                "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: [DONE]\n\n",
+                            )
+                                .into_response()
+                        } else {
+                            Json(json!({
+                                "id": "resp_test",
+                                "object": "response",
+                                "model": model,
+                                "output": [{
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{
+                                        "type": "output_text",
+                                        "text": "OK"
+                                    }]
+                                }],
+                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                            }))
+                            .into_response()
+                        }
+                    }
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -614,6 +756,114 @@ async fn admin_compatibility_matrix_requires_downstream_id() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn admin_compatibility_matrix_rejects_unsupported_client_profiles() {
+    let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
+    let upstream = spawn_diagnostic_upstream(capture.clone()).await;
+    let (app, _portal_key, downstream_id) = app_with_custom_upstream(upstream);
+    let admin_token = generate_admin_token("admin", "test_secret").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/troubleshooting/matrix/run")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "downstream_id": downstream_id,
+                        "client_profiles": ["claude_code"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not supported"));
+}
+
+#[tokio::test]
+async fn admin_compatibility_matrix_requires_plaintext_key_for_implicit_models() {
+    let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
+    let upstream = spawn_diagnostic_upstream(capture.clone()).await;
+    let app = app_with_custom_upstream_without_plaintext_key(upstream);
+    let admin_token = generate_admin_token("admin", "test_secret").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/troubleshooting/matrix/run")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "downstream_id": "test",
+                        "client_profiles": ["codex"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FAILED_DEPENDENCY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("plaintext key"));
+}
+
+#[tokio::test]
+async fn admin_compatibility_matrix_forwards_source_headers_for_ip_allowlist_checks() {
+    let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
+    let upstream = spawn_diagnostic_upstream(capture.clone()).await;
+    let (app, _portal_key, downstream_id) = app_with_custom_upstream_and_ip_allowlist(
+        upstream,
+        vec!["203.0.113.10".to_string()],
+    );
+    let admin_token = generate_admin_token("admin", "test_secret").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/troubleshooting/matrix/run")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-forwarded-for", "203.0.113.10")
+                .body(Body::from(
+                    json!({
+                        "downstream_id": downstream_id,
+                        "client_profiles": ["hermes"],
+                        "models": ["GLM-5.1"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let cell = payload["cells"].as_array().unwrap().first().unwrap();
+    assert_eq!(cell["status"], "passed");
 }
 
 #[tokio::test]

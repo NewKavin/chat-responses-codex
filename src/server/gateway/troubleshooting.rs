@@ -177,6 +177,7 @@ pub(super) async fn admin_troubleshooting_run(
 
 pub(super) async fn admin_compatibility_matrix_run(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<CompatibilityMatrixRunRequest>,
 ) -> impl IntoResponse {
     let Some(downstream_id) = Some(body.downstream_id.trim()).filter(|id| !id.is_empty()) else {
@@ -187,7 +188,7 @@ pub(super) async fn admin_compatibility_matrix_run(
             .into_response();
     };
 
-    run_compatibility_matrix(state, downstream_id.to_string(), body).await
+    run_compatibility_matrix(state, downstream_id.to_string(), body, headers).await
 }
 
 pub(super) async fn portal_troubleshooting_active_requests(
@@ -329,6 +330,7 @@ async fn run_compatibility_matrix(
     state: AppState,
     downstream_id: String,
     body: CompatibilityMatrixRunRequest,
+    source_headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
     let snapshot = state.routing_snapshot().await;
@@ -354,12 +356,41 @@ async fn run_compatibility_matrix(
     } else {
         body.client_profiles
     };
+    if let Some(unsupported) = client_profiles.iter().find(|profile| {
+        !matches!(
+            profile,
+            TroubleshootingClientProfile::Codex
+                | TroubleshootingClientProfile::Opencode
+                | TroubleshootingClientProfile::Hermes
+        )
+    }) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": format!(
+                        "client_profile '{unsupported:?}' is not supported by the compatibility matrix"
+                    )
+                }
+            })),
+        )
+            .into_response();
+    }
 
     let models = if body.models.is_empty() {
-        state
-            .available_models_for_downstream(
-                downstream.plaintext_key.as_deref().unwrap_or_default(),
+        let Some(secret) = downstream.plaintext_key.as_deref() else {
+            return (
+                StatusCode::FAILED_DEPENDENCY,
+                Json(json!({
+                    "error": {
+                        "message": "downstream plaintext key is unavailable; rotate the key before running the compatibility matrix"
+                    }
+                })),
             )
+                .into_response();
+        };
+        state
+            .available_models_for_downstream(secret)
             .await
     } else {
         body.models
@@ -368,7 +399,16 @@ async fn run_compatibility_matrix(
     let mut cells = Vec::new();
     for client_profile in &client_profiles {
         for model in &models {
-            cells.push(run_matrix_cell(state.clone(), &downstream, *client_profile, model).await);
+            cells.push(
+                run_matrix_cell(
+                    state.clone(),
+                    &downstream,
+                    *client_profile,
+                    model,
+                    &source_headers,
+                )
+                .await,
+            );
         }
     }
 
@@ -441,6 +481,7 @@ async fn run_matrix_cell(
     downstream: &crate::state::DownstreamConfig,
     client_profile: TroubleshootingClientProfile,
     model: &str,
+    source_headers: &HeaderMap,
 ) -> CompatibilityMatrixCell {
     let check_request = TroubleshootingRunRequest {
         client_profile,
@@ -449,8 +490,6 @@ async fn run_matrix_cell(
         downstream_id: Some(downstream.id.clone()),
     };
     let mut results = Vec::new();
-    let source_headers = HeaderMap::new();
-
     for &check in matrix_checks_for_profile(client_profile) {
         let result = match check {
             TroubleshootingCheck::Models => {
@@ -463,7 +502,7 @@ async fn run_matrix_cell(
                     client_profile,
                     model,
                     check,
-                    &source_headers,
+                    source_headers,
                 )
                 .await
             }
@@ -557,10 +596,7 @@ fn matrix_checks_for_profile(
             TroubleshootingCheck::ChatStream,
             TroubleshootingCheck::Tools,
         ],
-        _ => &[
-            TroubleshootingCheck::Models,
-            TroubleshootingCheck::ChatStream,
-        ],
+        _ => &[],
     }
 }
 
@@ -581,31 +617,25 @@ async fn selected_upstream_for_matrix_model(
     model: &str,
     endpoint: &'static str,
 ) -> Option<(String, String, crate::routing::UpstreamProtocol)> {
-    let protocol = match endpoint {
-        "/v1/responses" => crate::routing::UpstreamProtocol::Responses,
-        _ => crate::routing::UpstreamProtocol::ChatCompletions,
-    };
+    use crate::routing::UpstreamProtocol;
 
-    state
-        .routing_snapshot()
-        .await
-        .upstreams
-        .into_iter()
-        .filter(|upstream| upstream.active && upstream.supports_model(model))
-        .find_map(|upstream| {
-            let selected_protocol = if upstream.supports_protocol(protocol) {
-                protocol
-            } else if upstream.supports_protocol(crate::routing::UpstreamProtocol::Responses) {
-                crate::routing::UpstreamProtocol::Responses
-            } else if upstream.supports_protocol(crate::routing::UpstreamProtocol::ChatCompletions)
-            {
-                crate::routing::UpstreamProtocol::ChatCompletions
-            } else {
-                return None;
-            };
-
-            Some((upstream.id, upstream.name, selected_protocol))
-        })
+    match endpoint {
+        "/v1/responses" => {
+            if let Ok(upstream) = state.choose_upstream(model, UpstreamProtocol::Responses).await {
+                return Some((upstream.id, upstream.name, UpstreamProtocol::Responses));
+            }
+            state
+                .choose_upstream(model, UpstreamProtocol::ChatCompletions)
+                .await
+                .ok()
+                .map(|upstream| (upstream.id, upstream.name, UpstreamProtocol::ChatCompletions))
+        }
+        _ => state
+            .choose_upstream(model, UpstreamProtocol::ChatCompletions)
+            .await
+            .ok()
+            .map(|upstream| (upstream.id, upstream.name, UpstreamProtocol::ChatCompletions)),
+    }
 }
 
 fn matrix_protocol_label(protocol: crate::routing::UpstreamProtocol) -> &'static str {
