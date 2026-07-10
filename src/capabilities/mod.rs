@@ -1,8 +1,15 @@
 mod policy;
+mod profile;
+mod probe_queue;
 mod resolver;
 mod types;
 
 pub use policy::{CapabilityPolicyError, CompiledCapabilityConfiguration, CompiledExpectation};
+pub use profile::{
+    apply_probe_outcome, normalize_route_base_url, profile_is_current, route_fingerprint,
+    ProbeOutcome, RouteFingerprintInput,
+};
+pub use probe_queue::{ProbeJob, ProbeQueueState, ProbeReason};
 pub use resolver::{CapabilityResolutionError, CapabilityResolver, ResolutionInput};
 pub use types::*;
 

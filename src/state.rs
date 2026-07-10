@@ -1,6 +1,7 @@
 use crate::capabilities::{
-    CapabilityConfiguration, CapabilityRuntimeSnapshot, CapabilityStateDocument,
-    UpstreamDialectProfile,
+    normalize_route_base_url, route_fingerprint, profile_is_current, CapabilityConfiguration,
+    CapabilityRuntimeSnapshot, CapabilityStateDocument, DialectProfileKey, ProbeJob,
+    ProbeReason, RouteFingerprintInput, UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::verify_downstream_key;
 use crate::routing::{
@@ -35,7 +36,8 @@ use redis::AsyncCommands;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use sha2::Digest;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1844,6 +1846,77 @@ impl AppState {
         self.snapshot().await.usage_logs
     }
 
+    pub async fn reconcile_dialect_profiles(&self, now: u64) -> io::Result<Vec<ProbeJob>> {
+        let routing = self.routing_snapshot().await;
+        let snapshot = self.capability_snapshot();
+        let known_upstream_ids = routing
+            .upstreams
+            .iter()
+            .map(|upstream| upstream.id.clone())
+            .collect::<HashSet<_>>();
+        let stale_upstream_ids = snapshot
+            .profiles
+            .keys()
+            .filter(|key| !known_upstream_ids.contains(&key.upstream_id))
+            .map(|key| key.upstream_id.clone())
+            .collect::<BTreeSet<_>>();
+        for upstream_id in stale_upstream_ids {
+            self.delete_dialect_profiles_for_upstream(&upstream_id).await?;
+        }
+
+        let snapshot = self.capability_snapshot();
+        let refresh_interval_seconds = snapshot
+            .configuration
+            .source()
+            .probe
+            .refresh_interval_seconds;
+        let mut jobs = Vec::new();
+        let mut queued = BTreeSet::new();
+        for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
+            for exposed in upstream.route_models() {
+                let exposed_to_downstream = routing.downstreams.iter().any(|downstream| {
+                    downstream.active
+                        && (downstream.model_allowlist.is_empty()
+                            || portal_model_is_allowed(&downstream.model_allowlist, &exposed))
+                });
+                if !exposed_to_downstream {
+                    continue;
+                }
+                let Some(runtime) = upstream.resolved_model_name(&exposed) else {
+                    continue;
+                };
+                for protocol in upstream.protocols.iter().copied() {
+                    let key = DialectProfileKey {
+                        upstream_id: upstream.id.clone(),
+                        runtime_model_slug: runtime.clone(),
+                        protocol: protocol.into(),
+                    };
+                    let fingerprint =
+                        self.route_configuration_fingerprint(upstream, &exposed, &runtime, protocol)?;
+                    let current = snapshot.profiles.get(&key);
+                    if !current
+                        .map(|profile| {
+                            profile_is_current(
+                                profile,
+                                &fingerprint,
+                                now,
+                                refresh_interval_seconds,
+                            )
+                        })
+                        .unwrap_or(false)
+                        && queued.insert(key.clone())
+                    {
+                        jobs.push(ProbeJob {
+                            key,
+                            reason: ProbeReason::ConfigurationChanged,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(jobs)
+    }
+
     pub async fn available_models_for_downstream(&self, secret: &str) -> Vec<String> {
         let snapshot = self.routing_snapshot().await;
         let Some(downstream) = snapshot
@@ -1904,6 +1977,45 @@ impl AppState {
                 profiles: capability_state.profiles,
             }));
         Ok(())
+    }
+
+    fn route_configuration_fingerprint(
+        &self,
+        upstream: &UpstreamConfig,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+    ) -> io::Result<String> {
+        let normalized_base_url = normalize_route_base_url(&upstream.base_url)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let snapshot = self.capability_snapshot();
+        let mut route = crate::capabilities::RouteIdentity {
+            upstream_id: upstream.id.clone(),
+            exposed_model_slug: exposed_model_slug.to_owned(),
+            runtime_model_slug: runtime_model_slug.to_owned(),
+            protocol: WireProtocol::from(protocol),
+            tags: BTreeSet::new(),
+        };
+        snapshot.configuration.apply_route_tags(&mut route);
+        let route_overrides = snapshot.configuration.route_overrides_for(&route);
+        let route_override_digest = format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&route_overrides)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            )
+        );
+        Ok(route_fingerprint(&RouteFingerprintInput {
+            normalized_base_url,
+            enabled_protocols: upstream
+                .supported_protocols()
+                .into_iter()
+                .map(WireProtocol::from)
+                .collect(),
+            runtime_model_slug: runtime_model_slug.to_owned(),
+            route_override_digest,
+            probe_schema_version: crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
+        }))
     }
 
     async fn mutate_persisted_state<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>
