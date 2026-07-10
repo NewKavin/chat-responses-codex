@@ -1,4 +1,5 @@
 use super::*;
+use crate::capabilities::ResolvedCapabilities;
 
 pub(super) fn parse_retry_after_seconds(
     headers: &reqwest::header::HeaderMap,
@@ -213,6 +214,7 @@ pub(super) async fn send_to_upstream(
     state: &AppState,
     upstream: &UpstreamConfig,
     api_key: &str,
+    resolved_capabilities: Option<&ResolvedCapabilities>,
     upstream_protocol: UpstreamProtocol,
     body: &Value,
     endpoint: EndpointKind,
@@ -441,6 +443,9 @@ pub(super) async fn send_to_upstream(
             strip_unknown_nonstandard_fields = upstream.strip_nonstandard_chat_fields,
             "normalized chat payload for upstream compatibility"
         );
+        if let Some(resolved) = resolved_capabilities {
+            normalize_chat_payload_for_capabilities(&mut upstream_body, resolved);
+        }
     }
 
     let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream_protocol));

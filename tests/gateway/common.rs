@@ -45,7 +45,7 @@ pub(crate) async fn with_proxy_env_cleared<F, T>(f: impl FnOnce() -> F) -> T
 where
     F: Future<Output = T>,
 {
-    let _lock = proxy_env_lock().lock().unwrap();
+    let _lock = proxy_env_lock().lock().unwrap_or_else(|poison| poison.into_inner());
     let saved = ProxyEnvSnapshot::capture();
     ProxyEnvSnapshot::clear();
     let result = f().await;

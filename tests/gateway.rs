@@ -6,6 +6,8 @@ mod chat;
 mod claude;
 #[path = "gateway/common.rs"]
 mod common;
+#[path = "gateway/capability_routing.rs"]
+mod capability_routing;
 #[path = "gateway/compatibility.rs"]
 mod compatibility;
 #[path = "gateway/responses.rs"]

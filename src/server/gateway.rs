@@ -33,6 +33,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod capability_probe;
+mod capability_routing;
 mod claude;
 mod compat;
 mod context;
@@ -43,6 +44,7 @@ mod troubleshooting;
 mod upstream;
 
 pub use capability_probe::*;
+use capability_routing::*;
 use claude::*;
 use compat::*;
 use context::*;
@@ -902,6 +904,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
         .into_iter()
         .map(|slug| {
             let context_window = model_contexts.get(&slug).copied().flatten();
+            let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug);
             let supported_reasoning_levels = supported_reasoning_levels_for_model(&slug)
                 .iter()
                 .map(|(effort, description)| {
@@ -922,7 +925,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "supported_in_api": true,
                 "priority": 0,
                 "base_instructions": "",
-                "web_search_tool_type": "text",
+                "web_search_tool_type": serde_json::Value::Null,
                 "truncation_policy": {
                     "mode": "bytes",
                     "limit": 10_000
@@ -931,7 +934,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "default_reasoning_summary": "auto",
                 "support_verbosity": false,
                 "apply_patch_tool_type": null,
-                "supports_parallel_tool_calls": true,
+                "supports_parallel_tool_calls": witness.as_ref().map(|entry| entry.parallel_tool_calls_supported).unwrap_or(false),
                 "supports_image_detail_original": false,
                 "context_window": context_window,
                 "max_context_window": context_window,
@@ -939,7 +942,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "additional_speed_tiers": [],
                 "service_tiers": [],
                 "experimental_supported_tools": [],
-                "input_modalities": ["text"],
+                "input_modalities": if witness.as_ref().map(|entry| entry.image_supported).unwrap_or(false) { json!(["text", "image"]) } else { json!(["text"]) },
+                "gateway_catalog_witness": witness.map(|entry| entry.witness).unwrap_or(serde_json::Value::Null),
             })
         })
         .collect::<Vec<_>>();
@@ -1140,6 +1144,27 @@ struct ResponseHistoryContext {
 }
 
 impl ResponseHistoryContext {
+    fn with_selected_upstream(&self, upstream_id: &str) -> Self {
+        let mut history_request_state = self.history_request_state.clone();
+        history_request_state.insert(
+            "_gateway_continuation".to_string(),
+            json!({ "upstream_id": upstream_id }),
+        );
+        Self {
+            state: self.state.clone(),
+            history_input_items: self.history_input_items.clone(),
+            history_request_state,
+        }
+    }
+
+    fn continuation_upstream_id(&self) -> Option<&str> {
+        self.history_request_state
+            .get("_gateway_continuation")
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("upstream_id"))
+            .and_then(Value::as_str)
+    }
+
     fn store_from_completed_event(&self, event: &Value) -> bool {
         if event.get("type").and_then(Value::as_str) != Some("response.completed") {
             return false;
@@ -1265,8 +1290,12 @@ fn capture_response_history_state(object: &Map<String, Value>) -> Map<String, Va
 }
 
 fn apply_response_history_state(object: &mut Map<String, Value>, state: &Map<String, Value>) {
-    for (key, value) in state {
-        object.entry(key.clone()).or_insert_with(|| value.clone());
+    for field in RESPONSE_HISTORY_STATE_FIELDS {
+        if let Some(value) = state.get(*field) {
+            object
+                .entry((*field).to_string())
+                .or_insert_with(|| value.clone());
+        }
     }
 }
 
@@ -2154,6 +2183,29 @@ async fn process_gateway_request_inner(
 
     let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
     let now = unix_seconds();
+    let required_capabilities = required_capabilities_for_request(endpoint, &body);
+    let requested_features = requested_features_for_request(endpoint, &body);
+    if !any_route_supports_required_capabilities(
+        &state,
+        &routing_snapshot.upstreams,
+        model,
+        &required_capabilities,
+    ) {
+        let capability_name = required_capabilities
+            .iter()
+            .next()
+            .map(|capability| format!("{capability:?}"))
+            .unwrap_or_else(|| "Unknown".to_string());
+        return Err(GatewayError::classified(
+            StatusCode::BAD_REQUEST,
+            format!("selected routes cannot preserve required capability {capability_name}"),
+            "invalid_request_error",
+            "gateway_protocol_capability_unsupported",
+            "gateway_protocol_capability_unsupported",
+            None,
+            Some(json!({ "scope": "gateway" })),
+        ));
+    }
     let mut last_failure_upstream: Option<(String, Option<String>)> = None;
     let candidate_protocols = if requires_responses_tooling {
         if fallback_to_chat {
@@ -2175,7 +2227,15 @@ async fn process_gateway_request_inner(
         "resolved candidate protocols"
     );
     let mut last_error = None;
-    let preferred_upstream_id = if state.config.routing_affinity_enabled {
+    let preferred_upstream_id = if let Some(upstream_id) = response_history_context
+        .as_ref()
+        .and_then(ResponseHistoryContext::continuation_upstream_id)
+    {
+        routing_snapshot.upstreams.iter().any(|upstream| {
+            upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
+        })
+        .then(|| upstream_id.to_string())
+    } else if state.config.routing_affinity_enabled {
         match state.get_affinity_upstream(&downstream.id, normalized_model) {
             Some(upstream_id)
                 if routing_snapshot.upstreams.iter().any(|upstream| {
@@ -2201,6 +2261,15 @@ async fn process_gateway_request_inner(
             .filter(|upstream| upstream.active)
             .filter(|upstream| upstream.supports_protocol(protocol))
             .filter(|upstream| upstream.supports_model(model))
+            .filter(|upstream| {
+                route_supports_required_capabilities(
+                    &state,
+                    upstream,
+                    model,
+                    protocol,
+                    &required_capabilities,
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         let mut deprioritized_upstreams = Vec::new();
@@ -2217,10 +2286,13 @@ async fn process_gateway_request_inner(
             }
         });
         let total_candidate_count = upstreams.len() + deprioritized_upstreams.len();
-        // Stickiness only helps when there is a single viable upstream; with a pool,
-        // live pressure balancing should decide every request.
-        let use_routing_affinity =
-            state.config.routing_affinity_enabled && total_candidate_count == 1;
+        let history_pinned_upstream = response_history_context
+            .as_ref()
+            .and_then(ResponseHistoryContext::continuation_upstream_id);
+        // Ordinary affinity only helps when there is a single viable upstream; continuation
+        // history pinning is stricter and applies even when multiple candidates are available.
+        let use_routing_affinity = history_pinned_upstream.is_some()
+            || (state.config.routing_affinity_enabled && total_candidate_count == 1);
         let ranking_pressure = |upstream: &UpstreamConfig| {
             let runtime = upstream_runtime_snapshots
                 .get(&upstream.id)
@@ -2259,7 +2331,10 @@ async fn process_gateway_request_inner(
                     .iter()
                     .position(|upstream| upstream.id == preferred_upstream_id)
                 {
-                    if position > 0 {
+                    if history_pinned_upstream == Some(preferred_upstream_id) {
+                        let preferred = upstreams.remove(position);
+                        upstreams.insert(0, preferred);
+                    } else if position > 0 {
                         let escape_ratio =
                             state.config.routing_affinity_escape_pressure_ratio.max(1.0);
                         let (
@@ -2574,13 +2649,27 @@ async fn process_gateway_request_inner(
                                 }
                             }
                         } else {
-                            (body.clone(), response_history_context.clone(), None)
+                            (
+                                body.clone(),
+                                response_history_context
+                                    .clone()
+                                    .map(|context| context.with_selected_upstream(&upstream.id)),
+                                None,
+                            )
                         };
 
                     let result = send_to_upstream(
                         &state,
                         &upstream,
                         api_key,
+                        resolve_route_capabilities(
+                            &state,
+                            &upstream,
+                            model,
+                            protocol,
+                            &requested_features,
+                        )
+                        .as_ref(),
                         protocol,
                         &dispatch_body,
                         endpoint,
