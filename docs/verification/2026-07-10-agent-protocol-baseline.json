@@ -1,0 +1,13 @@
+{
+  "revision": "a17cfe6",
+  "direct_p50_ms": 2,
+  "direct_p95_ms": 26,
+  "gateway_p50_ms": 406,
+  "gateway_p95_ms": 659,
+  "gateway_added_p95_ms": 633,
+  "image_direct_p95_ms": 4,
+  "image_gateway_p95_ms": 672,
+  "image_gateway_added_p95_ms": 668,
+  "direct_requests": 200,
+  "gateway_requests": 200
+}
