@@ -1736,14 +1736,20 @@ impl AppState {
     }
 
     pub async fn remove_upstream(&self, upstream_id: &str) -> io::Result<bool> {
-        self.mutate_persisted_state_io(|state| {
+        let removed = self.mutate_persisted_state_io(|state| {
             let original_len = state.upstreams.len();
             state
                 .upstreams
                 .retain(|upstream| upstream.id != upstream_id);
             Ok(state.upstreams.len() != original_len)
         })
-        .await
+        .await?;
+
+        if removed {
+            self.delete_dialect_profiles_for_upstream(upstream_id).await?;
+        }
+
+        Ok(removed)
     }
 
     pub async fn insert_downstream(&self, downstream: DownstreamConfig) -> io::Result<()> {

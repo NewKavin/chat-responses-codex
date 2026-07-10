@@ -184,7 +184,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         .await
         .expect("should flush usage log rows");
 
-    let reloaded = AppState::load_from_database_url(&database_url, config)
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should reload state from PostgreSQL");
     let snapshot = reloaded.snapshot().await;
@@ -295,7 +295,7 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
         .await
         .expect("should persist upstream rows");
 
-    let reloaded = AppState::load_from_database_url(&database_url, config)
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should reload state from PostgreSQL");
     let snapshot = reloaded.snapshot().await;
@@ -349,7 +349,7 @@ async fn postgres_roundtrip_preserves_announcement_state() {
         .await
         .expect("should persist announcement rows");
 
-    let reloaded = AppState::load_from_database_url(&database_url, config)
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should reload state from PostgreSQL");
     let snapshot = reloaded.snapshot().await;
@@ -483,7 +483,7 @@ async fn postgres_roundtrip_preserves_capability_state() {
         .await
         .expect("should persist dialect profile");
 
-    let reloaded = AppState::load_from_database_url(&database_url, config)
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should reload state from PostgreSQL");
     let capability_snapshot = reloaded.capability_snapshot();
@@ -494,6 +494,13 @@ async fn postgres_roundtrip_preserves_capability_state() {
         .profiles
         .keys()
         .any(|candidate| candidate.runtime_model_slug == "lab/case-sensitive"));
+
+    assert!(reloaded.remove_upstream("up-1").await.unwrap());
+
+    let removed = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL after upstream removal");
+    assert!(!removed.capability_snapshot().profiles.contains_key(&key));
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");

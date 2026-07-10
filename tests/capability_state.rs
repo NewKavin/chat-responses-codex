@@ -68,3 +68,37 @@ async fn profile_round_trip_uses_exact_case_sensitive_key() {
         .keys()
         .any(|candidate| candidate.runtime_model_slug == "lab/case-sensitive"));
 }
+
+#[tokio::test]
+async fn removing_upstream_clears_capability_profiles_for_that_upstream() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
+    state
+        .insert_upstream(chat_responses_codex::state::UpstreamConfig {
+            id: "up-1".into(),
+            name: "primary".into(),
+            base_url: "https://upstream.example".into(),
+            api_key: "secret".into(),
+            active: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let key = DialectProfileKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "Lab/Case-Sensitive".into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    state
+        .upsert_dialect_profile(UpstreamDialectProfile::unknown(key.clone()))
+        .await
+        .unwrap();
+
+    assert!(state.remove_upstream("up-1").await.unwrap());
+
+    let loaded = AppState::load_from_path(&path, AppConfig::default())
+        .await
+        .unwrap();
+    assert!(!loaded.capability_snapshot().profiles.contains_key(&key));
+}
