@@ -1,3 +1,7 @@
+use crate::capabilities::{
+    CapabilityConfiguration, CapabilityRuntimeSnapshot, CapabilityStateDocument,
+    UpstreamDialectProfile,
+};
 use crate::keys::verify_downstream_key;
 use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
@@ -25,6 +29,7 @@ mod types;
 #[path = "state/usage.rs"]
 mod usage;
 
+use arc_swap::ArcSwap;
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use reqwest::Client;
@@ -178,6 +183,8 @@ impl ResponseHistoryStore {
 pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
     config_persist_lock: Arc<Mutex<()>>,
+    capability_snapshot: Arc<ArcSwap<CapabilityRuntimeSnapshot>>,
+    capability_update_lock: Arc<Mutex<()>>,
     archived_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
     pending_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
     usage_log_flush_running: Arc<AtomicBool>,
@@ -203,6 +210,35 @@ pub struct AppState {
 impl StateStore for PostgresStateStore {
     fn persist_config<'a>(&'a self, state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async move { self.replace_state(state).await })
+    }
+
+    fn load_capability_state<'a>(&'a self) -> StoreFuture<'a, io::Result<CapabilityStateDocument>> {
+        Box::pin(async move { PostgresStateStore::load_capability_state(self).await })
+    }
+
+    fn persist_capability_configuration<'a>(
+        &'a self,
+        config: &'a CapabilityConfiguration,
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            PostgresStateStore::persist_capability_configuration(self, config).await
+        })
+    }
+
+    fn upsert_dialect_profile<'a>(
+        &'a self,
+        profile: &'a UpstreamDialectProfile,
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move { PostgresStateStore::upsert_dialect_profile(self, profile).await })
+    }
+
+    fn delete_dialect_profiles_for_upstream<'a>(
+        &'a self,
+        upstream_id: &'a str,
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            PostgresStateStore::delete_dialect_profiles_for_upstream(self, upstream_id).await
+        })
     }
 
     fn query_usage_logs_page<'a>(
@@ -395,6 +431,10 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
+            capability_snapshot: Arc::new(ArcSwap::from_pointee(
+                CapabilityRuntimeSnapshot::default(),
+            )),
+            capability_update_lock: Arc::new(Mutex::new(())),
             archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
@@ -445,6 +485,10 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
+            capability_snapshot: Arc::new(ArcSwap::from_pointee(
+                CapabilityRuntimeSnapshot::default(),
+            )),
+            capability_update_lock: Arc::new(Mutex::new(())),
             archived_usage_logs: Arc::new(Mutex::new(archived_usage_logs)),
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
@@ -489,6 +533,10 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
+            capability_snapshot: Arc::new(ArcSwap::from_pointee(
+                CapabilityRuntimeSnapshot::default(),
+            )),
+            capability_update_lock: Arc::new(Mutex::new(())),
             archived_usage_logs: Arc::new(Mutex::new(Vec::new())),
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
@@ -779,6 +827,10 @@ impl AppState {
         }
     }
 
+    pub fn capability_snapshot(&self) -> Arc<CapabilityRuntimeSnapshot> {
+        self.capability_snapshot.load_full()
+    }
+
     pub async fn load_from_path(path: impl AsRef<Path>, config: AppConfig) -> io::Result<Self> {
         if let Ok(database_url) = env::var("DATABASE_URL") {
             if !database_url.trim().is_empty() {
@@ -806,6 +858,8 @@ impl AppState {
         let usage_log_count = state.usage_logs.len();
         let archived_usage_log_count = archived_usage_logs.len();
         let app = Self::new_with_archived(state, archived_usage_logs, store_path, config);
+        let capability_state = app.config_store.load_capability_state().await?;
+        app.initialize_capability_snapshot(capability_state)?;
         app.enforce_usage_log_archive_limit().await?;
         tracing::info!(
             backend = "file",
@@ -829,10 +883,11 @@ impl AppState {
                 .map_err(|error| {
                     io::Error::new(
                         io::ErrorKind::Other,
-                        format!("failed to initialize postgres backend: {error}"),
-                    )
-                })?;
+                format!("failed to initialize postgres backend: {error}"),
+            )
+        })?;
         let state = postgres.load_state().await?;
+        let capability_state = postgres.load_capability_state().await?;
         tracing::info!(
             backend = "postgres",
             upstreams = state.upstreams.len(),
@@ -840,12 +895,61 @@ impl AppState {
             usage_logs = state.usage_logs.len(),
             "loaded postgres-backed gateway state"
         );
-        Ok(Self::new_with_postgres(state, config, postgres).await)
+        let app = Self::new_with_postgres(state, config, postgres).await;
+        app.initialize_capability_snapshot(capability_state)?;
+        Ok(app)
     }
 
     pub async fn persist(&self) -> io::Result<()> {
         let state = self.snapshot().await;
         self.persist_state(&state).await
+    }
+
+    pub async fn replace_capability_configuration(
+        &self,
+        configuration: CapabilityConfiguration,
+    ) -> io::Result<()> {
+        let _guard = self.capability_update_lock.lock().await;
+        let compiled = configuration
+            .compile()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        self.config_store
+            .persist_capability_configuration(&configuration)
+            .await?;
+        let current = self.capability_snapshot();
+        self.capability_snapshot.store(Arc::new(CapabilityRuntimeSnapshot {
+            configuration: Arc::new(compiled),
+            profiles: current.profiles.clone(),
+        }));
+        Ok(())
+    }
+
+    pub async fn upsert_dialect_profile(&self, profile: UpstreamDialectProfile) -> io::Result<()> {
+        let _guard = self.capability_update_lock.lock().await;
+        self.config_store.upsert_dialect_profile(&profile).await?;
+        let current = self.capability_snapshot();
+        let mut profiles = current.profiles.clone();
+        profiles.insert(profile.key.clone(), profile);
+        self.capability_snapshot.store(Arc::new(CapabilityRuntimeSnapshot {
+            configuration: current.configuration.clone(),
+            profiles,
+        }));
+        Ok(())
+    }
+
+    pub async fn delete_dialect_profiles_for_upstream(&self, upstream_id: &str) -> io::Result<()> {
+        let _guard = self.capability_update_lock.lock().await;
+        self.config_store
+            .delete_dialect_profiles_for_upstream(upstream_id)
+            .await?;
+        let current = self.capability_snapshot();
+        let mut profiles = current.profiles.clone();
+        profiles.retain(|key, _| key.upstream_id != upstream_id);
+        self.capability_snapshot.store(Arc::new(CapabilityRuntimeSnapshot {
+            configuration: current.configuration.clone(),
+            profiles,
+        }));
+        Ok(())
     }
 
     pub async fn update_announcement(
@@ -1778,6 +1882,22 @@ impl AppState {
         let mut models = models.into_iter().collect::<Vec<_>>();
         models.sort();
         models
+    }
+
+    fn initialize_capability_snapshot(
+        &self,
+        capability_state: CapabilityStateDocument,
+    ) -> io::Result<()> {
+        let compiled = capability_state
+            .configuration
+            .compile()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: Arc::new(compiled),
+                profiles: capability_state.profiles,
+            }));
+        Ok(())
     }
 
     async fn mutate_persisted_state<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use super::CAPABILITY_SCHEMA_VERSION;
@@ -415,6 +415,60 @@ impl UpstreamDialectProfile {
             event_types: BTreeSet::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CapabilityStateDocument {
+    pub configuration: CapabilityConfiguration,
+    #[serde(
+        default,
+        serialize_with = "serialize_capability_profiles",
+        deserialize_with = "deserialize_capability_profiles"
+    )]
+    pub profiles: BTreeMap<DialectProfileKey, UpstreamDialectProfile>,
+}
+
+#[derive(Clone)]
+pub struct CapabilityRuntimeSnapshot {
+    pub configuration: std::sync::Arc<super::CompiledCapabilityConfiguration>,
+    pub profiles: BTreeMap<DialectProfileKey, UpstreamDialectProfile>,
+}
+
+impl Default for CapabilityRuntimeSnapshot {
+    fn default() -> Self {
+        Self {
+            configuration: std::sync::Arc::new(
+                CapabilityConfiguration::default()
+                    .compile()
+                    .expect("default capability policy"),
+            ),
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+fn serialize_capability_profiles<S>(
+    profiles: &BTreeMap<DialectProfileKey, UpstreamDialectProfile>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    profiles.values().collect::<Vec<_>>().serialize(serializer)
+}
+
+fn deserialize_capability_profiles<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<DialectProfileKey, UpstreamDialectProfile>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let profiles = Vec::<UpstreamDialectProfile>::deserialize(deserializer)?;
+    Ok(profiles
+        .into_iter()
+        .map(|profile| (profile.key.clone(), profile))
+        .collect())
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

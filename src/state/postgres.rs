@@ -7,6 +7,10 @@ use super::{
     ModelContextConfig, ModelRequestCostConfig, PersistedState, ResponseHistoryEntry,
     UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
+use crate::capabilities::{
+    CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
+    WireProtocol,
+};
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use serde_json::{Map, Value};
@@ -301,6 +305,111 @@ impl PostgresStateStore {
         sync_config_tables(&tx, state).await?;
         insert_usage_logs(&tx, &state.usage_logs).await?;
         tx.commit().await.map_err(io_other)
+    }
+
+    pub async fn load_capability_state(&self) -> io::Result<CapabilityStateDocument> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let mut document = CapabilityStateDocument::default();
+
+        if let Some(row) = conn
+            .query_opt(
+                "SELECT document
+                 FROM capability_configuration
+                 WHERE singleton_id = 'default'",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+        {
+            let config_json: String = row.get(0);
+            document.configuration = serde_json::from_str(&config_json)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        }
+
+        for row in conn
+            .query(
+                "SELECT upstream_id, runtime_model_slug, protocol, profile
+                 FROM dialect_profiles
+                 ORDER BY upstream_id, runtime_model_slug, protocol",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+        {
+            let upstream_id: String = row.get(0);
+            let runtime_model_slug: String = row.get(1);
+            let protocol = decode_wire_protocol_key(&row.get::<_, String>(2))?;
+            let profile_json: String = row.get(3);
+            let mut profile: UpstreamDialectProfile = serde_json::from_str(&profile_json)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let key = DialectProfileKey {
+                upstream_id,
+                runtime_model_slug,
+                protocol,
+            };
+            profile.key = key.clone();
+            document.profiles.insert(key, profile);
+        }
+
+        Ok(document)
+    }
+
+    pub async fn persist_capability_configuration(
+        &self,
+        config: &CapabilityConfiguration,
+    ) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let config_json = serde_json::to_string(config).map_err(io_other)?;
+        let updated_at = u64_to_i64(unix_seconds());
+        conn.execute(
+            "INSERT INTO capability_configuration (singleton_id, document, updated_at)
+             VALUES ('default', $1, $2)
+             ON CONFLICT (singleton_id) DO UPDATE SET
+                 document = EXCLUDED.document,
+                 updated_at = EXCLUDED.updated_at",
+            &[&config_json, &updated_at],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
+    }
+
+    pub async fn upsert_dialect_profile(&self, profile: &UpstreamDialectProfile) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let protocol = encode_wire_protocol_key(profile.key.protocol)?;
+        let profile_json = serde_json::to_string(profile).map_err(io_other)?;
+        let updated_at = u64_to_i64(unix_seconds());
+        conn.execute(
+            "INSERT INTO dialect_profiles (
+                upstream_id, runtime_model_slug, protocol, profile, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5
+            )
+            ON CONFLICT (upstream_id, runtime_model_slug, protocol) DO UPDATE SET
+                profile = EXCLUDED.profile,
+                updated_at = EXCLUDED.updated_at",
+            &[
+                &profile.key.upstream_id,
+                &profile.key.runtime_model_slug,
+                &protocol,
+                &profile_json,
+                &updated_at,
+            ],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
+    }
+
+    pub async fn delete_dialect_profiles_for_upstream(&self, upstream_id: &str) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        conn.execute(
+            "DELETE FROM dialect_profiles WHERE upstream_id = $1",
+            &[&upstream_id],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
     }
 
     pub async fn append_usage_logs(&self, logs: &[UsageLog]) -> io::Result<()> {
@@ -1118,6 +1227,21 @@ fn decode_protocol(value: String) -> io::Result<UpstreamProtocol> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+fn encode_wire_protocol_key(protocol: WireProtocol) -> io::Result<String> {
+    match serde_json::to_value(protocol).map_err(io_other)? {
+        Value::String(value) => Ok(value),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wire protocol did not serialize to a string",
+        )),
+    }
+}
+
+fn decode_wire_protocol_key(value: &str) -> io::Result<WireProtocol> {
+    serde_json::from_value(Value::String(value.to_string()))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 fn decode_protocols(
     value: Option<String>,
     fallback: UpstreamProtocol,
@@ -1355,6 +1479,21 @@ ALTER TABLE usage_logs
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_category TEXT NULL;
 
+CREATE TABLE IF NOT EXISTS capability_configuration (
+    singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),
+    document TEXT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dialect_profiles (
+    upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
+    runtime_model_slug TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    PRIMARY KEY (upstream_id, runtime_model_slug, protocol)
+);
+
 CREATE TABLE IF NOT EXISTS response_history (
     response_id TEXT PRIMARY KEY,
     items TEXT NOT NULL,
@@ -1367,6 +1506,8 @@ ALTER TABLE response_history
 
 CREATE INDEX IF NOT EXISTS response_history_created_at_idx
     ON response_history (created_at DESC, response_id);
+CREATE INDEX IF NOT EXISTS dialect_profiles_upstream_idx
+    ON dialect_profiles (upstream_id);
 
 CREATE INDEX IF NOT EXISTS usage_logs_created_at_idx
     ON usage_logs (created_at DESC, id);

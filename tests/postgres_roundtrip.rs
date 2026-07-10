@@ -1,3 +1,6 @@
+use chat_responses_codex::capabilities::{
+    CapabilityConfiguration, DialectProfileKey, UpstreamDialectProfile, WireProtocol,
+};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
@@ -423,6 +426,74 @@ async fn postgres_roundtrip_preserves_global_context_profiles() {
             .context_group,
         "glm",
     );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_capability_state() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    state
+        .insert_upstream(UpstreamConfig {
+            id: "up-1".into(),
+            name: "primary".into(),
+            base_url: "https://upstream.example".into(),
+            api_key: "upstream-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["Lab/Case-Sensitive".into()],
+            active: true,
+            ..UpstreamConfig::default()
+        })
+        .await
+        .expect("should persist upstream rows before capability profiles");
+
+    let mut capability_configuration = CapabilityConfiguration::default();
+    capability_configuration.revision = 17;
+    state
+        .replace_capability_configuration(capability_configuration)
+        .await
+        .expect("should persist capability configuration");
+
+    let key = DialectProfileKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "Lab/Case-Sensitive".into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    state
+        .upsert_dialect_profile(UpstreamDialectProfile::unknown(key.clone()))
+        .await
+        .expect("should persist dialect profile");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL");
+    let capability_snapshot = reloaded.capability_snapshot();
+
+    assert_eq!(capability_snapshot.configuration.source().revision, 17);
+    assert!(capability_snapshot.profiles.contains_key(&key));
+    assert!(!capability_snapshot
+        .profiles
+        .keys()
+        .any(|candidate| candidate.runtime_model_slug == "lab/case-sensitive"));
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
