@@ -1,7 +1,9 @@
 mod policy;
+mod resolver;
 mod types;
 
 pub use policy::{CapabilityPolicyError, CompiledCapabilityConfiguration, CompiledExpectation};
+pub use resolver::{CapabilityResolutionError, CapabilityResolver, ResolutionInput};
 pub use types::*;
 
 pub const CAPABILITY_SCHEMA_VERSION: u32 = 1;

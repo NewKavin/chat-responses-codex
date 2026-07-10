@@ -5,12 +5,21 @@ use serde_json::Value;
 
 use super::CAPABILITY_SCHEMA_VERSION;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireProtocol {
     ChatCompletions,
     Responses,
     Messages,
+}
+
+impl From<crate::routing::UpstreamProtocol> for WireProtocol {
+    fn from(protocol: crate::routing::UpstreamProtocol) -> Self {
+        match protocol {
+            crate::routing::UpstreamProtocol::ChatCompletions => Self::ChatCompletions,
+            crate::routing::UpstreamProtocol::Responses => Self::Responses,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -35,6 +44,30 @@ pub enum Capability {
     IndexedToolArgumentStream,
     UsageStream,
     StructuredOutput,
+}
+
+impl Capability {
+    pub const ALL: [Self; 19] = [
+        Self::TextInput,
+        Self::ImageHttps,
+        Self::ImageDataUrl,
+        Self::ImageDetail,
+        Self::NativeFileId,
+        Self::FunctionTools,
+        Self::NamespaceTools,
+        Self::CustomTools,
+        Self::HostedTools,
+        Self::ParallelToolCalls,
+        Self::ForcedToolChoice,
+        Self::ToolContinuation,
+        Self::ReasoningOutput,
+        Self::ReasoningReplay,
+        Self::TextStream,
+        Self::ReasoningStream,
+        Self::IndexedToolArgumentStream,
+        Self::UsageStream,
+        Self::StructuredOutput,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -311,4 +344,145 @@ pub struct RouteIdentity {
     pub runtime_model_slug: String,
     pub protocol: WireProtocol,
     pub tags: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DialectProfileKey {
+    pub upstream_id: String,
+    pub runtime_model_slug: String,
+    pub protocol: WireProtocol,
+}
+
+impl DialectProfileKey {
+    pub fn from_route(route: &RouteIdentity) -> Self {
+        Self {
+            upstream_id: route.upstream_id.clone(),
+            runtime_model_slug: route.runtime_model_slug.clone(),
+            protocol: route.protocol,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DialectProfileState {
+    Verified,
+    Partial,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamDialectProfile {
+    pub key: DialectProfileKey,
+    pub configuration_fingerprint: String,
+    pub probe_schema_version: u32,
+    pub state: DialectProfileState,
+    pub capabilities: BTreeMap<Capability, EvidenceState>,
+    pub token_limit_field: Option<TokenLimitField>,
+    pub reasoning_carrier: Option<ReasoningCarrier>,
+    pub correction_rules: Vec<DialectCorrectionRule>,
+    pub reasoning_controls: BTreeMap<String, Vec<String>>,
+    pub extension_evidence: BTreeMap<String, EvidenceState>,
+    pub last_attempt_at: Option<u64>,
+    pub last_success_at: Option<u64>,
+    pub last_operational_failure: Option<String>,
+    pub evidence_codes: BTreeSet<String>,
+    pub http_status: Option<u16>,
+    pub event_types: BTreeSet<String>,
+}
+
+impl UpstreamDialectProfile {
+    pub fn unknown(key: DialectProfileKey) -> Self {
+        Self {
+            key,
+            configuration_fingerprint: String::new(),
+            probe_schema_version: super::DIALECT_PROBE_SCHEMA_VERSION,
+            state: DialectProfileState::Unknown,
+            capabilities: BTreeMap::new(),
+            token_limit_field: None,
+            reasoning_carrier: None,
+            correction_rules: Vec::new(),
+            reasoning_controls: BTreeMap::new(),
+            extension_evidence: BTreeMap::new(),
+            last_attempt_at: None,
+            last_success_at: None,
+            last_operational_failure: None,
+            evidence_codes: BTreeSet::new(),
+            http_status: None,
+            event_types: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RequestedFeatures {
+    pub required: BTreeSet<Capability>,
+    pub optional: BTreeSet<Capability>,
+    pub explicitly_selected_tool_kind: Option<String>,
+    pub continuation_profile: Option<DialectProfileKey>,
+    pub continuation_reasoning_carrier: Option<ReasoningCarrier>,
+}
+
+impl RequestedFeatures {
+    pub fn text_stream() -> Self {
+        Self {
+            required: BTreeSet::from([Capability::TextInput, Capability::TextStream]),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedCapability {
+    pub state: EvidenceState,
+    pub source: CapabilitySource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRequestExtension {
+    pub id: String,
+    pub request_patch: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedCapabilities {
+    pub values: BTreeMap<Capability, ResolvedCapability>,
+    pub token_limit_field: TokenLimitField,
+    pub reasoning_mode: ReasoningMode,
+    pub reasoning_carrier: ReasoningCarrier,
+    pub reasoning_control_field: Option<String>,
+    pub effort_map: BTreeMap<String, String>,
+    pub omit_sampling_fields: BTreeSet<String>,
+    pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    pub omit_optional_extensions: bool,
+    pub profile_state: DialectProfileState,
+    pub provisional: bool,
+    pub native_preferred: bool,
+    pub adapters: BTreeSet<String>,
+    pub request_extensions: Vec<ResolvedRequestExtension>,
+    pub field_sources: BTreeMap<String, CapabilitySource>,
+}
+
+impl ResolvedCapabilities {
+    pub fn state(&self, capability: Capability) -> EvidenceState {
+        self.values
+            .get(&capability)
+            .map(|resolved| resolved.state)
+            .unwrap_or(EvidenceState::Unobserved)
+    }
+
+    pub fn source(&self, capability: Capability) -> CapabilitySource {
+        self.values
+            .get(&capability)
+            .map(|resolved| resolved.source)
+            .unwrap_or(CapabilitySource::Baseline)
+    }
+
+    pub fn supports(&self, capability: Capability) -> bool {
+        self.state(capability) == EvidenceState::Supported
+    }
 }
