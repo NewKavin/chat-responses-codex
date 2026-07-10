@@ -1,7 +1,7 @@
 use crate::capabilities::{
-    normalize_route_base_url, route_fingerprint, profile_is_current, CapabilityConfiguration,
-    CapabilityRuntimeSnapshot, CapabilityStateDocument, DialectProfileKey, ProbeJob,
-    ProbeReason, RouteFingerprintInput, UpstreamDialectProfile, WireProtocol,
+    normalize_route_base_url, profile_is_current, route_fingerprint, CapabilityConfiguration,
+    CapabilityRuntimeSnapshot, CapabilityStateDocument, DialectProfileKey, ProbeJob, ProbeReason,
+    RouteFingerprintInput, UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::verify_downstream_key;
 use crate::routing::{
@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::fs;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use file_store::FileStateStore;
@@ -173,11 +173,13 @@ impl ResponseHistoryStore {
 
     fn get(&mut self, response_id: &str, now: u64) -> Option<ResponseHistoryEntry> {
         self.evict_expired(now);
-        self.entries.get(response_id).map(|entry| ResponseHistoryEntry {
-            items: entry.items.clone(),
-            request_state: entry.request_state.clone(),
-            created_at: entry.created_at,
-        })
+        self.entries
+            .get(response_id)
+            .map(|entry| ResponseHistoryEntry {
+                items: entry.items.clone(),
+                request_state: entry.request_state.clone(),
+                created_at: entry.created_at,
+            })
     }
 }
 
@@ -200,6 +202,7 @@ pub struct AppState {
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
     routing_tie_breakers: Arc<StdMutex<HashMap<String, u64>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
+    capability_probe_sender: Arc<StdMutex<Option<mpsc::Sender<ProbeJob>>>>,
     pub store_path: PathBuf,
     pub config: AppConfig,
     client: Client,
@@ -222,9 +225,9 @@ impl StateStore for PostgresStateStore {
         &'a self,
         config: &'a CapabilityConfiguration,
     ) -> StoreFuture<'a, io::Result<()>> {
-        Box::pin(async move {
-            PostgresStateStore::persist_capability_configuration(self, config).await
-        })
+        Box::pin(
+            async move { PostgresStateStore::persist_capability_configuration(self, config).await },
+        )
     }
 
     fn upsert_dialect_profile<'a>(
@@ -312,7 +315,10 @@ impl AppState {
 
         let postgres = self.postgres.clone()?;
         let entry = postgres
-            .response_history(response_id, now.saturating_sub(RESPONSE_HISTORY_TTL_SECONDS))
+            .response_history(
+                response_id,
+                now.saturating_sub(RESPONSE_HISTORY_TTL_SECONDS),
+            )
             .await
             .ok()
             .flatten()?;
@@ -454,6 +460,7 @@ impl AppState {
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
+            capability_probe_sender: Arc::new(StdMutex::new(None)),
             store_path,
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -508,6 +515,7 @@ impl AppState {
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
+            capability_probe_sender: Arc::new(StdMutex::new(None)),
             store_path,
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -556,6 +564,7 @@ impl AppState {
             routing_affinity: Arc::new(StdMutex::new(HashMap::new())),
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
+            capability_probe_sender: Arc::new(StdMutex::new(None)),
             store_path: PathBuf::new(),
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -669,6 +678,22 @@ impl AppState {
         sessions.remove(token);
     }
 
+    pub fn set_capability_probe_sender(&self, sender: mpsc::Sender<ProbeJob>) {
+        *self
+            .capability_probe_sender
+            .lock()
+            .expect("probe sender lock poisoned") = Some(sender);
+    }
+
+    pub fn queue_capability_probe(&self, job: ProbeJob) -> bool {
+        self.capability_probe_sender
+            .lock()
+            .expect("probe sender lock poisoned")
+            .as_ref()
+            .map(|sender| sender.try_send(job).is_ok())
+            .unwrap_or(false)
+    }
+
     pub fn start_active_gateway_request(&self, start: ActiveGatewayRequestStart) {
         let now = unix_seconds();
         let mut active = self
@@ -734,11 +759,7 @@ impl AppState {
         active.remove(request_id);
     }
 
-    pub fn fail_active_gateway_request(
-        &self,
-        request_id: &str,
-        error_category: impl Into<String>,
-    ) {
+    pub fn fail_active_gateway_request(&self, request_id: &str, error_category: impl Into<String>) {
         let mut active = self
             .active_requests
             .lock()
@@ -885,9 +906,9 @@ impl AppState {
                 .map_err(|error| {
                     io::Error::new(
                         io::ErrorKind::Other,
-                format!("failed to initialize postgres backend: {error}"),
-            )
-        })?;
+                        format!("failed to initialize postgres backend: {error}"),
+                    )
+                })?;
         let state = postgres.load_state().await?;
         let capability_state = postgres.load_capability_state().await?;
         tracing::info!(
@@ -919,10 +940,11 @@ impl AppState {
             .persist_capability_configuration(&configuration)
             .await?;
         let current = self.capability_snapshot();
-        self.capability_snapshot.store(Arc::new(CapabilityRuntimeSnapshot {
-            configuration: Arc::new(compiled),
-            profiles: current.profiles.clone(),
-        }));
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: Arc::new(compiled),
+                profiles: current.profiles.clone(),
+            }));
         Ok(())
     }
 
@@ -932,10 +954,11 @@ impl AppState {
         let current = self.capability_snapshot();
         let mut profiles = current.profiles.clone();
         profiles.insert(profile.key.clone(), profile);
-        self.capability_snapshot.store(Arc::new(CapabilityRuntimeSnapshot {
-            configuration: current.configuration.clone(),
-            profiles,
-        }));
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: current.configuration.clone(),
+                profiles,
+            }));
         Ok(())
     }
 
@@ -947,10 +970,11 @@ impl AppState {
         let current = self.capability_snapshot();
         let mut profiles = current.profiles.clone();
         profiles.retain(|key, _| key.upstream_id != upstream_id);
-        self.capability_snapshot.store(Arc::new(CapabilityRuntimeSnapshot {
-            configuration: current.configuration.clone(),
-            profiles,
-        }));
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: current.configuration.clone(),
+                profiles,
+            }));
         Ok(())
     }
 
@@ -1705,11 +1729,14 @@ impl AppState {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
         }
 
+        let queue_candidate = upstream.clone();
         self.mutate_persisted_state_io(|state| {
             state.upstreams.push(upstream);
             Ok(())
         })
-        .await
+        .await?;
+        self.queue_probe_jobs_for_upstream(&queue_candidate);
+        Ok(())
     }
 
     pub async fn update_upstream(
@@ -1717,38 +1744,53 @@ impl AppState {
         upstream_id: &str,
         upstream: UpstreamConfig,
     ) -> io::Result<bool> {
-        self.mutate_persisted_state_io(|state| {
-            let Some(existing) = state
-                .upstreams
-                .iter_mut()
-                .find(|upstream| upstream.id == upstream_id)
-            else {
-                return Ok(false);
-            };
+        let updated = self
+            .mutate_persisted_state_io(|state| {
+                let Some(existing) = state
+                    .upstreams
+                    .iter_mut()
+                    .find(|upstream| upstream.id == upstream_id)
+                else {
+                    return Ok(false);
+                };
 
-            let mut upstream = upstream;
-            upstream.id = upstream_id.to_string();
-            upstream.normalize_for_storage();
-            let failure_count = existing.failure_count;
-            *existing = upstream;
-            existing.failure_count = failure_count;
-            Ok(true)
-        })
-        .await
+                let mut upstream = upstream;
+                upstream.id = upstream_id.to_string();
+                upstream.normalize_for_storage();
+                let failure_count = existing.failure_count;
+                *existing = upstream;
+                existing.failure_count = failure_count;
+                Ok(true)
+            })
+            .await?;
+        if updated {
+            if let Some(upstream) = self
+                .snapshot()
+                .await
+                .upstreams
+                .into_iter()
+                .find(|upstream| upstream.id == upstream_id)
+            {
+                self.queue_probe_jobs_for_upstream(&upstream);
+            }
+        }
+        Ok(updated)
     }
 
     pub async fn remove_upstream(&self, upstream_id: &str) -> io::Result<bool> {
-        let removed = self.mutate_persisted_state_io(|state| {
-            let original_len = state.upstreams.len();
-            state
-                .upstreams
-                .retain(|upstream| upstream.id != upstream_id);
-            Ok(state.upstreams.len() != original_len)
-        })
-        .await?;
+        let removed = self
+            .mutate_persisted_state_io(|state| {
+                let original_len = state.upstreams.len();
+                state
+                    .upstreams
+                    .retain(|upstream| upstream.id != upstream_id);
+                Ok(state.upstreams.len() != original_len)
+            })
+            .await?;
 
         if removed {
-            self.delete_dialect_profiles_for_upstream(upstream_id).await?;
+            self.delete_dialect_profiles_for_upstream(upstream_id)
+                .await?;
         }
 
         Ok(removed)
@@ -1861,7 +1903,8 @@ impl AppState {
             .map(|key| key.upstream_id.clone())
             .collect::<BTreeSet<_>>();
         for upstream_id in stale_upstream_ids {
-            self.delete_dialect_profiles_for_upstream(&upstream_id).await?;
+            self.delete_dialect_profiles_for_upstream(&upstream_id)
+                .await?;
         }
 
         let snapshot = self.capability_snapshot();
@@ -1891,17 +1934,12 @@ impl AppState {
                         runtime_model_slug: runtime.clone(),
                         protocol: protocol.into(),
                     };
-                    let fingerprint =
-                        self.route_configuration_fingerprint(upstream, &exposed, &runtime, protocol)?;
+                    let fingerprint = self
+                        .route_configuration_fingerprint(upstream, &exposed, &runtime, protocol)?;
                     let current = snapshot.profiles.get(&key);
                     if !current
                         .map(|profile| {
-                            profile_is_current(
-                                profile,
-                                &fingerprint,
-                                now,
-                                refresh_interval_seconds,
-                            )
+                            profile_is_current(profile, &fingerprint, now, refresh_interval_seconds)
                         })
                         .unwrap_or(false)
                         && queued.insert(key.clone())
@@ -1979,7 +2017,66 @@ impl AppState {
         Ok(())
     }
 
-    fn route_configuration_fingerprint(
+    fn queue_probe_jobs_for_upstream(&self, upstream: &UpstreamConfig) {
+        if !upstream.active {
+            return;
+        }
+        for exposed_model in upstream.route_models() {
+            let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
+                continue;
+            };
+            for protocol in upstream.supported_protocols() {
+                let _ = self.queue_capability_probe(ProbeJob {
+                    key: DialectProfileKey {
+                        upstream_id: upstream.id.clone(),
+                        runtime_model_slug: runtime_model_slug.clone(),
+                        protocol: protocol.into(),
+                    },
+                    reason: ProbeReason::ConfigurationChanged,
+                });
+            }
+        }
+    }
+
+    pub async fn queue_capability_probes_for_downstream_model(
+        &self,
+        downstream_id: &str,
+        model: &str,
+    ) -> usize {
+        let routing = self.routing_snapshot().await;
+        let Some(downstream) = routing
+            .downstreams
+            .iter()
+            .find(|downstream| downstream.id == downstream_id && downstream.active)
+        else {
+            return 0;
+        };
+
+        let mut queued = 0usize;
+        for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
+            if !(downstream.model_allowlist.is_empty()
+                || portal_model_is_allowed(&downstream.model_allowlist, model))
+            {
+                continue;
+            }
+            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                continue;
+            };
+            for protocol in upstream.supported_protocols() {
+                queued += usize::from(self.queue_capability_probe(ProbeJob {
+                    key: DialectProfileKey {
+                        upstream_id: upstream.id.clone(),
+                        runtime_model_slug: runtime_model_slug.clone(),
+                        protocol: protocol.into(),
+                    },
+                    reason: ProbeReason::Manual,
+                }));
+            }
+        }
+        queued
+    }
+
+    pub fn route_configuration_fingerprint(
         &self,
         upstream: &UpstreamConfig,
         exposed_model_slug: &str,

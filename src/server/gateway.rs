@@ -32,6 +32,7 @@ use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod capability_probe;
 mod claude;
 mod compat;
 mod context;
@@ -41,6 +42,7 @@ mod stream;
 mod troubleshooting;
 mod upstream;
 
+pub use capability_probe::*;
 use claude::*;
 use compat::*;
 use context::*;

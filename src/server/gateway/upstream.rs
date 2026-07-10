@@ -610,6 +610,14 @@ pub(super) async fn send_to_upstream(
                 upstream_body_has_completion_tokens = diagnostics.has_completion_tokens,
                 "upstream rejected request body; payload values withheld"
             );
+            let _ = maybe_queue_dialect_error_probe(
+                state,
+                &upstream.id,
+                &final_upstream_model,
+                upstream_protocol,
+                status,
+                &error_text,
+            );
         }
 
         // Handle context limit errors first (before feedback classification)

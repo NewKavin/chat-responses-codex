@@ -1,6 +1,7 @@
 use chat_responses_codex::capabilities::*;
 use chat_responses_codex::state::{AppConfig, AppState, PersistedState};
 use tempfile::tempdir;
+use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn file_backend_keeps_capabilities_out_of_main_state() {
@@ -101,4 +102,166 @@ async fn removing_upstream_clears_capability_profiles_for_that_upstream() {
         .await
         .unwrap();
     assert!(!loaded.capability_snapshot().profiles.contains_key(&key));
+}
+
+#[tokio::test]
+async fn inserting_upstream_queues_capability_probe_jobs_for_active_routes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
+    state
+        .replace_capability_configuration(CapabilityConfiguration::default())
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(8);
+    state.set_capability_probe_sender(sender);
+
+    state
+        .insert_upstream(chat_responses_codex::state::UpstreamConfig {
+            id: "up-1".into(),
+            name: "primary".into(),
+            base_url: "https://upstream.example/v1".into(),
+            api_key: "secret".into(),
+            protocol: chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+            protocols: vec![chat_responses_codex::routing::UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["Lab/Case-Sensitive".into()],
+            active: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let job = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.key.upstream_id, "up-1");
+    assert_eq!(job.key.runtime_model_slug, "Lab/Case-Sensitive");
+    assert_eq!(job.key.protocol, WireProtocol::ChatCompletions);
+}
+
+#[tokio::test]
+async fn updating_upstream_queues_capability_probe_jobs_for_active_routes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
+    state
+        .replace_capability_configuration(CapabilityConfiguration::default())
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(8);
+    state.set_capability_probe_sender(sender);
+
+    state
+        .insert_upstream(chat_responses_codex::state::UpstreamConfig {
+            id: "up-1".into(),
+            name: "primary".into(),
+            base_url: "https://upstream.example/v1".into(),
+            api_key: "secret".into(),
+            protocol: chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+            protocols: vec![chat_responses_codex::routing::UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["Lab/Case-Sensitive".into()],
+            active: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        .await
+        .ok()
+        .and_then(|job| job);
+
+    assert!(state
+        .update_upstream(
+            "up-1",
+            chat_responses_codex::state::UpstreamConfig {
+                id: "ignored".into(),
+                name: "primary".into(),
+                base_url: "https://upstream.example/v1".into(),
+                api_key: "secret".into(),
+                protocol: chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+                protocols: vec![chat_responses_codex::routing::UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["Lab/Case-Sensitive".into()],
+                active: true,
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap());
+
+    let job = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.key.upstream_id, "up-1");
+    assert_eq!(job.key.runtime_model_slug, "Lab/Case-Sensitive");
+    assert_eq!(job.key.protocol, WireProtocol::ChatCompletions);
+}
+
+#[tokio::test]
+async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: "https://upstream.example/v1".into(),
+                api_key: "secret".into(),
+                protocol: chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+                protocols: vec![
+                    chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+                    chat_responses_codex::routing::UpstreamProtocol::Responses,
+                ],
+                supported_models: vec!["Lab/Case-Sensitive".into()],
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![chat_responses_codex::state::DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: "hash".into(),
+                plaintext_key: Some("plain".into()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["Lab/Case-Sensitive".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        &path,
+        AppConfig::default(),
+    );
+    let (sender, mut receiver) = mpsc::channel(8);
+    state.set_capability_probe_sender(sender);
+
+    let queued = state
+        .queue_capability_probes_for_downstream_model("down-1", "Lab/Case-Sensitive")
+        .await;
+    assert_eq!(queued, 2);
+
+    let first = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.key.upstream_id, "up-1");
+    assert_eq!(first.key.runtime_model_slug, "Lab/Case-Sensitive");
+    assert_eq!(second.key.upstream_id, "up-1");
+    assert_eq!(second.key.runtime_model_slug, "Lab/Case-Sensitive");
 }

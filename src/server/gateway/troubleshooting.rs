@@ -300,6 +300,9 @@ async fn run_troubleshooting_for_downstream(
     };
 
     let checks = requested_checks(&body);
+    let _ = state
+        .queue_capability_probes_for_downstream_model(&downstream.id, &body.model)
+        .await;
     let mut results = Vec::with_capacity(checks.len());
     for check in checks {
         match check {
@@ -414,6 +417,9 @@ async fn run_compatibility_matrix(
     let mut cells = Vec::new();
     for client_profile in &client_profiles {
         for model in &models {
+            let _ = state
+                .queue_capability_probes_for_downstream_model(&downstream.id, model)
+                .await;
             cells.push(
                 run_matrix_cell(
                     state.clone(),
@@ -649,20 +655,35 @@ async fn selected_upstream_for_matrix_model(
 
     match endpoint {
         "/v1/responses" => {
-            if let Ok(upstream) = state.choose_upstream(model, UpstreamProtocol::Responses).await {
+            if let Ok(upstream) = state
+                .choose_upstream(model, UpstreamProtocol::Responses)
+                .await
+            {
                 return Some((upstream.id, upstream.name, UpstreamProtocol::Responses));
             }
             state
                 .choose_upstream(model, UpstreamProtocol::ChatCompletions)
                 .await
                 .ok()
-                .map(|upstream| (upstream.id, upstream.name, UpstreamProtocol::ChatCompletions))
+                .map(|upstream| {
+                    (
+                        upstream.id,
+                        upstream.name,
+                        UpstreamProtocol::ChatCompletions,
+                    )
+                })
         }
         _ => state
             .choose_upstream(model, UpstreamProtocol::ChatCompletions)
             .await
             .ok()
-            .map(|upstream| (upstream.id, upstream.name, UpstreamProtocol::ChatCompletions)),
+            .map(|upstream| {
+                (
+                    upstream.id,
+                    upstream.name,
+                    UpstreamProtocol::ChatCompletions,
+                )
+            }),
     }
 }
 
@@ -683,9 +704,7 @@ fn matrix_protocol_transition(
         ("/v1/chat/completions", crate::routing::UpstreamProtocol::Responses) => {
             "chat_to_responses"
         }
-        ("/v1/responses", crate::routing::UpstreamProtocol::ChatCompletions) => {
-            "responses_to_chat"
-        }
+        ("/v1/responses", crate::routing::UpstreamProtocol::ChatCompletions) => "responses_to_chat",
         _ => "native",
     }
 }
@@ -778,7 +797,8 @@ async fn run_internal_gateway_check(
     source_headers: &HeaderMap,
 ) -> TroubleshootingResult {
     let started = Instant::now();
-    let check_timeout = Duration::from_secs(state.config.troubleshooting_check_timeout_seconds.max(1));
+    let check_timeout =
+        Duration::from_secs(state.config.troubleshooting_check_timeout_seconds.max(1));
     let Some(secret) = plaintext_key else {
         return TroubleshootingResult {
             id: check_id(check),
@@ -825,7 +845,9 @@ async fn run_internal_gateway_check(
                     id: check_id(check),
                     status: TroubleshootingStepStatus::Failed,
                     http_status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                    error_category: Some("gateway_troubleshooting_request_build_failed".to_string()),
+                    error_category: Some(
+                        "gateway_troubleshooting_request_build_failed".to_string(),
+                    ),
                     details: format!("Failed to build internal gateway request: {error}"),
                     suggestion: "Check troubleshooting request construction.".to_string(),
                     duration_ms: started.elapsed().as_millis() as u64,
@@ -1083,10 +1105,7 @@ fn troubleshooting_result_is_retryable(result: &TroubleshootingResult) -> bool {
 
     matches!(
         result.error_category.as_deref(),
-        Some(
-            "upstream_temporary_unavailable"
-                | "upstream_network_error"
-        )
+        Some("upstream_temporary_unavailable" | "upstream_network_error")
     )
 }
 
