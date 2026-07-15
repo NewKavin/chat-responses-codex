@@ -46,6 +46,7 @@ pub enum ProbeOutcome {
         capabilities: BTreeMap<Capability, EvidenceState>,
         token_limit_field: Option<TokenLimitField>,
         reasoning_carrier: Option<ReasoningCarrier>,
+        reasoning_controls: BTreeMap<String, Vec<String>>,
         correction_rules: Vec<DialectCorrectionRule>,
         extension_evidence: BTreeMap<String, EvidenceState>,
         evidence_codes: BTreeSet<String>,
@@ -94,6 +95,7 @@ pub fn apply_probe_outcome(profile: &mut UpstreamDialectProfile, outcome: ProbeO
             capabilities,
             token_limit_field,
             reasoning_carrier,
+            reasoning_controls,
             correction_rules,
             extension_evidence,
             evidence_codes,
@@ -104,6 +106,7 @@ pub fn apply_probe_outcome(profile: &mut UpstreamDialectProfile, outcome: ProbeO
             profile.capabilities = capabilities;
             profile.token_limit_field = token_limit_field;
             profile.reasoning_carrier = reasoning_carrier;
+            profile.reasoning_controls = reasoning_controls;
             profile.correction_rules = correction_rules;
             profile.extension_evidence = extension_evidence;
             profile.evidence_codes = evidence_codes;

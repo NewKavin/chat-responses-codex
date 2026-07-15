@@ -6,7 +6,7 @@
 //! - Upstream toggle (enable/disable)
 //! - Input validation and error handling
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::get;
 use axum::Json;
@@ -20,14 +20,20 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::tempdir;
-use tokio::sync::Barrier;
+use tokio::sync::{mpsc, Barrier};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
     PathBuf::from(format!("/tmp/test_state_admin_upstreams_{unique}.json"))
+}
+
+fn attach_capability_probe_sink(state: AppState) -> AppState {
+    let (sender, mut receiver) = mpsc::channel(256);
+    state.set_capability_probe_sender(sender);
+    tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+    state
 }
 
 /// Helper function to create a test AppState
@@ -68,7 +74,7 @@ fn create_test_state() -> AppState {
         global_context_profiles: std::collections::HashMap::new(),
     };
 
-    AppState::new(state, unique_state_path(), config)
+    attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
 }
 
 fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState {
@@ -87,7 +93,7 @@ fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState 
         global_context_profiles: std::collections::HashMap::new(),
     };
 
-    AppState::new(state, unique_state_path(), config)
+    attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
 }
 
 /// Helper function to get a valid JWT token
@@ -978,7 +984,7 @@ async fn test_admin_freekey_sync_only_imports_valid_status() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let result: Value = serde_json::from_slice(&body).unwrap();
+    let _result: Value = serde_json::from_slice(&body).unwrap();
 
     // Only the valid key creates a new upstream; the invalid key is ignored
     // for creation (it would only matter when clearing an existing upstream).
@@ -1219,7 +1225,7 @@ async fn test_upstreams_toggle_changes_active_status() {
 
 #[test]
 fn upstream_config_available_keys_includes_legacy_and_new_keys() {
-    let mut upstream = UpstreamConfig {
+    let upstream = UpstreamConfig {
         id: "test-1".to_string(),
         name: "Test Upstream".to_string(),
         base_url: "https://api.example.com".to_string(),
@@ -1240,7 +1246,7 @@ fn upstream_config_available_keys_includes_legacy_and_new_keys() {
 
 #[test]
 fn upstream_config_available_keys_dedups_legacy_key() {
-    let mut upstream = UpstreamConfig {
+    let upstream = UpstreamConfig {
         id: "test-2".to_string(),
         name: "Test Upstream".to_string(),
         base_url: "https://api.example.com".to_string(),
@@ -1849,7 +1855,7 @@ async fn test_freekey_sync_then_list_shows_upstream() {
     );
 
     // 3. 验证列表中有我们创建的上游
-    assert!(list_json.as_array().unwrap().len() >= 1);
+    assert!(!list_json.as_array().unwrap().is_empty());
     let found = list_json
         .as_array()
         .unwrap()

@@ -1,4 +1,4 @@
-import type { PortalModelStat } from '@/types'
+import type { JsonValue, PortalModelStat } from '@/types'
 
 type GatewayModelItem = {
   id?: unknown
@@ -7,6 +7,31 @@ type GatewayModelItem = {
 type GatewayModelsResponse = {
   data?: GatewayModelItem[]
 }
+
+export interface CodexCatalogResponse {
+  models: Array<{ [key: string]: JsonValue }>
+}
+
+export type IntegrationCatalogViewState = {
+  allModelSlugs: string[]
+  primaryModelSlug: string
+  sortedModelStats: PortalModelStat[]
+  canGenerateConfigurationContent: boolean
+}
+
+type IntegrationCatalogViewStateInput = {
+  catalog: CodexCatalogResponse | null
+  modelAllowlist: string[]
+  portalModelStats: PortalModelStat[]
+}
+
+export const isCodexCatalogResponse = (value: unknown): value is CodexCatalogResponse =>
+  typeof value === 'object' &&
+  value !== null &&
+  !Array.isArray(value) &&
+  'models' in value &&
+  Array.isArray(value.models) &&
+  value.models.every(model => typeof model === 'object' && model !== null && !Array.isArray(model))
 
 type CodexConfigInput = {
   gatewayBaseUrl: string
@@ -80,8 +105,6 @@ const choosePrimaryModelSlug = (modelSlugs: string[], preferredModelSlug?: strin
 
 const chooseSecondaryModelSlug = (modelSlugs: string[], primaryModelSlug: string) =>
   modelSlugs.find(slug => slug !== primaryModelSlug) ?? primaryModelSlug
-
-const isClaudeCompatibleSlug = (modelSlug: string) => /^(claude|anthropic)([-/]|$)/i.test(modelSlug)
 
 export const buildGatewayBaseUrl = (origin: string) => origin.replace(/\/+$/, '')
 
@@ -167,74 +190,52 @@ export const buildModelUsageStats = (modelSlugs: string[], stats: PortalModelSta
   })
 }
 
-export interface CodexModelContextEntry {
-  context_window: number
-  /// Currently unused when emitting the catalog: Codex automatically derives
-  /// the auto-compaction threshold as 90% of `context_window`, which lines up
-  /// with the upstream admin's `output_reserve` default (10%). We still accept
-  /// `output_reserve` so callers can pass the full upstream config without
-  /// massaging it; in the future we may emit `auto_compact_token_limit`
-  /// when the operator configured a non-default reserve.
-  output_reserve?: number
-}
+const emptyIntegrationCatalogViewState = (): IntegrationCatalogViewState => ({
+  allModelSlugs: [],
+  primaryModelSlug: '',
+  sortedModelStats: [],
+  canGenerateConfigurationContent: false
+})
 
-export const buildCodexModelCatalogJson = (
-  modelSlugs: string[],
-  contexts?: Record<string, CodexModelContextEntry>
-) => {
-  const catalog = {
-    models: modelSlugs.map((slug, index) => {
-      const entry: Record<string, unknown> = {
-        slug,
-        display_name: slug,
-        default_reasoning_level: 'high',
-        supported_reasoning_levels: [
-          {
-            effort: 'low',
-            description: 'Fast responses with lighter reasoning'
-          },
-          {
-            effort: 'medium',
-            description: 'Balances speed and reasoning depth for everyday tasks'
-          },
-          {
-            effort: 'high',
-            description: 'Greater reasoning depth for complex problems'
-          },
-          {
-            effort: 'xhigh',
-            description: 'Extra high reasoning depth for complex problems'
-          }
-        ],
-        shell_type: 'shell_command',
-        visibility: 'list',
-        supported_in_api: true,
-        priority: index,
-        base_instructions: 'You are Codex, a coding agent.',
-        supports_reasoning_summaries: true,
-        support_verbosity: false,
-        truncation_policy: {
-          mode: 'tokens',
-          limit: 10000
-        },
-        supports_parallel_tool_calls: true,
-        experimental_supported_tools: [],
-        input_modalities: ['text'],
-        supports_search_tool: false
-      }
-
-      const ctx = contexts?.[slug]
-      if (ctx) {
-        const window = Number(ctx.context_window)
-        if (Number.isFinite(window) && window > 0) {
-          entry.context_window = Math.floor(window)
-        }
-      }
-
-      return entry
-    })
+export const buildIntegrationCatalogViewState = ({
+  catalog,
+  modelAllowlist,
+  portalModelStats
+}: IntegrationCatalogViewStateInput): IntegrationCatalogViewState => {
+  if (!catalog || catalog.models.length === 0) {
+    return emptyIntegrationCatalogViewState()
   }
 
+  const rankedLiveModelSlugs = rankModelSlugsByUsage(
+    catalog.models.map(model => normalizeSlug(model.slug)),
+    portalModelStats
+  )
+  const allowedModelSlugs = new Set(
+    modelAllowlist.map(normalizeSlug).filter(Boolean)
+  )
+  const allModelSlugs = allowedModelSlugs.size
+    ? rankedLiveModelSlugs.filter(slug => allowedModelSlugs.has(slug))
+    : rankedLiveModelSlugs
+
+  if (allModelSlugs.length === 0) {
+    return emptyIntegrationCatalogViewState()
+  }
+
+  return {
+    allModelSlugs,
+    primaryModelSlug: allModelSlugs[0],
+    sortedModelStats: buildModelUsageStats(allModelSlugs, portalModelStats),
+    canGenerateConfigurationContent: true
+  }
+}
+
+export const buildCodexModelCatalogJson = (catalog?: CodexCatalogResponse) => {
+  if (!catalog || !Array.isArray(catalog.models)) {
+    throw new Error('live Codex catalog is unavailable')
+  }
+  if (catalog.models.length === 0) {
+    throw new Error('live Codex catalog is empty')
+  }
   return `${jsonStringify(catalog)}\n`
 }
 
@@ -258,6 +259,7 @@ name = "Chat Responses Gateway"
 base_url = ${tomlString(gatewayApiBaseUrl)}
 wire_api = "responses"
 requires_openai_auth = true
+web_search = "disabled"
 `
 }
 
@@ -323,13 +325,13 @@ export const buildClaudeCodeSettingsJson = (input: IntegrationConfigInput) => {
     ANTHROPIC_BASE_URL: gatewayBaseUrl,
     ANTHROPIC_API_KEY: input.portalKey,
     ANTHROPIC_AUTH_TOKEN: input.portalKey,
-    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1'
-  }
-
-  if (primaryModelSlug && !isClaudeCompatibleSlug(primaryModelSlug)) {
-    env.ANTHROPIC_CUSTOM_MODEL_OPTION = primaryModelSlug
-    env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = primaryModelSlug
-    env.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION = 'Current portal gateway model'
+    CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: primaryModelSlug,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: primaryModelSlug,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: primaryModelSlug,
+    ANTHROPIC_CUSTOM_MODEL_OPTION: primaryModelSlug,
+    ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: primaryModelSlug,
+    ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: 'Current portal gateway model'
   }
 
   return `${jsonStringify({

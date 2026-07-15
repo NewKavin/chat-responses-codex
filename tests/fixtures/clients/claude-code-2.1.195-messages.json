@@ -1,0 +1,56 @@
+{
+  "_fixture_metadata": {
+    "client": "claude_code",
+    "version": "2.1.195",
+    "source_commit": "be02c39841a59e2ac1f35ac12285def02acdbb5a",
+    "captured_at": "2026-07-10",
+    "sanitized": true
+  },
+  "method": "POST",
+  "path": "/v1/messages?beta=true",
+  "header_names": [
+    "x-api-key",
+    "anthropic-version",
+    "anthropic-beta",
+    "content-type",
+    "user-agent"
+  ],
+  "body": {
+    "model": "opaque-public",
+    "max_tokens": 32000,
+    "stream": true,
+    "thinking": {
+      "type": "adaptive"
+    },
+    "output_config": {
+      "effort": "high"
+    },
+    "context_management": {
+      "edits": [
+        {
+          "type": "clear_thinking_20251015",
+          "keep": "all"
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "synthetic matrix request"
+      }
+    ],
+    "tools": [
+      {
+        "name": "gateway_matrix_probe",
+        "description": "Synthetic compatibility probe.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "nonce": {"type": "string"}
+          },
+          "required": ["nonce"]
+        }
+      }
+    ]
+  }
+}

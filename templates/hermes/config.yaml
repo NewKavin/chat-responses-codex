@@ -1,0 +1,7 @@
+model:
+  provider: custom
+  default: "<model_slug>"
+  base_url: "https://<gateway_url>/v1"
+  api_key: "${CHAT2RESPONSES_KEY}"
+
+max_turns: 90

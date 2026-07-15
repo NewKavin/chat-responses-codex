@@ -131,6 +131,7 @@ fn create_test_state() -> AppState {
                 total_tokens: 30,
                 latency_ms: 100,
                 created_at: now - 60,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-2".to_string(),
@@ -153,6 +154,7 @@ fn create_test_state() -> AppState {
                 total_tokens: 50,
                 latency_ms: 200,
                 created_at: now - 120,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-3".to_string(),
@@ -175,6 +177,7 @@ fn create_test_state() -> AppState {
                 total_tokens: 0,
                 latency_ms: 300,
                 created_at: now - 180,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-4".to_string(),
@@ -197,6 +200,7 @@ fn create_test_state() -> AppState {
                 total_tokens: 0,
                 latency_ms: 400,
                 created_at: now - 240,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-5".to_string(),
@@ -219,6 +223,7 @@ fn create_test_state() -> AppState {
                 total_tokens: 2,
                 latency_ms: 50,
                 created_at: seven_days_ago - 60,
+                compatibility: None,
             },
         ],
         announcement: None,
@@ -345,7 +350,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
     let downstream_alpha = generate_downstream_key("alpha");
     let downstream_beta = generate_downstream_key("beta");
     let now = chat_responses_codex::state::unix_seconds();
-    let seven_days_ago = now.saturating_sub(7 * 24 * 60 * 60);
+    let _seven_days_ago = now.saturating_sub(7 * 24 * 60 * 60);
 
     let state = PersistedState {
         upstreams: vec![
@@ -434,6 +439,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 total_tokens: 30,
                 latency_ms: 100,
                 created_at: now - 60,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-2".to_string(),
@@ -456,6 +462,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 total_tokens: 50,
                 latency_ms: 200,
                 created_at: now - 120,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-3".to_string(),
@@ -478,6 +485,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 total_tokens: 70,
                 latency_ms: 150,
                 created_at: now - 180,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-4".to_string(),
@@ -500,6 +508,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 total_tokens: 50,
                 latency_ms: 175,
                 created_at: now - 240,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-5".to_string(),
@@ -522,6 +531,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 total_tokens: 30,
                 latency_ms: 210,
                 created_at: now - 300,
+                compatibility: None,
             },
         ],
         announcement: None,

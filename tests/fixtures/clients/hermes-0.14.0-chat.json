@@ -1,0 +1,34 @@
+{
+  "_fixture_metadata": {
+    "client": "hermes",
+    "version": "0.14.0",
+    "source_commit": "43e566f77eaf01293086eb7cb99a21e240d60634",
+    "captured_at": "2026-07-10",
+    "sanitized": true
+  },
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "header_names": ["authorization", "content-type", "user-agent"],
+  "body": {
+    "model": "synthetic-model",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "synthetic matrix request"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "gateway_matrix_probe",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "nonce": {"type": "string"}
+            },
+            "required": ["nonce"]
+          }
+        }
+      }
+    ]
+  }
+}

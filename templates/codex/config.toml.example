@@ -1,10 +1,10 @@
 # Point Codex at the gateway, not at the upstream vendors directly.
-# `model` and `review_model` must match the slugs in model-catalog.json exactly.
+# `model` and `review_model` must match the selected exposed slug exactly.
 # Keep model-catalog.json next to this file; Codex resolves the path relative to ~/.codex/config.toml.
-# Use the exact live upstream IDs returned by `/v1/models`.
+# Render the live catalog from `/v1/models?client_version=0.144.0` before use.
 model_provider = "gateway"
-model = "ZhipuAI/GLM-5"
-review_model = "ZhipuAI/GLM-5"
+model = "<model_slug>"
+review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
@@ -15,9 +15,10 @@ tool_suggest = true
 
 [model_providers.gateway]
 name = "chat-responses-codex"
-base_url = "http://gateway-host:3001/v1"
+base_url = "<gateway_url>/v1"
 wire_api = "responses"
 requires_openai_auth = true
+web_search = "disabled"
 
 # If a skill still triggers an install prompt, the missing MCP server is declared
 # by that skill itself. Add it to your global Codex MCP config, then restart Codex.

@@ -121,10 +121,12 @@ fn legacy_strip_flag_cannot_remove_required_continuation_state() {
 
 #[test]
 fn capability_all_and_messages_baseline_are_complete_and_conservative() {
+    assert_eq!(DIALECT_PROBE_SCHEMA_VERSION, 10);
     assert_eq!(
         Capability::ALL,
         [
             Capability::TextInput,
+            Capability::NonStreamingResponse,
             Capability::ImageHttps,
             Capability::ImageDataUrl,
             Capability::ImageDetail,
@@ -155,6 +157,7 @@ fn capability_all_and_messages_baseline_are_complete_and_conservative() {
     assert_eq!(resolved.values.len(), Capability::ALL.len());
     let baseline_supported = BTreeSet::from([
         Capability::TextInput,
+        Capability::NonStreamingResponse,
         Capability::FunctionTools,
         Capability::ForcedToolChoice,
         Capability::ToolContinuation,

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   buildTroubleshootingCopySummary,
   getFallbackStageLabel,
+  getMatrixCheckStatusMeta,
   getActiveRequestHealth,
   getClientProfileDefaults,
+  matrixClientProfiles,
   getTroubleshootingStatusMeta,
   getTroubleshootingSuggestion
 } from '../../src/utils/troubleshooting'
@@ -87,5 +89,16 @@ describe('troubleshooting utils', () => {
     expect(getFallbackStageLabel('tool_replay_reduction')).toBe('工具重放缩减')
     expect(getFallbackStageLabel('history_compaction')).toBe('历史压缩')
     expect(getFallbackStageLabel(undefined)).toBe('原生')
+  })
+
+  it('uses codex, opencode, claude_code, and hermes as default matrix profiles', () => {
+    expect(matrixClientProfiles).toEqual(['codex', 'opencode', 'claude_code', 'hermes'])
+  })
+
+  it('renders permitted optional downgrades as warnings instead of passed checks', () => {
+    expect(getMatrixCheckStatusMeta({ id: 'optional_downgrades', passed: true })).toEqual({
+      label: '警告',
+      type: 'warning'
+    })
   })
 })

@@ -57,6 +57,13 @@ pub fn verify_downstream_key(plaintext: &str, stored_hash: &str) -> bool {
         .into()
 }
 
+pub fn validated_downstream_plaintext<'a>(
+    stored_plaintext: Option<&'a str>,
+    stored_hash: &str,
+) -> Option<&'a str> {
+    stored_plaintext.filter(|plaintext| verify_downstream_key(plaintext, stored_hash))
+}
+
 fn legacy_digest(plaintext: &str, salt: &str) -> String {
     let mut hasher = DefaultHasher::new();
     salt.hash(&mut hasher);

@@ -1,4 +1,9 @@
 use super::*;
+use chat_responses_codex::capabilities::{
+    Capability, CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, DialectProfileKey,
+    DialectProfileState, EvidenceState, SemanticPolicy, UpstreamDialectProfile, WireProtocol,
+};
+use std::collections::BTreeMap;
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_limit_error_retries_once_with_reduced_max_tokens() {
@@ -511,6 +516,73 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
             state_path,
             AppConfig::default(),
         );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                revision: 1,
+                policies: vec![
+                    CapabilityPolicy {
+                        id: "source-effort".into(),
+                        priority: 10,
+                        selector: CapabilitySelector {
+                            upstream_id: Some("up-1".into()),
+                            runtime_model_glob: Some("MiniMax2.7".into()),
+                            protocol: Some(WireProtocol::ChatCompletions),
+                            ..Default::default()
+                        },
+                        semantic: SemanticPolicy {
+                            effort_map: BTreeMap::from([("high".into(), "source-maximum".into())]),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    CapabilityPolicy {
+                        id: "fallback-effort".into(),
+                        priority: 20,
+                        selector: CapabilitySelector {
+                            upstream_id: Some("up-1".into()),
+                            runtime_model_glob: Some("MiniMax2.7-Long".into()),
+                            protocol: Some(WireProtocol::ChatCompletions),
+                            ..Default::default()
+                        },
+                        semantic: SemanticPolicy {
+                            effort_map: BTreeMap::from([(
+                                "high".into(),
+                                "fallback-maximum".into(),
+                            )]),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let upstream = state.upstreams().await.into_iter().next().unwrap();
+        for (runtime_model, field, accepted) in [
+            ("MiniMax2.7", "source_effort", "source-maximum"),
+            ("MiniMax2.7-Long", "fallback_effort", "fallback-maximum"),
+        ] {
+            let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+                upstream_id: upstream.id.clone(),
+                runtime_model_slug: runtime_model.into(),
+                protocol: WireProtocol::ChatCompletions,
+            });
+            profile.state = DialectProfileState::Verified;
+            profile.configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    "MiniMax2.7",
+                    runtime_model,
+                    UpstreamProtocol::ChatCompletions,
+                )
+                .unwrap();
+            profile
+                .capabilities
+                .insert(Capability::TextInput, EvidenceState::Supported);
+            profile.reasoning_controls = BTreeMap::from([(field.into(), vec![accepted.into()])]);
+            state.upsert_dialect_profile(profile).await.unwrap();
+        }
 
         let oversized_prompt = "A".repeat(1800);
         let app = build_router(state);
@@ -528,6 +600,7 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
                         json!({
                             "model": "MiniMax2.7",
                             "max_tokens": 80,
+                            "reasoning_effort": "high",
                             "messages": [
                                 {"role": "user", "content": oversized_prompt}
                             ]
@@ -543,6 +616,9 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
         let captured = capture.lock().unwrap().clone();
         let request_body = captured.request_body.unwrap();
         assert_eq!(request_body["model"], "MiniMax2.7-Long");
+        assert_eq!(request_body["fallback_effort"], "fallback-maximum");
+        assert!(request_body.get("source_effort").is_none());
+        assert!(request_body.get("reasoning_effort").is_none());
     })
     .await;
 }

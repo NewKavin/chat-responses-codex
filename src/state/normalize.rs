@@ -118,9 +118,7 @@ pub(super) fn normalized_model_contexts(
 pub(super) fn normalized_default_model_context(
     value: Option<DefaultModelContextConfig>,
 ) -> Option<DefaultModelContextConfig> {
-    let Some(context) = value else {
-        return None;
-    };
+    let context = value?;
     if context.context_limit == 0 {
         return None;
     }

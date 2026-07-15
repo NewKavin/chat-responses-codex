@@ -3,6 +3,10 @@ use axum::http::{header, Request, StatusCode};
 use axum::routing::post;
 use axum::Router;
 use bytes::Bytes;
+use chat_responses_codex::capabilities::{
+    Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
+    WireProtocol,
+};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
@@ -39,6 +43,21 @@ struct FirstEventBaseline {
     image_gateway_added_p95_ms: i64,
     direct_requests: usize,
     gateway_requests: usize,
+}
+
+#[derive(Debug)]
+struct LatencyComparison {
+    direct_ms: Vec<u64>,
+    gateway_ms: Vec<u64>,
+}
+
+impl LatencyComparison {
+    fn gateway_added_p95_ms(&mut self) -> i64 {
+        self.direct_ms.sort_unstable();
+        self.gateway_ms.sort_unstable();
+        let index = (self.gateway_ms.len() * 95 / 100).min(self.gateway_ms.len() - 1);
+        self.gateway_ms[index] as i64 - self.direct_ms[index] as i64
+    }
 }
 
 fn percentile(values: &mut [u64], percentile: usize) -> u64 {
@@ -228,7 +247,18 @@ async fn gateway_first_meaningful_event_latency(
     let operation = async move {
         let started = Instant::now();
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        if response.status() != StatusCode::OK {
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            panic!(
+                "gateway first-event request failed: round={} path={} request_index={} status={} body={}",
+                context.round.as_str(),
+                context.path.as_str(),
+                context.request_index,
+                status,
+                String::from_utf8_lossy(&body),
+            );
+        }
 
         let mut body = response.into_body();
         let mut buffer = Vec::new();
@@ -338,6 +368,28 @@ fn responses_request_body(image_url: Option<&str>) -> String {
         })
         .to_string(),
     }
+}
+
+async fn stamp_load_profile(state: &AppState, profile: &mut UpstreamDialectProfile) {
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == profile.key.upstream_id)
+        .expect("load-test upstream must exist");
+    let protocol = match profile.key.protocol {
+        WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
+        WireProtocol::Responses => UpstreamProtocol::Responses,
+        WireProtocol::Messages => panic!("Messages is not an upstream protocol"),
+    };
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            upstream,
+            &profile.key.runtime_model_slug,
+            &profile.key.runtime_model_slug,
+            protocol,
+        )
+        .unwrap();
 }
 
 #[test]
@@ -701,6 +753,23 @@ async fn load_gateway_first_meaningful_event_baseline() {
         state_path,
         AppConfig::default(),
     );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "gpt-4.1-mini".into(),
+        protocol: WireProtocol::Responses,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [
+        Capability::TextInput,
+        Capability::TextStream,
+        Capability::ImageDataUrl,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_load_profile(&state, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
     let app = build_router(state);
     let direct_client = reqwest::Client::builder()
         .pool_max_idle_per_host(CONCURRENCY)
@@ -784,4 +853,190 @@ async fn load_gateway_first_meaningful_event_baseline() {
         }
         std::fs::write(path, serde_json::to_vec_pretty(&baseline).unwrap()).unwrap();
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn load_gateway_first_meaningful_event() {
+    const TOTAL_REQUESTS: usize = 100;
+    const CONCURRENCY: usize = 20;
+
+    let baseline: FirstEventBaseline = serde_json::from_slice(include_bytes!(
+        "../docs/verification/2026-07-10-agent-protocol-baseline.json"
+    ))
+    .unwrap();
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_hits_clone = upstream_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let upstream_hits_clone = upstream_hits_clone.clone();
+            async move {
+                upstream_hits_clone.fetch_add(1, Ordering::SeqCst);
+                let first_event = stream::once(async {
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+                    ))
+                });
+                let terminal_event = stream::once(async {
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"))
+                });
+
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(first_event.chain(terminal_event)),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{upstream_addr}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                request_quota_window_hours: 5,
+                request_quota_requests: 10_000,
+                requests_per_minute: 10_000,
+                max_concurrency: TOTAL_REQUESTS as u32,
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 10_000,
+                rate_limit_enabled: true,
+                max_concurrency: TOTAL_REQUESTS as u32,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "gpt-4.1-mini".into(),
+        protocol: WireProtocol::Responses,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [
+        Capability::TextInput,
+        Capability::TextStream,
+        Capability::ImageDataUrl,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_load_profile(&state, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+    let app = build_router(state);
+    let direct_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(CONCURRENCY)
+        .build()
+        .unwrap();
+    let direct_url = format!("http://{upstream_addr}/v1/responses");
+
+    let text_request_body = responses_request_body(None);
+    let image_request_body = responses_request_body(Some(INLINE_IMAGE_BASELINE));
+
+    let mut comparison = LatencyComparison {
+        direct_ms: run_direct_first_event_round(
+            direct_client.clone(),
+            direct_url.clone(),
+            text_request_body.clone(),
+            BaselineRound::Text,
+            TOTAL_REQUESTS,
+            CONCURRENCY,
+        )
+        .await,
+        gateway_ms: run_gateway_first_event_round(
+            app.clone(),
+            downstream_key.plaintext.clone(),
+            text_request_body,
+            BaselineRound::Text,
+            TOTAL_REQUESTS,
+            CONCURRENCY,
+        )
+        .await,
+    };
+    println!(
+        "text first-event comparison: direct_p95_ms={} gateway_p95_ms={} gateway_added_p95_ms={}",
+        percentile(&mut comparison.direct_ms.clone(), 95),
+        percentile(&mut comparison.gateway_ms.clone(), 95),
+        comparison.gateway_added_p95_ms(),
+    );
+    assert!(
+        comparison.gateway_added_p95_ms() < 50,
+        "gateway-added first meaningful event P95 must remain below 50 ms"
+    );
+    assert!(
+        comparison.gateway_added_p95_ms() <= baseline.gateway_added_p95_ms + 10,
+        "gateway-added P95 regressed by more than the 10 ms measurement allowance"
+    );
+
+    let mut image_comparison = LatencyComparison {
+        direct_ms: run_direct_first_event_round(
+            direct_client,
+            direct_url,
+            image_request_body.clone(),
+            BaselineRound::Image,
+            TOTAL_REQUESTS,
+            CONCURRENCY,
+        )
+        .await,
+        gateway_ms: run_gateway_first_event_round(
+            app,
+            downstream_key.plaintext,
+            image_request_body,
+            BaselineRound::Image,
+            TOTAL_REQUESTS,
+            CONCURRENCY,
+        )
+        .await,
+    };
+    println!(
+        "image first-event comparison: direct_p95_ms={} gateway_p95_ms={} gateway_added_p95_ms={}",
+        percentile(&mut image_comparison.direct_ms.clone(), 95),
+        percentile(&mut image_comparison.gateway_ms.clone(), 95),
+        image_comparison.gateway_added_p95_ms(),
+    );
+    assert!(image_comparison.gateway_added_p95_ms() < 50);
+    assert!(image_comparison.gateway_added_p95_ms() <= baseline.image_gateway_added_p95_ms + 10);
+    assert_eq!(
+        upstream_hits.load(Ordering::SeqCst),
+        TOTAL_REQUESTS * 4,
+        "direct and gateway rounds must each make one healthy attempt"
+    );
 }

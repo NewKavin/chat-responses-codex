@@ -8,6 +8,7 @@ import {
   buildAnthropicCompatibleConfig,
   buildOpenAiCompatibleConfig,
   buildGatewayModelsEndpoint,
+  buildIntegrationCatalogViewState,
   buildModelUsageStats,
   buildHermesConfigYaml,
   buildOpenCodeConfig,
@@ -106,6 +107,35 @@ describe('integration config generators', () => {
     ).toEqual(['MiniMax/MiniMax-M2.7', 'Qwen/Qwen3'])
   })
 
+  it('withholds model selection and stats when the live catalog is unavailable or empty', () => {
+    const portalStats = [
+      {
+        model: 'stats-only-model',
+        today_count: 8,
+        month_count: 30,
+        today_tokens: 800,
+        month_tokens: 3000,
+        avg_latency_ms: 90,
+        success_rate: 0.99
+      }
+    ]
+
+    for (const catalog of [null, { models: [] }]) {
+      expect(
+        buildIntegrationCatalogViewState({
+          catalog,
+          modelAllowlist: [],
+          portalModelStats: portalStats
+        })
+      ).toEqual({
+        allModelSlugs: [],
+        primaryModelSlug: '',
+        sortedModelStats: [],
+        canGenerateConfigurationContent: false
+      })
+    }
+  })
+
   it('keeps upstream casing when stats contain lowercase aliases', () => {
     expect(
       buildModelUsageStats(
@@ -195,76 +225,63 @@ describe('integration config generators', () => {
     expect(yaml).not.toContain('key_env:')
   })
 
-  it('builds a codex model catalog from ranked slugs', () => {
-    const catalog = JSON.parse(
-      buildCodexModelCatalogJson(['MiniMax/MiniMax-M2.7', 'DeepSeek/DeepSeek-V3'])
-    )
-
-    expect(catalog.models).toHaveLength(2)
-    expect(catalog.models[0]).toMatchObject({
-      slug: 'MiniMax/MiniMax-M2.7',
-      display_name: 'MiniMax/MiniMax-M2.7',
-      priority: 0,
-      supports_search_tool: false
-    })
-    expect(catalog.models[1]).toMatchObject({
-      slug: 'DeepSeek/DeepSeek-V3',
-      display_name: 'DeepSeek/DeepSeek-V3',
-      priority: 1,
-      supports_search_tool: false
-    })
-  })
-
-  it('omits context_window when no per-model context limits are supplied', () => {
-    const catalog = JSON.parse(buildCodexModelCatalogJson(['MiniMax/MiniMax-M2.7']))
-    expect(catalog.models[0]).not.toHaveProperty('context_window')
-    expect(catalog.models[0]).not.toHaveProperty('auto_compact_token_limit')
-  })
-
-  it('writes per-model context_window from upstream-resolved limits', () => {
-    const catalog = JSON.parse(
-      buildCodexModelCatalogJson(
-        ['ZhipuAI/GLM-5', 'MiniMax/MiniMax-M2.7', 'unknown/model'],
+  it('uses the live Codex catalog without inventing capabilities', () => {
+    const live = {
+      models: [
         {
-          'ZhipuAI/GLM-5': { context_window: 128000, output_reserve: 16000 },
-          'MiniMax/MiniMax-M2.7': { context_window: 200000, output_reserve: 20000 }
+          slug: 'opaque',
+          input_modalities: ['text', 'image'],
+          supports_parallel_tool_calls: false,
+          apply_patch_tool_type: null
         }
-      )
-    )
+      ]
+    }
 
-    // GLM-5 picks up the explicit window.
-    expect(catalog.models[0]).toMatchObject({
-      slug: 'ZhipuAI/GLM-5',
-      context_window: 128000
-    })
-    // No auto_compact_token_limit field: let Codex apply its 90% default.
-    expect(catalog.models[0]).not.toHaveProperty('auto_compact_token_limit')
-
-    // MiniMax also configured.
-    expect(catalog.models[1]).toMatchObject({
-      slug: 'MiniMax/MiniMax-M2.7',
-      context_window: 200000
-    })
-
-    // Unknown model has no upstream context info -> field omitted.
-    expect(catalog.models[2].slug).toBe('unknown/model')
-    expect(catalog.models[2]).not.toHaveProperty('context_window')
+    const emitted = JSON.parse(buildCodexModelCatalogJson(live as never))
+    expect(emitted).toEqual(live)
   })
 
-  it('skips invalid or non-positive context_window entries', () => {
-    const catalog = JSON.parse(
-      buildCodexModelCatalogJson(
-        ['a', 'b', 'c'],
-        {
-          a: { context_window: 0, output_reserve: 0 },
-          b: { context_window: -100, output_reserve: 0 } as never,
-          c: { context_window: 64000, output_reserve: 0 }
-        }
-      )
+  it('fails catalog generation when the live catalog is unavailable', () => {
+    expect(() => buildCodexModelCatalogJson(undefined as never)).toThrow(
+      'live Codex catalog is unavailable'
     )
-    expect(catalog.models[0]).not.toHaveProperty('context_window')
-    expect(catalog.models[1]).not.toHaveProperty('context_window')
-    expect(catalog.models[2].context_window).toBe(64000)
+  })
+
+  it('fails catalog generation when the live catalog has no models', () => {
+    expect(() => buildCodexModelCatalogJson({ models: [] })).toThrow(
+      'live Codex catalog is empty'
+    )
+  })
+
+  it('rejects legacy model slug arrays instead of inventing Codex capabilities', () => {
+    expect(() => buildCodexModelCatalogJson(['opaque/model'] as never)).toThrow(
+      'live Codex catalog is unavailable'
+    )
+  })
+
+  it('generates a Codex provider with hosted web search disabled', () => {
+    const config = buildCodexConfigToml({
+      gatewayBaseUrl: 'https://gw.example',
+      modelSlug: 'opaque'
+    })
+
+    expect(config).toContain('web_search = "disabled"')
+    expect(config).toContain('wire_api = "responses"')
+  })
+
+  it('maps every Claude Code alias to an arbitrary selected gateway slug', () => {
+    const settings = JSON.parse(
+      buildClaudeCodeSettingsJson({
+        gatewayBaseUrl: 'https://gw.example',
+        portalKey: 'downstream-key',
+        modelSlugs: ['lab/opaque'],
+        selectedModelSlug: 'lab/opaque'
+      })
+    )
+
+    expect(settings.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('lab/opaque')
+    expect(settings.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('lab/opaque')
+    expect(settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('lab/opaque')
   })
 
   it('builds a codex login command that seeds auth.json', () => {
@@ -369,10 +386,3 @@ describe('integration config generators', () => {
   })
 
 })
-
-  it('advertises supports_reasoning_summaries=true so Codex sends reasoning.effort', () => {
-    const catalog = JSON.parse(
-      buildCodexModelCatalogJson(['ZhipuAI/GLM-5'])
-    )
-    expect(catalog.models[0].supports_reasoning_summaries).toBe(true)
-  })

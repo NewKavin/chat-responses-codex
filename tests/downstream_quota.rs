@@ -54,6 +54,7 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
                 total_tokens: 10,
                 latency_ms: 12,
                 created_at: now,
+                compatibility: None,
             }],
             global_context_profiles: std::collections::HashMap::new(),
             ..PersistedState::default()
@@ -127,6 +128,7 @@ async fn request_quota_usage_remaining_calculation() {
                     total_tokens: 20,
                     latency_ms: 100,
                     created_at: now,
+                    compatibility: None,
                 })
                 .collect(),
             global_context_profiles: std::collections::HashMap::new(),
@@ -195,6 +197,7 @@ async fn request_quota_usage_remaining_when_exhausted() {
                     total_tokens: 20,
                     latency_ms: 100,
                     created_at: now,
+                    compatibility: None,
                 })
                 .collect(),
             global_context_profiles: std::collections::HashMap::new(),

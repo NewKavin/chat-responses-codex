@@ -10,3 +10,4 @@ frontend/.vite/
 data/
 logs/
 target/
+**/target/

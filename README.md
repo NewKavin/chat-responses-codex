@@ -229,7 +229,16 @@ flowchart LR
 - Cline → 门户集成页的 **Cline / OpenAI 兼容** preset（`baseURL` + `apiKey` + `model`）
 - OpenCode → 门户集成页的 **OpenCode** preset（`opencode.json`）
 - Claude Code → 门户集成页的 **Claude Code** preset（`settings.json`）
+- Hermes → `templates/hermes/config.yaml`（Chat Completions）
 - Anthropic 兼容客户端 → 门户集成页的 **Anthropic / Messages 兼容** preset（`baseURL` + `apiKey` + `model`）
+
+协议兼容由外部 capability policy 和精确路由 probe 驱动，不按模型名、厂商名或 hostname 写死。第三方和自部署 API 是主要目标：语义 policy 描述模型约束，probe profile 证明某个 upstream/runtime slug/protocol 的实际 wire 能力。网关按 `preserve -> adapt -> bounded downgrade -> reject` 处理请求，不支持的必需能力会在上游调度前失败。
+
+管理端的排障中心支持 capability JSON 导入/导出、精确 profile 查看、手动 probe，以及 Codex/OpenCode/Claude Code/Hermes 四客户端语义矩阵。详见：
+
+- [协议兼容与成熟度](docs/PROTOCOL_COMPATIBILITY.md)
+- [可替换 capability 模板](templates/capabilities/current-deployment.example.json)
+- [部署和验收](DEPLOYMENT.md)
 
 ### Codex 集成
 
@@ -242,6 +251,7 @@ flowchart LR
 如果你想看手工步骤，再看：
 
 - [docs/codex-integration-guide.md](docs/codex-integration-guide.md)
+- [docs/PROTOCOL_COMPATIBILITY.md](docs/PROTOCOL_COMPATIBILITY.md)
 
 那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>` 和 `<model_slug>`，按步骤替换即可。Codex 的 `model_catalog_json` 示例也已经做成了同目录相对路径，复制到 `~/.codex/` 后不需要再手工改路径。
 

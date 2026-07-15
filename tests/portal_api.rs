@@ -90,6 +90,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 total_tokens: 150,
                 latency_ms: 500,
                 created_at: now - 3600,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-2".to_string(),
@@ -112,6 +113,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 total_tokens: 75,
                 latency_ms: 300,
                 created_at: now - 7200,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-3".to_string(),
@@ -134,6 +136,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 total_tokens: 100,
                 latency_ms: 200,
                 created_at: now - 1800,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-4".to_string(),
@@ -156,6 +159,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 total_tokens: 15,
                 latency_ms: 120,
                 created_at: now - 900,
+                compatibility: None,
             },
         ],
         announcement: None,
@@ -218,6 +222,7 @@ fn create_test_state() -> (AppState, String) {
                 total_tokens: 150,
                 latency_ms: 500,
                 created_at: now - 3600,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-2".to_string(),
@@ -240,6 +245,7 @@ fn create_test_state() -> (AppState, String) {
                 total_tokens: 75,
                 latency_ms: 300,
                 created_at: now - 7200,
+                compatibility: None,
             },
         ],
         announcement: None,
@@ -298,6 +304,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 total_tokens: 100,
                 latency_ms: 200,
                 created_at: now - 600,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-b".to_string(),
@@ -320,6 +327,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 total_tokens: 120,
                 latency_ms: 210,
                 created_at: now - 300,
+                compatibility: None,
             },
         ],
         announcement: None,
@@ -358,6 +366,7 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             total_tokens: 15,
             latency_ms: 120,
             created_at: now.saturating_sub(index as u64),
+            compatibility: None,
         })
         .collect::<Vec<_>>();
 

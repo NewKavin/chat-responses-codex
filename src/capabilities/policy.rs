@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use super::types::{
     AgentClientProfile, Capability, CapabilityConfiguration, CapabilityPolicy, CapabilitySelector,
-    CompatibilityExpectation, DeclarativeProbeCase, HttpsImageFixture, RouteCapabilityOverride,
-    RouteIdentity, SemanticPolicy,
+    CompatibilityExpectation, DeclarativeProbeCase, HttpsImageFixture, ProbeCandidates,
+    RouteCapabilityOverride, RouteIdentity, SemanticPolicy,
 };
 use super::{
     CAPABILITY_SCHEMA_VERSION, MAX_CAPABILITY_COLLECTION_ENTRIES,
@@ -66,6 +66,8 @@ pub enum CapabilityPolicyError {
         "invalid HTTPS fixture for {id}: URL must use HTTPS and expected label must be non-empty"
     )]
     InvalidHttpsFixture { id: String },
+    #[error("sensitive URL is not permitted in capability configuration")]
+    SensitiveUrl,
     #[error("invalid bounded response predicate path {path} in extension case {id}")]
     InvalidBoundedResponsePredicatePath { id: String, path: String },
     #[error("extension case over 16384 serialized bytes: {id} is at least {size} bytes")]
@@ -437,6 +439,35 @@ impl CompiledCapabilityConfiguration {
             .collect()
     }
 
+    pub fn probe_candidates_for(&self, route: &RouteIdentity) -> ProbeCandidates {
+        let mut candidates = ProbeCandidates::default();
+        for policy in self.matching_policies(route) {
+            let source = &self.source.policies[policy.source_index].probe_candidates;
+            for &field in &source.token_limit_fields {
+                if !candidates.token_limit_fields.contains(&field) {
+                    candidates.token_limit_fields.push(field);
+                }
+            }
+            for (field, values) in &source.reasoning_controls {
+                let accepted = candidates
+                    .reasoning_controls
+                    .entry(field.clone())
+                    .or_default();
+                for value in values {
+                    if !accepted.contains(value) {
+                        accepted.push(value.clone());
+                    }
+                }
+            }
+            for &carrier in &source.reasoning_carriers {
+                if !candidates.reasoning_carriers.contains(&carrier) {
+                    candidates.reasoning_carriers.push(carrier);
+                }
+            }
+        }
+        candidates
+    }
+
     pub fn policy_ids_for(&self, route: &RouteIdentity) -> Vec<&str> {
         self.matching_policies(route)
             .map(|policy| self.source.policies[policy.source_index].id.as_str())
@@ -623,6 +654,13 @@ fn validate_fixtures(configuration: &CapabilityConfiguration) -> Result<(), Capa
             validate_fixture(&expectation.id, fixture)?;
         }
     }
+    for evidence in configuration
+        .policies
+        .iter()
+        .flat_map(|policy| policy.evidence.iter())
+    {
+        validate_public_url(&evidence.url)?;
+    }
     Ok(())
 }
 
@@ -633,6 +671,92 @@ fn validate_fixture(id: &str, fixture: &HttpsImageFixture) -> Result<(), Capabil
         .is_some();
     if !valid_url || fixture.expected_label.trim().is_empty() {
         return Err(CapabilityPolicyError::InvalidHttpsFixture { id: id.to_owned() });
+    }
+    validate_public_url(&fixture.url)?;
+    Ok(())
+}
+
+pub fn is_sensitive_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return true;
+    }
+    url.query_pairs()
+        .any(|(key, _)| is_sensitive_url_query_key(&key))
+}
+
+pub fn sanitize_sensitive_urls(configuration: &mut CapabilityConfiguration) -> bool {
+    let mut changed = sanitize_fixture_url(configuration.probe.https_image_fixture.as_mut());
+    for expectation in &mut configuration.compatibility_expectations {
+        changed |= sanitize_fixture_url(expectation.https_image_fixture.as_mut());
+    }
+    for policy in &mut configuration.policies {
+        for evidence in &mut policy.evidence {
+            changed |= sanitize_url(&mut evidence.url);
+        }
+        for extension in &mut policy.extension_probes {
+            changed |= sanitize_json_urls(&mut extension.request_patch);
+        }
+    }
+    changed
+}
+
+fn sanitize_fixture_url(fixture: Option<&mut HttpsImageFixture>) -> bool {
+    fixture
+        .map(|fixture| sanitize_url(&mut fixture.url))
+        .unwrap_or(false)
+}
+
+fn sanitize_url(value: &mut String) -> bool {
+    if !is_sensitive_url(value) {
+        return false;
+    }
+    *value = "https://redacted.invalid/".into();
+    true
+}
+
+fn sanitize_json_urls(value: &mut Value) -> bool {
+    match value {
+        Value::Object(object) => object
+            .values_mut()
+            .fold(false, |changed, value| sanitize_json_urls(value) | changed),
+        Value::Array(values) => values
+            .iter_mut()
+            .fold(false, |changed, value| sanitize_json_urls(value) | changed),
+        Value::String(value) => sanitize_url(value),
+        _ => false,
+    }
+}
+
+fn is_sensitive_url_query_key(key: &str) -> bool {
+    let normalized = key
+        .bytes()
+        .filter_map(|byte| {
+            byte.is_ascii_alphanumeric()
+                .then_some(byte.to_ascii_lowercase())
+        })
+        .collect::<Vec<_>>();
+    let normalized = String::from_utf8_lossy(&normalized);
+    [
+        "token",
+        "key",
+        "secret",
+        "signature",
+        "sig",
+        "credential",
+        "password",
+        "passwd",
+        "auth",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term))
+}
+
+fn validate_public_url(value: &str) -> Result<(), CapabilityPolicyError> {
+    if is_sensitive_url(value) {
+        return Err(CapabilityPolicyError::SensitiveUrl);
     }
     Ok(())
 }
@@ -693,6 +817,7 @@ fn validate_request_patch(
                 validate_request_patch(case, value, &path)?;
             }
         }
+        Value::String(value) => validate_public_url(value)?,
         _ => {}
     }
     Ok(())

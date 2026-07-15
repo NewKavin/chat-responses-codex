@@ -459,6 +459,9 @@ different routes. Requests using advertised capabilities are restricted to the
 witness route or another route with a compatible superset. A Responses
 continuation is pinned to the same dialect-profile identity unless an equivalent
 profile can preserve its reasoning and tool registry exactly.
+Until adapter semantics and tool-registry compatibility have a durable persisted
+equivalence identity, a missing or failed exact continuation profile fails closed;
+a capability superset alone never authorizes continuation failover.
 
 If no route is verified yet, the best active route becomes a provisional
 catalog witness and advertises only the conservative subset. The model remains
@@ -838,6 +841,62 @@ The load test records direct mock latency and gateway latency separately before
 and after the change in the same release build and environment. A bounded
 inline-image fixture is measured separately so text-only performance cannot hide
 an image-copying regression.
+
+## Stream-Only Upstream Delivery Adaptation
+
+Some third-party OpenAI-compatible routes accept text, reasoning, and function
+tools only when the request uses SSE. The same exact route can return HTTP 200
+with an empty JSON completion when `stream:false`. This is a wire-delivery
+property, not a model-family property.
+
+Add `NonStreamingResponse` to the generic route capability vocabulary. The
+minimal non-stream probe verifies usable output rather than HTTP status alone,
+while the existing stream probe independently verifies a meaningful delta and
+terminal event. A route with `NonStreamingResponse=Rejected` and
+`TextStream=Supported` uses an `SseAggregate` upstream attempt for a downstream
+JSON request. The same direct aggregate mode is allowed when non-stream evidence
+is unobserved but `TextStream=Supported` comes from a probe or exact override;
+baseline stream assumptions are not sufficient evidence. The downstream still
+receives the endpoint's ordinary JSON schema, so Codex, OpenCode, Claude Code,
+and Hermes share one adapter.
+
+The attempt modes are explicit:
+
+- `Json`: request JSON and return JSON
+- `SsePassThrough`: request SSE and forward/translate incrementally
+- `SseAggregate`: request SSE, accumulate the source protocol, then perform the
+  existing JSON protocol conversion
+
+`SseAggregate` is allowed only for a non-stream downstream request. It must
+never delay a downstream streaming request or change the first-event latency
+contract above. It is recorded as the `stream_to_json` adapter and is not a
+semantic downgrade.
+
+When route evidence is still unknown, an empty JSON success can trigger one
+same-route SSE recovery only when usage explicitly reports zero output tokens,
+no content/reasoning/tool call exists, no stateful continuation is present, and
+no hosted/computer tool can execute upstream. Missing usage is not zero. A
+successful recovery atomically merges exact-route evidence under the capability
+update lock; a failed recovery does not alter the profile. The route
+configuration fingerprint and probe schema version invalidate learned evidence.
+A bounded per-route singleflight elects one unknown-route recovery leader;
+followers wait before making their first upstream attempt, then re-read the
+profile and use the learned single-attempt mode. This cold-start serialization
+is exact-route only and never applies after conclusive evidence exists.
+
+Chat accumulation is indexed by choice and tool-call index and preserves text,
+refusal, `reasoning_content`, legacy function calls, fragmented function names
+and arguments, finish reasons, log probabilities, usage-only tail chunks, IDs,
+model, timestamps, service tier, and system fingerprint. Responses accumulation
+uses the complete response object from `response.completed` or
+`response.incomplete`. Error/failed events and incomplete transport termination
+remain upstream failures; partial output is never promoted to JSON success.
+
+The SSE decoder accepts LF and CRLF delimiters, `data:` with or without a space,
+multiple data lines, comments, arbitrary network chunk boundaries, and a final
+EOF frame. Aggregation reuses the stream idle/max-duration watchdog, enforces
+bounded frame and total bytes, and leaves upstream/downstream slot release to
+the existing RAII guards.
 
 ## Testing Strategy
 

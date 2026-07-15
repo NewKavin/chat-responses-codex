@@ -528,18 +528,31 @@ mod tests {
             name: "Primary Upstream".into(),
             base_url: "https://upstream.example.com".into(),
             api_key: "up-key".into(),
+            api_keys: vec![],
+            api_key_models: vec![],
             protocol: UpstreamProtocol::Responses,
+            protocols: vec![UpstreamProtocol::Responses],
             supported_models: vec!["glm-5".into()],
+            model_contexts: vec![],
+            default_model_context: None,
             request_quota_window_hours: 5,
             request_quota_requests: 11,
             requests_per_minute: 22,
             max_concurrency: 33,
             model_request_costs: vec![ModelRequestCostConfig {
                 slug: "glm-5".into(),
-                cost: 2,
+                cost: 2.0,
             }],
+            priority: 0,
+            premium_models: vec![],
+            premium_only: false,
+            protect_premium_quota: false,
             active: false,
             failure_count: 0,
+            auto_managed: false,
+            managed_source: None,
+            last_synced_at: 0,
+            strip_nonstandard_chat_fields: false,
         }
     }
 
@@ -549,6 +562,7 @@ mod tests {
             name: "Portal Client".into(),
             hash: "hash".into(),
             plaintext_key: Some("secret-key".into()),
+            plaintext_key_prefix: None,
             model_allowlist: vec!["glm-5".into(), "glm-5.1".into()],
             per_minute_limit: 120,
             rate_limit_enabled: true,
@@ -620,7 +634,7 @@ mod tests {
         assert_eq!(view.model_request_costs, "glm-5=2");
 
         let updated = view.with_fetched_models("GLM-5,GLM-5.1".into());
-        assert_eq!(updated.models, "glm-5,glm-5.1");
+        assert_eq!(updated.models, "GLM-5,GLM-5.1");
     }
 
     #[test]

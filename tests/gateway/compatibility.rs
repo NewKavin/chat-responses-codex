@@ -150,7 +150,23 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
         .insert(Capability::ImageHttps, EvidenceState::Supported);
     witness
         .capabilities
+        .insert(Capability::ImageDataUrl, EvidenceState::Supported);
+    witness
+        .capabilities
         .insert(Capability::ParallelToolCalls, EvidenceState::Supported);
+    let configured_upstreams = state.snapshot().await.upstreams;
+    let witness_upstream = configured_upstreams
+        .iter()
+        .find(|upstream| upstream.id == "priority-low")
+        .unwrap();
+    witness.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            witness_upstream,
+            model_slug,
+            model_slug,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
     state.upsert_dialect_profile(witness).await.unwrap();
 
     let weaker_key = DialectProfileKey {
@@ -166,6 +182,18 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     weaker
         .capabilities
         .insert(Capability::TextStream, EvidenceState::Supported);
+    let weaker_upstream = configured_upstreams
+        .iter()
+        .find(|upstream| upstream.id == "priority-high")
+        .unwrap();
+    weaker.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            weaker_upstream,
+            model_slug,
+            model_slug,
+            UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
     state.upsert_dialect_profile(weaker).await.unwrap();
 
     let app = build_router(state);
@@ -194,16 +222,12 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["shell_type"], "shell_command");
     assert_eq!(model["visibility"], "list");
     assert!(model["apply_patch_tool_type"].is_null());
-    assert_eq!(model["supports_reasoning_summaries"], true);
-    assert_eq!(model["default_reasoning_level"], "high");
+    assert_eq!(model["supports_reasoning_summaries"], false);
+    assert!(model["default_reasoning_level"].is_null());
     let levels = model["supported_reasoning_levels"]
         .as_array()
         .expect("supported_reasoning_levels array");
-    let efforts: Vec<&str> = levels
-        .iter()
-        .map(|v| v["effort"].as_str().unwrap())
-        .collect();
-    assert_eq!(efforts, ["low", "medium", "high", "xhigh"]);
+    assert!(levels.is_empty());
     assert_eq!(model["default_reasoning_summary"], "auto");
     assert_eq!(model["support_verbosity"], false);
     assert_eq!(model["supports_parallel_tool_calls"], true);
@@ -214,7 +238,13 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["truncation_policy"]["limit"], 10_000);
     assert_eq!(model["experimental_supported_tools"], json!([]));
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
-    assert_eq!(model["web_search_tool_type"], Value::Null);
-    assert_eq!(model["gateway_catalog_witness"]["upstream_id"], "priority-low");
-    assert_eq!(model["gateway_catalog_witness"]["profile_state"], "verified");
+    assert_eq!(model["web_search_tool_type"], "text");
+    assert_eq!(
+        model["gateway_catalog_witness"]["upstream_id"],
+        "priority-low"
+    );
+    assert_eq!(
+        model["gateway_catalog_witness"]["profile_state"],
+        "verified"
+    );
 }

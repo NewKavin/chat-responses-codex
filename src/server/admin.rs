@@ -260,8 +260,8 @@ pub(super) async fn admin_dashboard(
     }
 
     for bucket in &mut daily_series {
-        if bucket.requests > 0 {
-            bucket.avg_latency_ms /= bucket.requests;
+        if let Some(avg_latency_ms) = bucket.avg_latency_ms.checked_div(bucket.requests) {
+            bucket.avg_latency_ms = avg_latency_ms;
             bucket.success_rate = (bucket.success_rate / bucket.requests as f64) * 100.0;
         }
     }
@@ -322,11 +322,9 @@ pub(super) async fn admin_dashboard(
             } else {
                 0.0
             },
-            average_latency_ms: if total_requests > 0 {
-                total_latency / total_requests
-            } else {
-                0
-            },
+            average_latency_ms: total_latency
+                .checked_div(total_requests.max(1))
+                .unwrap_or(0),
             total_tokens,
         },
         daily_series,

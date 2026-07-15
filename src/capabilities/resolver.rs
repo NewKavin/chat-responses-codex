@@ -3,10 +3,10 @@ use std::error::Error;
 use std::fmt;
 
 use super::types::{
-    Capability, CapabilitySource, DeclarativeProbeCase, DialectProfileKey, DialectProfileState,
-    EvidenceState, ReasoningCarrier, ReasoningMode, RequestedFeatures, ResolvedCapabilities,
-    ResolvedCapability, ResolvedRequestExtension, RouteCapabilityOverride, RouteIdentity,
-    SemanticPolicy, TokenLimitField, UpstreamDialectProfile, WireProtocol,
+    Capability, CapabilitySource, DeclarativeProbeCase, DialectCorrectionRule, DialectProfileKey,
+    DialectProfileState, EvidenceState, ReasoningCarrier, ReasoningMode, RequestedFeatures,
+    ResolvedCapabilities, ResolvedCapability, ResolvedRequestExtension, RouteCapabilityOverride,
+    RouteIdentity, SemanticPolicy, TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 
 static EMPTY_SEMANTIC_POLICY: SemanticPolicy = SemanticPolicy {
@@ -125,6 +125,7 @@ impl CapabilityResolver {
         validate_required_capabilities(&input, &values, reasoning_carrier)?;
 
         let (token_limit_field, token_limit_source) = resolve_token_limit_field(&input);
+        let correction_rules = resolve_correction_rules(&input);
         let (reasoning_control_field, effort_map) = resolve_effort_control(&input);
         let effort_source = if effort_map.is_empty() {
             CapabilitySource::Baseline
@@ -170,6 +171,7 @@ impl CapabilityResolver {
             token_limit_field,
             reasoning_mode,
             reasoning_carrier,
+            correction_rules,
             reasoning_control_field,
             effort_map,
             omit_sampling_fields: input.semantic.omit_sampling_fields.clone(),
@@ -192,6 +194,19 @@ impl CapabilityResolver {
     }
 }
 
+fn resolve_correction_rules(input: &ResolutionInput<'_>) -> Vec<DialectCorrectionRule> {
+    let mut rules = input
+        .profile
+        .map(|profile| profile.correction_rules.clone())
+        .unwrap_or_default();
+    for route_override in input.route_overrides {
+        if !route_override.correction_rules.is_empty() {
+            rules = route_override.correction_rules.clone();
+        }
+    }
+    rules
+}
+
 fn baseline_capabilities() -> BTreeMap<Capability, ResolvedCapability> {
     Capability::ALL
         .into_iter()
@@ -199,6 +214,7 @@ fn baseline_capabilities() -> BTreeMap<Capability, ResolvedCapability> {
             let state = if matches!(
                 capability,
                 Capability::TextInput
+                    | Capability::NonStreamingResponse
                     | Capability::TextStream
                     | Capability::FunctionTools
                     | Capability::ForcedToolChoice

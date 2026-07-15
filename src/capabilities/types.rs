@@ -26,6 +26,7 @@ impl From<crate::routing::UpstreamProtocol> for WireProtocol {
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     TextInput,
+    NonStreamingResponse,
     ImageHttps,
     ImageDataUrl,
     ImageDetail,
@@ -47,8 +48,9 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::TextInput,
+        Self::NonStreamingResponse,
         Self::ImageHttps,
         Self::ImageDataUrl,
         Self::ImageDetail,
@@ -96,6 +98,17 @@ pub enum TokenLimitField {
     Omit,
 }
 
+impl TokenLimitField {
+    pub fn request_field(self) -> Option<&'static str> {
+        match self {
+            Self::MaxTokens => Some("max_tokens"),
+            Self::MaxCompletionTokens => Some("max_completion_tokens"),
+            Self::MaxOutputTokens => Some("max_output_tokens"),
+            Self::Omit => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningMode {
@@ -132,6 +145,41 @@ pub enum DialectCorrectionRule {
     RemoveOptionalField {
         field: String,
     },
+}
+
+impl DialectCorrectionRule {
+    pub fn is_safe(&self) -> bool {
+        match self {
+            Self::SwitchTokenLimit {
+                rejected,
+                replacement,
+            } => {
+                rejected != replacement
+                    && rejected.request_field().is_some()
+                    && replacement.request_field().is_some()
+            }
+            Self::RemoveOptionalField { field } => matches!(
+                field.as_str(),
+                "service_tier"
+                    | "safety_identifier"
+                    | "prompt_cache_key"
+                    | "prompt_cache_retention"
+                    | "client_metadata"
+                    | "verbosity"
+                    | "parallel_tool_calls"
+                    | "stream_options"
+            ),
+        }
+    }
+
+    pub fn matches_rejected_field(&self, rejected_field: &str) -> bool {
+        match self {
+            Self::SwitchTokenLimit { rejected, .. } => {
+                rejected.request_field() == Some(rejected_field)
+            }
+            Self::RemoveOptionalField { field } => field == rejected_field,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -507,6 +555,7 @@ pub struct ResolvedCapabilities {
     pub token_limit_field: TokenLimitField,
     pub reasoning_mode: ReasoningMode,
     pub reasoning_carrier: ReasoningCarrier,
+    pub correction_rules: Vec<DialectCorrectionRule>,
     pub reasoning_control_field: Option<String>,
     pub effort_map: BTreeMap<String, String>,
     pub omit_sampling_fields: BTreeSet<String>,

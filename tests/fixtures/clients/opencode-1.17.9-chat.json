@@ -1,0 +1,34 @@
+{
+  "_fixture_metadata": {
+    "client": "opencode",
+    "version": "1.17.9",
+    "source_commit": "5c23e88419c4743b9be42cea132f2fb1e6cb63ff",
+    "captured_at": "2026-07-10",
+    "sanitized": true
+  },
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "header_names": ["authorization", "content-type", "user-agent"],
+  "body": {
+    "model": "synthetic-model",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "synthetic matrix request"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "gateway_matrix_probe",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "nonce": {"type": "string"}
+            },
+            "required": ["nonce"]
+          }
+        }
+      }
+    ]
+  }
+}

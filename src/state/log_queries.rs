@@ -316,10 +316,7 @@ impl AppState {
             Vec::new()
         } else {
             let end = (start + page_size).min(total);
-            logs[start..end]
-                .iter()
-                .map(|log| enrich_usage_log(log))
-                .collect()
+            logs[start..end].iter().map(enrich_usage_log).collect()
         };
 
         Ok(UsageLogPage {

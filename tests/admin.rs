@@ -6,6 +6,9 @@ use serde_json::json;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+#[path = "admin_capabilities.rs"]
+mod admin_capabilities;
+
 #[tokio::test]
 async fn admin_login_returns_jwt_token() {
     let tempdir = tempdir().unwrap();

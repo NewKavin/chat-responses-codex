@@ -1,5 +1,149 @@
 use super::common::*;
+use chat_responses_codex::keys::generate_downstream_key as generate_argon2_downstream_key;
 use serde_json::json;
+
+#[tokio::test]
+async fn mismatched_stored_plaintext_is_rejected_across_gateway_auth_surfaces() {
+    let stored_plaintext = generate_argon2_downstream_key("stored").plaintext;
+    let authoritative_hash = generate_argon2_downstream_key("authoritative").hash;
+    let state = AppState::new(
+        PersistedState {
+            downstreams: vec![DownstreamConfig {
+                id: "down-mismatched".into(),
+                name: "mismatched".into(),
+                hash: authoritative_hash,
+                plaintext_key: Some(stored_plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir().unwrap().path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state);
+
+    let inference = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("Authorization", format!("Bearer {stored_plaintext}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"model": "gpt-4.1-mini"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inference.status(), StatusCode::UNAUTHORIZED);
+
+    let standard_catalog = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("Authorization", format!("Bearer {stored_plaintext}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(standard_catalog.status(), StatusCode::OK);
+    let standard_body: Value = serde_json::from_slice(
+        &to_bytes(standard_catalog.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(standard_body["data"], json!([]));
+
+    let codex_catalog = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models?client_version=0.62.0")
+                .header("Authorization", format!("Bearer {stored_plaintext}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(codex_catalog.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn rotated_hash_and_plaintext_replace_the_gateway_authentication_secret() {
+    let original = generate_argon2_downstream_key("original");
+    let state = AppState::new(
+        PersistedState {
+            downstreams: vec![DownstreamConfig {
+                id: "down-rotated".into(),
+                name: "rotated".into(),
+                hash: original.hash,
+                plaintext_key: Some(original.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir().unwrap().path().join("state.json"),
+        AppConfig::default(),
+    );
+    let rotated = generate_argon2_downstream_key("rotated");
+    let mut downstream = state.snapshot().await.downstreams.remove(0);
+    downstream.hash = rotated.hash;
+    downstream.plaintext_key = Some(rotated.plaintext.clone());
+    assert!(state
+        .update_downstream("down-rotated", downstream)
+        .await
+        .unwrap());
+    let app = build_router(state);
+
+    let old_secret = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models?client_version=0.62.0")
+                .header("Authorization", format!("Bearer {}", original.plaintext))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old_secret.status(), StatusCode::UNAUTHORIZED);
+
+    let new_secret = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models?client_version=0.62.0")
+                .header("Authorization", format!("Bearer {}", rotated.plaintext))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(new_secret.status(), StatusCode::OK);
+}
 
 #[tokio::test]
 async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix() {
@@ -56,7 +200,7 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
         axum::serve(listener, upstream_app).await.unwrap();
     });
 
-    let downstream_key = generate_downstream_key("gw");
+    let downstream_key = generate_argon2_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
             upstreams: vec![UpstreamConfig {
@@ -175,7 +319,7 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
         axum::serve(listener, upstream_app).await.unwrap();
     });
 
-    let downstream_key = generate_downstream_key("gw");
+    let downstream_key = generate_argon2_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
             upstreams: vec![UpstreamConfig {
@@ -326,7 +470,7 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
         axum::serve(listener, upstream_app).await.unwrap();
     });
 
-    let downstream_key = generate_downstream_key("gw");
+    let downstream_key = generate_argon2_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
             upstreams: vec![UpstreamConfig {
@@ -394,7 +538,7 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
 
 #[tokio::test]
 async fn claude_count_tokens_endpoint_accepts_x_api_key() {
-    let downstream_key = generate_downstream_key("gw");
+    let downstream_key = generate_argon2_downstream_key("gw");
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {

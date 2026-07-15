@@ -5,14 +5,17 @@ import type {
   ActiveGatewayRequestsResponse,
   CompatibilityMatrixRunRequest,
   CompatibilityMatrixRunResponse,
+  CapabilityConfigurationDocument,
   DashboardAnalyticsRange,
   DashboardData,
   DashboardSummaryResponse,
+  DialectProfileSummary,
   DownstreamConfig,
   LoginRequest,
   LoginResponse,
   LogsResponse,
   ModelProbeResponse,
+  ResolvedCapabilitiesResponse,
   TroubleshootingRunRequest,
   TroubleshootingRunResponse,
   UpstreamConfig
@@ -68,6 +71,28 @@ export interface DashboardViewResponse {
 
 export interface AnnouncementResponse {
   announcement: Announcement | null
+}
+
+export type CapabilityExportResponse = CapabilityConfigurationDocument
+
+export interface DialectProfilesResponse {
+  profiles: DialectProfileSummary[]
+}
+
+export interface ResolvedCapabilitiesParams {
+  upstream_id: string
+  model: string
+  protocol: 'chat_completions' | 'responses'
+}
+
+export interface QueueDialectProbeRequest {
+  upstream_id: string
+  runtime_model_slug: string
+  protocol: 'chat_completions' | 'responses'
+}
+
+export interface QueueDialectProbeResponse {
+  queued: true
 }
 
 export interface UpdateAnnouncementRequest {
@@ -186,6 +211,16 @@ export const adminApi = {
     adminHttp.post<CompatibilityMatrixRunResponse>('/admin/troubleshooting/matrix/run', data),
   getActiveTroubleshootingRequests: () =>
     adminHttp.get<ActiveGatewayRequestsResponse>('/admin/troubleshooting/active-requests'),
+  exportCapabilities: () =>
+    adminHttp.get<CapabilityExportResponse>('/admin/capabilities/export'),
+  importCapabilities: (data: CapabilityConfigurationDocument) =>
+    adminHttp.post<{ ok: true }>('/admin/capabilities/import', data),
+  getDialectProfiles: () =>
+    adminHttp.get<DialectProfilesResponse>('/admin/capabilities/profiles'),
+  getResolvedCapabilities: (params: ResolvedCapabilitiesParams) =>
+    adminHttp.get<ResolvedCapabilitiesResponse>('/admin/capabilities/resolved', { params }),
+  queueDialectProbe: (data: QueueDialectProbeRequest) =>
+    adminHttp.post<QueueDialectProbeResponse>('/admin/capabilities/probe', data),
 
   // Announcements
   getAnnouncement: () => adminHttp.get<AnnouncementResponse>('/admin/announcement'),

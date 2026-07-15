@@ -1,7 +1,15 @@
+use chat_responses_codex::capabilities::{CapabilityConfiguration, ReasoningMode};
 use chat_responses_codex::state::AppConfig;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+
+fn deployment_capabilities() -> CapabilityConfiguration {
+    serde_json::from_str(
+        &fs::read_to_string("templates/capabilities/current-deployment.example.json").unwrap(),
+    )
+    .expect("deployment template must deserialize through the public capability schema")
+}
 
 #[test]
 fn template_files_live_under_templates_directory() {
@@ -16,36 +24,20 @@ fn codex_model_catalog_preserves_upstream_model_slugs_exactly() {
         serde_json::from_str(&fs::read_to_string("templates/codex/model-catalog.json").unwrap())
             .unwrap();
     let models = catalog["models"].as_array().expect("catalog models array");
-    let slugs = models
-        .iter()
-        .map(|model| model["slug"].as_str().unwrap())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        slugs,
-        vec![
-            "ZhipuAI/GLM-5",
-            "MiniMax/MiniMax-M2.7",
-            "deepseek-ai/DeepSeek-R1-0528",
-        ]
+    assert!(
+        models.is_empty(),
+        "template catalog should be an empty scaffold"
     );
-
-    for model in models {
-        assert_eq!(
-            model["supports_search_tool"], false,
-            "template catalog should not overstate search tool support"
-        );
-    }
 }
 
 #[test]
 fn codex_config_example_uses_live_model_slug_exactly() {
     let config = fs::read_to_string("templates/codex/config.toml.example").unwrap();
 
-    assert!(config.contains(r#"model = "ZhipuAI/GLM-5""#));
-    assert!(config.contains(r#"review_model = "ZhipuAI/GLM-5""#));
-    assert!(!config.contains(r#"model = "glm-5""#));
+    assert!(config.contains(r#"model = "<model_slug>""#));
+    assert!(config.contains(r#"review_model = "<model_slug>""#));
     assert!(config.contains(r#"model_catalog_json = "model-catalog.json""#));
+    assert!(config.contains(r#"web_search = "disabled""#));
     assert!(!config
         .contains("/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"));
 }
@@ -159,4 +151,163 @@ fn codex_docs_mention_the_copy_ready_relative_catalog_path() {
     assert!(!readme.contains("Gitee"));
     assert!(!deployment.contains("Gitee"));
     assert!(!contributing.contains("Gitee"));
+}
+
+#[test]
+fn deployment_capabilities_are_external_versioned_and_model_agnostic_in_code() {
+    let configuration = deployment_capabilities();
+    assert_eq!(configuration.schema_version, 1);
+    assert!(configuration.route_overrides.is_empty());
+    for bundle_id in ["agent_core", "reasoning_agent", "image_agent"] {
+        assert!(
+            configuration
+                .bundles
+                .iter()
+                .any(|bundle| bundle.id == bundle_id),
+            "missing bundle {bundle_id}"
+        );
+    }
+    assert!(configuration.compatibility_expectations.len() >= 6);
+    configuration
+        .compile()
+        .expect("deployment template must compile through the runtime policy compiler");
+}
+
+#[test]
+fn deployment_policies_externalize_semantics_and_probe_candidates() {
+    let configuration = deployment_capabilities();
+    for policy_id in [
+        "glm-5.2",
+        "deepseek-v4-flash",
+        "minimax-m2.5",
+        "minimax-m2.7",
+        "kimi-k2.5",
+        "kimi-k2.6",
+    ] {
+        let policy = configuration
+            .policies
+            .iter()
+            .find(|policy| policy.id == policy_id)
+            .unwrap_or_else(|| panic!("missing policy {policy_id}"));
+        assert_eq!(
+            policy.semantic.reasoning_mode,
+            Some(ReasoningMode::Optional)
+        );
+        assert!(policy.semantic.context_window.is_some(), "{policy_id}");
+        assert!(policy.semantic.max_output_tokens.is_some(), "{policy_id}");
+        assert!(!policy.evidence.is_empty(), "{policy_id}");
+        assert!(
+            !policy.probe_candidates.token_limit_fields.is_empty(),
+            "{policy_id}"
+        );
+        assert!(
+            !policy.probe_candidates.reasoning_controls.is_empty(),
+            "{policy_id}"
+        );
+        assert!(!policy.extension_probes.is_empty(), "{policy_id}");
+    }
+
+    let deepseek = configuration
+        .policies
+        .iter()
+        .find(|policy| policy.id == "deepseek-v4-flash")
+        .unwrap();
+    for field in [
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "logprobs",
+        "top_logprobs",
+    ] {
+        assert!(
+            deepseek.semantic.omit_sampling_fields.contains(field),
+            "deepseek policy must externalize omission of {field}"
+        );
+    }
+}
+
+#[test]
+fn reasoning_expectations_require_replay_only_when_policy_requires_it() {
+    let configuration = deployment_capabilities();
+    for (policy_id, expectation_id) in [
+        ("glm-5.2", "glm-5.2-core"),
+        ("deepseek-v4-flash", "deepseek-v4-flash-core"),
+        ("minimax-m2.5", "minimax-m2.5-core"),
+        ("minimax-m2.7", "minimax-m2.7-core"),
+        ("kimi-k2.5", "kimi-k2.5-core"),
+        ("kimi-k2.6", "kimi-k2.6-core"),
+    ] {
+        let policy = configuration
+            .policies
+            .iter()
+            .find(|policy| policy.id == policy_id)
+            .unwrap();
+        let expectation = configuration
+            .compatibility_expectations
+            .iter()
+            .find(|expectation| expectation.id == expectation_id)
+            .unwrap();
+        assert_eq!(
+            expectation.bundles.contains("reasoning_agent"),
+            policy.semantic.reasoning_replay_required == Some(true),
+            "{expectation_id} must match {policy_id} replay requirements"
+        );
+    }
+}
+
+#[test]
+fn all_client_templates_use_only_gateway_url_key_and_exposed_slug() {
+    let codex = std::fs::read_to_string("templates/codex/config.toml.example").unwrap();
+    assert!(codex.contains("web_search = \"disabled\""));
+    for path in [
+        "templates/opencode/opencode.json",
+        "templates/claude-code/settings.json",
+        "templates/hermes/config.yaml",
+    ] {
+        let body = std::fs::read_to_string(path).unwrap();
+        assert!(!body.contains("api.deepseek.com"));
+        assert!(!body.contains("api.minimax.io"));
+        assert!(!body.contains("api.moonshot.cn"));
+    }
+}
+
+#[test]
+fn all_client_templates_use_gateway_placeholders_without_hardcoded_hosts() {
+    let codex = fs::read_to_string("templates/codex/config.toml.example").unwrap();
+    assert!(codex.contains("base_url = \"<gateway_url>/v1\""));
+    assert!(codex.contains("model = \"<model_slug>\""));
+    assert!(codex.contains("web_search = \"disabled\""));
+
+    let opencode = fs::read_to_string("templates/opencode/opencode.json").unwrap();
+    assert!(opencode.contains("https://<gateway_url>/v1"));
+    assert!(opencode.contains("<downstream_key>"));
+    assert!(opencode.contains("<model_slug>"));
+
+    let claude = fs::read_to_string("templates/claude-code/settings.json").unwrap();
+    assert!(claude.contains("https://<gateway_url>"));
+    assert!(claude.contains("<downstream_key>"));
+    assert!(claude.contains("<model_slug>"));
+
+    let hermes = fs::read_to_string("templates/hermes/config.yaml").unwrap();
+    assert!(hermes.contains("https://<gateway_url>/v1"));
+    assert!(hermes.contains("<model_slug>"));
+    assert!(hermes.contains("${CHAT2RESPONSES_KEY}"));
+
+    for template in [codex, opencode, claude, hermes] {
+        assert!(!template.contains("gateway-host:3001"));
+        assert!(!template.contains("gateway.example"));
+    }
+}
+
+#[test]
+fn opencode_template_denies_unlisted_permissions_by_default() {
+    let opencode: Value =
+        serde_json::from_str(&fs::read_to_string("templates/opencode/opencode.json").unwrap())
+            .expect("OpenCode template must be valid JSON");
+
+    assert_eq!(
+        opencode["permission"],
+        serde_json::json!({"*": "deny", "read": "allow"})
+    );
 }

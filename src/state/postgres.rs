@@ -278,7 +278,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
                  endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
-                 status_code, error_message, error_category, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at \
+                 status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at \
                  FROM usage_logs WHERE created_at >= $1 ORDER BY created_at, request_id, id",
                 &[&runtime_usage_start],
             )
@@ -481,7 +481,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, error_message, error_category, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
+                        status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at <= $2
@@ -640,7 +640,12 @@ impl PostgresStateStore {
                  items = EXCLUDED.items,
                  state = EXCLUDED.state,
                  created_at = EXCLUDED.created_at",
-            &[&response_id, &items_json, &request_state_json, &created_at_db],
+            &[
+                &response_id,
+                &items_json,
+                &request_state_json,
+                &created_at_db,
+            ],
         )
         .await
         .map_err(io_other)?;
@@ -695,8 +700,8 @@ impl PostgresStateStore {
         let request_state_json: String = row.get(1);
         let created_at_db: i64 = row.get(2);
         let items = serde_json::from_str::<Vec<Value>>(&items_json).map_err(io_other)?;
-        let request_state = serde_json::from_str::<Map<String, Value>>(&request_state_json)
-            .map_err(io_other)?;
+        let request_state =
+            serde_json::from_str::<Map<String, Value>>(&request_state_json).map_err(io_other)?;
         Ok(Some(ResponseHistoryEntry {
             items,
             request_state,
@@ -1089,6 +1094,10 @@ async fn sync_announcements(
 async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Result<()> {
     for log in logs {
         let request_count = log.request_count.map(|value| value as i64);
+        let compatibility = log
+            .compatibility
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok());
         let prompt_tokens = log.prompt_tokens as i64;
         let completion_tokens = log.completion_tokens as i64;
         let total_tokens = log.total_tokens as i64;
@@ -1111,6 +1120,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
             &status_code,
             &log.error_message,
             &log.error_category,
+            &compatibility,
             &prompt_tokens,
             &completion_tokens,
             &total_tokens,
@@ -1123,12 +1133,13 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
                 id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                 endpoint, model, inference_strength, billing_mode, request_count,
                 user_agent, request_id, status_code, error_message, error_category,
-                prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
+                compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20
+                $16, $17, $18, $19, $20,
+                $21
             ) ON CONFLICT (id) DO NOTHING",
             params,
         )
@@ -1197,11 +1208,14 @@ fn usage_log_from_row(row: &Row) -> UsageLog {
         status_code: row.get::<_, i32>(12).clamp(0, u16::MAX as i32) as u16,
         error_message: row.get::<_, Option<String>>(13),
         error_category: row.get::<_, Option<String>>(14),
-        prompt_tokens: i64_to_u64(row.get::<_, i64>(15)),
-        completion_tokens: i64_to_u64(row.get::<_, i64>(16)),
-        total_tokens: i64_to_u64(row.get::<_, i64>(17)),
-        latency_ms: i64_to_u64(row.get::<_, i64>(18)),
-        created_at: i64_to_u64(row.get::<_, i64>(19)),
+        compatibility: row
+            .get::<_, Option<String>>(15)
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        prompt_tokens: i64_to_u64(row.get::<_, i64>(16)),
+        completion_tokens: i64_to_u64(row.get::<_, i64>(17)),
+        total_tokens: i64_to_u64(row.get::<_, i64>(18)),
+        latency_ms: i64_to_u64(row.get::<_, i64>(19)),
+        created_at: i64_to_u64(row.get::<_, i64>(20)),
     }
 }
 
@@ -1305,7 +1319,7 @@ fn io_other<E>(error: E) -> io::Error
 where
     E: std::error::Error + Send + Sync + 'static,
 {
-    io::Error::new(io::ErrorKind::Other, error)
+    io::Error::other(error)
 }
 
 const SCHEMA_SQL: &str = r#"
@@ -1455,6 +1469,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     status_code INTEGER NOT NULL,
     error_message TEXT NULL,
     error_category TEXT NULL,
+    compatibility TEXT NULL,
     prompt_tokens BIGINT NOT NULL,
     completion_tokens BIGINT NOT NULL,
     total_tokens BIGINT NOT NULL,
@@ -1478,6 +1493,8 @@ ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_message TEXT NULL;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_category TEXT NULL;
+ALTER TABLE usage_logs
+    ADD COLUMN IF NOT EXISTS compatibility TEXT NULL;
 
 CREATE TABLE IF NOT EXISTS capability_configuration (
     singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),

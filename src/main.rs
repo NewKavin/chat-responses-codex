@@ -142,6 +142,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     init_tracing(&log_path);
+    if config.jwt_secret == "change_me_in_production" {
+        tracing::warn!(
+            "JWT_SECRET is using the development default; production deployments should set a strong secret because rotating it invalidates outstanding thinking continuations"
+        );
+    }
     tracing::info!(
         bind_addr = %bind_addr,
         state_path = %state_path.display(),

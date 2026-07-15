@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use super::*;
 
 #[tokio::test]
@@ -401,7 +403,7 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
 
                         let chunks = vec![
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\"}\n\n",
+                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
                             )),
                             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
                         ];
@@ -497,7 +499,7 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("data: {\"id\":\"chatcmpl-stream\""));
+    assert!(text.contains("chat.completion.chunk"));
     assert!(text.contains("data: [DONE]"));
 
     let captured = capture.lock().unwrap().clone();
@@ -539,7 +541,10 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
 
                         let chunks = vec![
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\"}\n\n",
+                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+                            )),
+                            Ok(Bytes::from_static(
+                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
                             )),
                             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
                         ];
@@ -660,12 +665,12 @@ async fn downstream_chat_stream_sets_sse_anti_buffering_headers() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("data: {\"id\":\"chatcmpl-stream\""));
+    assert!(text.contains("chat.completion.chunk"));
     assert!(text.contains("data: [DONE]"));
 }
 
 #[tokio::test]
-async fn downstream_chat_stream_records_usage_from_final_chunk() {
+async fn downstream_chat_stream_normalizes_cumulative_usage_to_final_usage_chunk() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -702,15 +707,15 @@ async fn downstream_chat_stream_records_usage_from_final_chunk() {
 
                         let chunks = vec![
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+                                b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
                             )),
                             if include_usage {
                                 Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                                    b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+                                    b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
                                 ))
                             } else {
                                 Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                                    b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                                    b"data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
                                 ))
                             },
                             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
@@ -807,8 +812,33 @@ async fn downstream_chat_stream_records_usage_from_final_chunk() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("\"usage\""));
-    assert!(text.contains("data: [DONE]"));
+    let frames = text
+        .split("\n\n")
+        .filter_map(|frame| frame.strip_prefix("data: "))
+        .collect::<Vec<_>>();
+    assert_eq!(frames.last(), Some(&"[DONE]"));
+    let chunks = frames[..frames.len() - 1]
+        .iter()
+        .map(|frame| serde_json::from_str::<Value>(frame).unwrap())
+        .collect::<Vec<_>>();
+    assert!(chunks.len() >= 3);
+
+    let choice_chunks = chunks
+        .iter()
+        .filter(|chunk| !chunk["choices"].as_array().unwrap().is_empty())
+        .collect::<Vec<_>>();
+    assert!(choice_chunks
+        .iter()
+        .all(|chunk| chunk.get("usage").is_none()));
+
+    let usage_chunks = chunks
+        .iter()
+        .filter(|chunk| chunk["choices"].as_array().unwrap().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(usage_chunks.len(), 1);
+    assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 2);
+    assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 3);
+    assert_eq!(usage_chunks[0]["usage"]["total_tokens"], 5);
 
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
@@ -2780,13 +2810,542 @@ async fn stream_disconnect_releases_runtime_state() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-
     let mut body = response.into_body();
-    let first_frame = body.frame().await.unwrap();
-    first_frame.expect("expected at least one SSE frame before drop");
+    let first_frame = body
+        .frame()
+        .await
+        .expect("expected at least one SSE frame before drop")
+        .expect("expected a valid SSE frame")
+        .into_data()
+        .expect("expected an SSE data frame");
+    assert!(String::from_utf8_lossy(&first_frame).contains("Hello"));
     drop(body);
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
+}
+
+#[tokio::test]
+async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slots() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = upstream_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                (
+                    StatusCode::OK,
+                    headers,
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n",
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                failure_count: 3,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 1,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+    let downstream = state.snapshot().await.downstreams[0].clone();
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while upstream_hits.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("upstream request should start");
+
+    state.mark_upstream_rate_limited("up-1", 60).await;
+    let cooldown_before_cancel = state
+        .upstream_runtime_snapshots()
+        .await
+        .get("up-1")
+        .expect("upstream runtime should exist")
+        .cooldown_until;
+    drop(response.into_body());
+
+    tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            let upstream_released = state
+                .upstream_runtime_snapshots()
+                .await
+                .get("up-1")
+                .is_some_and(|runtime| runtime.in_flight == 0);
+            if upstream_released
+                && state
+                    .try_reserve_downstream_concurrency(&downstream)
+                    .is_ok()
+            {
+                state.release_downstream_concurrency(&downstream.id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("client disconnect should promptly release upstream and downstream slots");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if state.snapshot().await.usage_logs.len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pre-header cancellation should emit one usage log");
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.status_code, 499);
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("stream_client_cancelled")
+    );
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "up-1")
+        .expect("upstream should still exist");
+    assert_eq!(upstream.failure_count, 3);
+    let runtime = state.upstream_runtime_snapshots().await;
+    assert_eq!(
+        runtime
+            .get("up-1")
+            .expect("upstream runtime should exist")
+            .cooldown_until,
+        cooldown_before_cancel
+    );
+}
+
+#[tokio::test]
+async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let release_headers = Arc::new(tokio::sync::Notify::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = upstream_hits.clone();
+    let release = release_headers.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let hits = hits.clone();
+            let release = release.clone();
+            async move {
+                let attempt = hits.fetch_add(1, Ordering::SeqCst);
+                release.notified().await;
+                let mut headers = HeaderMap::new();
+                if attempt == 2 {
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    return (
+                        StatusCode::OK,
+                        headers,
+                        Body::from(
+                            json!({
+                                "id": "chatcmpl-json",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "json"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })
+                            .to_string(),
+                        ),
+                    );
+                }
+
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                if attempt == 1 {
+                    return (
+                        StatusCode::OK,
+                        headers,
+                        Body::from(
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"}}]}\n\ndata: [DONE]\n\n",
+                        ),
+                    );
+                }
+
+                let stream = stream::unfold(false, |sent| async move {
+                    if sent {
+                        std::future::pending::<
+                            Option<(Result<Bytes, std::io::Error>, bool)>,
+                        >()
+                        .await
+                    } else {
+                        Some((
+                            Ok(Bytes::from_static(
+                                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+                            )),
+                            true,
+                        ))
+                    }
+                });
+                (StatusCode::OK, headers, Body::from_stream(stream))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                failure_count: 3,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 1,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+    let downstream = state.snapshot().await.downstreams[0].clone();
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while upstream_hits.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("upstream request should start");
+    state.mark_upstream_rate_limited("up-1", 60).await;
+    let cooldown_before_headers = state
+        .upstream_runtime_snapshots()
+        .await
+        .get("up-1")
+        .expect("upstream runtime should exist")
+        .cooldown_until;
+    release_headers.notify_one();
+
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("timed out waiting for upstream content")
+        .expect("expected upstream content")
+        .expect("expected valid upstream content")
+        .into_data()
+        .expect("expected SSE data frame");
+    assert!(String::from_utf8_lossy(&frame).contains("Hello"));
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "up-1")
+        .expect("upstream should still exist");
+    assert_eq!(upstream.failure_count, 3);
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .get("up-1")
+            .expect("upstream runtime should exist")
+            .cooldown_until,
+        cooldown_before_headers
+    );
+
+    drop(body);
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    assert!(state
+        .try_reserve_downstream_concurrency(&downstream)
+        .is_ok());
+    state.release_downstream_concurrency(&downstream.id);
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].status_code, 499);
+    assert_eq!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("stream_incomplete_close")
+    );
+    assert_eq!(
+        snapshot
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == "up-1")
+            .expect("upstream should still exist")
+            .failure_count,
+        3
+    );
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .get("up-1")
+            .expect("upstream runtime should exist")
+            .cooldown_until,
+        cooldown_before_headers
+    );
+
+    state.mark_upstream_success("up-1").await.unwrap();
+    for _ in 0..3 {
+        state.mark_upstream_failure("up-1").await.unwrap();
+    }
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while upstream_hits.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal upstream request should start");
+    state.mark_upstream_rate_limited("up-1", 60).await;
+    release_headers.notify_one();
+    to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("terminal stream should drain");
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(
+        snapshot
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == "up-1")
+            .expect("upstream should still exist")
+            .failure_count,
+        0
+    );
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .get("up-1")
+            .expect("upstream runtime should exist")
+            .cooldown_until,
+        0
+    );
+
+    for _ in 0..3 {
+        state.mark_upstream_failure("up-1").await.unwrap();
+    }
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while upstream_hits.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("immediate JSON upstream request should start");
+    state.mark_upstream_rate_limited("up-1", 60).await;
+    release_headers.notify_one();
+    to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("synthesized stream should drain");
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(
+        snapshot
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == "up-1")
+            .expect("upstream should still exist")
+            .failure_count,
+        0
+    );
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .get("up-1")
+            .expect("upstream runtime should exist")
+            .cooldown_until,
+        0
+    );
 }
 
 #[tokio::test]
@@ -2900,24 +3459,31 @@ async fn stream_interruption_marks_interrupted_not_success() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let first_frame = body.frame().await.unwrap();
-    first_frame.expect("expected at least one SSE frame before drop");
+    let first_frame = body
+        .frame()
+        .await
+        .expect("expected at least one SSE frame before drop")
+        .expect("expected a valid SSE frame")
+        .into_data()
+        .expect("expected an SSE data frame");
+    assert!(String::from_utf8_lossy(&first_frame).contains("Hello"));
     drop(body);
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
 
     let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
     let log = snapshot
         .usage_logs
         .last()
         .expect("expected usage log entry");
     assert_eq!(log.status_code, 499);
-    // The upstream emitted a content chunk but no usage/[DONE], so the drop
-    // path classifies this as a client cancel before billable output rather
-    // than the generic stream_interrupted bucket.
+    // A content event reached the downstream before it disconnected. Terminal
+    // usage is not required to distinguish a partial delivery from a cancel
+    // before output.
     assert_eq!(
         log.error_category.as_deref(),
-        Some("stream_client_cancelled")
+        Some("stream_incomplete_close")
     );
     assert!(
         log.error_message
@@ -2927,6 +3493,416 @@ async fn stream_interruption_marks_interrupted_not_success() {
         "unexpected interruption message: {:?}",
         log.error_message
     );
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "up-1")
+        .expect("upstream should still exist");
+    assert_eq!(
+        upstream.failure_count, 0,
+        "a downstream cancellation must not penalize a healthy upstream"
+    );
+}
+
+#[tokio::test]
+async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            (StatusCode::OK, headers, "data: {not-json}\n\n")
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("decode failure should be returned as a structured SSE error");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("\"category\":\"stream_upstream_body_decode_error\""));
+    assert!(body.contains("data: [DONE]"));
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let mut downstream = state.snapshot().await.downstreams[0].clone();
+    downstream.max_concurrency = 1;
+    assert!(state
+        .try_reserve_downstream_concurrency(&downstream)
+        .is_ok());
+    state.release_downstream_concurrency(&downstream.id);
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));
+    let log = snapshot
+        .usage_logs
+        .last()
+        .expect("expected usage log entry");
+    assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("stream_upstream_body_decode_error")
+    );
+}
+
+#[tokio::test]
+async fn claude_stream_preserves_structured_gateway_stream_error() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            (StatusCode::OK, headers, "data: {not-json}\n\n")
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", downstream_key.plaintext)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "max_tokens": 128,
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Claude stream should carry a structured error event");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("event: error"));
+    assert!(body.contains("\"type\":\"error\""));
+    assert!(body.contains("\"category\":\"stream_upstream_body_decode_error\""));
+    assert!(!body.contains("event: message_start"));
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let mut downstream = state.snapshot().await.downstreams[0].clone();
+    downstream.max_concurrency = 1;
+    assert!(state
+        .try_reserve_downstream_concurrency(&downstream)
+        .is_ok());
+    state.release_downstream_concurrency(&downstream.id);
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));
+    let log = snapshot
+        .usage_logs
+        .last()
+        .expect("expected usage log entry");
+    assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("stream_upstream_body_decode_error")
+    );
+}
+
+async fn claude_drop_after_first_outer_frame(with_text_delta: bool) -> (String, u16, String) {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            let delta = if with_text_delta {
+                json!({"role": "assistant", "content": "Hello"})
+            } else {
+                json!({"role": "assistant"})
+            };
+            let initial = Bytes::from(format!(
+                "data: {}\n\n",
+                json!({
+                    "id": "chatcmpl-claude-delivery",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "gpt-4",
+                    "choices": [{
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": null
+                    }]
+                })
+            ));
+            (
+                StatusCode::OK,
+                headers,
+                Body::from_stream(stream::unfold(Some(initial), |initial| async move {
+                    match initial {
+                        Some(initial) => Some((Ok::<Bytes, std::io::Error>(initial), None)),
+                        None => {
+                            std::future::pending::<
+                                Option<(Result<Bytes, std::io::Error>, Option<Bytes>)>,
+                            >()
+                            .await
+                        }
+                    }
+                })),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", downstream_key.plaintext)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "max_tokens": 128,
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("timed out waiting for first Claude frame")
+        .expect("expected first Claude frame")
+        .expect("expected valid first Claude frame")
+        .into_data()
+        .expect("expected Claude SSE data");
+    let first = String::from_utf8_lossy(&first).into_owned();
+    drop(body);
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while state.snapshot().await.usage_logs.len() != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Claude disconnect should emit one usage log");
+    let snapshot = state.snapshot().await;
+    let log = &snapshot.usage_logs[0];
+    (
+        first,
+        log.status_code,
+        log.error_category.clone().unwrap_or_default(),
+    )
+}
+
+#[tokio::test]
+async fn claude_message_start_only_delivery_is_cancelled_before_usable_output() {
+    let (first, status, category) = claude_drop_after_first_outer_frame(false).await;
+
+    assert!(first.contains("event: message_start"));
+    assert!(!first.contains("event: content_block_delta"));
+    assert_eq!(status, 499);
+    assert_eq!(category, "stream_client_cancelled");
+}
+
+#[tokio::test]
+async fn claude_text_delta_is_delivered_with_message_start_in_one_outer_frame() {
+    let (first, status, category) = claude_drop_after_first_outer_frame(true).await;
+
+    assert!(first.contains("event: message_start"));
+    assert!(first.contains("event: content_block_delta"));
+    assert!(first.contains("Hello"));
+    assert_eq!(status, 499);
+    assert_eq!(category, "stream_incomplete_close");
 }
 
 #[tokio::test]
@@ -3374,6 +4350,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
         post(|_body: String| async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
             let mut headers = HeaderMap::new();
             headers.insert(
                 header::CONTENT_TYPE,
@@ -3480,6 +4457,14 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let response_request_id = response
+        .headers()
+        .get("x-gateway-request-id")
+        .expect("early Chat SSE response must include a gateway request ID")
+        .to_str()
+        .expect("gateway request ID must be a valid header value")
+        .to_string();
+    assert!(!response_request_id.is_empty());
 
     let mut body = response.into_body();
     let keepalive_bytes = Bytes::from_static(b": keepalive\n\n");
@@ -3494,7 +4479,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
 
     let mut saw_real_chunk = false;
     let mut saw_stream_end = false;
-    for _ in 0..4 {
+    for _ in 0..8 {
         let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
             .await
             .expect("timed out waiting for the upstream chunk or a keepalive");
@@ -3537,6 +4522,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     );
     assert_eq!(log.error_category.as_deref(), None);
     assert_eq!(log.error_message.as_deref(), None);
+    assert_eq!(log.request_id, response_request_id);
 }
 
 #[tokio::test]

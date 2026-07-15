@@ -332,6 +332,30 @@ fn fixtures_require_https_and_a_non_empty_label() {
     }
 }
 
+#[test]
+fn fixtures_reject_sensitive_url_userinfo_and_query_credentials() {
+    for url in [
+        "https://fixture-user:fixture-password@fixture.invalid/image.png",
+        "https://fixture.invalid/image.png?X-Amz-Signature=fixture-signature",
+    ] {
+        let error = CapabilityConfiguration {
+            probe: chat_responses_codex::capabilities::ProbeConfiguration {
+                https_image_fixture: Some(HttpsImageFixture {
+                    url: url.into(),
+                    expected_label: "fixture".into(),
+                }),
+                ..Default::default()
+            },
+            ..CapabilityConfiguration::default()
+        }
+        .compile()
+        .unwrap_err();
+
+        assert!(error.to_string().contains("sensitive URL"));
+        assert!(!error.to_string().contains(url));
+    }
+}
+
 fn extension_case(id: &str, request_patch: serde_json::Value) -> DeclarativeProbeCase {
     DeclarativeProbeCase {
         id: id.to_owned(),

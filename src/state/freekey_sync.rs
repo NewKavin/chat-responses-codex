@@ -23,7 +23,7 @@ pub struct FreekeySyncItem {
 }
 
 pub(super) fn merge_api_keys(existing: &[String], incoming: &[String]) -> Vec<String> {
-    let mut keys: Vec<String> = existing.iter().cloned().collect();
+    let mut keys: Vec<String> = existing.to_vec();
     let mut seen: HashSet<String> = existing.iter().cloned().collect();
     for key in incoming {
         let key = key.trim().to_string();
@@ -152,201 +152,223 @@ impl AppState {
             }
         }
 
-        self.mutate_persisted_state(
-            |candidate_state| {
-                let mut result = FreekeySyncSummary::default();
+        let (result, touched_upstream_ids) = self
+            .mutate_persisted_state(
+                |candidate_state| {
+                    let mut result = FreekeySyncSummary::default();
+                    let mut touched_upstream_ids = HashSet::new();
 
-                let find_auto_upstream = |state: &[UpstreamConfig], base_url: &str| {
-                    state
-                        .iter()
-                        .position(|upstream| upstream.base_url == base_url && upstream.auto_managed)
-                };
+                    let find_auto_upstream = |state: &[UpstreamConfig], base_url: &str| {
+                        state.iter().position(|upstream| {
+                            upstream.base_url == base_url && upstream.auto_managed
+                        })
+                    };
 
-                let has_manual_upstream = |state: &[UpstreamConfig], base_url: &str| {
-                    state
-                        .iter()
-                        .any(|upstream| upstream.base_url == base_url && !upstream.auto_managed)
-                };
+                    let has_manual_upstream = |state: &[UpstreamConfig], base_url: &str| {
+                        state
+                            .iter()
+                            .any(|upstream| upstream.base_url == base_url && !upstream.auto_managed)
+                    };
 
-                let fold_group = |items: &[FreekeySyncItem]| {
-                    let mut keys: Vec<String> = Vec::new();
-                    let mut models: Vec<String> = Vec::new();
-                    let mut key_models: Vec<ApiKeyModelConfig> = Vec::new();
-                    let mut last_name: Option<String> = None;
-                    for item in items {
-                        // Only valid items contribute keys/models. Invalid
-                        // items are carried so the group still reaches the
-                        // replace branch (enabling key-set clearing) but do
-                        // not add keys back.
-                        if !item.valid {
+                    let fold_group = |items: &[FreekeySyncItem]| {
+                        let mut keys: Vec<String> = Vec::new();
+                        let mut models: Vec<String> = Vec::new();
+                        let mut key_models: Vec<ApiKeyModelConfig> = Vec::new();
+                        let mut last_name: Option<String> = None;
+                        for item in items {
+                            // Only valid items contribute keys/models. Invalid
+                            // items are carried so the group still reaches the
+                            // replace branch (enabling key-set clearing) but do
+                            // not add keys back.
+                            if !item.valid {
+                                if let Some(name) = &item.name {
+                                    last_name = Some(name.clone());
+                                }
+                                continue;
+                            }
+                            let key = item.api_key.trim().to_string();
+                            let model = item.model.trim().to_string();
+                            if !key.is_empty() && !keys.iter().any(|k| k == &key) {
+                                keys.push(key.clone());
+                            }
+                            if !model.is_empty() && !models.iter().any(|m| m == &model) {
+                                models.push(model.clone());
+                            }
+                            if !key.is_empty() && !model.is_empty() {
+                                if let Some(entry) =
+                                    key_models.iter_mut().find(|entry| entry.api_key == key)
+                                {
+                                    if !entry.supported_models.iter().any(|m| m == &model) {
+                                        entry.supported_models.push(model.clone());
+                                    }
+                                } else {
+                                    key_models.push(ApiKeyModelConfig {
+                                        api_key: key.clone(),
+                                        supported_models: vec![model.clone()],
+                                    });
+                                }
+                            }
                             if let Some(name) = &item.name {
                                 last_name = Some(name.clone());
                             }
+                        }
+                        (keys, models, key_models, last_name)
+                    };
+
+                    for (base_url, items) in grouped.iter() {
+                        if has_manual_upstream(&candidate_state.upstreams, base_url) {
+                            result.skipped = result.skipped.saturating_add(items.len());
                             continue;
                         }
-                        let key = item.api_key.trim().to_string();
-                        let model = item.model.trim().to_string();
-                        if !key.is_empty() && !keys.iter().any(|k| k == &key) {
-                            keys.push(key.clone());
-                        }
-                        if !model.is_empty() && !models.iter().any(|m| m == &model) {
-                            models.push(model.clone());
-                        }
-                        if !key.is_empty() && !model.is_empty() {
-                            if let Some(entry) =
-                                key_models.iter_mut().find(|entry| entry.api_key == key)
+
+                        let (keys, models, key_models, last_name) = fold_group(items);
+                        // Creating a brand-new upstream requires at least one valid
+                        // key+model; an all-invalid payload only makes sense for an
+                        // existing upstream (clearing its keys), so skip creation.
+                        if keys.is_empty() || models.is_empty() {
+                            if let Some(index) =
+                                find_auto_upstream(&candidate_state.upstreams, base_url)
                             {
-                                if !entry.supported_models.iter().any(|m| m == &model) {
-                                    entry.supported_models.push(model.clone());
+                                let upstream = &mut candidate_state.upstreams[index];
+                                upstream.api_keys = Vec::new();
+                                upstream.api_key = String::new();
+                                upstream.api_key_models = Vec::new();
+                                upstream.supported_models = Vec::new();
+                                if let Some(name) = last_name {
+                                    upstream.name = name;
                                 }
+                                upstream.managed_source = Some(source.clone());
+                                upstream.last_synced_at = synced_at;
+                                upstream.normalize_for_storage();
+                                touched_upstream_ids.insert(upstream.id.clone());
+                                result.updated = result.updated.saturating_add(items.len());
                             } else {
-                                key_models.push(ApiKeyModelConfig {
-                                    api_key: key.clone(),
-                                    supported_models: vec![model.clone()],
-                                });
+                                result.skipped = result.skipped.saturating_add(items.len());
                             }
+                            continue;
                         }
-                        if let Some(name) = &item.name {
-                            last_name = Some(name.clone());
-                        }
-                    }
-                    (keys, models, key_models, last_name)
-                };
 
-                for (base_url, items) in grouped.iter() {
-                    if has_manual_upstream(&candidate_state.upstreams, base_url) {
-                        result.skipped = result.skipped.saturating_add(items.len());
-                        continue;
-                    }
-
-                    let (keys, models, key_models, last_name) = fold_group(items);
-                    // Creating a brand-new upstream requires at least one valid
-                    // key+model; an all-invalid payload only makes sense for an
-                    // existing upstream (clearing its keys), so skip creation.
-                    if keys.is_empty() || models.is_empty() {
                         if let Some(index) =
                             find_auto_upstream(&candidate_state.upstreams, base_url)
                         {
                             let upstream = &mut candidate_state.upstreams[index];
-                            upstream.api_keys = Vec::new();
-                            upstream.api_key = String::new();
-                            upstream.api_key_models = Vec::new();
-                            upstream.supported_models = Vec::new();
+                            // Replace semantics: the submitted valid key set is the
+                            // new source of truth. Keys absent from the payload are
+                            // removed (the external script is responsible for
+                            // probing and reports only still-valid keys).
+                            upstream.api_keys = keys.clone();
+                            // Sync the legacy single-key field to the first key so
+                            // it cannot resurrect deleted keys via the routing
+                            // fallback. Empty key set clears it.
+                            upstream.api_key = keys.first().cloned().unwrap_or_default();
+                            // Replace api_key_models with the incoming mappings,
+                            // preserving existing supported_models for keys that
+                            // survive the replace (the backend does not probe here;
+                            // model mappings are refreshed via discover-models).
+                            let surviving_keys: HashSet<String> = keys.iter().cloned().collect();
+                            let preserved: HashMap<String, Vec<String>> = upstream
+                                .api_key_models
+                                .iter()
+                                .filter(|entry| surviving_keys.contains(&entry.api_key))
+                                .map(|entry| {
+                                    (entry.api_key.clone(), entry.supported_models.clone())
+                                })
+                                .collect();
+                            upstream.api_key_models = key_models
+                                .iter()
+                                .map(|entry| {
+                                    let preserved_models = preserved.get(&entry.api_key).cloned();
+                                    ApiKeyModelConfig {
+                                        api_key: entry.api_key.clone(),
+                                        supported_models: if entry.supported_models.is_empty() {
+                                            preserved_models.unwrap_or_default()
+                                        } else {
+                                            entry.supported_models.clone()
+                                        },
+                                    }
+                                })
+                                .filter(|entry: &ApiKeyModelConfig| {
+                                    !entry.supported_models.is_empty()
+                                })
+                                .collect();
+                            // Re-attach any surviving key whose models we preserved
+                            // but which had no incoming mapping.
+                            let mapped_keys: HashSet<String> = upstream
+                                .api_key_models
+                                .iter()
+                                .map(|e| e.api_key.clone())
+                                .collect();
+                            for (key, models) in &preserved {
+                                if !mapped_keys.contains(key) && !models.is_empty() {
+                                    upstream.api_key_models.push(ApiKeyModelConfig {
+                                        api_key: key.clone(),
+                                        supported_models: models.clone(),
+                                    });
+                                }
+                            }
+                            upstream.supported_models =
+                                derive_supported_models(&upstream.api_key_models);
                             if let Some(name) = last_name {
                                 upstream.name = name;
                             }
                             upstream.managed_source = Some(source.clone());
                             upstream.last_synced_at = synced_at;
                             upstream.normalize_for_storage();
-                            result.updated = result.updated.saturating_add(items.len());
-                        } else {
-                            result.skipped = result.skipped.saturating_add(items.len());
-                        }
-                        continue;
-                    }
+                            touched_upstream_ids.insert(upstream.id.clone());
 
-                    if let Some(index) = find_auto_upstream(&candidate_state.upstreams, base_url) {
-                        let upstream = &mut candidate_state.upstreams[index];
-                        // Replace semantics: the submitted valid key set is the
-                        // new source of truth. Keys absent from the payload are
-                        // removed (the external script is responsible for
-                        // probing and reports only still-valid keys).
-                        upstream.api_keys = keys.clone();
-                        // Sync the legacy single-key field to the first key so
-                        // it cannot resurrect deleted keys via the routing
-                        // fallback. Empty key set clears it.
-                        upstream.api_key = keys
-                            .first()
-                            .cloned()
-                            .unwrap_or_default();
-                        // Replace api_key_models with the incoming mappings,
-                        // preserving existing supported_models for keys that
-                        // survive the replace (the backend does not probe here;
-                        // model mappings are refreshed via discover-models).
-                        let surviving_keys: HashSet<String> = keys.iter().cloned().collect();
-                        let preserved: HashMap<String, Vec<String>> = upstream
-                            .api_key_models
-                            .iter()
-                            .filter(|entry| surviving_keys.contains(&entry.api_key))
-                            .map(|entry| (entry.api_key.clone(), entry.supported_models.clone()))
-                            .collect();
-                        upstream.api_key_models = key_models
-                            .iter()
-                            .map(|entry| {
-                                let preserved_models =
-                                    preserved.get(&entry.api_key).cloned();
-                                ApiKeyModelConfig {
-                                    api_key: entry.api_key.clone(),
-                                    supported_models: if entry.supported_models.is_empty() {
-                                        preserved_models.unwrap_or_default()
-                                    } else {
-                                        entry.supported_models.clone()
-                                    },
-                                }
-                            })
-                            .filter(|entry: &ApiKeyModelConfig| {
-                                !entry.supported_models.is_empty()
-                            })
-                            .collect();
-                        // Re-attach any surviving key whose models we preserved
-                        // but which had no incoming mapping.
-                        let mapped_keys: HashSet<String> = upstream
-                            .api_key_models
-                            .iter()
-                            .map(|e| e.api_key.clone())
-                            .collect();
-                        for (key, models) in &preserved {
-                            if !mapped_keys.contains(key) && !models.is_empty() {
-                                upstream.api_key_models.push(ApiKeyModelConfig {
-                                    api_key: key.clone(),
-                                    supported_models: models.clone(),
-                                });
-                            }
+                            result.updated = result
+                                .updated
+                                .saturating_add(items.iter().filter(|i| i.valid).count());
+                            continue;
                         }
-                        upstream.supported_models =
-                            derive_supported_models(&upstream.api_key_models);
-                        if let Some(name) = last_name {
-                            upstream.name = name;
-                        }
-                        upstream.managed_source = Some(source.clone());
-                        upstream.last_synced_at = synced_at;
+
+                        let primary_key = keys.first().cloned().unwrap_or_default();
+                        let extra_keys: Vec<String> = keys.iter().skip(1).cloned().collect();
+                        let primary_model = models.first().cloned().unwrap_or_default();
+                        let mut upstream = UpstreamConfig {
+                            id: Uuid::new_v4().to_string(),
+                            name: last_name.unwrap_or(primary_model),
+                            base_url: base_url.clone(),
+                            api_key: primary_key,
+                            api_keys: extra_keys,
+                            api_key_models: key_models,
+                            supported_models: models,
+                            auto_managed: true,
+                            managed_source: Some(source.clone()),
+                            last_synced_at: synced_at,
+                            active: true,
+                            ..Default::default()
+                        };
                         upstream.normalize_for_storage();
-
-                        result.updated = result.updated.saturating_add(
-                            items.iter().filter(|i| i.valid).count(),
-                        );
-                        continue;
+                        touched_upstream_ids.insert(upstream.id.clone());
+                        candidate_state.upstreams.push(upstream);
+                        result.created = result
+                            .created
+                            .saturating_add(items.iter().filter(|i| i.valid).count());
                     }
 
-                    let primary_key = keys.first().cloned().unwrap_or_default();
-                    let extra_keys: Vec<String> = keys.iter().skip(1).cloned().collect();
-                    let primary_model = models.first().cloned().unwrap_or_default();
-                    let mut upstream = UpstreamConfig {
-                        id: Uuid::new_v4().to_string(),
-                        name: last_name.unwrap_or(primary_model),
-                        base_url: base_url.clone(),
-                        api_key: primary_key,
-                        api_keys: extra_keys,
-                        api_key_models: key_models,
-                        supported_models: models,
-                        auto_managed: true,
-                        managed_source: Some(source.clone()),
-                        last_synced_at: synced_at,
-                        active: true,
-                        ..Default::default()
-                    };
-                    upstream.normalize_for_storage();
-                    candidate_state.upstreams.push(upstream);
-                    result.created = result.created.saturating_add(
-                        items.iter().filter(|i| i.valid).count(),
-                    );
-                }
+                    Ok((result, touched_upstream_ids))
+                },
+                |error| format!("Failed to persist state: {}", error),
+            )
+            .await?;
 
-                Ok(result)
-            },
-            |error| format!("Failed to persist state: {}", error),
+        let routing = self.routing_snapshot().await;
+        let jobs = self.stale_capability_probe_jobs_for_upstreams(
+            routing
+                .upstreams
+                .iter()
+                .filter(|upstream| touched_upstream_ids.contains(&upstream.id)),
+            synced_at,
+        );
+        self.submit_capability_probe_jobs(
+            jobs,
+            crate::capabilities::ProbeReason::ConfigurationChanged,
         )
         .await
+        .map_err(|error| error.to_string())?;
+
+        Ok(result)
     }
 
     pub async fn update_upstream_by_id(
@@ -442,7 +464,8 @@ impl AppState {
                     if let Some(api_key) = updates.get("api_key").and_then(|v| v.as_str()) {
                         let new_key = api_key.to_string();
                         if !new_key.is_empty() {
-                            let mut merged = merge_api_keys(&upstream.api_keys, &[new_key.clone()]);
+                            let mut merged =
+                                merge_api_keys(&upstream.api_keys, std::slice::from_ref(&new_key));
                             if !upstream.api_key.is_empty()
                                 && !merged.iter().any(|k| k == &upstream.api_key)
                             {
@@ -461,7 +484,7 @@ impl AppState {
                 }
                 if !replace_api_keys {
                     if let Some(api_key_models) =
-                    updates.get("api_key_models").and_then(|v| v.as_array())
+                        updates.get("api_key_models").and_then(|v| v.as_array())
                     {
                         let incoming: Vec<ApiKeyModelConfig> = api_key_models
                             .iter()
@@ -481,7 +504,8 @@ impl AppState {
                             .collect();
                         upstream.api_key_models =
                             merge_api_key_models(&upstream.api_key_models, &incoming);
-                        upstream.supported_models = derive_supported_models(&upstream.api_key_models);
+                        upstream.supported_models =
+                            derive_supported_models(&upstream.api_key_models);
                     }
                 }
                 if replace_api_keys {
@@ -541,7 +565,8 @@ impl AppState {
                             let max_output_tokens = value
                                 .get("max_output_tokens")
                                 .and_then(parse_u64_flexible)
-                                .unwrap_or(0) as u32;
+                                .unwrap_or(0)
+                                as u32;
                             Some(ModelContextConfig {
                                 slug: slug.to_string(),
                                 context_limit: context_limit as u32,
@@ -567,7 +592,8 @@ impl AppState {
                             let max_output_tokens = default_model_context_updates
                                 .get("max_output_tokens")
                                 .and_then(parse_u64_flexible)
-                                .unwrap_or(0) as u32;
+                                .unwrap_or(0)
+                                as u32;
                             Some(DefaultModelContextConfig {
                                 context_limit: context_limit.unwrap_or(0) as u32,
                                 output_reserve: output_reserve as u32,

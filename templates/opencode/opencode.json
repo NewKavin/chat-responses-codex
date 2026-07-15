@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "gateway/<model_slug>",
+  "small_model": "gateway/<model_slug>",
+  "provider": {
+    "gateway": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Chat Responses Gateway",
+      "options": {
+        "baseURL": "https://<gateway_url>/v1",
+        "apiKey": "<downstream_key>"
+      },
+      "models": {
+        "<model_slug>": {
+          "name": "<model_slug>"
+        }
+      }
+    }
+  },
+  "permission": {
+    "*": "deny",
+    "read": "allow"
+  }
+}

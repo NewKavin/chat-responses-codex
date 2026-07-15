@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use super::*;
 
 #[tokio::test]
@@ -109,10 +111,15 @@ async fn stream_disconnect_releases_runtime_state() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-
     let mut body = response.into_body();
-    let first_frame = body.frame().await.unwrap();
-    first_frame.expect("expected at least one SSE frame before drop");
+    let first_frame = body
+        .frame()
+        .await
+        .expect("expected at least one SSE frame before drop")
+        .expect("expected a valid SSE frame")
+        .into_data()
+        .expect("expected an SSE data frame");
+    assert!(String::from_utf8_lossy(&first_frame).contains("Hello"));
     drop(body);
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
@@ -229,24 +236,31 @@ async fn stream_interruption_marks_interrupted_not_success() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let mut body = response.into_body();
-    let first_frame = body.frame().await.unwrap();
-    first_frame.expect("expected at least one SSE frame before drop");
+    let first_frame = body
+        .frame()
+        .await
+        .expect("expected at least one SSE frame before drop")
+        .expect("expected a valid SSE frame")
+        .into_data()
+        .expect("expected an SSE data frame");
+    assert!(String::from_utf8_lossy(&first_frame).contains("Hello"));
     drop(body);
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
 
     let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
     let log = snapshot
         .usage_logs
         .last()
         .expect("expected usage log entry");
     assert_eq!(log.status_code, 499);
-    // The upstream emitted a content chunk but no usage/[DONE], so the drop
-    // path classifies this as a client cancel before billable output rather
-    // than the generic stream_interrupted bucket.
+    // A content event reached the downstream before it disconnected. Terminal
+    // usage is not required to distinguish a partial delivery from a cancel
+    // before output.
     assert_eq!(
         log.error_category.as_deref(),
-        Some("stream_client_cancelled")
+        Some("stream_incomplete_close")
     );
     assert!(
         log.error_message
@@ -256,6 +270,292 @@ async fn stream_interruption_marks_interrupted_not_success() {
         "unexpected interruption message: {:?}",
         log.error_message
     );
+}
+
+#[tokio::test]
+async fn invalid_translated_sse_returns_structured_protocol_error_not_499() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            (
+                StatusCode::OK,
+                headers,
+                concat!(
+                    "data: {\"id\":\"chatcmpl-invalid\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",",
+                    "\"choices\":[",
+                    "{\"index\":0,\"delta\":{\"content\":\"one\"},\"finish_reason\":null},",
+                    "{\"index\":1,\"delta\":{\"content\":\"two\"},\"finish_reason\":null}",
+                    "]}\n\n",
+                ),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "input": "Hello",
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("translation failure should be returned as a structured SSE error");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("\"category\":\"upstream_protocol_translation_failed\""));
+    assert!(body.contains("data: [DONE]"));
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let mut downstream = state.snapshot().await.downstreams[0].clone();
+    downstream.max_concurrency = 1;
+    assert!(state
+        .try_reserve_downstream_concurrency(&downstream)
+        .is_ok());
+    state.release_downstream_concurrency(&downstream.id);
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));
+    let log = snapshot
+        .usage_logs
+        .last()
+        .expect("expected usage log entry");
+    assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(
+        log.error_category.as_deref(),
+        Some("upstream_protocol_translation_failed")
+    );
+}
+
+async fn translated_drop_after_event(event_type: &str) -> (Vec<String>, u16, String) {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            let initial = stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"id\":\"chatcmpl-delivery\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+                ))
+            });
+            let stalled = stream::pending::<Result<Bytes, std::io::Error>>();
+            (
+                StatusCode::OK,
+                headers,
+                Body::from_stream(initial.chain(stalled)),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "input": "Hello",
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let marker = format!("\"type\":\"{event_type}\"");
+    let mut body = response.into_body();
+    let mut delivered = Vec::new();
+    for _ in 0..12 {
+        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("timed out waiting for translated event")
+            .expect("expected translated event")
+            .expect("expected valid translated event")
+            .into_data()
+            .expect("expected translated SSE data");
+        let text = String::from_utf8_lossy(&frame).into_owned();
+        let reached_marker = text.contains(&marker);
+        delivered.push(text);
+        if reached_marker {
+            break;
+        }
+    }
+    assert!(
+        delivered.iter().any(|frame| frame.contains(&marker)),
+        "translated stream did not emit {event_type}: {delivered:?}"
+    );
+    drop(body);
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while state.snapshot().await.usage_logs.len() != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("translated disconnect should emit one usage log");
+    let snapshot = state.snapshot().await;
+    let log = &snapshot.usage_logs[0];
+    (
+        delivered,
+        log.status_code,
+        log.error_category.clone().unwrap_or_default(),
+    )
+}
+
+#[tokio::test]
+async fn translated_drop_after_response_created_is_cancelled_before_usable_output() {
+    let (delivered, status, category) = translated_drop_after_event("response.created").await;
+
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(status, 499);
+    assert_eq!(category, "stream_client_cancelled");
+}
+
+#[tokio::test]
+async fn translated_drop_after_text_delta_is_incomplete_close() {
+    let (delivered, status, category) =
+        translated_drop_after_event("response.output_text.delta").await;
+
+    assert!(delivered.len() > 1);
+    assert_eq!(status, 499);
+    assert_eq!(category, "stream_incomplete_close");
 }
 
 #[tokio::test]
@@ -704,7 +1004,7 @@ async fn translated_chat_to_responses_drop_after_completed_event_is_logged_as_su
     let mut saw_completed = false;
     let mut saw_done = false;
     for _ in 0..8 {
-        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
             .await
             .expect("timed out waiting for translated SSE frame")
             .expect("expected translated SSE frame")
@@ -905,6 +1205,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
         post(|_body: String| async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
             let mut headers = HeaderMap::new();
             headers.insert(
                 header::CONTENT_TYPE,
@@ -991,7 +1292,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/chat/completions")
+                .uri("/v1/responses")
                 .header(
                     "Authorization",
                     format!("Bearer {}", downstream_key.plaintext),
@@ -1000,7 +1301,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
                 .body(Body::from(
                     json!({
                         "model": "gpt-4",
-                        "messages": [{"role": "user", "content": "Hello"}],
+                        "input": "Hello",
                         "stream": true
                     })
                     .to_string(),
@@ -1011,6 +1312,14 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let response_request_id = response
+        .headers()
+        .get("x-gateway-request-id")
+        .expect("early Responses SSE response must include a gateway request ID")
+        .to_str()
+        .expect("gateway request ID must be a valid header value")
+        .to_string();
+    assert!(!response_request_id.is_empty());
 
     let mut body = response.into_body();
     let keepalive_bytes = Bytes::from_static(b": keepalive\n\n");
@@ -1025,7 +1334,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
 
     let mut saw_real_chunk = false;
     let mut saw_stream_end = false;
-    for _ in 0..4 {
+    for _ in 0..16 {
         let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
             .await
             .expect("timed out waiting for the upstream chunk or a keepalive");
@@ -1064,6 +1373,7 @@ async fn stream_keepalive_heartbeats_extend_stream_until_completion() {
     assert_eq!(log.status_code, 200);
     assert_eq!(log.error_category.as_deref(), None);
     assert_eq!(log.error_message.as_deref(), None);
+    assert_eq!(log.request_id, response_request_id);
 }
 
 #[tokio::test(flavor = "current_thread")]

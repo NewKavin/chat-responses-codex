@@ -1,0 +1,6 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_bad","content":[]}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+

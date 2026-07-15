@@ -1,7 +1,7 @@
+use super::{DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage, UsageLogQuery};
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, UpstreamDialectProfile,
 };
-use super::{DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage, UsageLogQuery};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;

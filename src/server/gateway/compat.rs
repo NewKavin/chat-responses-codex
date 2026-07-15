@@ -1,18 +1,6 @@
 use crate::capabilities::{Capability, ResolvedCapabilities, TokenLimitField};
+use crate::protocol::image_adapter::ImageDialect;
 use serde_json::{Map, Value};
-
-const DEFAULT_SUPPORTED_REASONING_LEVELS: [(&str, &str); 4] = [
-    ("low", "Fast responses with lighter reasoning"),
-    ("medium", "Balances speed and reasoning depth"),
-    ("high", "Greater reasoning depth for complex problems"),
-    ("xhigh", "Extra high reasoning depth for complex problems"),
-];
-
-pub(super) fn supported_reasoning_levels_for_model(
-    _model: &str,
-) -> &'static [(&'static str, &'static str)] {
-    &DEFAULT_SUPPORTED_REASONING_LEVELS
-}
 
 pub(super) fn normalize_reasoning_effort_for_model(
     _model: &str,
@@ -73,7 +61,7 @@ pub(super) fn normalize_chat_payload_for_upstream_compatibility(
     }
 
     if strip_unknown_nonstandard_fields {
-        for key in ["metadata", "user", "parallel_tool_calls"] {
+        for key in ["metadata", "user", "parallel_tool_calls", "stream_options"] {
             object.remove(key);
         }
     }
@@ -135,10 +123,6 @@ pub(super) fn normalize_chat_payload_for_capabilities(
         object.remove("parallel_tool_calls");
     }
 
-    if !resolved.supports(Capability::UsageStream) {
-        object.remove("stream_options");
-    }
-
     if resolved.token_limit_field != TokenLimitField::Omit {
         let requested_limit = object
             .remove("max_output_tokens")
@@ -176,6 +160,53 @@ pub(super) fn normalize_chat_payload_for_capabilities(
             merge_optional_object(object, patch);
         }
     }
+}
+
+pub(super) fn normalize_image_payload_for_capabilities(
+    object: &mut Map<String, Value>,
+    dialect: &ImageDialect,
+) -> Option<String> {
+    let mut downgraded = false;
+    if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+        for message in messages {
+            if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
+                for part in content {
+                    if let Some(part_object) = part.as_object_mut() {
+                        if part_object.get("type").and_then(Value::as_str) == Some("image_url") {
+                            if let Some(image_url) = part_object.get_mut("image_url") {
+                                if let Some(image_url_object) = image_url.as_object_mut() {
+                                    if !dialect.detail
+                                        && image_url_object.remove("detail").is_some()
+                                    {
+                                        downgraded = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) {
+        for item in input {
+            if let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) {
+                for part in content {
+                    if let Some(part_object) = part.as_object_mut() {
+                        if part_object.get("type").and_then(Value::as_str) == Some("input_image")
+                            && !dialect.detail
+                            && part_object.remove("detail").is_some()
+                        {
+                            downgraded = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    downgraded.then_some("optional_image_detail".to_string())
 }
 
 fn merge_optional_object(target: &mut Map<String, Value>, patch: &Map<String, Value>) {
@@ -239,5 +270,68 @@ pub(super) fn strip_response_usage_fields_from_upstream_request(body: &mut Value
         "completion_tokens_details",
     ] {
         object.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capabilities::{
+        CapabilitySource, DialectProfileState, EvidenceState, ReasoningCarrier, ReasoningMode,
+        ResolvedCapabilities, ResolvedCapability,
+    };
+    use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn resolved_without_image_detail() -> ResolvedCapabilities {
+        ResolvedCapabilities {
+            values: BTreeMap::from([(
+                crate::capabilities::Capability::ImageHttps,
+                ResolvedCapability {
+                    state: EvidenceState::Supported,
+                    source: CapabilitySource::Probe,
+                },
+            )]),
+            token_limit_field: TokenLimitField::Omit,
+            reasoning_mode: ReasoningMode::Off,
+            reasoning_carrier: ReasoningCarrier::None,
+            correction_rules: Vec::new(),
+            reasoning_control_field: None,
+            effort_map: BTreeMap::new(),
+            omit_sampling_fields: BTreeSet::new(),
+            context_window: None,
+            max_output_tokens: None,
+            omit_optional_extensions: false,
+            profile_state: DialectProfileState::Verified,
+            provisional: false,
+            native_preferred: false,
+            adapters: BTreeSet::new(),
+            request_extensions: vec![],
+            field_sources: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn chat_capabilities_normalization_preserves_image_detail() {
+        let mut body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://images.example/red.png",
+                        "detail": "high"
+                    }
+                }]
+            }]
+        });
+
+        let resolved = resolved_without_image_detail();
+        normalize_chat_payload_for_capabilities(&mut body, &resolved);
+
+        assert_eq!(
+            body["messages"][0]["content"][0]["image_url"]["detail"],
+            "high"
+        );
     }
 }

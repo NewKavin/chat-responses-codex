@@ -195,7 +195,7 @@ pub(super) async fn dispatch_streaming_request(
     body: Value,
     endpoint: EndpointKind,
 ) -> Response {
-    if troubleshooting_route_capture_requested(&headers) {
+    if troubleshooting_route_capture_requested(&state, &headers) {
         return match process_gateway_request(state, headers, body, endpoint).await {
             Ok(result) => dispatch_success(result),
             Err(error) => error.into_response(),
@@ -210,26 +210,54 @@ pub(super) async fn dispatch_streaming_request(
     );
 
     let (tx, mut rx) = mpsc::channel::<Result<DispatchResult, GatewayError>>(1);
+    let request_id = Uuid::new_v4().to_string();
+    let background_request_id = request_id.clone();
     let bg_state = state.clone();
+    let pre_header_cancellation = PreHeaderStreamCancellation::default();
+    let request_cancellation = pre_header_cancellation.clone();
     tokio::spawn(async move {
-        let result = process_gateway_request(bg_state, headers, body, endpoint).await;
-        let _ = tx.send(result).await;
+        let request = process_gateway_request_with_pre_header_cancellation(
+            bg_state,
+            headers,
+            body,
+            endpoint,
+            background_request_id,
+            request_cancellation,
+        );
+        tokio::pin!(request);
+        tokio::select! {
+            result = &mut request => {
+                let _ = tx.send(result).await;
+            }
+            _ = tx.closed() => {
+                pre_header_cancellation.cancel().await;
+            }
+        }
     });
 
-    // Wait briefly for immediate errors (model not found, auth failure, etc.).
-    // 200ms is enough for synchronous validation failures but well below the
-    // typical upstream latency, so legitimate streaming requests are not delayed.
-    match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-        Ok(Some(Ok(result))) => return dispatch_success(result),
-        Ok(Some(Err(error))) => return error.into_response(),
+    // Wait only briefly for immediate synchronous failures. A longer pre-check
+    // inflates the first meaningful event latency for healthy streams.
+    match tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
+        Ok(Some(Ok(result))) => dispatch_success(result),
+        Ok(Some(Err(error))) => {
+            if error.error_category().starts_with("upstream_") {
+                dispatch_stream_response(
+                    Body::from_stream(futures_stream::iter([Ok::<Bytes, std::io::Error>(
+                        sse_gateway_error_frame(&error),
+                    )])),
+                    request_id,
+                )
+            } else {
+                error.into_response()
+            }
+        }
         Ok(None) => {
-            return GatewayError::Upstream("request processing channel closed".into())
-                .into_response()
+            GatewayError::Upstream("request processing channel closed".into()).into_response()
         }
         Err(_) => {
             // Still running — start the SSE keepalive stream.
             let body = early_keepalive_stream(rx, endpoint, keepalive_interval);
-            return dispatch_stream_response(body, String::new());
+            dispatch_stream_response(body, request_id)
         }
     }
 }
@@ -299,6 +327,59 @@ pub(super) fn dispatch_success(result: DispatchResult) -> Response {
     }
 }
 
+pub(super) async fn aggregate_upstream_sse_response(
+    mut response: reqwest::Response,
+    protocol: UpstreamProtocol,
+    stream_timeouts: StreamTimeouts,
+) -> Result<Value, GatewayError> {
+    let mut aggregator = StreamResponseAggregator::new(protocol);
+    let mut watchdog = StreamWatchdog::new(stream_timeouts);
+
+    loop {
+        match wait_for_upstream_chunk(&mut response, &watchdog).await {
+            StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
+                watchdog.record_upstream_activity(TokioInstant::now());
+                match aggregator.push(&chunk).map_err(protocol_error_to_gateway)? {
+                    StreamAggregateResult::Pending => {}
+                    StreamAggregateResult::Complete(response) => return Ok(response),
+                }
+            }
+            StreamReadOutcome::Chunk(Ok(None)) => {
+                return aggregator.finish().map_err(protocol_error_to_gateway);
+            }
+            StreamReadOutcome::Chunk(Err(error)) => {
+                let message = error.to_string();
+                let (status, category) =
+                    classify_upstream_stream_error(&message, error.is_timeout(), error.is_decode());
+                return Err(stream_gateway_error(status, message, category));
+            }
+            StreamReadOutcome::Heartbeat => {
+                watchdog.record_heartbeat(TokioInstant::now());
+            }
+            StreamReadOutcome::IdleTimeout => {
+                return Err(stream_gateway_error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "idle timeout waiting for SSE ({})",
+                        watchdog.debug_state(TokioInstant::now())
+                    ),
+                    "stream_idle_timeout",
+                ));
+            }
+            StreamReadOutcome::MaxDurationExceeded => {
+                return Err(stream_gateway_error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "stream max duration exceeded before completion ({})",
+                        watchdog.debug_state(TokioInstant::now())
+                    ),
+                    "stream_max_duration",
+                ));
+            }
+        }
+    }
+}
+
 pub(super) fn proxied_stream_body(
     response: reqwest::Response,
     endpoint: EndpointKind,
@@ -307,9 +388,18 @@ pub(super) fn proxied_stream_body(
     response_history_context: Option<ResponseHistoryContext>,
     stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
+    let canonicalizer = (endpoint == EndpointKind::ChatCompletions).then(|| {
+        ChatStreamCanonicalizer::new(
+            format!("chatcmpl-{}", log_context.request_id),
+            log_context.model.clone(),
+            unix_seconds(),
+        )
+    });
     let state = ProxiedStreamState {
         response,
         buffer: Vec::new(),
+        pending: VecDeque::new(),
+        canonicalizer,
         usage: None,
         log_context: Some(log_context),
         completion_context: stream_completion_context,
@@ -322,21 +412,57 @@ pub(super) fn proxied_stream_body(
         watchdog: StreamWatchdog::new(stream_timeouts),
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
-        if state.finished {
-            state.flush_usage_log().await?;
-            state.finalize_completion().await?;
-            return Ok::<Option<(Bytes, ProxiedStreamState)>, std::io::Error>(None);
-        }
+        loop {
+            if let Some(frame) = state.pending.pop_front() {
+                return Ok::<Option<(Bytes, ProxiedStreamState)>, std::io::Error>(Some((
+                    frame, state,
+                )));
+            }
+            if state.finished {
+                state.flush_usage_log().await?;
+                state.finalize_completion().await?;
+                return Ok(None);
+            }
 
-        match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
-            StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
-                state.watchdog.record_upstream_activity(TokioInstant::now());
-                if let Some(log_context) = state.log_context.as_ref() {
-                    log_context.touch_active_request();
+            match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
+                StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
+                    state.watchdog.record_upstream_activity(TokioInstant::now());
+                    if let Some(log_context) = state.log_context.as_ref() {
+                        log_context.touch_active_request();
+                    }
+                    state.buffer.extend_from_slice(&chunk);
+                    if let Err(error) = state.drain_usage_from_buffer() {
+                        let frame = state.finish_with_gateway_error(error).await;
+                        return Ok(Some((frame, state)));
+                    }
+                    if let Some(frame) = state.pending.pop_front() {
+                        return Ok(Some((frame, state)));
+                    }
+                    if state.finished {
+                        if state.should_emit_empty_response_error() {
+                            let frame = state
+                                .finish_with_gateway_error(upstream_empty_response_error())
+                                .await;
+                            return Ok(Some((frame, state)));
+                        }
+                        state.flush_usage_log().await?;
+                        state.finalize_completion().await?;
+                    } else if state.should_emit_empty_response_error() {
+                        let frame = state
+                            .finish_with_gateway_error(upstream_empty_response_error())
+                            .await;
+                        return Ok(Some((frame, state)));
+                    }
+                    if state.canonicalizer.is_some() {
+                        continue;
+                    }
+                    return Ok(Some((chunk, state)));
                 }
-                state.buffer.extend_from_slice(&chunk);
-                state.drain_usage_from_buffer()?;
-                if state.finished {
+                StreamReadOutcome::Chunk(Ok(None)) => {
+                    if let Err(error) = state.finish_stream(false) {
+                        let frame = state.finish_with_gateway_error(error).await;
+                        return Ok(Some((frame, state)));
+                    }
                     if state.should_emit_empty_response_error() {
                         let frame = state
                             .finish_with_gateway_error(upstream_empty_response_error())
@@ -345,80 +471,66 @@ pub(super) fn proxied_stream_body(
                     }
                     state.flush_usage_log().await?;
                     state.finalize_completion().await?;
-                } else if state.should_emit_empty_response_error() {
+                    if let Some(frame) = state.pending.pop_front() {
+                        return Ok(Some((frame, state)));
+                    }
+                    return Ok(None);
+                }
+                StreamReadOutcome::Chunk(Err(error)) => {
+                    let error_message = error.to_string();
+                    let is_timeout = error.is_timeout();
+                    let is_decode = error.is_decode();
+                    state
+                        .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
+                        .await;
+                    let (status, error_category) =
+                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
                     let frame = state
-                        .finish_with_gateway_error(upstream_empty_response_error())
+                        .finish_with_gateway_error(stream_gateway_error(
+                            status,
+                            error_message,
+                            error_category,
+                        ))
                         .await;
                     return Ok(Some((frame, state)));
                 }
-                Ok(Some((chunk, state)))
-            }
-            StreamReadOutcome::Chunk(Ok(None)) => {
-                state.finish_stream();
-                if state.should_emit_empty_response_error() {
+                StreamReadOutcome::Heartbeat => {
+                    state.watchdog.record_heartbeat(TokioInstant::now());
+                    return Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)));
+                }
+                StreamReadOutcome::IdleTimeout => {
+                    let now = TokioInstant::now();
+                    let debug_info = state.watchdog.debug_state(now);
+                    let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
+                    tracing::warn!("stream idle timeout: {}", debug_info);
+                    state.mark_stream_interrupted(error_message.clone()).await;
                     let frame = state
-                        .finish_with_gateway_error(upstream_empty_response_error())
+                        .finish_with_gateway_error(stream_gateway_error(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            error_message,
+                            "stream_idle_timeout",
+                        ))
                         .await;
                     return Ok(Some((frame, state)));
                 }
-                state.flush_usage_log().await?;
-                state.finalize_completion().await?;
-                Ok(None)
-            }
-            StreamReadOutcome::Chunk(Err(error)) => {
-                let error_message = error.to_string();
-                let is_timeout = error.is_timeout();
-                let is_decode = error.is_decode();
-                state
-                    .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
-                    .await;
-                let (status, error_category) =
-                    classify_upstream_stream_error(&error_message, is_timeout, is_decode);
-                let frame = state
-                    .finish_with_gateway_error(stream_gateway_error(
-                        status,
-                        error_message,
-                        error_category,
-                    ))
-                    .await;
-                Ok(Some((frame, state)))
-            }
-            StreamReadOutcome::Heartbeat => {
-                state.watchdog.record_heartbeat(TokioInstant::now());
-                Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)))
-            }
-            StreamReadOutcome::IdleTimeout => {
-                let now = TokioInstant::now();
-                let debug_info = state.watchdog.debug_state(now);
-                let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
-                tracing::warn!("stream idle timeout: {}", debug_info);
-                state.mark_stream_interrupted(error_message.clone()).await;
-                let frame = state
-                    .finish_with_gateway_error(stream_gateway_error(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        error_message,
-                        "stream_idle_timeout",
-                    ))
-                    .await;
-                Ok(Some((frame, state)))
-            }
-            StreamReadOutcome::MaxDurationExceeded => {
-                let now = TokioInstant::now();
-                let debug_info = state.watchdog.debug_state(now);
-                let error_message = format!(
-                    "stream max duration exceeded before completion ({})",
-                    debug_info
-                );
-                tracing::warn!("stream max duration: {}", debug_info);
-                state.mark_stream_interrupted(error_message.clone()).await;
-                let frame = state
-                    .finish_with_gateway_error(stream_gateway_error(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        error_message,
-                        "stream_max_duration",
-                    ))
-                    .await;
-                Ok(Some((frame, state)))
+                StreamReadOutcome::MaxDurationExceeded => {
+                    let now = TokioInstant::now();
+                    let debug_info = state.watchdog.debug_state(now);
+                    let error_message = format!(
+                        "stream max duration exceeded before completion ({})",
+                        debug_info
+                    );
+                    tracing::warn!("stream max duration: {}", debug_info);
+                    state.mark_stream_interrupted(error_message.clone()).await;
+                    let frame = state
+                        .finish_with_gateway_error(stream_gateway_error(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            error_message,
+                            "stream_max_duration",
+                        ))
+                        .await;
+                    return Ok(Some((frame, state)));
+                }
             }
         }
     });
@@ -429,6 +541,8 @@ pub(super) fn proxied_stream_body(
 struct ProxiedStreamState {
     response: reqwest::Response,
     buffer: Vec<u8>,
+    pending: VecDeque<Bytes>,
+    canonicalizer: Option<ChatStreamCanonicalizer>,
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
@@ -442,39 +556,56 @@ struct ProxiedStreamState {
 }
 
 impl ProxiedStreamState {
-    fn drain_usage_from_buffer(&mut self) -> Result<(), std::io::Error> {
+    fn drain_usage_from_buffer(&mut self) -> Result<(), GatewayError> {
         while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
-            let payload = match parse_sse_data_payload(&frame)? {
-                Some(payload) => payload,
-                None => {
-                    self.buffer.drain(..frame.len() + delimiter_len);
-                    continue;
-                }
-            };
+            let payload =
+                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error())? {
+                    Some(payload) => payload,
+                    None => {
+                        if self.canonicalizer.is_some() && is_sse_comment_frame(&frame) {
+                            self.pending
+                                .push_back(serialize_raw_sse_frame(frame.clone()));
+                        }
+                        self.buffer.drain(..frame.len() + delimiter_len);
+                        continue;
+                    }
+                };
 
             self.buffer.drain(..frame.len() + delimiter_len);
 
             if payload.trim() == "[DONE]" {
-                self.finish_stream();
+                self.finish_stream(true)?;
                 break;
             }
 
-            let event: Value = serde_json::from_str(&payload)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let event: Value =
+                serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error())?;
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
-            if stream_event_has_usable_output(&event) {
-                self.usable_output_seen = true;
-            }
-            if event.get("type").and_then(Value::as_str) == Some("response.completed") {
-                self.semantic_completion_emitted = true;
-            }
-            if !self.response_history_stored {
-                if let Some(context) = self.response_history_context.as_ref() {
-                    if context.store_from_completed_event(&event) {
-                        self.response_history_stored = true;
+            let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
+                canonicalizer
+                    .push(event)
+                    .map_err(protocol_error_to_gateway)?
+            } else {
+                vec![event]
+            };
+            for event in events {
+                if stream_event_has_usable_output(&event) {
+                    self.usable_output_seen = true;
+                }
+                if event.get("type").and_then(Value::as_str) == Some("response.completed") {
+                    self.semantic_completion_emitted = true;
+                }
+                if !self.response_history_stored {
+                    if let Some(context) = self.response_history_context.as_ref() {
+                        if context.store_from_completed_event(&event) {
+                            self.response_history_stored = true;
+                        }
                     }
+                }
+                if self.canonicalizer.is_some() {
+                    self.pending.push_back(serialize_sse_data(&event));
                 }
             }
         }
@@ -489,13 +620,37 @@ impl ProxiedStreamState {
             && stream_output_tokens_are_zero_or_unknown(self.usage)
     }
 
-    fn finish_stream(&mut self) {
+    fn finish_stream(&mut self, allow_missing_terminal: bool) -> Result<(), GatewayError> {
         if self.finished {
-            return;
+            return Ok(());
+        }
+
+        if let Some(mut canonicalizer) = self.canonicalizer.take() {
+            let result = if allow_missing_terminal {
+                canonicalizer.finish_after_done()
+            } else {
+                canonicalizer.finish()
+            };
+            let events = match result {
+                Ok(events) => events,
+                Err(_)
+                    if allow_missing_terminal
+                        && !self.usable_output_seen
+                        && stream_output_tokens_are_zero_or_unknown(self.usage) =>
+                {
+                    return Err(upstream_empty_response_error());
+                }
+                Err(error) => return Err(protocol_error_to_gateway(error)),
+            };
+            for event in events {
+                self.pending.push_back(serialize_sse_data(&event));
+            }
+            self.pending.push_back(sse_done_frame());
         }
 
         self.finished = true;
         self.buffer.clear();
+        Ok(())
     }
 
     async fn flush_usage_log(&mut self) -> Result<(), std::io::Error> {
@@ -532,6 +687,8 @@ impl ProxiedStreamState {
 
         self.finished = true;
         self.usage_log_flushed = true;
+        self.pending.clear();
+        self.canonicalizer.take();
         self.buffer.clear();
 
         finalize_stream_error(
@@ -541,6 +698,7 @@ impl ProxiedStreamState {
             status,
             error_category,
             error_message,
+            true,
         )
         .await;
 
@@ -572,6 +730,7 @@ impl ProxiedStreamState {
             status,
             error_category,
             error_message,
+            true,
         )
         .await;
     }
@@ -596,12 +755,13 @@ impl Drop for ProxiedStreamState {
                 completion_context,
                 log_context,
                 usage,
-                stream_drop_interruption_message(usage),
+                stream_drop_interruption_message(self.usable_output_seen),
             );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn translated_stream_body(
     response: reqwest::Response,
     source_protocol: UpstreamProtocol,
@@ -612,15 +772,29 @@ pub(super) fn translated_stream_body(
     response_history_context: Option<ResponseHistoryContext>,
     stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
-    let translator = StreamTranslator::new(source_protocol, target_protocol).ok_or_else(|| {
-        GatewayError::BadRequest(
-            "stream translation is not available for the requested protocol pair".into(),
+    let tool_registry = response_history_context
+        .as_ref()
+        .and_then(ResponseHistoryContext::tool_registry)
+        .cloned();
+    let translator =
+        StreamTranslator::new_with_tool_registry(source_protocol, target_protocol, tool_registry)
+            .ok_or_else(|| {
+            GatewayError::BadRequest(
+                "stream translation is not available for the requested protocol pair".into(),
+            )
+        })?;
+    let canonicalizer = (source_protocol == UpstreamProtocol::ChatCompletions).then(|| {
+        ChatStreamCanonicalizer::new(
+            format!("chatcmpl-{}", log_context.request_id),
+            log_context.model.clone(),
+            unix_seconds(),
         )
-    })?;
+    });
 
     let state = TranslatedStreamState {
         response,
         translator,
+        canonicalizer,
         buffer: Vec::new(),
         pending: VecDeque::new(),
         usage: None,
@@ -630,7 +804,8 @@ pub(super) fn translated_stream_body(
         response_history_stored: false,
         finished: false,
         semantic_completion_emitted: false,
-        usable_output_seen: false,
+        usable_output_observed: false,
+        usable_output_delivered: false,
         usage_log_flushed: false,
         watchdog: StreamWatchdog::new(stream_timeouts),
     };
@@ -645,7 +820,7 @@ pub(super) fn translated_stream_body(
                 )));
             }
 
-            if let Some(bytes) = state.pending.pop_front() {
+            if let Some(bytes) = state.pop_pending() {
                 if state.finished {
                     state.flush_usage_log().await?;
                     state.finalize_completion().await?;
@@ -666,17 +841,23 @@ pub(super) fn translated_stream_body(
                         log_context.touch_active_request();
                     }
                     state.buffer.extend_from_slice(&chunk);
-                    state.drain_buffer()?;
+                    if let Err(error) = state.drain_buffer() {
+                        let frame = state.finish_with_gateway_error(error).await;
+                        return Ok(Some((frame, state)));
+                    }
                 }
                 StreamReadOutcome::Chunk(Ok(None)) => {
-                    state.finish_stream()?;
+                    if let Err(error) = state.finish_stream(false) {
+                        let frame = state.finish_with_gateway_error(error).await;
+                        return Ok(Some((frame, state)));
+                    }
                     if state.should_emit_empty_response_error() {
                         let frame = state
                             .finish_with_gateway_error(upstream_empty_response_error())
                             .await;
                         return Ok(Some((frame, state)));
                     }
-                    if let Some(bytes) = state.pending.pop_front() {
+                    if let Some(bytes) = state.pop_pending() {
                         state.flush_usage_log().await?;
                         state.finalize_completion().await?;
                         return Ok(Some((bytes, state)));
@@ -747,11 +928,17 @@ pub(super) fn translated_stream_body(
     Ok(Body::from_stream(stream))
 }
 
+struct TranslatedPendingFrame {
+    bytes: Bytes,
+    usable_output: bool,
+}
+
 struct TranslatedStreamState {
     response: reqwest::Response,
     translator: StreamTranslator,
+    canonicalizer: Option<ChatStreamCanonicalizer>,
     buffer: Vec<u8>,
-    pending: VecDeque<Bytes>,
+    pending: VecDeque<TranslatedPendingFrame>,
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
@@ -759,80 +946,130 @@ struct TranslatedStreamState {
     response_history_stored: bool,
     finished: bool,
     semantic_completion_emitted: bool,
-    usable_output_seen: bool,
+    usable_output_observed: bool,
+    usable_output_delivered: bool,
     usage_log_flushed: bool,
     watchdog: StreamWatchdog,
 }
 
 impl TranslatedStreamState {
-    fn drain_buffer(&mut self) -> Result<(), std::io::Error> {
+    fn pop_pending(&mut self) -> Option<Bytes> {
+        let frame = self.pending.pop_front()?;
+        self.usable_output_delivered |= frame.usable_output;
+        Some(frame.bytes)
+    }
+
+    fn push_translated_event(&mut self, event: &Value) {
+        let usable_output = stream_event_has_usable_output(event);
+        self.usable_output_observed |= usable_output;
+        self.pending.push_back(TranslatedPendingFrame {
+            bytes: serialize_sse_data(event),
+            usable_output,
+        });
+    }
+
+    fn drain_buffer(&mut self) -> Result<(), GatewayError> {
         while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
-            let payload = match parse_sse_data_payload(&frame)? {
-                Some(payload) => payload,
-                None => {
-                    self.buffer.drain(..frame.len() + delimiter_len);
-                    continue;
-                }
-            };
+            let payload =
+                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error())? {
+                    Some(payload) => payload,
+                    None => {
+                        if is_sse_comment_frame(&frame) {
+                            self.pending.push_back(TranslatedPendingFrame {
+                                bytes: serialize_raw_sse_frame(frame.clone()),
+                                usable_output: false,
+                            });
+                        }
+                        self.buffer.drain(..frame.len() + delimiter_len);
+                        continue;
+                    }
+                };
 
             self.buffer.drain(..frame.len() + delimiter_len);
 
             if payload.trim() == "[DONE]" {
-                self.finish_stream()?;
+                self.finish_stream(true)?;
                 break;
             }
 
-            let event: Value = serde_json::from_str(&payload)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let event: Value =
+                serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error())?;
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
-            if stream_event_has_usable_output(&event) {
-                self.usable_output_seen = true;
-            }
-            let translated = self
-                .translator
-                .translate_event(&event)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            if translated.iter().any(stream_event_has_usable_output) {
-                self.usable_output_seen = true;
-            }
-            if translated
-                .iter()
-                .any(|item| item.get("type").and_then(Value::as_str) == Some("response.completed"))
-            {
-                self.semantic_completion_emitted = true;
-            }
-            if !self.response_history_stored {
-                if let Some(context) = self.response_history_context.as_ref() {
-                    if translated
-                        .iter()
-                        .any(|item| context.store_from_completed_event(item))
-                    {
-                        self.response_history_stored = true;
+            let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
+                canonicalizer
+                    .push(event)
+                    .map_err(protocol_error_to_gateway)?
+            } else {
+                vec![event]
+            };
+            for event in events {
+                let translated = self
+                    .translator
+                    .translate_event(&event)
+                    .map_err(|_| upstream_stream_translation_error())?;
+                if translated.iter().any(|item| {
+                    item.get("type").and_then(Value::as_str) == Some("response.completed")
+                }) {
+                    self.semantic_completion_emitted = true;
+                }
+                if !self.response_history_stored {
+                    if let Some(context) = self.response_history_context.as_ref() {
+                        if translated
+                            .iter()
+                            .any(|item| context.store_from_completed_event(item))
+                        {
+                            self.response_history_stored = true;
+                        }
                     }
                 }
-            }
-            for item in translated {
-                self.pending.push_back(serialize_sse_data(&item));
+                for item in translated {
+                    self.push_translated_event(&item);
+                }
             }
         }
 
         Ok(())
     }
 
-    fn finish_stream(&mut self) -> Result<(), std::io::Error> {
+    fn finish_stream(&mut self, allow_missing_terminal: bool) -> Result<(), GatewayError> {
         if self.finished {
             return Ok(());
+        }
+
+        if let Some(mut canonicalizer) = self.canonicalizer.take() {
+            let result = if allow_missing_terminal {
+                canonicalizer.finish_after_done()
+            } else {
+                canonicalizer.finish()
+            };
+            let events = match result {
+                Ok(events) => events,
+                Err(_)
+                    if allow_missing_terminal
+                        && !self.usable_output_observed
+                        && stream_output_tokens_are_zero_or_unknown(self.usage) =>
+                {
+                    return Err(upstream_empty_response_error());
+                }
+                Err(error) => return Err(protocol_error_to_gateway(error)),
+            };
+            for event in events {
+                let translated = self
+                    .translator
+                    .translate_event(&event)
+                    .map_err(|_| upstream_stream_translation_error())?;
+                for item in translated {
+                    self.push_translated_event(&item);
+                }
+            }
         }
 
         let translated = self
             .translator
             .finish()
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if translated.iter().any(stream_event_has_usable_output) {
-            self.usable_output_seen = true;
-        }
+            .map_err(|_| upstream_stream_translation_error())?;
         if translated
             .iter()
             .any(|item| item.get("type").and_then(Value::as_str) == Some("response.completed"))
@@ -850,9 +1087,12 @@ impl TranslatedStreamState {
             }
         }
         for item in translated {
-            self.pending.push_back(serialize_sse_data(&item));
+            self.push_translated_event(&item);
         }
-        self.pending.push_back(sse_done_frame());
+        self.pending.push_back(TranslatedPendingFrame {
+            bytes: sse_done_frame(),
+            usable_output: false,
+        });
         self.finished = true;
         self.buffer.clear();
         Ok(())
@@ -861,7 +1101,7 @@ impl TranslatedStreamState {
     fn should_emit_empty_response_error(&self) -> bool {
         !self.usage_log_flushed
             && (self.finished || self.semantic_completion_emitted)
-            && !self.usable_output_seen
+            && !self.usable_output_observed
             && stream_output_tokens_are_zero_or_unknown(self.usage)
     }
 
@@ -909,6 +1149,7 @@ impl TranslatedStreamState {
             status,
             error_category,
             error_message,
+            true,
         )
         .await;
 
@@ -940,6 +1181,7 @@ impl TranslatedStreamState {
             status,
             error_category,
             error_message,
+            true,
         )
         .await;
     }
@@ -966,14 +1208,55 @@ impl Drop for TranslatedStreamState {
                 completion_context,
                 log_context,
                 usage,
-                stream_drop_interruption_message(usage),
+                stream_drop_interruption_message(self.usable_output_delivered),
             );
         }
     }
 }
 
+fn upstream_sse_decode_error() -> GatewayError {
+    stream_gateway_error(
+        StatusCode::BAD_GATEWAY,
+        "failed to decode upstream SSE event",
+        "stream_upstream_body_decode_error",
+    )
+}
+
+fn upstream_stream_translation_error() -> GatewayError {
+    stream_gateway_error(
+        StatusCode::BAD_GATEWAY,
+        "failed to translate upstream SSE event",
+        "upstream_protocol_translation_failed",
+    )
+}
+
 fn serialize_sse_data(value: &Value) -> Bytes {
-    Bytes::from(format!("data: {}\n\n", value))
+    match value.get("type").and_then(Value::as_str) {
+        Some(event) if !event.is_empty() => {
+            Bytes::from(format!("event: {event}\ndata: {value}\n\n"))
+        }
+        _ => Bytes::from(format!("data: {value}\n\n")),
+    }
+}
+
+fn is_sse_comment_frame(frame: &[u8]) -> bool {
+    std::str::from_utf8(frame).ok().is_some_and(|frame| {
+        let mut saw_comment = false;
+        let only_comments = frame.lines().all(|line| {
+            if line.starts_with(':') {
+                saw_comment = true;
+                true
+            } else {
+                line.is_empty()
+            }
+        });
+        only_comments && saw_comment
+    })
+}
+
+fn serialize_raw_sse_frame(mut frame: Vec<u8>) -> Bytes {
+    frame.extend_from_slice(b"\n\n");
+    Bytes::from(frame)
 }
 
 pub(super) fn sse_keepalive_frame() -> Bytes {
@@ -997,11 +1280,44 @@ fn sse_done_frame() -> Bytes {
 
 pub(super) fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
     match error {
+        ProtocolError::CapabilityUnsupported => GatewayError::classified(
+            StatusCode::BAD_REQUEST,
+            "selected route cannot preserve required protocol capability",
+            "invalid_request_error",
+            "gateway_protocol_capability_unsupported",
+            "gateway_protocol_capability_unsupported",
+            None,
+            Some(json!({ "scope": "gateway" })),
+        ),
         ProtocolError::MissingField(field) => {
             GatewayError::BadRequest(format!("protocol conversion failed: missing field {field}"))
         }
         ProtocolError::InvalidPayload(_) => {
             GatewayError::BadRequest("protocol conversion failed: invalid payload shape".into())
+        }
+        ProtocolError::InvalidUpstreamStream { kind, .. } => {
+            let (message, code) = match kind {
+                crate::protocol::UpstreamStreamErrorKind::Decode => (
+                    "failed to decode upstream SSE stream",
+                    "upstream_stream_decode_error",
+                ),
+                crate::protocol::UpstreamStreamErrorKind::LimitExceeded => (
+                    "upstream SSE stream exceeded gateway limits",
+                    "upstream_stream_limit_exceeded",
+                ),
+                crate::protocol::UpstreamStreamErrorKind::UpstreamEvent => (
+                    "upstream SSE stream reported failure",
+                    "upstream_stream_error_event",
+                ),
+                crate::protocol::UpstreamStreamErrorKind::Incomplete => (
+                    "upstream SSE stream ended before semantic completion",
+                    "upstream_stream_incomplete",
+                ),
+            };
+            GatewayError::upstream_invalid_response(message, code)
+        }
+        ProtocolError::UnsupportedImageSource => {
+            GatewayError::BadRequest("protocol conversion failed: unsupported image source".into())
         }
     }
 }

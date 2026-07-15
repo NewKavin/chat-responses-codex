@@ -2,15 +2,7 @@ FROM node:22-bookworm-slim AS frontend-builder
 
 WORKDIR /app/frontend
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
-    && curl -fsSLo /tmp/node.tar.xz https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.xz \
-    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
-    && npm install -g npm@11.16.0 \
-    && rm -f /tmp/node.tar.xz \
-    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g npm@11.16.0
 
 COPY frontend/package*.json ./
 RUN npm ci

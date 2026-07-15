@@ -57,6 +57,7 @@ export const getClientProfileDefaults = (profile: TroubleshootingClientProfile) 
 export const matrixClientProfiles: TroubleshootingClientProfile[] = [
   'codex',
   'opencode',
+  'claude_code',
   'hermes'
 ]
 
@@ -73,6 +74,15 @@ export const getTroubleshootingStatusMeta = (status: TroubleshootingStepStatus) 
   if (status === 'warning') return { label: '警告', type: 'warning' as const }
   if (status === 'timeout') return { label: '超时', type: 'warning' as const }
   return { label: '失败', type: 'danger' as const }
+}
+
+export const getMatrixCheckStatusMeta = (check: { id: string; passed: boolean }) => {
+  if (check.id === 'optional_downgrades') {
+    return { label: '警告', type: 'warning' as const }
+  }
+  return check.passed
+    ? { label: '通过', type: 'success' as const }
+    : { label: '失败', type: 'danger' as const }
 }
 
 export const getTroubleshootingSuggestion = (category?: string | null) => {

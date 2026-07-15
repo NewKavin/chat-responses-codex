@@ -6,8 +6,9 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
     let status = result.status;
     let usage = result.usage;
     let mut usage_log_context = result.usage_log_context;
+    let thinking_signature = result.claude_thinking_signature.clone();
 
-    let mut headers = HeaderMap::new();
+    let mut headers = result.response_headers;
     headers.insert(
         header::HeaderName::from_static("x-gateway-request-id"),
         request_id,
@@ -15,22 +16,23 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
 
     match result.body {
         DispatchBody::Json(body) => {
-            let claude_body = match chat_completion_to_claude_message(&body) {
-                Ok(claude_body) => claude_body,
-                Err(error) => {
-                    if let Some(context) = usage_log_context.take() {
-                        context
-                            .emit(
-                                error.status_code(),
-                                Some(error.to_string()),
-                                Some(error.error_category().to_string()),
-                                usage,
-                            )
-                            .await;
+            let claude_body =
+                match chat_completion_to_claude_message(&body, thinking_signature.as_ref()) {
+                    Ok(claude_body) => claude_body,
+                    Err(error) => {
+                        if let Some(context) = usage_log_context.take() {
+                            context
+                                .emit(
+                                    error.status_code(),
+                                    Some(error.to_string()),
+                                    Some(error.error_category().to_string()),
+                                    usage,
+                                )
+                                .await;
+                        }
+                        return error.into_anthropic_response();
                     }
-                    return error.into_anthropic_response();
-                }
-            };
+                };
 
             if stream {
                 headers.insert(
@@ -110,7 +112,12 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
             if let Some(context) = usage_log_context.take() {
                 context.emit(status, None, None, usage).await;
             }
-            (status, headers, claude_stream_body(body)).into_response()
+            (
+                status,
+                headers,
+                claude_stream_body(body, thinking_signature),
+            )
+                .into_response()
         }
     }
 }
@@ -172,6 +179,60 @@ fn claude_message_to_sse_body(message: &Value) -> Result<Body, GatewayError> {
             .to_string();
 
         match block_type.as_str() {
+            "thinking" => {
+                let thinking = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let signature = block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                chunks.push(claude_sse_event(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {
+                            "type": "thinking",
+                            "thinking": ""
+                        }
+                    }),
+                ));
+                if !thinking.is_empty() {
+                    chunks.push(claude_sse_event(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {
+                                "type": "thinking_delta",
+                                "thinking": thinking
+                            }
+                        }),
+                    ));
+                }
+                if !signature.is_empty() {
+                    chunks.push(claude_sse_event(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {
+                                "type": "signature_delta",
+                                "signature": signature
+                            }
+                        }),
+                    ));
+                }
+                chunks.push(claude_sse_event(
+                    "content_block_stop",
+                    json!({
+                        "type": "content_block_stop",
+                        "index": index
+                    }),
+                ));
+            }
             "tool_use" => {
                 let id = block.get("id").and_then(Value::as_str).ok_or_else(|| {
                     GatewayError::Upstream("claude tool_use block missing id".into())
@@ -277,11 +338,7 @@ fn claude_message_to_sse_body(message: &Value) -> Result<Body, GatewayError> {
         }),
     ));
 
-    let stream = futures_stream::iter(
-        chunks
-            .into_iter()
-            .map(|chunk| Ok::<Bytes, std::io::Error>(chunk)),
-    );
+    let stream = futures_stream::iter(chunks.into_iter().map(Ok::<Bytes, std::io::Error>));
     Ok(Body::from_stream(stream))
 }
 
@@ -297,11 +354,15 @@ fn chat_finish_reason_to_claude_stop_reason(reason: Option<&str>) -> &'static st
     }
 }
 
-fn claude_stream_body(body: Body) -> Body {
+fn claude_stream_body(
+    body: Body,
+    thinking_signature: Option<ClaudeThinkingSignatureContext>,
+) -> Body {
     let state = ClaudeStreamState {
         stream: body.into_data_stream(),
         buffer: Vec::new(),
         pending: VecDeque::new(),
+        thinking_signature,
         usage: None,
         message_id: None,
         model: None,
@@ -310,6 +371,7 @@ fn claude_stream_body(body: Body) -> Body {
         thinking_block_index: None,
         thinking_block_started: false,
         thinking_block_finished: false,
+        thinking_text: String::new(),
         next_block_index: 0,
         tool_blocks: BTreeMap::new(),
         stop_reason: None,
@@ -318,7 +380,7 @@ fn claude_stream_body(body: Body) -> Body {
     };
     let stream = futures_stream::try_unfold(state, |mut state| async move {
         loop {
-            if let Some(bytes) = state.pending.pop_front() {
+            if let Some(bytes) = state.take_pending_frame() {
                 return Ok(Some((bytes, state)));
             }
 
@@ -353,6 +415,7 @@ struct ClaudeStreamState {
     stream: BodyDataStream,
     buffer: Vec<u8>,
     pending: VecDeque<Bytes>,
+    thinking_signature: Option<ClaudeThinkingSignatureContext>,
     usage: Option<(u64, u64, u64)>,
     message_id: Option<String>,
     model: Option<String>,
@@ -361,6 +424,7 @@ struct ClaudeStreamState {
     thinking_block_index: Option<usize>,
     thinking_block_started: bool,
     thinking_block_finished: bool,
+    thinking_text: String,
     next_block_index: usize,
     tool_blocks: BTreeMap<usize, ClaudeToolUseState>,
     stop_reason: Option<String>,
@@ -369,6 +433,21 @@ struct ClaudeStreamState {
 }
 
 impl ClaudeStreamState {
+    fn take_pending_frame(&mut self) -> Option<Bytes> {
+        let first = self.pending.pop_front()?;
+        if self.pending.is_empty() {
+            return Some(first);
+        }
+
+        let pending_bytes = self.pending.iter().map(Bytes::len).sum::<usize>();
+        let mut merged = Vec::with_capacity(first.len().saturating_add(pending_bytes));
+        merged.extend_from_slice(&first);
+        while let Some(bytes) = self.pending.pop_front() {
+            merged.extend_from_slice(&bytes);
+        }
+        Some(Bytes::from(merged))
+    }
+
     fn drain_buffer(&mut self) -> Result<(), std::io::Error> {
         while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
             let payload = parse_sse_data_payload(&frame)?;
@@ -388,10 +467,38 @@ impl ClaudeStreamState {
 
             let event: Value = serde_json::from_str(&payload)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if self.emit_gateway_error(&event) {
+                continue;
+            }
             self.consume_chat_chunk(&event)?;
         }
 
         Ok(())
+    }
+
+    fn emit_gateway_error(&mut self, event: &Value) -> bool {
+        let Some(upstream_error) = event.get("error").and_then(Value::as_object) else {
+            return false;
+        };
+
+        let mut error = upstream_error.clone();
+        error.remove("param");
+        error.insert("type".into(), Value::String("api_error".into()));
+        if !error.get("message").is_some_and(Value::is_string) {
+            error.insert(
+                "message".into(),
+                Value::String("upstream stream failed".into()),
+            );
+        }
+        self.pending.push_back(claude_sse_event(
+            "error",
+            json!({
+                "type": "error",
+                "error": Value::Object(error)
+            }),
+        ));
+        self.downstream_finished = true;
+        true
     }
 
     fn consume_chat_chunk(&mut self, chunk: &Value) -> Result<(), std::io::Error> {
@@ -419,7 +526,11 @@ impl ClaudeStreamState {
 
         let delta = choice.get("delta").unwrap_or(&Value::Null);
 
-        // reasoning_content (DeepSeek-style thinking) → Anthropic thinking block
+        if delta.get("role").and_then(Value::as_str) == Some("assistant") {
+            self.ensure_message_start();
+        }
+
+        // reasoning_content from the upstream chat response → Anthropic thinking block
         if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str) {
             if !reasoning_content.is_empty() && !self.thinking_block_finished {
                 self.ensure_message_start();
@@ -440,6 +551,7 @@ impl ClaudeStreamState {
                         }),
                     ));
                 }
+                self.thinking_text.push_str(reasoning_content);
                 self.pending.push_back(claude_sse_event(
                     "content_block_delta",
                     json!({
@@ -451,18 +563,6 @@ impl ClaudeStreamState {
                         }
                     }),
                 ));
-            } else if reasoning_content.is_empty()
-                && self.thinking_block_started
-                && !self.thinking_block_finished
-            {
-                self.thinking_block_finished = true;
-                self.pending.push_back(claude_sse_event(
-                    "content_block_stop",
-                    json!({
-                        "type": "content_block_stop",
-                        "index": self.thinking_block_index.unwrap_or(0)
-                    }),
-                ));
             }
         }
         if let Some(text) = delta
@@ -470,22 +570,23 @@ impl ClaudeStreamState {
             .map(|content| extract_plain_text_from_content(Some(content)))
             .filter(|text| !text.is_empty())
         {
-            if self.thinking_block_started && !self.thinking_block_finished {
-                self.thinking_block_finished = true;
-                self.pending.push_back(claude_sse_event(
-                    "content_block_stop",
-                    json!({
-                        "type": "content_block_stop",
-                        "index": self.thinking_block_index.unwrap_or(0)
-                    }),
-                ));
-            }
+            self.finish_thinking_block(&[]);
             self.close_open_tool_blocks();
             self.emit_text_delta(&text);
         }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             if !tool_calls.is_empty() {
+                let call_ids = tool_calls
+                    .iter()
+                    .filter_map(|tool_call| {
+                        tool_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>();
+                self.finish_thinking_block(&call_ids);
                 self.close_text_block();
                 self.ensure_message_start();
                 for (fallback_index, tool_call) in tool_calls.iter().enumerate() {
@@ -495,12 +596,19 @@ impl ClaudeStreamState {
         }
 
         if let Some(function_call) = delta.get("function_call") {
+            let call_ids = function_call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default();
+            self.finish_thinking_block(&call_ids);
             self.close_text_block();
             self.ensure_message_start();
             self.emit_legacy_function_call_delta(function_call)?;
         }
 
         if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish_thinking_block(&[]);
             self.stop_reason =
                 Some(chat_finish_reason_to_claude_stop_reason(Some(finish_reason)).to_string());
             self.finish_message();
@@ -722,6 +830,48 @@ impl ClaudeStreamState {
         }
     }
 
+    fn finish_thinking_block(&mut self, call_ids: &[String]) {
+        if !self.thinking_block_started || self.thinking_block_finished {
+            return;
+        }
+
+        if let Some(signature_context) = self.thinking_signature.as_ref() {
+            let call_id_refs = call_ids.iter().map(|id| id.as_str()).collect::<Vec<_>>();
+            let input = super::thinking_signature::ThinkingSignatureInput {
+                thinking: &self.thinking_text,
+                model: &signature_context.model,
+                upstream_id: &signature_context.upstream_id,
+                protocol: &signature_context.protocol,
+                profile_fingerprint: &signature_context.profile_fingerprint,
+                call_ids: &call_id_refs,
+            };
+            let signature = super::thinking_signature::sign_thinking(
+                signature_context.secret.as_bytes(),
+                &input,
+            );
+            self.pending.push_back(claude_sse_event(
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": self.thinking_block_index.unwrap_or(0),
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": signature
+                    }
+                }),
+            ));
+        }
+
+        self.thinking_block_finished = true;
+        self.pending.push_back(claude_sse_event(
+            "content_block_stop",
+            json!({
+                "type": "content_block_stop",
+                "index": self.thinking_block_index.unwrap_or(0)
+            }),
+        ));
+    }
+
     fn close_tool_block(&mut self, tool_index: usize) {
         let Some((block_index, should_emit)) = self.tool_blocks.get_mut(&tool_index).map(|state| {
             if state.started && !state.stopped {
@@ -751,6 +901,7 @@ impl ClaudeStreamState {
         }
 
         self.ensure_message_start();
+        self.finish_thinking_block(&[]);
         self.close_text_block();
         self.close_open_tool_blocks();
 
@@ -788,7 +939,10 @@ impl ClaudeStreamState {
     }
 }
 
-fn chat_completion_to_claude_message(body: &Value) -> Result<Value, GatewayError> {
+fn chat_completion_to_claude_message(
+    body: &Value,
+    thinking_signature: Option<&ClaudeThinkingSignatureContext>,
+) -> Result<Value, GatewayError> {
     let choice = body
         .get("choices")
         .and_then(Value::as_array)
@@ -800,16 +954,48 @@ fn chat_completion_to_claude_message(body: &Value) -> Result<Value, GatewayError
         .ok_or_else(|| GatewayError::Upstream("missing chat message".into()))?;
     let text = extract_plain_text_from_content(message.get("content"));
     let mut content_blocks = Vec::new();
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(reasoning) = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|reasoning| !reasoning.is_empty())
+    {
+        let call_ids = tool_calls
+            .iter()
+            .filter_map(|tool_call| tool_call.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let mut block = json!({
+            "type": "thinking",
+            "thinking": reasoning,
+        });
+        if let Some(signature_context) = thinking_signature {
+            let input = super::thinking_signature::ThinkingSignatureInput {
+                thinking: reasoning,
+                model: &signature_context.model,
+                upstream_id: &signature_context.upstream_id,
+                protocol: &signature_context.protocol,
+                profile_fingerprint: &signature_context.profile_fingerprint,
+                call_ids: &call_ids,
+            };
+            block["signature"] = Value::String(super::thinking_signature::sign_thinking(
+                signature_context.secret.as_bytes(),
+                &input,
+            ));
+        }
+        content_blocks.push(block);
+    }
     if !text.is_empty() {
         content_blocks.push(json!({
             "type": "text",
             "text": text,
         }));
     }
-    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-        for tool_call in tool_calls {
-            content_blocks.push(chat_tool_call_to_claude_tool_use_block(tool_call)?);
-        }
+    for tool_call in &tool_calls {
+        content_blocks.push(chat_tool_call_to_claude_tool_use_block(tool_call)?);
     }
     if content_blocks.is_empty() {
         content_blocks.push(json!({
@@ -923,6 +1109,20 @@ pub(super) fn claude_messages_to_chat_payload(body: &Value) -> Result<Value, Str
             Value::String(inference_strength.to_string()),
         );
     }
+    let mut gateway_claude = Map::new();
+    if body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.iter().any(|tool| tool.get("type").is_some()))
+    {
+        gateway_claude.insert("stream_only_recovery_unsafe_tool".into(), Value::Bool(true));
+    }
+    for key in ["thinking", "output_config", "context_management"] {
+        if let Some(value) = body.get(key) {
+            gateway_claude.insert(key.to_string(), value.clone());
+        }
+    }
+    output.insert("_gateway_claude".into(), Value::Object(gateway_claude));
 
     Ok(Value::Object(output))
 }
@@ -938,14 +1138,48 @@ fn claude_message_to_chat_messages(message: &Value) -> Result<Vec<Value>, String
         Some(Value::Array(parts)) if role == "assistant" => {
             let mut text_parts = Vec::new();
             let mut tool_calls = Vec::new();
+            let mut thinking_blocks = Vec::new();
+            let mut current_thinking_index = None;
             for part in parts {
                 let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
                 match part_type {
-                    "tool_use" => tool_calls.push(claude_tool_use_to_chat_tool_call(part)?),
+                    "thinking" => {
+                        let thinking = part
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let signature = part
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if !thinking.is_empty() || !signature.is_empty() {
+                            thinking_blocks.push(json!({
+                                "thinking": thinking,
+                                "signature": signature,
+                                "tool_use_ids": [],
+                            }));
+                            current_thinking_index = Some(thinking_blocks.len() - 1);
+                        }
+                    }
+                    "tool_use" => {
+                        let tool_call = claude_tool_use_to_chat_tool_call(part)?;
+                        if let Some(index) = current_thinking_index {
+                            if let Some(tool_use_ids) = thinking_blocks[index]
+                                .get_mut("tool_use_ids")
+                                .and_then(Value::as_array_mut)
+                            {
+                                if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
+                                    tool_use_ids.push(Value::String(id.to_string()));
+                                }
+                            }
+                        }
+                        tool_calls.push(tool_call);
+                    }
                     "text" => {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             if !text.is_empty() {
                                 text_parts.push(text.to_string());
+                                current_thinking_index = None;
                             }
                         }
                     }
@@ -953,6 +1187,7 @@ fn claude_message_to_chat_messages(message: &Value) -> Result<Vec<Value>, String
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             if !text.is_empty() {
                                 text_parts.push(text.to_string());
+                                current_thinking_index = None;
                             }
                         }
                     }
@@ -970,39 +1205,56 @@ fn claude_message_to_chat_messages(message: &Value) -> Result<Vec<Value>, String
             if !tool_calls.is_empty() {
                 message.insert("tool_calls".into(), Value::Array(tool_calls));
             }
+            if !thinking_blocks.is_empty() {
+                message.insert(
+                    "_gateway_claude_thinking".into(),
+                    Value::Array(thinking_blocks),
+                );
+            }
             Ok(vec![Value::Object(message)])
         }
         Some(Value::Array(parts)) if role == "user" => {
             let mut messages = Vec::new();
-            let mut text_parts = Vec::new();
+            let mut content_parts = Vec::new();
+            let mut structured_content = false;
             for part in parts {
                 let part_type = part.get("type").and_then(Value::as_str).unwrap_or_default();
                 match part_type {
-                    "tool_result" => messages.push(claude_tool_result_to_chat_tool_message(part)?),
+                    "tool_result" => {
+                        push_claude_user_content_message(
+                            &mut messages,
+                            &mut content_parts,
+                            &mut structured_content,
+                        );
+                        messages.push(claude_tool_result_to_chat_tool_message(part)?);
+                    }
                     "text" => {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             if !text.is_empty() {
-                                text_parts.push(text.to_string());
+                                content_parts.push(json!({"type": "text", "text": text}));
                             }
                         }
+                    }
+                    "image" => {
+                        content_parts.push(claude_image_to_chat_content(part)?);
+                        structured_content = true;
                     }
                     _ => {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             if !text.is_empty() {
-                                text_parts.push(text.to_string());
+                                content_parts.push(json!({"type": "text", "text": text}));
                             }
                         }
                     }
                 }
             }
 
-            let text = text_parts.join("\n");
-            if !text.is_empty() {
-                messages.push(json!({
-                    "role": "user",
-                    "content": text,
-                }));
-            } else if messages.is_empty() {
+            push_claude_user_content_message(
+                &mut messages,
+                &mut content_parts,
+                &mut structured_content,
+            );
+            if messages.is_empty() {
                 messages.push(json!({
                     "role": "user",
                     "content": "",
@@ -1018,6 +1270,67 @@ fn claude_message_to_chat_messages(message: &Value) -> Result<Vec<Value>, String
             })])
         }
     }
+}
+
+fn push_claude_user_content_message(
+    messages: &mut Vec<Value>,
+    content_parts: &mut Vec<Value>,
+    structured_content: &mut bool,
+) {
+    if content_parts.is_empty() {
+        return;
+    }
+    let parts = std::mem::take(content_parts);
+    let content = if *structured_content {
+        Value::Array(parts)
+    } else {
+        Value::String(
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
+    messages.push(json!({"role": "user", "content": content}));
+    *structured_content = false;
+}
+
+fn claude_image_to_chat_content(block: &Value) -> Result<Value, String> {
+    let source = block
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "claude image block missing source".to_string())?;
+    let source_type = source
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "claude image source missing type".to_string())?;
+    let url = match source_type {
+        "url" => source
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| "claude URL image source missing URL".to_string())?
+            .to_string(),
+        "base64" => {
+            let media_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .filter(|media_type| !media_type.is_empty())
+                .ok_or_else(|| "claude base64 image source missing media type".to_string())?;
+            let data = source
+                .get("data")
+                .and_then(Value::as_str)
+                .filter(|data| !data.is_empty())
+                .ok_or_else(|| "claude base64 image source missing data".to_string())?;
+            format!("data:{media_type};base64,{data}")
+        }
+        _ => return Err("unsupported claude image source type".to_string()),
+    };
+    Ok(json!({
+        "type": "image_url",
+        "image_url": {"url": url, "detail": "auto"}
+    }))
 }
 
 pub(super) fn extract_claude_content_text(message: &Value) -> String {
@@ -1221,5 +1534,69 @@ pub(super) fn extract_claude_system_text(system: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_messages_to_chat_payload;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn claude_user_image_preserves_mixed_content_order_for_chat_upstream() {
+        let converted = claude_messages_to_chat_payload(&json!({
+            "model": "opaque-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image", "source": {
+                        "type": "url",
+                        "url": "https://images.example/diagnostic.png"
+                    }},
+                    {"type": "text", "text": "after"}
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let content = converted
+            .pointer("/messages/0/content")
+            .and_then(Value::as_array)
+            .expect("mixed Claude content should remain structured Chat content");
+        assert_eq!(
+            content
+                .iter()
+                .filter_map(|block| block.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            ["text", "image_url", "text"]
+        );
+        assert_eq!(
+            content[1].pointer("/image_url/url").and_then(Value::as_str),
+            Some("https://images.example/diagnostic.png")
+        );
+    }
+
+    #[test]
+    fn claude_base64_image_preserves_mime_and_data_for_chat_upstream() {
+        let converted = claude_messages_to_chat_payload(&json!({
+            "model": "opaque-model",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "image", "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "cG5nLWJ5dGVz"
+                }}]
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            converted
+                .pointer("/messages/0/content/0/image_url/url")
+                .and_then(Value::as_str),
+            Some("data:image/png;base64,cG5nLWJ5dGVz")
+        );
     }
 }

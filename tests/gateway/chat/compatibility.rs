@@ -298,7 +298,10 @@ async fn strict_chat_compatibility_strips_optional_fields_but_preserves_tools() 
             "text",
             "max_output_tokens",
         ] {
-            assert!(captured.get(key).is_none(), "{key} should be removed: {captured}");
+            assert!(
+                captured.get(key).is_none(),
+                "{key} should be removed: {captured}"
+            );
         }
 
         assert_eq!(captured["max_tokens"].as_u64(), Some(4096));

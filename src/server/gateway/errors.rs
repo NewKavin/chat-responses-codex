@@ -6,10 +6,29 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};
 
 pub(super) fn upstream_empty_response_error() -> GatewayError {
-    GatewayError::upstream_invalid_response(
-        "upstream returned an empty response body (no content, zero tokens)",
-        "upstream_empty_response",
-    )
+    GatewayError::upstream_empty_response(false)
+}
+
+pub(super) fn recoverable_upstream_empty_response_error() -> GatewayError {
+    GatewayError::upstream_empty_response(true)
+}
+
+impl GatewayError {
+    fn upstream_empty_response(stream_only_recovery_candidate: bool) -> Self {
+        let mut error = GatewayError::upstream_invalid_response(
+            "upstream returned an empty response body (no content, zero tokens)",
+            "upstream_empty_response",
+        );
+        if stream_only_recovery_candidate {
+            if let GatewayError::Classified { meta, .. } = &mut error {
+                meta.details = Some(json!({
+                    "scope": "upstream",
+                    "stream_only_recovery_candidate": true,
+                }));
+            }
+        }
+        error
+    }
 }
 
 pub(super) fn stream_gateway_error(
@@ -390,12 +409,30 @@ impl GatewayError {
             _ => self.error_code(),
         }
     }
+    pub(super) fn is_stream_only_recovery_candidate(&self) -> bool {
+        matches!(
+            self,
+            GatewayError::Classified { meta, .. }
+                if meta
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("stream_only_recovery_candidate"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        )
+    }
     pub(super) fn safe_details(&self) -> Value {
         match self {
-            GatewayError::Classified { meta, .. } => meta
-                .details
-                .clone()
-                .unwrap_or_else(|| json!({ "scope": "gateway" })),
+            GatewayError::Classified { meta, .. } => {
+                let mut details = meta
+                    .details
+                    .clone()
+                    .unwrap_or_else(|| json!({ "scope": "gateway" }));
+                if let Some(object) = details.as_object_mut() {
+                    object.remove("stream_only_recovery_candidate");
+                }
+                details
+            }
             GatewayError::TooManyRequests {
                 retry_after_seconds,
                 ..
@@ -525,8 +562,7 @@ fn truncate_message(message: &str, max_chars: usize) -> String {
 /// hermes, claude code, …) will see in the `error.message` field.
 ///
 /// The goal is clarity: the user must understand *why* the request failed.
-/// We surface the upstream's real error text when available (e.g.
-/// "This token has no access to model deepseek-v4-pro") and fall back to a
+/// We surface the upstream's real error text when available and fall back to a
 /// concise status-based hint otherwise.
 pub(super) fn upstream_client_message(
     status: StatusCode,

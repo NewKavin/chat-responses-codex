@@ -58,7 +58,10 @@ impl FileStateStore {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    async fn write_capability_document(&self, document: &CapabilityStateDocument) -> io::Result<()> {
+    async fn write_capability_document(
+        &self,
+        document: &CapabilityStateDocument,
+    ) -> io::Result<()> {
         let path = self.capability_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
@@ -85,7 +88,7 @@ impl StateStore for FileStateStore {
                 announcement: state.announcement.clone(),
                 global_context_profiles: state.global_context_profiles.clone(),
             })
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+            .map_err(io::Error::other)?;
 
             let tmp_path = self.config_path.with_extension("tmp");
             fs::write(&tmp_path, &bytes).await?;
@@ -147,8 +150,7 @@ impl StateStore for FileStateStore {
             }
 
             let batch_path = self.usage_batch_path();
-            let bytes = serde_json::to_vec(logs)
-                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+            let bytes = serde_json::to_vec(logs).map_err(io::Error::other)?;
             let tmp_path = batch_path.with_extension("tmp");
             fs::write(&tmp_path, &bytes).await?;
             fs::rename(&tmp_path, &batch_path).await

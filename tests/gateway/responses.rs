@@ -38,5 +38,7 @@ mod history;
 mod stream_lifecycle;
 #[path = "responses/streaming.rs"]
 mod streaming;
+#[path = "responses/tools.rs"]
+mod tools;
 #[path = "responses/upstream_feedback.rs"]
 mod upstream_feedback;

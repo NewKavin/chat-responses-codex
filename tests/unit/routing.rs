@@ -77,7 +77,7 @@ fn test_fallback_to_premium_when_no_other_option() {
     .with_priority(100);
 
     let request = RouteRequest::new("gpt-4", UpstreamProtocol::ChatCompletions, false);
-    let result = select_upstream(&request, &[premium_account.clone()]);
+    let result = select_upstream(&request, std::slice::from_ref(&premium_account));
 
     // Should fall back to premium account when it's the only option
     assert!(result.is_ok());

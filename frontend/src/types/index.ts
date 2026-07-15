@@ -331,6 +331,9 @@ export type TroubleshootingCheck =
   | 'tools'
 
 export type TroubleshootingStepStatus = 'passed' | 'warning' | 'failed' | 'timeout'
+export interface TroubleshootingLogFilter {
+  [key: string]: string | number | boolean
+}
 
 export interface TroubleshootingRunRequest {
   client_profile: TroubleshootingClientProfile
@@ -345,13 +348,14 @@ export interface TroubleshootingStepResult {
   status: TroubleshootingStepStatus
   protocol: string
   http_status: number
+  observed_value?: number | null
   duration_ms: number
   summary: string
   details: string
   error_category?: string | null
   suggestion: string
   copy_summary: string
-  log_filter?: Record<string, unknown> | null
+  log_filter?: TroubleshootingLogFilter | null
 }
 
 export interface TroubleshootingRunResponse {
@@ -408,6 +412,21 @@ export interface CompatibilityMatrixCell {
   selected_upstream_protocol?: string | null
   protocol_transition?: string | null
   fallback_stage?: string | null
+  profile_state?: string
+  profile_currentness?: ProfileCurrentness
+  profile_age_seconds?: number | null
+  probe_version?: number | null
+  runtime_model_slug?: string
+  adapter_set?: string[]
+  dialect_retry_count?: number
+  optional_downgrades?: string[]
+  check_results?: Array<{
+    id: string
+    passed: boolean
+    codes: string[]
+    observed_value?: number | null
+  }>
+  first_meaningful_event_ms?: number | null
   status: TroubleshootingStepStatus
   http_status: number
   error_category?: string | null
@@ -429,6 +448,114 @@ export interface CompatibilityMatrixRunResponse {
   cells: CompatibilityMatrixCell[]
   duration_ms: number
   copy_summary: string
+}
+
+export type EvidenceState = 'supported' | 'rejected' | 'unobserved'
+export type CapabilitySource = 'override' | 'probe' | 'policy' | 'baseline'
+export type ProfileCurrentness = 'current' | 'stale' | 'missing'
+export type JsonPrimitive = string | number | boolean | null
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+
+export interface CapabilityConfigurationDocument {
+  schema_version: number
+  revision: number
+  policies?: JsonValue[]
+  route_overrides?: JsonValue[]
+  route_tags?: JsonValue[]
+  bundles?: JsonValue[]
+  compatibility_expectations?: JsonValue[]
+  probe?: JsonValue
+}
+
+export interface DialectProfileKey {
+  upstream_id: string
+  runtime_model_slug: string
+  protocol: 'chat_completions' | 'responses'
+}
+
+export interface DialectProfileEvidence {
+  capabilities: { [capability: string]: EvidenceState }
+  extensions: { [extension: string]: EvidenceState }
+  codes: string[]
+}
+
+export interface DialectProfileSources {
+  capabilities: { [capability: string]: 'probe' | 'baseline' }
+  extensions: { [extension: string]: 'probe' }
+}
+
+export interface DialectProfileEventSummary {
+  types: string[]
+}
+
+export interface DialectProfileStatusSummary {
+  http_status: number | null
+  operational_code: string | null
+}
+
+export interface ResolvedCapabilityValue {
+  state: EvidenceState
+  source: CapabilitySource
+}
+
+export interface DialectProfileSummary {
+  key: DialectProfileKey
+  upstream_id: string
+  runtime_model_slug: string
+  protocol: 'chat_completions' | 'responses'
+  state: 'verified' | 'partial' | 'unsupported' | 'unknown'
+  currentness: ProfileCurrentness
+  age_seconds: number | null
+  profile_age_seconds: number | null
+  probe_version: number | null
+  fingerprint: string | null
+  sources: DialectProfileSources
+  evidence: DialectProfileEvidence
+  event_summary: DialectProfileEventSummary
+  status_summary: DialectProfileStatusSummary
+}
+
+export interface ResolvedCapabilityConflictSide {
+  code: string
+  state: EvidenceState
+}
+
+export interface ResolvedCapabilityConflict {
+  subject: string
+  probe: ResolvedCapabilityConflictSide
+  policy: ResolvedCapabilityConflictSide
+  winner: CapabilitySource
+}
+
+export interface ResolvedCapabilitiesResponse {
+  configuration_revision: number
+  configuration_fingerprint: string | null
+  capabilities: { [capability: string]: ResolvedCapabilityValue }
+  profile_age_seconds: number | null
+  profile_currentness: ProfileCurrentness
+  profile_state: 'verified' | 'partial' | 'unsupported' | 'unknown'
+  profile: {
+    currentness: ProfileCurrentness
+    state: 'verified' | 'partial' | 'unsupported' | 'unknown'
+    age_seconds: number | null
+    fingerprint: string | null
+  }
+  field_sources: { [field: string]: CapabilitySource }
+  token: {
+    field: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens' | 'omit'
+    source: CapabilitySource
+  }
+  reasoning: {
+    mode: 'off' | 'optional' | 'fixed_on'
+    carrier: 'none' | 'reasoning_content' | 'responses_reasoning_item' | 'messages_thinking'
+    control_field: string | null
+    source: CapabilitySource
+  }
+  extensions: {
+    ids: string[]
+    source: CapabilitySource
+  }
+  conflicts: ResolvedCapabilityConflict[]
 }
 
 // ============================================================================

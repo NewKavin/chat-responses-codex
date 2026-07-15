@@ -1,0 +1,15 @@
+{
+  "model": "<model_slug>",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://<gateway_url>",
+    "ANTHROPIC_API_KEY": "<downstream_key>",
+    "ANTHROPIC_AUTH_TOKEN": "<downstream_key>",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "<model_slug>",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "<model_slug>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<model_slug>",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION": "<model_slug>",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "<model_slug>",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Current portal gateway model"
+  }
+}

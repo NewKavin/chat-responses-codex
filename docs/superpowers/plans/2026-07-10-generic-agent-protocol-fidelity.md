@@ -2302,7 +2302,7 @@ async fn catalog_uses_one_deterministic_witness_not_union_or_intersection() {
     assert_eq!(model["gateway_catalog_witness"]["upstream_id"], "priority-low");
     assert_eq!(model["input_modalities"], serde_json::json!(["text", "image"]));
     assert_eq!(model["supports_parallel_tool_calls"], true);
-    assert_eq!(model["web_search_tool_type"], serde_json::Value::Null);
+    assert_eq!(model["web_search_tool_type"], "text");
 }
 
 #[tokio::test]
@@ -2516,7 +2516,7 @@ For each exposed slug, select one route by:
 4. existing priority and health rank;
 5. upstream ID as the stable final tie-breaker.
 
-Build Codex metadata exclusively from that route's `ResolvedCapabilities`. Emit `input_modalities`, reasoning levels from the external effort map, context limits, parallel tools, structured output, reasoning summaries, shell type, and apply-patch type only when executable. Add bounded diagnostic metadata:
+Build Codex metadata exclusively from that route's `ResolvedCapabilities`. Emit `input_modalities`, context limits, parallel tools, and structured output only when executable. Publish reasoning summaries, reasoning levels, and the default effort only when reasoning summaries have distinct executable evidence; otherwise emit `supports_reasoning_summaries: false`, `supported_reasoning_levels: []`, and `default_reasoning_level: null`, while retaining the pinned non-null/default `default_reasoning_summary: "auto"`. `shell_type` is required: publish `shell_command` for a model with the standard function-tool continuation loop (otherwise do not publish that model; `disabled` is the explicit no-shell value). Keep `apply_patch_tool_type` optional and publish `freeform` only with executable custom-tool evidence. Add bounded diagnostic metadata:
 
 ```json
 {
@@ -2529,7 +2529,8 @@ Build Codex metadata exclusively from that route's `ResolvedCapabilities`. Emit 
 }
 ```
 
-Set hosted search to disabled/null. Do not advertise a capability assembled from multiple routes. Store the witness profile identity in request history, and constrain capability-using requests to the witness or a compatible superset.
+Keep `web_search_tool_type` at `text`; it describes hosted-search content shape and is not the disable flag. These required/default semantics are pinned to `openai/codex` v0.144.0/v0.144.1 `codex-rs/protocol/src/openai_models.rs`, with shell disable behavior in `codex-rs/core/src/tools/spec_plan.rs`. Do not advertise a capability assembled from multiple routes. Store the witness profile identity in request history, and constrain capability-using requests to the witness or a compatible superset.
+Continuation failover remains disabled until adapter semantics and tool-registry compatibility have a durable persisted equivalence identity; initial capability-using Codex requests may use the catalog witness or a current Verified full-capability superset with the same protocol, adapter set, and reasoning carrier.
 
 - [ ] **Step 7: Run compatibility and catalog tests**
 
@@ -4549,6 +4550,194 @@ Update `docs/PROTOCOL_COMPATIBILITY.md` maturity levels from the final determini
 rtk git add tests/load.rs docs/PROTOCOL_COMPATIBILITY.md docs/verification/2026-07-10-agent-protocol-fidelity.md
 rtk git commit -m "test: verify agent fidelity and streaming latency"
 ```
+
+### Task 16: Adapt Stream-Only Upstreams To Non-Streaming Clients
+
+**Files:**
+- Modify: `src/capabilities/types.rs`
+- Modify: `src/capabilities/mod.rs`
+- Modify: `src/capabilities/resolver.rs`
+- Modify: `src/server/gateway/capability_probe.rs`
+- Create: `src/protocol/stream_aggregate.rs`
+- Modify: `src/protocol.rs`
+- Modify: `src/server/gateway/stream.rs`
+- Modify: `src/server/gateway/upstream.rs`
+- Modify: `src/server/gateway.rs`
+- Modify: `src/state.rs`
+- Modify: `tests/capability_probe.rs`
+- Modify: `tests/protocol.rs`
+- Modify: `tests/gateway/chat/core.rs`
+- Modify: `tests/gateway/responses.rs`
+- Modify: `tests/gateway/claude.rs`
+- Modify: `tests/gateway/responses/history.rs`
+
+- [ ] **Step 1: Write failing capability-probe tests for a stream-only route**
+
+Add a synthetic Chat route whose non-stream response is HTTP 200 with empty
+content and explicit `completion_tokens: 0`, while its SSE response contains a
+meaningful text delta and `[DONE]`. Assert:
+
+```rust
+assert_eq!(
+    outcome.capability(Capability::NonStreamingResponse),
+    EvidenceState::Rejected,
+);
+assert_eq!(outcome.capability(Capability::TextInput), EvidenceState::Supported);
+assert_eq!(outcome.capability(Capability::TextStream), EvidenceState::Supported);
+```
+
+Run: `rtk cargo test --locked --test capability_probe stream_only -- --nocapture`
+
+Expected: FAIL because `NonStreamingResponse` does not exist and the Chat
+non-stream probe treats any HTTP 200 as supported.
+
+- [ ] **Step 2: Separate non-stream delivery evidence from text input**
+
+Add `Capability::NonStreamingResponse` to `Capability::ALL`, treat it as a
+supported baseline for unprobed routes, and increment
+`DIALECT_PROBE_SCHEMA_VERSION`. A successful stream probe proves both
+`TextInput` and `TextStream`; a usable non-stream JSON response proves both
+`TextInput` and `NonStreamingResponse`; an empty HTTP 200 rejects only
+`NonStreamingResponse`.
+
+Run: `rtk cargo test --locked --test capability_probe stream_only -- --nocapture`
+
+Expected: PASS.
+
+- [ ] **Step 3: Write failing pure Chat and Responses accumulator tests**
+
+Cover LF/CRLF framing, a frame split across input chunks, multiple `data:`
+lines, comments, fragmented text/reasoning/tool arguments, parallel tool call
+indices, usage-only Chat tail chunks, Responses completed/incomplete terminals,
+error events, and EOF without a valid terminal. The public protocol boundary is:
+
+```rust
+pub enum StreamAggregateResult {
+    Pending,
+    Complete(Value),
+}
+
+pub struct StreamResponseAggregator { /* protocol-specific state */ }
+
+impl StreamResponseAggregator {
+    pub fn new(protocol: UpstreamProtocol) -> Self;
+    pub fn push(&mut self, bytes: &[u8]) -> Result<StreamAggregateResult, ProtocolError>;
+    pub fn finish(self) -> Result<Value, ProtocolError>;
+}
+```
+
+Run: `rtk cargo test --locked --test protocol stream_aggregate -- --nocapture`
+
+Expected: FAIL because the accumulator is not implemented.
+
+- [ ] **Step 4: Implement bounded protocol accumulation**
+
+Create `src/protocol/stream_aggregate.rs`. Chat state is keyed by
+`choice.index`, with nested tool state keyed by `tool_calls[].index`. Do not end
+at the first `finish_reason`; retain a possible official `choices=[] + usage`
+tail until `[DONE]` or EOF. Responses accepts the full `response` object only
+from `response.completed` or `response.incomplete`; `response.failed` and error
+envelopes fail. Enforce explicit per-frame and total byte limits.
+
+Run: `rtk cargo test --locked --test protocol stream_aggregate -- --nocapture`
+
+Expected: PASS.
+
+- [ ] **Step 5: Write failing gateway tests for direct aggregate mode**
+
+For a profile with `NonStreamingResponse=Rejected` and
+`TextStream=Supported`, send non-stream Chat, Responses, and Messages requests.
+Assert one upstream hit, captured `stream:true`, downstream JSON content,
+reasoning, exact call IDs/arguments, usage, and Claude thinking-before-tool
+ordering. Assert ordinary downstream SSE still emits its first meaningful event
+before upstream completion. Repeat with `NonStreamingResponse=Unobserved` and
+probe/override-sourced `TextStream=Supported`; then prove baseline-only
+`TextStream` does not enable direct aggregation.
+
+Run: `rtk cargo test --locked --test gateway stream_only -- --nocapture`
+
+Expected: FAIL because non-stream requests still force `stream:false`.
+
+- [ ] **Step 6: Add explicit upstream attempt modes and async aggregation**
+
+Replace the overlapping downstream/upstream stream booleans at the dispatch
+boundary with:
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpstreamAttemptMode {
+    Json,
+    SsePassThrough,
+    SseAggregate,
+}
+```
+
+`SseAggregate` explicitly writes `stream:true`, reads SSE through the existing
+idle/max-duration watchdog, feeds `StreamResponseAggregator`, converts the final
+source JSON through the existing Chat/Responses conversion context, stores
+history, and returns `DispatchBody::Json`. It must not create a
+`StreamCompletionContext`; outer RAII guards release the non-stream request.
+
+Run: `rtk cargo test --locked --test gateway stream_only -- --nocapture`
+
+Expected: PASS for routes with conclusive stream-only evidence.
+
+- [ ] **Step 7: Write failing tests for bounded first-request learning**
+
+For an unobserved route, assert one JSON attempt followed by at most one SSE
+attempt only when the empty response contains explicit zero output usage and the
+request has no continuation, background/conversation state, or hosted/computer
+tool. Missing usage, stateful requests, and unsafe tools must return the empty
+response error without retry. After successful recovery, the next request must
+make one `stream:true` attempt. Start concurrent cold requests for the same
+exact route and assert one elected recovery leader performs JSON/SSE detection
+while followers wait, re-read evidence, and make only their single final SSE
+attempt. Requests for a different route must not wait.
+
+Run: `rtk cargo test --locked --test gateway stream_only_learning -- --nocapture`
+
+Expected: FAIL because no safe inverse retry or field-level learning exists.
+
+- [ ] **Step 8: Implement exact-route evidence learning without lost updates**
+
+Add an `AppState` method that locks `capability_update_lock`, reloads the latest
+snapshot, checks the exact `DialectProfileKey`, configuration fingerprint, and
+probe schema version, merges only `NonStreamingResponse=Rejected` and
+`TextStream=Supported`, persists, then publishes one ArcSwap snapshot. Never
+replace a profile assembled before the lock. Mark the route only after aggregate
+success. A failed or cancelled recovery leaves evidence unchanged. Use a
+bounded exact-route singleflight registry for the unknown recovery window and
+remove idle entries after completion.
+
+Run: `rtk cargo test --locked --test gateway stream_only_learning -- --nocapture`
+
+Expected: PASS.
+
+- [ ] **Step 9: Prove cancellation, timeout, and quota cleanup**
+
+Add tests that cancel an aggregate future, return malformed SSE, exceed the
+byte bound, and trigger idle timeout. After every case assert downstream
+concurrency and upstream `in_flight` return to zero, no partial response history
+is stored, and one structured upstream error category is logged.
+
+Run: `rtk cargo test --locked --test gateway aggregate -- --nocapture`
+
+Expected: PASS.
+
+- [ ] **Step 10: Run genericity, performance, and full verification**
+
+Run:
+
+```bash
+rtk cargo fmt --all -- --check
+rtk cargo clippy --all-targets --all-features -- -D warnings
+rtk cargo test --locked --all-targets -- --nocapture
+rtk cargo test --release --test load load_gateway_first_meaningful_event -- --ignored --exact --nocapture
+rtk rg -n -i 'deepseek|minimax|moonshot|kimi|qwen|zhipu|glm|grok|sonnet|haiku' src --glob '*.rs'
+```
+
+Expected: all tests pass, streaming P95 remains below the existing bound, and
+production dispatch/aggregation contains no model or provider classifier.
 
 ## Final Acceptance Checklist
 

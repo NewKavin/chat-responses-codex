@@ -1,9 +1,10 @@
 use crate::capabilities::{
-    normalize_route_base_url, profile_is_current, route_fingerprint, CapabilityConfiguration,
-    CapabilityRuntimeSnapshot, CapabilityStateDocument, DialectProfileKey, ProbeJob, ProbeReason,
-    RouteFingerprintInput, UpstreamDialectProfile, WireProtocol,
+    normalize_route_base_url, profile_is_current, route_fingerprint, Capability,
+    CapabilityConfiguration, CapabilityRuntimeSnapshot, CapabilityStateDocument, DialectProfileKey,
+    EvidenceState, ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeReason,
+    RouteFingerprintInput, UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
-use crate::keys::verify_downstream_key;
+use crate::keys::{validated_downstream_plaintext, verify_downstream_key};
 use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
@@ -37,7 +38,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::Digest;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use tokio::fs;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -64,9 +66,10 @@ pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
     default_upstream_request_quota_5h, default_upstream_request_quota_requests,
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
-    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, DefaultModelContextConfig,
-    DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
-    PersistedState, UpstreamConfig, UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
+    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
+    CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
+    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
+    UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
 };
 pub use usage::{
     portal_model_is_allowed, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage, TokenQuota,
@@ -91,6 +94,7 @@ pub use crate::util::{
 const RESPONSE_HISTORY_MAX_ENTRIES: usize = 2048;
 const RESPONSE_HISTORY_TTL_SECONDS: u64 = 12 * 60 * 60;
 const ACTIVE_REQUEST_USER_AGENT_MAX_BYTES: usize = 256;
+const CAPABILITY_PROBE_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn fallback_stage_failure_key(
     downstream_id: &str,
@@ -202,7 +206,10 @@ pub struct AppState {
     routing_affinity: Arc<StdMutex<HashMap<String, RoutingAffinityEntry>>>,
     routing_tie_breakers: Arc<StdMutex<HashMap<String, u64>>>,
     admin_sessions: Arc<StdMutex<HashMap<String, u64>>>,
-    capability_probe_sender: Arc<StdMutex<Option<mpsc::Sender<ProbeJob>>>>,
+    capability_probe_sender: Arc<StdMutex<Option<mpsc::Sender<ProbeJobBatch>>>>,
+    capability_probe_submissions:
+        Arc<StdMutex<HashMap<DialectProfileKey, ProbeConfigurationBinding>>>,
+    troubleshooting_route_capture_token: Arc<str>,
     pub store_path: PathBuf,
     pub config: AppConfig,
     client: Client,
@@ -210,6 +217,32 @@ pub struct AppState {
     config_store: Arc<dyn StateStore>,
     postgres: Option<Arc<PostgresStateStore>>,
     redis: Option<Arc<Mutex<ConnectionManager>>>,
+}
+
+fn new_internal_route_capture_token() -> Arc<str> {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()).into()
+}
+
+fn validate_downstream_plaintext_pair(downstream: &mut DownstreamConfig) {
+    let has_invalid_plaintext = downstream
+        .plaintext_key
+        .as_deref()
+        .is_some_and(|plaintext| {
+            validated_downstream_plaintext(Some(plaintext), &downstream.hash).is_none()
+        });
+    if has_invalid_plaintext {
+        tracing::warn!(
+            downstream_id = %downstream.id,
+            "clearing downstream plaintext that does not match its hash"
+        );
+        downstream.plaintext_key = None;
+    }
+}
+
+fn validate_downstream_plaintext_pairs(state: &mut PersistedState) {
+    for downstream in &mut state.downstreams {
+        validate_downstream_plaintext_pair(downstream);
+    }
 }
 
 impl StateStore for PostgresStateStore {
@@ -425,6 +458,7 @@ impl AppState {
         for upstream in &mut state.upstreams {
             upstream.normalize_for_storage();
         }
+        validate_downstream_plaintext_pairs(&mut state);
         state.global_context_profiles = normalize_global_context_profiles_for_storage(
             std::mem::take(&mut state.global_context_profiles),
         );
@@ -461,6 +495,8 @@ impl AppState {
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
+            capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            troubleshooting_route_capture_token: new_internal_route_capture_token(),
             store_path,
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -482,6 +518,7 @@ impl AppState {
         for upstream in &mut state.upstreams {
             upstream.normalize_for_storage();
         }
+        validate_downstream_plaintext_pairs(&mut state);
         state.global_context_profiles = normalize_global_context_profiles_for_storage(
             std::mem::take(&mut state.global_context_profiles),
         );
@@ -516,6 +553,8 @@ impl AppState {
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
+            capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            troubleshooting_route_capture_token: new_internal_route_capture_token(),
             store_path,
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -534,6 +573,7 @@ impl AppState {
         for upstream in &mut state.upstreams {
             upstream.normalize_for_storage();
         }
+        validate_downstream_plaintext_pairs(&mut state);
         state.global_context_profiles = normalize_global_context_profiles_for_storage(
             std::mem::take(&mut state.global_context_profiles),
         );
@@ -565,6 +605,8 @@ impl AppState {
             routing_tie_breakers: Arc::new(StdMutex::new(HashMap::new())),
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
+            capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            troubleshooting_route_capture_token: new_internal_route_capture_token(),
             store_path: PathBuf::new(),
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -573,6 +615,10 @@ impl AppState {
             postgres: Some(postgres),
             redis: None,
         }
+    }
+
+    pub fn troubleshooting_route_capture_token(&self) -> &str {
+        &self.troubleshooting_route_capture_token
     }
 
     pub async fn maybe_attach_redis(&mut self) -> bool {
@@ -678,7 +724,7 @@ impl AppState {
         sessions.remove(token);
     }
 
-    pub fn set_capability_probe_sender(&self, sender: mpsc::Sender<ProbeJob>) {
+    pub fn set_capability_probe_sender(&self, sender: mpsc::Sender<ProbeJobBatch>) {
         *self
             .capability_probe_sender
             .lock()
@@ -686,12 +732,175 @@ impl AppState {
     }
 
     pub fn queue_capability_probe(&self, job: ProbeJob) -> bool {
-        self.capability_probe_sender
+        if !self
+            .capability_snapshot()
+            .configuration
+            .source()
+            .probe
+            .enabled
+        {
+            return false;
+        }
+        let sender = self
+            .capability_probe_sender
             .lock()
             .expect("probe sender lock poisoned")
             .as_ref()
-            .map(|sender| sender.try_send(job).is_ok())
-            .unwrap_or(false)
+            .cloned();
+        let Some(sender) = sender else {
+            return false;
+        };
+        let key = job.key.clone();
+        let binding = job.configuration.clone();
+        {
+            let mut submissions = self
+                .capability_probe_submissions
+                .lock()
+                .expect("probe submission lock poisoned");
+            if submissions
+                .get(&key)
+                .is_some_and(|queued| queued == &binding)
+            {
+                return false;
+            }
+            submissions.insert(key.clone(), binding.clone());
+        }
+        if sender.try_send(ProbeJobBatch::single(job)).is_ok() {
+            return true;
+        }
+        let mut submissions = self
+            .capability_probe_submissions
+            .lock()
+            .expect("probe submission lock poisoned");
+        if submissions
+            .get(&key)
+            .is_some_and(|queued| queued == &binding)
+        {
+            submissions.remove(&key);
+        }
+        false
+    }
+
+    pub fn finish_capability_probe_submission(
+        &self,
+        key: &DialectProfileKey,
+        binding: &ProbeConfigurationBinding,
+    ) {
+        let mut submissions = self
+            .capability_probe_submissions
+            .lock()
+            .expect("probe submission lock poisoned");
+        if submissions.get(key).is_some_and(|queued| queued == binding) {
+            submissions.remove(key);
+        }
+    }
+
+    pub async fn build_capability_probe_job(
+        &self,
+        upstream_id: &str,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+        reason: ProbeReason,
+    ) -> io::Result<Option<ProbeJob>> {
+        let routing = self.routing_snapshot().await;
+        let Some(upstream) = routing
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == upstream_id)
+        else {
+            return Ok(None);
+        };
+        let capability_snapshot = self.capability_snapshot();
+        Self::build_capability_probe_job_with_snapshot(
+            &capability_snapshot,
+            upstream,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+            reason,
+        )
+    }
+
+    fn build_capability_probe_job_with_snapshot(
+        capability_snapshot: &CapabilityRuntimeSnapshot,
+        upstream: &UpstreamConfig,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+        reason: ProbeReason,
+    ) -> io::Result<Option<ProbeJob>> {
+        if !capability_snapshot.configuration.source().probe.enabled
+            || !upstream.active
+            || !upstream.supports_protocol(protocol)
+            || upstream.resolved_model_name(exposed_model_slug).as_deref()
+                != Some(runtime_model_slug)
+        {
+            return Ok(None);
+        }
+        let configuration_fingerprint = Self::route_configuration_fingerprint_with_snapshot(
+            capability_snapshot,
+            upstream,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+        )?;
+        Ok(Some(ProbeJob {
+            key: DialectProfileKey {
+                upstream_id: upstream.id.clone(),
+                runtime_model_slug: runtime_model_slug.to_owned(),
+                protocol: protocol.into(),
+            },
+            exposed_model_slugs: BTreeSet::from([exposed_model_slug.to_owned()]),
+            reason,
+            configuration: ProbeConfigurationBinding {
+                configuration_fingerprint,
+                configuration_digest: capability_snapshot.configuration.digest().to_owned(),
+                configuration_schema_version: capability_snapshot
+                    .configuration
+                    .source()
+                    .schema_version,
+                configuration_revision: capability_snapshot.configuration.source().revision,
+                probe_schema_version: DIALECT_PROBE_SCHEMA_VERSION,
+            },
+            plan_configuration: capability_snapshot.configuration.clone(),
+        }))
+    }
+
+    pub fn capability_probe_job_is_current(
+        capability_snapshot: &CapabilityRuntimeSnapshot,
+        upstream: &UpstreamConfig,
+        job: &ProbeJob,
+    ) -> bool {
+        let Some(exposed_model_slug) = job.exposed_model_slugs.iter().next() else {
+            return false;
+        };
+        let protocol = match job.key.protocol {
+            WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
+            WireProtocol::Responses => UpstreamProtocol::Responses,
+            WireProtocol::Messages => return false,
+        };
+        if !upstream.active
+            || !upstream.supports_protocol(protocol)
+            || upstream.resolved_model_name(exposed_model_slug).as_deref()
+                != Some(job.key.runtime_model_slug.as_str())
+        {
+            return false;
+        }
+        job.configuration.configuration_schema_version
+            == capability_snapshot.configuration.source().schema_version
+            && job.configuration.configuration_revision
+                == capability_snapshot.configuration.source().revision
+            && job.configuration.configuration_digest == capability_snapshot.configuration.digest()
+            && job.configuration.probe_schema_version == DIALECT_PROBE_SCHEMA_VERSION
+            && Self::route_configuration_fingerprint_with_snapshot(
+                capability_snapshot,
+                upstream,
+                exposed_model_slug,
+                &job.key.runtime_model_slug,
+                protocol,
+            )
+            .is_ok_and(|fingerprint| fingerprint == job.configuration.configuration_fingerprint)
     }
 
     pub fn start_active_gateway_request(&self, start: ActiveGatewayRequestStart) {
@@ -819,8 +1028,8 @@ impl AppState {
 
         let mut usage_logs = pending_usage_logs
             .into_iter()
-            .chain(archived_usage_logs.into_iter())
-            .chain(state.usage_logs.into_iter())
+            .chain(archived_usage_logs)
+            .chain(state.usage_logs)
             .collect::<Vec<_>>();
         usage_logs.sort_by(|left, right| {
             left.created_at
@@ -882,7 +1091,8 @@ impl AppState {
         let archived_usage_log_count = archived_usage_logs.len();
         let app = Self::new_with_archived(state, archived_usage_logs, store_path, config);
         let capability_state = app.config_store.load_capability_state().await?;
-        app.initialize_capability_snapshot(capability_state)?;
+        app.initialize_capability_snapshot_from_store(capability_state)
+            .await?;
         app.enforce_usage_log_archive_limit().await?;
         tracing::info!(
             backend = "file",
@@ -904,10 +1114,7 @@ impl AppState {
             PostgresStateStore::connect(database_url.as_ref(), config.postgres_pool_max_size)
                 .await
                 .map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("failed to initialize postgres backend: {error}"),
-                    )
+                    io::Error::other(format!("failed to initialize postgres backend: {error}"))
                 })?;
         let state = postgres.load_state().await?;
         let capability_state = postgres.load_capability_state().await?;
@@ -919,7 +1126,8 @@ impl AppState {
             "loaded postgres-backed gateway state"
         );
         let app = Self::new_with_postgres(state, config, postgres).await;
-        app.initialize_capability_snapshot(capability_state)?;
+        app.initialize_capability_snapshot_from_store(capability_state)
+            .await?;
         Ok(app)
     }
 
@@ -960,6 +1168,114 @@ impl AppState {
                 profiles,
             }));
         Ok(())
+    }
+
+    pub async fn upsert_dialect_profile_if_probe_current(
+        &self,
+        profile: UpstreamDialectProfile,
+        binding: &ProbeConfigurationBinding,
+    ) -> io::Result<bool> {
+        let _guard = self.capability_update_lock.lock().await;
+        let current = self.capability_snapshot();
+        if current.configuration.source().schema_version != binding.configuration_schema_version
+            || current.configuration.source().revision != binding.configuration_revision
+            || current.configuration.digest() != binding.configuration_digest
+            || binding.probe_schema_version != DIALECT_PROBE_SCHEMA_VERSION
+            || profile.configuration_fingerprint != binding.configuration_fingerprint
+            || profile.probe_schema_version != binding.probe_schema_version
+        {
+            return Ok(false);
+        }
+        self.config_store.upsert_dialect_profile(&profile).await?;
+        let mut profiles = current.profiles.clone();
+        profiles.insert(profile.key.clone(), profile);
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: current.configuration.clone(),
+                profiles,
+            }));
+        Ok(true)
+    }
+
+    pub async fn learn_stream_only_route(
+        &self,
+        key: &DialectProfileKey,
+        exposed_model_slug: &str,
+        configuration_fingerprint: &str,
+    ) -> io::Result<bool> {
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let _capability_guard = self.capability_update_lock.lock().await;
+        let latest = self.config_store.load_capability_state().await?;
+        let compiled = Arc::new(
+            latest
+                .configuration
+                .compile()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        );
+        let latest_snapshot = CapabilityRuntimeSnapshot {
+            configuration: compiled.clone(),
+            profiles: latest.profiles.clone(),
+        };
+        let routing = self.routing_snapshot().await;
+        let Some(upstream) = routing
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == key.upstream_id)
+        else {
+            return Ok(false);
+        };
+        let protocol = match key.protocol {
+            WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
+            WireProtocol::Responses => UpstreamProtocol::Responses,
+            WireProtocol::Messages => return Ok(false),
+        };
+        if !upstream.supports_model(exposed_model_slug)
+            || !upstream.supports_model(&key.runtime_model_slug)
+        {
+            return Ok(false);
+        }
+        if !upstream.supports_protocol(protocol) {
+            return Ok(false);
+        }
+        let latest_fingerprint = Self::route_configuration_fingerprint_with_snapshot(
+            &latest_snapshot,
+            upstream,
+            exposed_model_slug,
+            &key.runtime_model_slug,
+            protocol,
+        )?;
+        if latest_fingerprint != configuration_fingerprint {
+            return Ok(false);
+        }
+        let mut profile = if let Some(current_profile) = latest.profiles.get(key) {
+            if current_profile.key != *key
+                || current_profile.configuration_fingerprint != configuration_fingerprint
+                || current_profile.probe_schema_version != DIALECT_PROBE_SCHEMA_VERSION
+            {
+                return Ok(false);
+            }
+            current_profile.clone()
+        } else {
+            let mut profile = UpstreamDialectProfile::unknown(key.clone());
+            profile.configuration_fingerprint = configuration_fingerprint.to_string();
+            profile
+        };
+        profile
+            .capabilities
+            .insert(Capability::NonStreamingResponse, EvidenceState::Rejected);
+        profile
+            .capabilities
+            .insert(Capability::TextStream, EvidenceState::Supported);
+        self.config_store.upsert_dialect_profile(&profile).await?;
+
+        let mut profiles = latest.profiles;
+        profiles.insert(key.clone(), profile);
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: compiled,
+                profiles,
+            }));
+        Ok(true)
     }
 
     pub async fn delete_dialect_profiles_for_upstream(&self, upstream_id: &str) -> io::Result<()> {
@@ -1012,8 +1328,17 @@ impl AppState {
         state
             .downstreams
             .iter()
-            .find(|downstream| downstream.active && verify_downstream_key(secret, &downstream.hash))
+            .find(|downstream| {
+                downstream.active && Self::normalized_downstream_matches(downstream, secret)
+            })
             .cloned()
+    }
+
+    fn normalized_downstream_matches(downstream: &DownstreamConfig, candidate: &str) -> bool {
+        downstream.plaintext_key.as_deref().map_or_else(
+            || verify_downstream_key(candidate, &downstream.hash),
+            |validated| validated.as_bytes().ct_eq(candidate.as_bytes()).into(),
+        )
     }
 
     pub async fn fetch_models_from_endpoint(
@@ -1399,11 +1724,11 @@ impl AppState {
     async fn flush_pending_usage_logs_now(&self) -> io::Result<()> {
         loop {
             let batch = {
-                let mut pending = self.pending_usage_logs.lock().await;
+                let pending = self.pending_usage_logs.lock().await;
                 if pending.is_empty() {
                     Vec::new()
                 } else {
-                    std::mem::take(&mut *pending)
+                    pending.clone()
                 }
             };
 
@@ -1411,13 +1736,12 @@ impl AppState {
                 return Ok(());
             }
 
-            if let Err(error) = self.flush_usage_log_batch(&batch).await {
-                let mut pending = self.pending_usage_logs.lock().await;
-                let mut requeued = batch;
-                requeued.extend(pending.drain(..));
-                *pending = requeued;
-                return Err(error);
-            }
+            // Keep the batch visible to snapshots until durable storage and the
+            // archived in-memory view both contain it.
+            self.flush_usage_log_batch(&batch).await?;
+            let mut pending = self.pending_usage_logs.lock().await;
+            let persisted_count = batch.len().min(pending.len());
+            pending.drain(..persisted_count);
         }
     }
 
@@ -1731,12 +2055,31 @@ impl AppState {
 
         let queue_candidate = upstream.clone();
         self.mutate_persisted_state_io(|state| {
+            if let Some(existing) = state
+                .upstreams
+                .iter()
+                .find(|existing| existing.id == upstream.id)
+            {
+                let mut candidate_for_comparison = upstream.clone();
+                candidate_for_comparison.failure_count = existing.failure_count;
+                if existing == &candidate_for_comparison {
+                    return Ok(());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "upstream id \"{}\" already exists with different configuration",
+                        upstream.id
+                    ),
+                ));
+            }
             state.upstreams.push(upstream);
             Ok(())
         })
         .await?;
-        self.queue_probe_jobs_for_upstream(&queue_candidate);
-        Ok(())
+        let jobs = self.capability_probe_jobs_for_upstream(&queue_candidate);
+        self.submit_capability_probe_jobs(jobs, ProbeReason::ConfigurationChanged)
+            .await
     }
 
     pub async fn update_upstream(
@@ -1771,7 +2114,9 @@ impl AppState {
                 .into_iter()
                 .find(|upstream| upstream.id == upstream_id)
             {
-                self.queue_probe_jobs_for_upstream(&upstream);
+                let jobs = self.capability_probe_jobs_for_upstream(&upstream);
+                self.submit_capability_probe_jobs(jobs, ProbeReason::ConfigurationChanged)
+                    .await?;
             }
         }
         Ok(updated)
@@ -1908,13 +2253,16 @@ impl AppState {
         }
 
         let snapshot = self.capability_snapshot();
+        if !snapshot.configuration.source().probe.enabled {
+            return Ok(Vec::new());
+        }
         let refresh_interval_seconds = snapshot
             .configuration
             .source()
             .probe
             .refresh_interval_seconds;
-        let mut jobs = Vec::new();
-        let mut queued = BTreeSet::new();
+        let mut jobs = Vec::<ProbeJob>::new();
+        let mut queued = HashMap::<DialectProfileKey, usize>::new();
         for upstream in routing.upstreams.iter().filter(|upstream| upstream.active) {
             for exposed in upstream.route_models() {
                 let exposed_to_downstream = routing.downstreams.iter().any(|downstream| {
@@ -1942,12 +2290,24 @@ impl AppState {
                             profile_is_current(profile, &fingerprint, now, refresh_interval_seconds)
                         })
                         .unwrap_or(false)
-                        && queued.insert(key.clone())
                     {
-                        jobs.push(ProbeJob {
-                            key,
-                            reason: ProbeReason::ConfigurationChanged,
-                        });
+                        if let Some(index) = queued.get(&key).copied() {
+                            jobs[index].exposed_model_slugs.insert(exposed.clone());
+                        } else {
+                            let Some(job) = Self::build_capability_probe_job_with_snapshot(
+                                &snapshot,
+                                upstream,
+                                &exposed,
+                                &runtime,
+                                protocol,
+                                ProbeReason::ConfigurationChanged,
+                            )?
+                            else {
+                                continue;
+                            };
+                            queued.insert(key.clone(), jobs.len());
+                            jobs.push(job);
+                        }
                     }
                 }
             }
@@ -1956,15 +2316,10 @@ impl AppState {
     }
 
     pub async fn available_models_for_downstream(&self, secret: &str) -> Vec<String> {
-        let snapshot = self.routing_snapshot().await;
-        let Some(downstream) = snapshot
-            .downstreams
-            .iter()
-            .find(|downstream| downstream.active && verify_downstream_key(secret, &downstream.hash))
-            .cloned()
-        else {
+        let Some(downstream) = self.downstream_for_secret(secret).await else {
             return Vec::new();
         };
+        let snapshot = self.routing_snapshot().await;
 
         let mut models = HashSet::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
@@ -2001,14 +2356,21 @@ impl AppState {
         models
     }
 
-    fn initialize_capability_snapshot(
+    async fn initialize_capability_snapshot_from_store(
         &self,
-        capability_state: CapabilityStateDocument,
+        mut capability_state: CapabilityStateDocument,
     ) -> io::Result<()> {
+        let migrated =
+            crate::capabilities::sanitize_sensitive_urls(&mut capability_state.configuration);
         let compiled = capability_state
             .configuration
             .compile()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if migrated {
+            self.config_store
+                .persist_capability_configuration(&capability_state.configuration)
+                .await?;
+        }
         self.capability_snapshot
             .store(Arc::new(CapabilityRuntimeSnapshot {
                 configuration: Arc::new(compiled),
@@ -2017,25 +2379,160 @@ impl AppState {
         Ok(())
     }
 
-    fn queue_probe_jobs_for_upstream(&self, upstream: &UpstreamConfig) {
+    fn capability_probe_jobs_for_upstream(
+        &self,
+        upstream: &UpstreamConfig,
+    ) -> BTreeMap<DialectProfileKey, BTreeSet<String>> {
         if !upstream.active {
-            return;
+            return BTreeMap::new();
         }
+        let mut jobs = BTreeMap::<DialectProfileKey, BTreeSet<String>>::new();
         for exposed_model in upstream.route_models() {
             let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
                 continue;
             };
             for protocol in upstream.supported_protocols() {
-                let _ = self.queue_capability_probe(ProbeJob {
-                    key: DialectProfileKey {
+                jobs.entry(DialectProfileKey {
+                    upstream_id: upstream.id.clone(),
+                    runtime_model_slug: runtime_model_slug.clone(),
+                    protocol: protocol.into(),
+                })
+                .or_default()
+                .insert(exposed_model.clone());
+            }
+        }
+        jobs
+    }
+
+    async fn submit_capability_probe_jobs(
+        &self,
+        jobs: BTreeMap<DialectProfileKey, BTreeSet<String>>,
+        reason: ProbeReason,
+    ) -> io::Result<()> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let routing = self.routing_snapshot().await;
+        let capability_snapshot = self.capability_snapshot();
+        let mut prepared_jobs = Vec::new();
+        for (key, exposed_model_slugs) in jobs {
+            let Some(exposed_model_slug) = exposed_model_slugs.iter().next() else {
+                continue;
+            };
+            let Some(upstream) = routing
+                .upstreams
+                .iter()
+                .find(|upstream| upstream.id == key.upstream_id)
+            else {
+                continue;
+            };
+            let protocol = match key.protocol {
+                WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
+                WireProtocol::Responses => UpstreamProtocol::Responses,
+                WireProtocol::Messages => continue,
+            };
+            let Some(mut job) = Self::build_capability_probe_job_with_snapshot(
+                &capability_snapshot,
+                upstream,
+                exposed_model_slug,
+                &key.runtime_model_slug,
+                protocol,
+                reason,
+            )?
+            else {
+                continue;
+            };
+            job.exposed_model_slugs = exposed_model_slugs;
+            prepared_jobs.push(job);
+        }
+        if prepared_jobs.is_empty() {
+            return Ok(());
+        }
+        let sender = {
+            self.capability_probe_sender
+                .lock()
+                .expect("probe sender lock poisoned")
+                .clone()
+        }
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "capability probe worker is not configured",
+            )
+        })?;
+        let batch = ProbeJobBatch::new(prepared_jobs);
+        match tokio::time::timeout(CAPABILITY_PROBE_ENQUEUE_TIMEOUT, sender.send(batch)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "capability probe queue is closed",
+                ))
+            }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for capability probe queue capacity",
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    fn stale_capability_probe_jobs_for_upstreams<'a>(
+        &self,
+        upstreams: impl IntoIterator<Item = &'a UpstreamConfig>,
+        now: u64,
+    ) -> BTreeMap<DialectProfileKey, BTreeSet<String>> {
+        let snapshot = self.capability_snapshot();
+        let refresh_interval_seconds = snapshot
+            .configuration
+            .source()
+            .probe
+            .refresh_interval_seconds;
+        let mut jobs = BTreeMap::<DialectProfileKey, BTreeSet<String>>::new();
+        for upstream in upstreams.into_iter().filter(|upstream| upstream.active) {
+            for exposed_model in upstream.route_models() {
+                let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
+                    continue;
+                };
+                for protocol in upstream.supported_protocols() {
+                    let key = DialectProfileKey {
                         upstream_id: upstream.id.clone(),
                         runtime_model_slug: runtime_model_slug.clone(),
                         protocol: protocol.into(),
-                    },
-                    reason: ProbeReason::ConfigurationChanged,
-                });
+                    };
+                    let fingerprint = match Self::route_configuration_fingerprint_with_snapshot(
+                        &snapshot,
+                        upstream,
+                        &exposed_model,
+                        &runtime_model_slug,
+                        protocol,
+                    ) {
+                        Ok(fingerprint) => fingerprint,
+                        Err(error) => {
+                            tracing::warn!(
+                                upstream_id = %upstream.id,
+                                exposed_model = %exposed_model,
+                                runtime_model = %runtime_model_slug,
+                                protocol = ?protocol,
+                                error = %error,
+                                "skipping capability probe for route with invalid fingerprint"
+                            );
+                            continue;
+                        }
+                    };
+                    let current = snapshot.profiles.get(&key).is_some_and(|profile| {
+                        profile_is_current(profile, &fingerprint, now, refresh_interval_seconds)
+                    });
+                    if current {
+                        continue;
+                    }
+                    jobs.entry(key).or_default().insert(exposed_model.clone());
+                }
             }
         }
+        jobs
     }
 
     pub async fn queue_capability_probes_for_downstream_model(
@@ -2063,14 +2560,18 @@ impl AppState {
                 continue;
             };
             for protocol in upstream.supported_protocols() {
-                queued += usize::from(self.queue_capability_probe(ProbeJob {
-                    key: DialectProfileKey {
-                        upstream_id: upstream.id.clone(),
-                        runtime_model_slug: runtime_model_slug.clone(),
-                        protocol: protocol.into(),
-                    },
-                    reason: ProbeReason::Manual,
-                }));
+                if let Ok(Some(job)) = self
+                    .build_capability_probe_job(
+                        &upstream.id,
+                        model,
+                        &runtime_model_slug,
+                        protocol,
+                        ProbeReason::Manual,
+                    )
+                    .await
+                {
+                    queued += usize::from(self.queue_capability_probe(job));
+                }
             }
         }
         queued
@@ -2083,9 +2584,25 @@ impl AppState {
         runtime_model_slug: &str,
         protocol: UpstreamProtocol,
     ) -> io::Result<String> {
+        let snapshot = self.capability_snapshot();
+        Self::route_configuration_fingerprint_with_snapshot(
+            &snapshot,
+            upstream,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+        )
+    }
+
+    pub fn route_configuration_fingerprint_with_snapshot(
+        snapshot: &CapabilityRuntimeSnapshot,
+        upstream: &UpstreamConfig,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+    ) -> io::Result<String> {
         let normalized_base_url = normalize_route_base_url(&upstream.base_url)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let snapshot = self.capability_snapshot();
         let mut route = crate::capabilities::RouteIdentity {
             upstream_id: upstream.id.clone(),
             exposed_model_slug: exposed_model_slug.to_owned(),
@@ -2125,6 +2642,7 @@ impl AppState {
             let state = self.inner.lock().await;
             let mut candidate_state = state.clone();
             let result = mutator(&mut candidate_state)?;
+            validate_downstream_plaintext_pairs(&mut candidate_state);
             (candidate_state, result)
         };
 
@@ -2436,13 +2954,6 @@ impl AppState {
         Ok(())
     }
 
-    /// Synchronize upstreams from an external key source.
-    ///
-    /// Existing upstreams that match by name first, then by base_url, are updated only when
-    /// they are marked as auto-managed.
-
-    /// Update an existing upstream
-
     /// Delete an upstream
     pub async fn delete_upstream_by_id(&self, id: &str) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
@@ -2468,7 +2979,8 @@ impl AppState {
     }
 
     /// Add a new downstream
-    pub async fn add_downstream(&self, downstream: DownstreamConfig) -> Result<(), String> {
+    pub async fn add_downstream(&self, mut downstream: DownstreamConfig) -> Result<(), String> {
+        validate_downstream_plaintext_pair(&mut downstream);
         let mut inner = self.inner.lock().await;
         if inner.downstreams.iter().any(|d| d.id == downstream.id) {
             return Err(format!(
