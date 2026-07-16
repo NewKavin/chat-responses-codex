@@ -2,9 +2,9 @@
 
 ## Deployment
 
-- Verified at: `2026-07-17T02:34:57+08:00`
-- Deployed commit: `5002582`
-- Runtime and local-image binary SHA-256: `7a04c341104fda6d1fa9b153756e53746140a68e561384d954aec2e23e3324de`
+- Verified at: `2026-07-17T03:39:39+08:00`
+- Deployed commit: `5a69acd`
+- Runtime and local-image binary SHA-256: `80fb6f2d0528a39397575a5f719018db7ed2040830190b07760d25f3ef125f71`
 - Gateway container: running and healthy after binary replacement
 - PostgreSQL and Redis: retained existing containers and state
 - Exact clients: Codex `0.144.0`, OpenCode `1.17.9`
@@ -61,13 +61,17 @@ Verification:
 
 - `protocol`: 74 passed
 - `gateway`: 255 passed
+- full Rust workspace: 903 passed, 3 ignored, 47 suites
+- standalone `gateway-core`: 8 passed
 - touched-file rustfmt check: passed
 - `git diff --check`: passed
 
-The full Rust test command has one pre-existing failure:
-`stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback` times
-out. The same failure was reproduced from clean commit `526ef6f`, so it is not
-caused by commit `5002582`.
+The previously failing
+`stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback` test
+was traced to repeated Argon2 validation of unchanged downstream keys during
+upstream failure/success persistence. The request-path fix is deployed and the
+original 2-second regression test now passes. Direct hash updates still clear a
+stored plaintext value when it no longer matches the authoritative hash.
 
 ## Portal Playground
 
