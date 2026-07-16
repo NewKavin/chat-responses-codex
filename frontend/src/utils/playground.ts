@@ -104,6 +104,10 @@ interface ChatCompletionResponse {
   usage?: unknown
 }
 
+export interface GatewayModelResponse {
+  data?: Array<{ id?: unknown }>
+}
+
 export const parseGatewayModels = (response: unknown): string[] => {
   if (typeof response !== 'object' || response === null) {
     throw new Error('模型列表返回结构不正确')
@@ -133,6 +137,24 @@ export const parseGatewayModels = (response: unknown): string[] => {
   }
 
   return [...models]
+}
+
+export const selectPlayableModels = (
+  allowlist: string[],
+  response: GatewayModelResponse
+): string[] => {
+  const live = parseGatewayModels(response)
+  if (allowlist.length === 0) return live
+
+  const liveSet = new Set(live)
+  const seen = new Set<string>()
+  return allowlist
+    .map(model => model.trim())
+    .filter(model => {
+      if (!model || !liveSet.has(model) || seen.has(model)) return false
+      seen.add(model)
+      return true
+    })
 }
 
 export const buildPlaygroundChatPayload = ({

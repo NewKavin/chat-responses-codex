@@ -8,8 +8,41 @@ import {
   formatPlaygroundUsageText,
   parseGatewayModels,
   parseSSELine,
+  selectPlayableModels,
+  type GatewayModelResponse,
   type UploadedFileContext
 } from '../../src/utils/playground'
+
+describe('playground live model selection', () => {
+  const live: GatewayModelResponse = {
+    data: [
+      { id: 'Qwen/Qwen3-235B-A22B' },
+      { id: 'deepseek-ai/deepseek-v4-flash' },
+      { id: 'grok-4.20-fast' }
+    ]
+  }
+
+  it('preserves allowlist order while intersecting the live catalog', () => {
+    expect(
+      selectPlayableModels(
+        ['deepseek-v4-flash', 'grok-4.20-fast', 'Qwen/Qwen3-235B-A22B'],
+        live
+      )
+    ).toEqual(['grok-4.20-fast', 'Qwen/Qwen3-235B-A22B'])
+  })
+
+  it('uses every live model when the allowlist is empty', () => {
+    expect(selectPlayableModels([], live)).toEqual([
+      'Qwen/Qwen3-235B-A22B',
+      'deepseek-ai/deepseek-v4-flash',
+      'grok-4.20-fast'
+    ])
+  })
+
+  it('never accepts historical model statistics as an input', () => {
+    expect(selectPlayableModels(['stale-model'], { data: [] })).toEqual([])
+  })
+})
 
 describe('playground model parsing', () => {
   it('deduplicates and trims model ids from gateway response', () => {
