@@ -10,6 +10,7 @@ readonly DEFAULT_CODEX_VERSION="0.144.0"
 readonly DEFAULT_OPENCODE_VERSION="1.17.9"
 readonly DEFAULT_CLAUDE_CODE_VERSION="2.1.195"
 readonly DEFAULT_HERMES_VERSION="0.14.0"
+CLIENTS_JSON="${CLIENTS_JSON:-[\"codex\",\"opencode\",\"claude_code\",\"hermes\"]}"
 CODEX_VERSION="${EXPECTED_CODEX_VERSION:-$DEFAULT_CODEX_VERSION}"
 OPENCODE_VERSION="${EXPECTED_OPENCODE_VERSION:-$DEFAULT_OPENCODE_VERSION}"
 CLAUDE_CODE_VERSION="${EXPECTED_CLAUDE_CODE_VERSION:-$DEFAULT_CLAUDE_CODE_VERSION}"
@@ -37,6 +38,20 @@ for command in curl jq timeout readlink; do
   fi
 done
 
+if ! jq -e '
+  type == "array" and length > 0
+  and all(.[]; . as $client
+    | type == "string"
+    and (["codex", "opencode", "claude_code", "hermes"] | index($client) != null))
+' <<<"$CLIENTS_JSON" >/dev/null; then
+  printf 'status=invalid_clients message=%s\n' 'unknown client in CLIENTS_JSON' >&2
+  exit 1
+fi
+
+client_enabled() {
+  jq -e --arg client "$1" 'index($client) != null' <<<"$CLIENTS_JSON" >/dev/null
+}
+
 resolve_client_executable() {
   local client="$1"
   local command="$2"
@@ -54,10 +69,22 @@ resolve_client_executable() {
   printf '%s' "$resolved"
 }
 
-CODEX_BIN="$(resolve_client_executable codex codex)" || exit 1
-OPENCODE_BIN="$(resolve_client_executable opencode opencode)" || exit 1
-CLAUDE_CODE_BIN="$(resolve_client_executable claude_code claude)" || exit 1
-HERMES_BIN="$(resolve_client_executable hermes hermes)" || exit 1
+CODEX_BIN=""
+OPENCODE_BIN=""
+CLAUDE_CODE_BIN=""
+HERMES_BIN=""
+if client_enabled codex; then
+  CODEX_BIN="$(resolve_client_executable codex codex)" || exit 1
+fi
+if client_enabled opencode; then
+  OPENCODE_BIN="$(resolve_client_executable opencode opencode)" || exit 1
+fi
+if client_enabled claude_code; then
+  CLAUDE_CODE_BIN="$(resolve_client_executable claude_code claude)" || exit 1
+fi
+if client_enabled hermes; then
+  HERMES_BIN="$(resolve_client_executable hermes hermes)" || exit 1
+fi
 readonly CODEX_BIN OPENCODE_BIN CLAUDE_CODE_BIN HERMES_BIN
 
 version_token() {
@@ -149,24 +176,34 @@ record_case() {
     "$client" "$task" "$duration" "$events"
 }
 
-verify_version codex "$CODEX_VERSION" "$CODEX_BIN" --version
-verify_version opencode "$OPENCODE_VERSION" "$OPENCODE_BIN" --version
-verify_version claude_code "$CLAUDE_CODE_VERSION" "$CLAUDE_CODE_BIN" --version
-verify_version hermes "$HERMES_VERSION" "$HERMES_BIN" --version
+if client_enabled codex; then
+  verify_version codex "$CODEX_VERSION" "$CODEX_BIN" --version
+fi
+if client_enabled opencode; then
+  verify_version opencode "$OPENCODE_VERSION" "$OPENCODE_BIN" --version
+fi
+if client_enabled claude_code; then
+  verify_version claude_code "$CLAUDE_CODE_VERSION" "$CLAUDE_CODE_BIN" --version
+fi
+if client_enabled hermes; then
+  verify_version hermes "$HERMES_VERSION" "$HERMES_BIN" --version
+fi
 
-if ! HERMES_PYTHON_BIN="$(resolve_hermes_python)"; then
-  printf 'client=hermes task=mcp_preflight prerequisite=missing_python status=prerequisite_failed\n' >&2
-  exit 1
-fi
-readonly HERMES_PYTHON_BIN
+HERMES_PYTHON_BIN=""
 HERMES_MCP_PYTHONPATH="${HERMES_PYTHONPATH-${PYTHONPATH-}}"
-readonly HERMES_MCP_PYTHONPATH
-if ! env PYTHONPATH="$HERMES_MCP_PYTHONPATH" \
-  "$HERMES_PYTHON_BIN" -c 'import mcp' >/dev/null 2>&1; then
-  printf 'client=hermes task=mcp_preflight prerequisite=python_mcp_extra status=prerequisite_failed\n' >&2
-  exit 1
+if client_enabled hermes; then
+  if ! HERMES_PYTHON_BIN="$(resolve_hermes_python)"; then
+    printf 'client=hermes task=mcp_preflight prerequisite=missing_python status=prerequisite_failed\n' >&2
+    exit 1
+  fi
+  if ! env PYTHONPATH="$HERMES_MCP_PYTHONPATH" \
+    "$HERMES_PYTHON_BIN" -c 'import mcp' >/dev/null 2>&1; then
+    printf 'client=hermes task=mcp_preflight prerequisite=python_mcp_extra status=prerequisite_failed\n' >&2
+    exit 1
+  fi
+  printf 'client=hermes task=mcp_preflight prerequisite=python_mcp_extra status=verified\n'
 fi
-printf 'client=hermes task=mcp_preflight prerequisite=python_mcp_extra status=verified\n'
+readonly HERMES_PYTHON_BIN HERMES_MCP_PYTHONPATH
 
 TEXT_MARKER="CLIENT_TEXT_SMOKE_OK"
 READ_MARKER="read-only-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
@@ -183,14 +220,17 @@ if [[ -n "${ATTACHMENT_FILE:-}" ]]; then
   ATTACHMENT_FILE="$(readlink -f "$ATTACHMENT_FILE")"
 fi
 
-CODEX_HOME_DIR="$WORKDIR/codex-home"
-mkdir -p "$CODEX_HOME_DIR"
-curl -fsS "$API_BASE_URL/models?client_version=$CODEX_VERSION" \
-  -H "Authorization: Bearer $DOWNSTREAM_KEY" >"$CODEX_HOME_DIR/model-catalog.json"
-jq -e '.models | type == "array"' "$CODEX_HOME_DIR/model-catalog.json" >/dev/null
-MODEL_TOML="$(jq -Rn --arg value "$MODEL_SLUG" '$value')"
-API_BASE_TOML="$(jq -Rn --arg value "$API_BASE_URL" '$value')"
-cat >"$CODEX_HOME_DIR/config.toml" <<EOF
+cd "$TASKDIR"
+
+if client_enabled codex; then
+  CODEX_HOME_DIR="$WORKDIR/codex-home"
+  mkdir -p "$CODEX_HOME_DIR"
+  curl -fsS "$API_BASE_URL/models?client_version=$CODEX_VERSION" \
+    -H "Authorization: Bearer $DOWNSTREAM_KEY" >"$CODEX_HOME_DIR/model-catalog.json"
+  jq -e '.models | type == "array"' "$CODEX_HOME_DIR/model-catalog.json" >/dev/null
+  MODEL_TOML="$(jq -Rn --arg value "$MODEL_SLUG" '$value')"
+  API_BASE_TOML="$(jq -Rn --arg value "$API_BASE_URL" '$value')"
+  cat >"$CODEX_HOME_DIR/config.toml" <<EOF
 model_provider = "gateway"
 model = $MODEL_TOML
 review_model = $MODEL_TOML
@@ -205,22 +245,22 @@ wire_api = "responses"
 env_key = "CHAT2RESPONSES_KEY"
 EOF
 
-cd "$TASKDIR"
+  record_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \
+    env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+    "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
+    --cd "$TASKDIR" --model "$MODEL_SLUG" "$TEXT_PROMPT"
+  record_case codex read_only_tool_task "$READ_MARKER" "$WORKDIR/codex-tool.jsonl" \
+    env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+    "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
+    --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
+fi
 
-record_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \
-  env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-  "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
-  --cd "$TASKDIR" --model "$MODEL_SLUG" "$TEXT_PROMPT"
-record_case codex read_only_tool_task "$READ_MARKER" "$WORKDIR/codex-tool.jsonl" \
-  env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-  "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
-  --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
-
-OPENCODE_CONFIG_FILE="$WORKDIR/opencode.json"
-jq -n \
-  --arg base_url "$API_BASE_URL" \
-  --arg model "$MODEL_SLUG" \
-  '{
+if client_enabled opencode; then
+  OPENCODE_CONFIG_FILE="$WORKDIR/opencode.json"
+  jq -n \
+    --arg base_url "$API_BASE_URL" \
+    --arg model "$MODEL_SLUG" \
+    '{
     "$schema": "https://opencode.ai/config.json",
     model: ("gateway/" + $model),
     small_model: ("gateway/" + $model),
@@ -235,33 +275,37 @@ jq -n \
     permission: {"*": "deny", read: "allow"}
   }' >"$OPENCODE_CONFIG_FILE"
 
-record_case opencode text_task "$TEXT_MARKER" "$WORKDIR/opencode-text.jsonl" \
-  env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-  "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
-  "$TEXT_PROMPT"
-record_case opencode read_only_tool_task "$READ_MARKER" "$WORKDIR/opencode-tool.jsonl" \
-  env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-  "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
-  "$READ_FILE_PROMPT"
+  record_case opencode text_task "$TEXT_MARKER" "$WORKDIR/opencode-text.jsonl" \
+    env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+    "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
+    "$TEXT_PROMPT"
+  record_case opencode read_only_tool_task "$READ_MARKER" "$WORKDIR/opencode-tool.jsonl" \
+    env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+    "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
+    "$READ_FILE_PROMPT"
+fi
 
-mkdir -p "$WORKDIR/claude-home"
-CLAUDE_ENV=(
-  CLAUDE_CONFIG_DIR="$WORKDIR/claude-home"
-  ANTHROPIC_BASE_URL="$BASE_URL"
-  ANTHROPIC_API_KEY="$DOWNSTREAM_KEY"
-  ANTHROPIC_AUTH_TOKEN="$DOWNSTREAM_KEY"
-  ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL_SLUG"
-  ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL_SLUG"
-  ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL_SLUG"
-)
-record_case claude_code text_task "$TEXT_MARKER" "$WORKDIR/claude-text.jsonl" \
-  env "${CLAUDE_ENV[@]}" "$CLAUDE_CODE_BIN" -p "$TEXT_PROMPT" --bare --verbose \
-  --no-session-persistence --output-format stream-json --model "$MODEL_SLUG" --tools ""
-record_case claude_code read_only_tool_task "$READ_MARKER" "$WORKDIR/claude-tool.jsonl" \
-  env "${CLAUDE_ENV[@]}" "$CLAUDE_CODE_BIN" -p "$READ_FILE_PROMPT" --bare --verbose \
-  --no-session-persistence --output-format stream-json --model "$MODEL_SLUG" \
-  --tools Read --allowedTools Read --permission-mode dontAsk
+if client_enabled claude_code; then
+  mkdir -p "$WORKDIR/claude-home"
+  CLAUDE_ENV=(
+    CLAUDE_CONFIG_DIR="$WORKDIR/claude-home"
+    ANTHROPIC_BASE_URL="$BASE_URL"
+    ANTHROPIC_API_KEY="$DOWNSTREAM_KEY"
+    ANTHROPIC_AUTH_TOKEN="$DOWNSTREAM_KEY"
+    ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL_SLUG"
+    ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL_SLUG"
+    ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL_SLUG"
+  )
+  record_case claude_code text_task "$TEXT_MARKER" "$WORKDIR/claude-text.jsonl" \
+    env "${CLAUDE_ENV[@]}" "$CLAUDE_CODE_BIN" -p "$TEXT_PROMPT" --bare --verbose \
+    --no-session-persistence --output-format stream-json --model "$MODEL_SLUG" --tools ""
+  record_case claude_code read_only_tool_task "$READ_MARKER" "$WORKDIR/claude-tool.jsonl" \
+    env "${CLAUDE_ENV[@]}" "$CLAUDE_CODE_BIN" -p "$READ_FILE_PROMPT" --bare --verbose \
+    --no-session-persistence --output-format stream-json --model "$MODEL_SLUG" \
+    --tools Read --allowedTools Read --permission-mode dontAsk
+fi
 
+if client_enabled hermes; then
 HERMES_HOME_DIR="$WORKDIR/hermes-home"
 mkdir -p "$HERMES_HOME_DIR"
 if ! command -v node >/dev/null 2>&1; then
@@ -367,8 +411,9 @@ if [[ "$HERMES_MCP_CALL_COUNT" != "1" || "$HERMES_MCP_TOOL_NAME" != "lookup" ]];
   exit 1
 fi
 printf 'client=hermes task=read_only_tool_proof calls=1 tool=lookup status=verified\n'
+fi
 
-if [[ "${CODEX_NAMESPACE_TEST:-0}" == "1" ]]; then
+if client_enabled codex && [[ "${CODEX_NAMESPACE_TEST:-0}" == "1" ]]; then
   if ! command -v node >/dev/null 2>&1; then
     printf 'client=codex task=namespace_lookup status=missing_node\n' >&2
     exit 1
@@ -435,31 +480,40 @@ EOF
 fi
 
 if [[ -n "${ATTACHMENT_FILE:-}" ]]; then
-  if "$CODEX_BIN" exec --help 2>&1 | grep -q -- '--image'; then
-    ATTACHMENT_MARKER="CODEX_ATTACHMENT_SMOKE_OK"
-    record_case codex attachment "$ATTACHMENT_MARKER" "$WORKDIR/codex-attachment.jsonl" \
-      env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-      "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
-      --cd "$TASKDIR" --model "$MODEL_SLUG" --image "$ATTACHMENT_FILE" \
-      "Inspect the attached file, then reply with exactly ${ATTACHMENT_MARKER}."
-  else
-    printf 'client=codex task=attachment status=protocol_matrix_covered\n'
+  if client_enabled codex; then
+    if "$CODEX_BIN" exec --help 2>&1 | grep -q -- '--image'; then
+      ATTACHMENT_MARKER="CODEX_ATTACHMENT_SMOKE_OK"
+      record_case codex attachment "$ATTACHMENT_MARKER" "$WORKDIR/codex-attachment.jsonl" \
+        env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+        "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
+        --cd "$TASKDIR" --model "$MODEL_SLUG" --image "$ATTACHMENT_FILE" \
+        "Inspect the attached file, then reply with exactly ${ATTACHMENT_MARKER}."
+    else
+      printf 'client=codex task=attachment status=protocol_matrix_covered\n'
+    fi
   fi
-  if "$OPENCODE_BIN" run --help 2>&1 | grep -q -- '--file'; then
-    ATTACHMENT_MARKER="OPENCODE_ATTACHMENT_SMOKE_OK"
-    record_case opencode attachment "$ATTACHMENT_MARKER" "$WORKDIR/opencode-attachment.jsonl" \
-      env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-      "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
-      --file "$ATTACHMENT_FILE" \
-      "Inspect the attached file, then reply with exactly ${ATTACHMENT_MARKER}."
-  else
-    printf 'client=opencode task=attachment status=protocol_matrix_covered\n'
+  if client_enabled opencode; then
+    if "$OPENCODE_BIN" run --help 2>&1 | grep -q -- '--file'; then
+      ATTACHMENT_MARKER="OPENCODE_ATTACHMENT_SMOKE_OK"
+      record_case opencode attachment "$ATTACHMENT_MARKER" "$WORKDIR/opencode-attachment.jsonl" \
+        env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+        "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
+        --file "$ATTACHMENT_FILE" \
+        "Inspect the attached file, then reply with exactly ${ATTACHMENT_MARKER}."
+    else
+      printf 'client=opencode task=attachment status=protocol_matrix_covered\n'
+    fi
   fi
-  printf 'client=claude_code task=attachment status=protocol_matrix_covered\n'
-  printf 'client=hermes task=attachment status=protocol_matrix_covered\n'
+  if client_enabled claude_code; then
+    printf 'client=claude_code task=attachment status=protocol_matrix_covered\n'
+  fi
+  if client_enabled hermes; then
+    printf 'client=hermes task=attachment status=protocol_matrix_covered\n'
+  fi
 else
-  printf 'client=codex task=attachment status=protocol_matrix_covered\n'
-  printf 'client=opencode task=attachment status=protocol_matrix_covered\n'
-  printf 'client=claude_code task=attachment status=protocol_matrix_covered\n'
-  printf 'client=hermes task=attachment status=protocol_matrix_covered\n'
+  for client in codex opencode claude_code hermes; do
+    if client_enabled "$client"; then
+      printf 'client=%s task=attachment status=protocol_matrix_covered\n' "$client"
+    fi
+  done
 fi

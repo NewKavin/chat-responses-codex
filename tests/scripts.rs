@@ -737,6 +737,81 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
 }
 
 #[test]
+fn installed_client_smoke_accepts_a_validated_client_subset() {
+    let script = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
+    assert!(script.contains(
+        "CLIENTS_JSON=\"${CLIENTS_JSON:-[\\\"codex\\\",\\\"opencode\\\",\\\"claude_code\\\",\\\"hermes\\\"]}\""
+    ));
+    assert!(script.contains("client_enabled()"));
+    assert!(script.contains("jq -e --arg client"));
+    assert!(script.contains("unknown client in CLIENTS_JSON"));
+}
+
+#[test]
+fn installed_client_smoke_executes_only_selected_clients() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let unexpected_curl = temp.path().join("unexpected-curl");
+    fs::create_dir(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("opencode"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf '1.17.9\n'
+elif [[ " $* " == *CLIENT_TEXT_SMOKE_OK* ]]; then
+  printf 'CLIENT_TEXT_SMOKE_OK\n'
+else
+  cat probe.txt
+fi
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf called >\"$UNEXPECTED_CURL\"\nexit 97\n",
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/installed_client_smoke.sh")
+        .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+        .env("BASE_URL", "https://gateway.invalid")
+        .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+        .env("MODEL_SLUG", "opaque/exposed-slug")
+        .env("CLIENTS_JSON", r#"["opencode"]"#)
+        .env("UNEXPECTED_CURL", &unexpected_curl)
+        .env("CLIENT_TIMEOUT_SECONDS", "5")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "OpenCode-only smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !unexpected_curl.exists(),
+        "OpenCode-only smoke entered the Codex catalog block"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("client=opencode task=text_task"));
+    assert!(stdout.contains("client=opencode task=read_only_tool_task"));
+    for skipped in ["client=codex", "client=claude_code", "client=hermes"] {
+        assert!(
+            !stdout.contains(skipped),
+            "disabled client produced smoke evidence: {skipped}\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn installed_client_smoke_keeps_exact_primary_versions() {
+    let script = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
+    assert!(script.contains("DEFAULT_CODEX_VERSION=\"0.144.0\""));
+    assert!(script.contains("DEFAULT_OPENCODE_VERSION=\"1.17.9\""));
+}
+
+#[test]
 fn installed_client_smoke_only_requests_tools_that_each_client_has() {
     let script = fs::read_to_string("scripts/installed_client_smoke.sh")
         .expect("read installed client smoke script");
