@@ -1209,14 +1209,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/portal/announcement", get(portal_announcement))
         .route("/api/portal/key", get(portal_get_key))
         .route("/api/portal/key/rotate", post(portal_rotate_key))
-        .route(
-            "/api/portal/troubleshooting/run",
-            post(portal_troubleshooting_run),
-        )
-        .route(
-            "/api/portal/troubleshooting/active-requests",
-            get(portal_troubleshooting_active_requests),
-        )
         // Frontend assets and SPA fallback
         .fallback(serve_frontend)
         .layer(

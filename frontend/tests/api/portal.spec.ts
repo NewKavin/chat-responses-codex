@@ -51,31 +51,4 @@ describe('portal api', () => {
     expect(spy).toHaveBeenCalledWith('/portal/model-probe')
   })
 
-  it('runs portal troubleshooting diagnostics', async () => {
-    const spy = vi.spyOn(portalHttp, 'post').mockResolvedValue({
-      data: { run_id: 'diag_1', results: [] }
-    } as never)
-
-    await portalApi.runTroubleshooting({
-      client_profile: 'cline',
-      model: 'GLM-5.1',
-      checks: ['models']
-    })
-
-    expect(spy).toHaveBeenCalledWith('/portal/troubleshooting/run', {
-      client_profile: 'cline',
-      model: 'GLM-5.1',
-      checks: ['models']
-    })
-  })
-
-  it('loads portal active troubleshooting requests', async () => {
-    const spy = vi.spyOn(portalHttp, 'get').mockResolvedValue({
-      data: { active_requests: [] }
-    } as never)
-
-    await portalApi.getActiveTroubleshootingRequests()
-
-    expect(spy).toHaveBeenCalledWith('/portal/troubleshooting/active-requests')
-  })
 })

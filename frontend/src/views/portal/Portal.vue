@@ -20,7 +20,6 @@
           <el-menu-item index="/portal/history">使用历史</el-menu-item>
           <el-menu-item index="/portal/integration">集成示例</el-menu-item>
           <el-menu-item index="/portal/playground">模型操练场</el-menu-item>
-          <el-menu-item index="/portal/troubleshooting">排障中心</el-menu-item>
           <el-menu-item index="/portal/key">秘钥管理</el-menu-item>
         </el-menu>
       </el-aside>
@@ -73,7 +72,6 @@ const titleMap: Record<string, string> = {
   '/portal/history': '使用历史',
   '/portal/integration': '集成示例',
   '/portal/playground': '模型操练场',
-  '/portal/troubleshooting': '排障中心',
   '/portal/key': '秘钥管理'
 }
 

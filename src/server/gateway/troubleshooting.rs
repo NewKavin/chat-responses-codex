@@ -226,19 +226,6 @@ struct GatewayResponseTiming {
     request_started: Instant,
 }
 
-pub(super) async fn portal_troubleshooting_run(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<TroubleshootingRunRequest>,
-) -> impl IntoResponse {
-    let downstream_id = match extract_portal_downstream_id_from_bearer(&state, &headers).await {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
-
-    run_troubleshooting_for_downstream(state, downstream_id, body, headers).await
-}
-
 pub(super) async fn admin_troubleshooting_run(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -275,21 +262,6 @@ pub(super) async fn admin_compatibility_matrix_run(
     run_compatibility_matrix(state, downstream_id.to_string(), body, headers).await
 }
 
-pub(super) async fn portal_troubleshooting_active_requests(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    let downstream_id = match extract_portal_downstream_id_from_bearer(&state, &headers).await {
-        Ok(id) => id,
-        Err(response) => return response,
-    };
-
-    Json(json!({
-        "active_requests": state.active_gateway_requests(Some(&downstream_id))
-    }))
-    .into_response()
-}
-
 pub(super) async fn admin_troubleshooting_active_requests(
     State(state): State<AppState>,
 ) -> Response {
@@ -297,52 +269,6 @@ pub(super) async fn admin_troubleshooting_active_requests(
         "active_requests": state.active_gateway_requests(None)
     }))
     .into_response()
-}
-
-async fn extract_portal_downstream_id_from_bearer(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<String, Response> {
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"message": "Missing Authorization header"}})),
-            )
-                .into_response()
-        })?;
-
-    let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": {"message": "Invalid Authorization header format"}})),
-        )
-            .into_response()
-    })?;
-
-    if token.starts_with("eyJ") {
-        return crate::auth::verify_admin_token(token, &state.config.jwt_secret)
-            .map(|claims| claims.sub)
-            .map_err(|_| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": {"message": "Invalid JWT token"}})),
-                )
-                    .into_response()
-            });
-    }
-
-    if let Some(downstream) = state.downstream_for_secret(token).await {
-        return Ok(downstream.id);
-    }
-
-    Err((
-        StatusCode::UNAUTHORIZED,
-        Json(json!({"error": {"message": "Invalid Bearer token"}})),
-    )
-        .into_response())
 }
 
 async fn run_troubleshooting_for_downstream(
