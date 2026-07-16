@@ -1,6 +1,4 @@
-use crate::capabilities::{
-    Capability, DialectProfileState, EvidenceState, UpstreamDialectProfile,
-};
+use crate::capabilities::{Capability, DialectProfileState, EvidenceState, UpstreamDialectProfile};
 use crate::routing::UpstreamProtocol;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;

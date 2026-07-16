@@ -2696,7 +2696,12 @@ impl AppState {
             .await;
             let discovered_by_key = discovery_results
                 .into_iter()
-                .map(|result| (result.key, result.models.into_iter().collect::<BTreeSet<_>>()))
+                .map(|result| {
+                    (
+                        result.key,
+                        result.models.into_iter().collect::<BTreeSet<_>>(),
+                    )
+                })
                 .collect::<HashMap<_, _>>();
             let aggregate_models = upstream.route_models().into_iter().collect::<BTreeSet<_>>();
             let uses_per_key_maps = !upstream.api_key_models.is_empty();
@@ -2730,9 +2735,9 @@ impl AppState {
                 .iter()
                 .flat_map(|(api_key, models)| {
                     protocols.iter().flat_map(move |protocol| {
-                        models.iter().map(move |model| {
-                            (api_key.clone(), model.clone(), *protocol)
-                        })
+                        models
+                            .iter()
+                            .map(move |model| (api_key.clone(), model.clone(), *protocol))
                     })
                 })
                 .collect::<Vec<_>>();
@@ -2975,9 +2980,9 @@ impl AppState {
                     .filter(|model| !upstream.premium_models.contains(model))
                     .collect();
                 upstream.normalize_for_storage();
-                upstream.validate_configuration().map_err(|error| {
-                    io::Error::new(io::ErrorKind::InvalidInput, error)
-                })?;
+                upstream
+                    .validate_configuration()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             }
 
             let exposed = state
