@@ -82,6 +82,45 @@ async fn mismatched_stored_plaintext_is_rejected_across_gateway_auth_surfaces() 
 }
 
 #[tokio::test]
+async fn direct_hash_update_clears_mismatched_stored_plaintext() {
+    let original = generate_argon2_downstream_key("original");
+    let state = AppState::new(
+        PersistedState {
+            downstreams: vec![DownstreamConfig {
+                id: "down-direct-hash-update".into(),
+                name: "direct-hash-update".into(),
+                hash: original.hash,
+                plaintext_key: Some(original.plaintext),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir().unwrap().path().join("state.json"),
+        AppConfig::default(),
+    );
+    let replacement = generate_argon2_downstream_key("replacement");
+
+    state
+        .update_downstream_hash("down-direct-hash-update", replacement.hash)
+        .await
+        .unwrap();
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.downstreams[0].plaintext_key, None);
+}
+
+#[tokio::test]
 async fn rotated_hash_and_plaintext_replace_the_gateway_authentication_secret() {
     let original = generate_argon2_downstream_key("original");
     let state = AppState::new(

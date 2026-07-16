@@ -254,6 +254,18 @@ fn validate_downstream_plaintext_pairs(state: &mut PersistedState) {
     }
 }
 
+fn downstream_plaintext_pairs_unchanged(
+    before: &[DownstreamConfig],
+    after: &[DownstreamConfig],
+) -> bool {
+    before.len() == after.len()
+        && before.iter().zip(after).all(|(before, after)| {
+            before.id == after.id
+                && before.hash == after.hash
+                && before.plaintext_key == after.plaintext_key
+        })
+}
+
 impl StateStore for PostgresStateStore {
     fn persist_config<'a>(&'a self, state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async move { self.replace_state(state).await })
@@ -3005,7 +3017,12 @@ impl AppState {
             let state = self.inner.lock().await;
             let mut candidate_state = state.clone();
             let result = mutator(&mut candidate_state)?;
-            validate_downstream_plaintext_pairs(&mut candidate_state);
+            if !downstream_plaintext_pairs_unchanged(
+                &state.downstreams,
+                &candidate_state.downstreams,
+            ) {
+                validate_downstream_plaintext_pairs(&mut candidate_state);
+            }
             (candidate_state, result)
         };
 
@@ -3469,6 +3486,7 @@ impl AppState {
             .find(|d| d.id == id)
             .ok_or_else(|| format!("Downstream '{}' not found", id))?;
         downstream.hash = new_hash;
+        validate_downstream_plaintext_pair(downstream);
         Ok(())
     }
 }
