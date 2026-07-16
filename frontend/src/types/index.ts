@@ -306,6 +306,68 @@ export interface ModelProbeResponse {
   models: ModelProbeModel[]
 }
 
+export type ModelQualificationLevel = 'full' | 'adapted' | 'unusable' | 'operational_failure'
+
+export type ModelQualificationCategory =
+  | 'passed'
+  | 'authentication'
+  | 'rate_limit'
+  | 'upstream_unavailable'
+  | 'request_rejected'
+  | 'model_not_found'
+  | 'malformed_response'
+  | 'empty_response'
+  | 'timeout'
+  | 'network'
+
+export interface ModelQualificationEvidence {
+  upstream_id: string
+  key_prefix: string
+  model: string
+  protocol: 'ChatCompletions' | 'Responses'
+  level: ModelQualificationLevel
+  category: ModelQualificationCategory
+  latency_ms: number
+  attempted_at: number
+}
+
+export interface QualifyModelsRequest {
+  apply: boolean
+  upstream_ids: string[]
+  downstream_id: string
+  excluded_models: string[]
+}
+
+export interface QualifyModelsSummary {
+  retained_models: number
+  full_models: number
+  adapted_models: number
+  removed_models: number
+  operational_failures: number
+  upstreams: number
+}
+
+export interface QualifyModelsUpstreamResult {
+  upstream_id: string
+  retained_models: string[]
+  full_models: string[]
+  adapted_models: string[]
+  removed_models: string[]
+  operational_models: string[]
+  evidence: ModelQualificationEvidence[]
+}
+
+export interface QualifyModelsResponse {
+  applied: boolean
+  downstream_id: string
+  summary: QualifyModelsSummary
+  upstreams: QualifyModelsUpstreamResult[]
+  apply_summary?: {
+    upstreams_updated: number
+    retained_models: number
+  }
+}
+
 // ============================================================================
 // Troubleshooting Types
 // ============================================================================

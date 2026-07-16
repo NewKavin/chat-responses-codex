@@ -91,6 +91,30 @@ describe('admin api auth behavior', () => {
     expect(spy).toHaveBeenCalledWith('/admin/model-probe')
   })
 
+  it('qualifies live upstream models with explicit apply intent', async () => {
+    const spy = vi.spyOn(adminHttp, 'post').mockResolvedValue({
+      data: { summary: { retained_models: 3 } }
+    } as never)
+
+    await adminApi.qualifyUpstreamModels({
+      apply: true,
+      upstream_ids: [],
+      downstream_id: 'test',
+      excluded_models: []
+    })
+
+    expect(spy).toHaveBeenCalledWith(
+      '/admin/upstreams/qualify-models',
+      {
+        apply: true,
+        upstream_ids: [],
+        downstream_id: 'test',
+        excluded_models: []
+      },
+      { timeout: 10 * 60 * 1000 }
+    )
+  })
+
   it('calls the logs endpoint with error category filters', async () => {
     const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
       data: {

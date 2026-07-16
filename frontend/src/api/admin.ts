@@ -15,6 +15,8 @@ import type {
   LoginResponse,
   LogsResponse,
   ModelProbeResponse,
+  QualifyModelsRequest,
+  QualifyModelsResponse,
   ResolvedCapabilitiesResponse,
   TroubleshootingRunRequest,
   TroubleshootingRunResponse,
@@ -169,6 +171,10 @@ export const adminApi = {
     adminHttp.post<BatchCreateUpstreamResult>('/admin/upstreams/batch', data),
   discoverUpstreamModels: (data: DiscoverUpstreamModelsPayload) =>
     adminHttp.post<DiscoverUpstreamModelsResult>('/admin/upstreams/discover-models', data),
+  qualifyUpstreamModels: (data: QualifyModelsRequest) =>
+    adminHttp.post<QualifyModelsResponse>('/admin/upstreams/qualify-models', data, {
+      timeout: 10 * 60 * 1000
+    }),
   getUpstream: (id: string) => adminHttp.get<UpstreamConfig>(`/admin/upstreams/${id}`),
   updateUpstream: (id: string, data: Partial<UpstreamConfig>) =>
     adminHttp.put<UpstreamConfig>(`/admin/upstreams/${id}`, data),
