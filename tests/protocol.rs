@@ -823,6 +823,38 @@ fn chat_response_converts_tool_calls_to_responses_output() {
 }
 
 #[test]
+fn chat_response_defaults_required_responses_usage_details() {
+    let chat_response = json!({
+        "id": "chatcmpl-usage-defaults",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "opaque-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Complete"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 4,
+            "completion_tokens": 2,
+            "total_tokens": 6
+        }
+    });
+
+    let converted =
+        chat_response_to_responses_payload(&chat_response).expect("conversion should work");
+
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cached_tokens"],
+        0
+    );
+    assert_eq!(
+        converted["usage"]["output_tokens_details"]["reasoning_tokens"],
+        0
+    );
+}
+
+#[test]
 fn chat_response_rejects_multiple_choices_for_responses_payload() {
     let chat_response = json!({
         "id": "chatcmpl-1",
@@ -1667,6 +1699,61 @@ fn chat_stream_translator_maps_completed_usage_to_responses_usage() {
     );
     assert_eq!(
         completed["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+        1
+    );
+}
+
+#[test]
+fn chat_stream_defaults_required_responses_usage_details() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    translator
+        .translate_event(&json!({
+            "id": "chatcmpl-stream-defaults",
+            "created": 1,
+            "model": "opaque-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Complete"},
+                "finish_reason": null
+            }]
+        }))
+        .expect("delta should translate");
+    translator
+        .translate_event(&json!({
+            "id": "chatcmpl-stream-defaults",
+            "created": 1,
+            "model": "opaque-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "total_tokens": 6,
+                "completion_tokens_details": {
+                    "accepted_prediction_tokens": 1
+                }
+            }
+        }))
+        .expect("terminal chunk should translate");
+
+    let events = translator.finish().expect("stream should finish");
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("expected response.completed event");
+    let usage = &completed["response"]["usage"];
+    assert_eq!(usage["input_tokens_details"]["cached_tokens"], 0);
+    assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 0);
+    assert_eq!(
+        usage["output_tokens_details"]["accepted_prediction_tokens"],
         1
     );
 }

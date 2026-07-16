@@ -883,7 +883,36 @@ fn chat_usage_to_responses_usage(usage: &Value) -> Value {
     {
         output.insert("output_tokens_details".into(), details.clone());
     }
-    Value::Object(output)
+    let mut usage = Value::Object(output);
+    normalize_responses_usage_details(&mut usage);
+    usage
+}
+
+pub fn normalize_responses_usage_details(usage: &mut Value) {
+    let Some(usage) = usage.as_object_mut() else {
+        return;
+    };
+    ensure_usage_detail(usage, "input_tokens_details", "cached_tokens");
+    ensure_usage_detail(usage, "output_tokens_details", "reasoning_tokens");
+}
+
+fn ensure_usage_detail(usage: &mut Map<String, Value>, details_field: &str, required_field: &str) {
+    let details = usage
+        .entry(details_field.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !details.is_object() {
+        *details = Value::Object(Map::new());
+    }
+    let details = details
+        .as_object_mut()
+        .expect("usage details were normalized to an object");
+    if details
+        .get(required_field)
+        .and_then(Value::as_u64)
+        .is_none()
+    {
+        details.insert(required_field.to_string(), Value::Number(0.into()));
+    }
 }
 
 fn responses_usage_to_chat_usage(usage: &Value) -> Value {

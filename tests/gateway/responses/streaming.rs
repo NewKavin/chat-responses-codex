@@ -30,9 +30,14 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
 
                         let chunks = vec![
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                                b"data: {\"id\":\"resp-stream\",\"object\":\"response.chunk\"}\n\n",
+                                b": upstream-comment\r\nevent: custom-response-event\r\nid: event-42\r\nretry: 1500\r\ndata: {\"id\":\"resp-stream\",\r\ndata: \"object\":\"response.chunk\"}\r\n\r\n",
                             )),
-                            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+                            Ok(Bytes::from_static(
+                                b"event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n",
+                            )),
+                            Ok(Bytes::from_static(
+                                b": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]\r\n\r\n",
+                            )),
                         ];
 
                         (
@@ -124,8 +129,13 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("data: {\"id\":\"resp-stream\""));
-    assert!(text.contains("data: [DONE]"));
+    assert!(text.contains(
+        ": upstream-comment\r\nevent: custom-response-event\r\nid: event-42\r\nretry: 1500\r\ndata: {\"id\":\"resp-stream\",\r\ndata: \"object\":\"response.chunk\"}"
+    ));
+    assert!(text.contains("event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n"));
+    assert!(text.contains(
+        ": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]"
+    ));
 
     let captured = capture.lock().unwrap().clone();
     assert_eq!(captured.path, "/v1/responses");
@@ -166,7 +176,7 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
 
                         let initial_chunks =
                             stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(format!(
-                                "data: {}\n\n",
+                                ": usage-comment\r\nevent: custom-completed\r\nid: completed-42\r\nretry: 1750\r\ndata: {}\r\n\r\n",
                                 json!({
                                     "type": "response.completed",
                                     "response": {
@@ -181,7 +191,15 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
                                                 "text": "OK",
                                                 "annotations": []
                                             }]
-                                        }]
+                                        }],
+                                        "usage": {
+                                            "input_tokens": 4,
+                                            "output_tokens": 2,
+                                            "total_tokens": 6,
+                                            "output_tokens_details": {
+                                                "accepted_prediction_tokens": 1
+                                            }
+                                        }
                                     }
                                 })
                             )))]);
@@ -287,7 +305,13 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
         .expect("expected proxied SSE data frame");
     let bytes = frame.into_data().expect("expected data frame");
     let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains(
+        ": usage-comment\r\nevent: custom-completed\r\nid: completed-42\r\nretry: 1750\r\ndata: "
+    ));
     assert!(text.contains("response.completed"));
+    assert!(text.contains("\"cached_tokens\":0"));
+    assert!(text.contains("\"reasoning_tokens\":0"));
+    assert!(text.contains("\"accepted_prediction_tokens\":1"));
     assert!(!text.contains("[DONE]"));
     drop(body);
 

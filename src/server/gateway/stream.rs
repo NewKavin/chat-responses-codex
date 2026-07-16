@@ -400,6 +400,7 @@ pub(super) fn proxied_stream_body(
         buffer: Vec::new(),
         pending: VecDeque::new(),
         canonicalizer,
+        rewrite_responses_events: endpoint == EndpointKind::Responses,
         usage: None,
         log_context: Some(log_context),
         completion_context: stream_completion_context,
@@ -453,7 +454,7 @@ pub(super) fn proxied_stream_body(
                             .await;
                         return Ok(Some((frame, state)));
                     }
-                    if state.canonicalizer.is_some() {
+                    if state.canonicalizer.is_some() || state.rewrite_responses_events {
                         continue;
                     }
                     return Ok(Some((chunk, state)));
@@ -543,6 +544,7 @@ struct ProxiedStreamState {
     buffer: Vec<u8>,
     pending: VecDeque<Bytes>,
     canonicalizer: Option<ChatStreamCanonicalizer>,
+    rewrite_responses_events: bool,
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
@@ -562,9 +564,11 @@ impl ProxiedStreamState {
                 match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error())? {
                     Some(payload) => payload,
                     None => {
-                        if self.canonicalizer.is_some() && is_sse_comment_frame(&frame) {
+                        if self.rewrite_responses_events
+                            || (self.canonicalizer.is_some() && is_sse_comment_frame(&frame))
+                        {
                             self.pending
-                                .push_back(serialize_raw_sse_frame(frame.clone()));
+                                .push_back(serialize_raw_sse_frame(frame.clone(), delimiter_len));
                         }
                         self.buffer.drain(..frame.len() + delimiter_len);
                         continue;
@@ -574,12 +578,17 @@ impl ProxiedStreamState {
             self.buffer.drain(..frame.len() + delimiter_len);
 
             if payload.trim() == "[DONE]" {
+                if self.rewrite_responses_events {
+                    self.pending
+                        .push_back(serialize_raw_sse_frame(frame.clone(), delimiter_len));
+                }
                 self.finish_stream(true)?;
                 break;
             }
 
-            let event: Value =
+            let mut event: Value =
                 serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error())?;
+            let responses_usage_normalized = normalize_responses_event_usage(&mut event);
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
@@ -609,8 +618,24 @@ impl ProxiedStreamState {
                 }
                 if self.canonicalizer.is_some() {
                     self.pending.push_back(serialize_sse_data(&event));
+                } else if self.rewrite_responses_events {
+                    let frame = if responses_usage_normalized {
+                        rewrite_sse_data_payload(&frame, delimiter_len, &event)
+                            .map_err(|_| upstream_sse_decode_error())?
+                    } else {
+                        serialize_raw_sse_frame(frame.clone(), delimiter_len)
+                    };
+                    self.pending.push_back(frame);
                 }
             }
+        }
+
+        if self.rewrite_responses_events && self.pending.len() > 1 {
+            let mut merged = Vec::new();
+            while let Some(frame) = self.pending.pop_front() {
+                merged.extend_from_slice(&frame);
+            }
+            self.pending.push_back(Bytes::from(merged));
         }
 
         Ok(())
@@ -762,6 +787,21 @@ impl Drop for ProxiedStreamState {
             );
         }
     }
+}
+
+fn normalize_responses_event_usage(event: &mut Value) -> bool {
+    if !matches!(
+        event.get("type").and_then(Value::as_str),
+        Some("response.completed" | "response.incomplete")
+    ) {
+        return false;
+    }
+    if let Some(usage) = event.pointer_mut("/response/usage") {
+        let original = usage.clone();
+        crate::protocol::normalize_responses_usage_details(usage);
+        return *usage != original;
+    }
+    false
 }
 
 fn chat_stream_event_is_semantically_complete(event: &Value) -> bool {
@@ -994,7 +1034,7 @@ impl TranslatedStreamState {
                     None => {
                         if is_sse_comment_frame(&frame) {
                             self.pending.push_back(TranslatedPendingFrame {
-                                bytes: serialize_raw_sse_frame(frame.clone()),
+                                bytes: serialize_raw_sse_frame(frame.clone(), delimiter_len),
                                 usable_output: false,
                             });
                         }
@@ -1272,9 +1312,46 @@ fn is_sse_comment_frame(frame: &[u8]) -> bool {
     })
 }
 
-fn serialize_raw_sse_frame(mut frame: Vec<u8>) -> Bytes {
-    frame.extend_from_slice(b"\n\n");
+fn serialize_raw_sse_frame(mut frame: Vec<u8>, delimiter_len: usize) -> Bytes {
+    frame.extend_from_slice(sse_frame_delimiter(delimiter_len));
     Bytes::from(frame)
+}
+
+fn rewrite_sse_data_payload(
+    frame: &[u8],
+    delimiter_len: usize,
+    value: &Value,
+) -> Result<Bytes, std::io::Error> {
+    let frame =
+        std::str::from_utf8(frame).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut output = String::with_capacity(frame.len() + 2);
+    let mut replaced = false;
+    let line_ending = if delimiter_len == 4 { "\r\n" } else { "\n" };
+
+    for line in frame.lines() {
+        if line == "data" || line.starts_with("data:") {
+            if !replaced {
+                output.push_str("data: ");
+                output.push_str(&value.to_string());
+                output.push_str(line_ending);
+                replaced = true;
+            }
+        } else {
+            output.push_str(line);
+            output.push_str(line_ending);
+        }
+    }
+    output.push_str(line_ending);
+
+    Ok(Bytes::from(output))
+}
+
+fn sse_frame_delimiter(delimiter_len: usize) -> &'static [u8] {
+    if delimiter_len == 4 {
+        b"\r\n\r\n"
+    } else {
+        b"\n\n"
+    }
 }
 
 pub(super) fn sse_keepalive_frame() -> Bytes {
@@ -1341,23 +1418,32 @@ pub(super) fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
 }
 
 pub(super) fn next_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
-    let double_newline = b"\n\n";
-    buffer
-        .windows(double_newline.len())
-        .position(|window| window == double_newline)
-        .map(|pos| {
-            let frame = buffer[..pos].to_vec();
-            (frame, double_newline.len())
-        })
+    let lf_pos = buffer.windows(2).position(|window| window == b"\n\n");
+    let crlf_pos = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    let (position, delimiter_len) = match (lf_pos, crlf_pos) {
+        (Some(lf), Some(crlf)) if lf <= crlf => (lf, 2),
+        (Some(_), Some(crlf)) => (crlf, 4),
+        (Some(lf), None) => (lf, 2),
+        (None, Some(crlf)) => (crlf, 4),
+        (None, None) => return None,
+    };
+    Some((buffer[..position].to_vec(), delimiter_len))
 }
 
 pub(super) fn parse_sse_data_payload(frame: &[u8]) -> Result<Option<String>, std::io::Error> {
     let frame_str =
         std::str::from_utf8(frame).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut data_lines = Vec::new();
     for line in frame_str.lines() {
-        if let Some(payload) = line.strip_prefix("data: ") {
-            return Ok(Some(payload.to_string()));
+        if line == "data" {
+            data_lines.push("");
+        } else if let Some(payload) = line.strip_prefix("data:") {
+            data_lines.push(payload.strip_prefix(' ').unwrap_or(payload));
         }
     }
-    Ok(None)
+    if data_lines.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(data_lines.join("\n")))
+    }
 }
