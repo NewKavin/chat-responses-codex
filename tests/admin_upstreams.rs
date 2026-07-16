@@ -12,13 +12,19 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use chat_responses_codex::capabilities::{
+    Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
+    WireProtocol,
+};
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    qualify_model_on_upstream, ApiKeyModelConfig, AppConfig, AppState, ModelQualificationCategory,
-    PersistedState, UpstreamConfig,
+    build_key_qualification_decision, confirmed_level, qualify_model_on_upstream, unix_seconds,
+    ApiKeyModelConfig, AppConfig, AppState, ModelQualificationCategory, ModelQualificationLevel,
+    PersistedState, QualificationObservation, UpstreamConfig,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,6 +237,106 @@ async fn qualification_probe_returns_sanitized_categories() {
         assert!(!serialized.contains("secret-key"));
         assert!(!serialized.contains(&mock));
     }
+}
+
+fn observation(model: &str, level: ModelQualificationLevel) -> QualificationObservation {
+    QualificationObservation {
+        model: model.to_string(),
+        level,
+    }
+}
+
+#[test]
+fn qualification_decision_keeps_success_and_prior_models_after_operational_failure() {
+    let previous = BTreeSet::from(["known-good".to_string()]);
+    let observations = vec![
+        observation("new-good", ModelQualificationLevel::Adapted),
+        observation("known-good", ModelQualificationLevel::OperationalFailure),
+    ];
+    let decision = build_key_qualification_decision(previous, observations);
+    assert_eq!(
+        decision.retained,
+        BTreeSet::from(["known-good".to_string(), "new-good".to_string()])
+    );
+}
+
+#[test]
+fn qualification_decision_requires_two_matching_attempts_before_removal() {
+    assert_eq!(
+        confirmed_level(&[
+            ModelQualificationCategory::EmptyResponse,
+            ModelQualificationCategory::Passed,
+        ]),
+        ModelQualificationLevel::Adapted
+    );
+    assert_eq!(
+        confirmed_level(&[
+            ModelQualificationCategory::EmptyResponse,
+            ModelQualificationCategory::EmptyResponse,
+        ]),
+        ModelQualificationLevel::Unusable
+    );
+}
+
+#[tokio::test]
+async fn qualification_decision_uses_exact_current_profile_for_full_level() {
+    let mock = spawn_qualification_upstream().await;
+    let upstream = UpstreamConfig {
+        id: "qualified-upstream".to_string(),
+        name: "Qualified Upstream".to_string(),
+        base_url: mock,
+        api_key: "secret-key".to_string(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["chat-ok".to_string()],
+        active: true,
+        ..Default::default()
+    };
+    let state = create_test_state_with_upstreams(vec![upstream.clone()]);
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: "chat-ok".to_string(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            &upstream,
+            "chat-ok",
+            "chat-ok",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
+    profile.state = DialectProfileState::Verified;
+    profile.last_success_at = Some(unix_seconds());
+    for capability in [
+        Capability::TextInput,
+        Capability::TextStream,
+        Capability::FunctionTools,
+        Capability::ToolContinuation,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    let decisions = state
+        .qualify_active_upstreams(&["qualified-upstream".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        decisions[0].keys[0].retained,
+        BTreeSet::from(["chat-ok".to_string()])
+    );
+    assert_eq!(
+        decisions[0].keys[0].full,
+        BTreeSet::from(["chat-ok".to_string()])
+    );
+    assert_eq!(decisions[0].evidence[0].model, "chat-ok");
+    assert_eq!(
+        decisions[0].evidence[0].level,
+        ModelQualificationLevel::Full
+    );
 }
 
 /// Helper function to get a valid JWT token

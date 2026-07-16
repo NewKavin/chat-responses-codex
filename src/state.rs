@@ -34,6 +34,7 @@ mod types;
 mod usage;
 
 use arc_swap::ArcSwap;
+use futures_util::{stream, StreamExt};
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use reqwest::Client;
@@ -65,8 +66,10 @@ pub use model_discovery::{
     KeyModelDiscoveryResult,
 };
 pub use model_qualification::{
-    classify_qualification_level, qualify_model_on_upstream, DirectQualificationResult,
+    build_key_qualification_decision, classify_qualification_level, confirmed_level,
+    qualify_model_on_upstream, DirectQualificationResult, KeyQualificationDecision,
     ModelQualificationCategory, ModelQualificationEvidence, ModelQualificationLevel,
+    QualificationObservation, UpstreamQualificationDecision,
 };
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
@@ -2636,6 +2639,257 @@ impl AppState {
             route_override_digest,
             probe_schema_version: crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
         }))
+    }
+
+    pub async fn qualify_active_upstreams(
+        &self,
+        upstream_ids: &[String],
+    ) -> io::Result<Vec<UpstreamQualificationDecision>> {
+        #[derive(Debug)]
+        struct ProbeRecord {
+            api_key: String,
+            model: String,
+            protocol: UpstreamProtocol,
+            categories: Vec<ModelQualificationCategory>,
+            latency_ms: u64,
+        }
+
+        let selected = upstream_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        let routing = self.routing_snapshot().await;
+        let capability_snapshot = self.capability_snapshot();
+        let refresh_interval_seconds = capability_snapshot
+            .configuration
+            .source()
+            .probe
+            .refresh_interval_seconds;
+        let timeout_seconds = self.config.admin_upstream_timeout_seconds.max(1);
+        let attempted_at = unix_seconds();
+        let mut decisions = Vec::new();
+
+        for upstream in routing.upstreams.into_iter().filter(|upstream| {
+            upstream.active && (selected.is_empty() || selected.contains(upstream.id.as_str()))
+        }) {
+            let keys = upstream.available_keys();
+            let client = self.client_for_url(&upstream.base_url);
+            let discovery_results = fetch_models_from_upstream_keys_concurrently(
+                &client,
+                &upstream.base_url,
+                &keys,
+                timeout_seconds,
+            )
+            .await;
+            let discovered_by_key = discovery_results
+                .into_iter()
+                .map(|result| (result.key, result.models.into_iter().collect::<BTreeSet<_>>()))
+                .collect::<HashMap<_, _>>();
+            let aggregate_models = upstream.route_models().into_iter().collect::<BTreeSet<_>>();
+            let uses_per_key_maps = !upstream.api_key_models.is_empty();
+            let mut previous_by_key = BTreeMap::<String, BTreeSet<String>>::new();
+            let mut candidates_by_key = BTreeMap::<String, BTreeSet<String>>::new();
+
+            for api_key in &keys {
+                let previous = if uses_per_key_maps {
+                    upstream
+                        .api_key_models
+                        .iter()
+                        .filter(|mapping| mapping.api_key.trim() == api_key)
+                        .flat_map(|mapping| mapping.supported_models.iter())
+                        .map(|model| model.trim())
+                        .filter(|model| !model.is_empty())
+                        .map(str::to_string)
+                        .collect::<BTreeSet<_>>()
+                } else {
+                    aggregate_models.clone()
+                };
+                let mut candidates = previous.clone();
+                if let Some(discovered) = discovered_by_key.get(api_key) {
+                    candidates.extend(discovered.iter().cloned());
+                }
+                previous_by_key.insert(api_key.clone(), previous);
+                candidates_by_key.insert(api_key.clone(), candidates);
+            }
+
+            let protocols = upstream.supported_protocols();
+            let jobs = candidates_by_key
+                .iter()
+                .flat_map(|(api_key, models)| {
+                    protocols.iter().flat_map(move |protocol| {
+                        models.iter().map(move |model| {
+                            (api_key.clone(), model.clone(), *protocol)
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            let base_url = upstream.base_url.clone();
+            let records = stream::iter(jobs.into_iter().map(|(api_key, model, protocol)| {
+                let client = client.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let first = qualify_model_on_upstream(
+                        &client,
+                        &base_url,
+                        &api_key,
+                        &model,
+                        protocol,
+                        timeout_seconds,
+                    )
+                    .await;
+                    let mut latency_ms = first.latency_ms;
+                    let mut categories = vec![first.category];
+                    if first.category.requires_confirmation() {
+                        let confirmation = qualify_model_on_upstream(
+                            &client,
+                            &base_url,
+                            &api_key,
+                            &model,
+                            protocol,
+                            timeout_seconds,
+                        )
+                        .await;
+                        latency_ms = latency_ms.saturating_add(confirmation.latency_ms);
+                        categories.push(confirmation.category);
+                    }
+                    ProbeRecord {
+                        api_key,
+                        model,
+                        protocol,
+                        categories,
+                        latency_ms,
+                    }
+                }
+            }))
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+
+            let mut evidence = Vec::with_capacity(records.len());
+            let mut levels_by_key_model =
+                HashMap::<(String, String), Vec<ModelQualificationLevel>>::new();
+            for record in records {
+                let passed = record
+                    .categories
+                    .contains(&ModelQualificationCategory::Passed);
+                let level = if passed {
+                    let profile_key = DialectProfileKey {
+                        upstream_id: upstream.id.clone(),
+                        runtime_model_slug: record.model.clone(),
+                        protocol: WireProtocol::from(record.protocol),
+                    };
+                    let profile = Self::route_configuration_fingerprint_with_snapshot(
+                        &capability_snapshot,
+                        &upstream,
+                        &record.model,
+                        &record.model,
+                        record.protocol,
+                    )
+                    .ok()
+                    .and_then(|fingerprint| {
+                        capability_snapshot
+                            .profiles
+                            .get(&profile_key)
+                            .filter(|profile| {
+                                profile_is_current(
+                                    profile,
+                                    &fingerprint,
+                                    attempted_at,
+                                    refresh_interval_seconds,
+                                )
+                            })
+                    });
+                    classify_qualification_level(ModelQualificationCategory::Passed, profile)
+                } else {
+                    confirmed_level(&record.categories)
+                };
+                let category = if passed {
+                    ModelQualificationCategory::Passed
+                } else if let Some(operational) = record
+                    .categories
+                    .iter()
+                    .copied()
+                    .find(|category| category.is_operational())
+                {
+                    operational
+                } else {
+                    record.categories[0]
+                };
+                let key_prefix = {
+                    let prefix = record.api_key.chars().take(8).collect::<String>();
+                    if record.api_key.chars().count() > 8 {
+                        format!("{prefix}...")
+                    } else {
+                        prefix
+                    }
+                };
+                evidence.push(ModelQualificationEvidence {
+                    upstream_id: upstream.id.clone(),
+                    key_prefix,
+                    model: record.model.clone(),
+                    protocol: record.protocol,
+                    level,
+                    category,
+                    latency_ms: record.latency_ms,
+                    attempted_at,
+                });
+                levels_by_key_model
+                    .entry((record.api_key, record.model))
+                    .or_default()
+                    .push(level);
+            }
+
+            let mut key_decisions = Vec::with_capacity(keys.len());
+            for api_key in keys {
+                let observations = candidates_by_key
+                    .remove(&api_key)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|model| {
+                        let levels = levels_by_key_model
+                            .remove(&(api_key.clone(), model.clone()))
+                            .unwrap_or_default();
+                        let level = if levels.contains(&ModelQualificationLevel::Full) {
+                            ModelQualificationLevel::Full
+                        } else if levels.contains(&ModelQualificationLevel::Adapted) {
+                            ModelQualificationLevel::Adapted
+                        } else if levels.contains(&ModelQualificationLevel::OperationalFailure) {
+                            ModelQualificationLevel::OperationalFailure
+                        } else {
+                            ModelQualificationLevel::Unusable
+                        };
+                        QualificationObservation { model, level }
+                    })
+                    .collect();
+                let mut decision = build_key_qualification_decision(
+                    previous_by_key.remove(&api_key).unwrap_or_default(),
+                    observations,
+                );
+                decision.api_key = api_key;
+                key_decisions.push(decision);
+            }
+
+            evidence.sort_by(|left, right| {
+                left.key_prefix
+                    .cmp(&right.key_prefix)
+                    .then_with(|| left.model.cmp(&right.model))
+                    .then_with(|| {
+                        let rank = |protocol| match protocol {
+                            UpstreamProtocol::ChatCompletions => 0,
+                            UpstreamProtocol::Responses => 1,
+                        };
+                        rank(left.protocol).cmp(&rank(right.protocol))
+                    })
+            });
+            decisions.push(UpstreamQualificationDecision {
+                upstream_id: upstream.id,
+                keys: key_decisions,
+                evidence,
+            });
+        }
+
+        Ok(decisions)
     }
 
     async fn mutate_persisted_state<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>

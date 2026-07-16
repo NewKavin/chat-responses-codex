@@ -5,6 +5,7 @@ use crate::routing::UpstreamProtocol;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 const QUALIFICATION_RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
@@ -72,6 +73,107 @@ pub struct ModelQualificationEvidence {
 pub struct DirectQualificationResult {
     pub category: ModelQualificationCategory,
     pub latency_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QualificationObservation {
+    pub model: String,
+    pub level: ModelQualificationLevel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyQualificationDecision {
+    pub api_key: String,
+    pub retained: BTreeSet<String>,
+    pub full: BTreeSet<String>,
+    pub adapted: BTreeSet<String>,
+    pub removed: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpstreamQualificationDecision {
+    pub upstream_id: String,
+    pub keys: Vec<KeyQualificationDecision>,
+    pub evidence: Vec<ModelQualificationEvidence>,
+}
+
+pub fn confirmed_level(categories: &[ModelQualificationCategory]) -> ModelQualificationLevel {
+    if categories.contains(&ModelQualificationCategory::Passed) {
+        return ModelQualificationLevel::Adapted;
+    }
+    if categories.iter().any(|category| category.is_operational()) {
+        return ModelQualificationLevel::OperationalFailure;
+    }
+    if categories.len() >= 2
+        && categories.windows(2).all(|pair| pair[0] == pair[1])
+        && categories[0].requires_confirmation()
+    {
+        return ModelQualificationLevel::Unusable;
+    }
+    ModelQualificationLevel::OperationalFailure
+}
+
+pub fn build_key_qualification_decision(
+    previous: BTreeSet<String>,
+    observations: Vec<QualificationObservation>,
+) -> KeyQualificationDecision {
+    let mut strongest = BTreeMap::<String, ModelQualificationLevel>::new();
+    for observation in observations {
+        strongest
+            .entry(observation.model)
+            .and_modify(|level| *level = stronger_level(*level, observation.level))
+            .or_insert(observation.level);
+    }
+
+    let mut retained = previous.clone();
+    let mut full = BTreeSet::new();
+    let mut adapted = BTreeSet::new();
+    for (model, level) in strongest {
+        match level {
+            ModelQualificationLevel::Full => {
+                retained.insert(model.clone());
+                full.insert(model);
+            }
+            ModelQualificationLevel::Adapted => {
+                retained.insert(model.clone());
+                adapted.insert(model);
+            }
+            ModelQualificationLevel::OperationalFailure => {
+                if previous.contains(&model) {
+                    retained.insert(model);
+                }
+            }
+            ModelQualificationLevel::Unusable => {
+                retained.remove(&model);
+            }
+        }
+    }
+    let removed = previous.difference(&retained).cloned().collect();
+
+    KeyQualificationDecision {
+        api_key: String::new(),
+        retained,
+        full,
+        adapted,
+        removed,
+    }
+}
+
+fn stronger_level(
+    left: ModelQualificationLevel,
+    right: ModelQualificationLevel,
+) -> ModelQualificationLevel {
+    let rank = |level| match level {
+        ModelQualificationLevel::Full => 3,
+        ModelQualificationLevel::Adapted => 2,
+        ModelQualificationLevel::OperationalFailure => 1,
+        ModelQualificationLevel::Unusable => 0,
+    };
+    if rank(right) > rank(left) {
+        right
+    } else {
+        left
+    }
 }
 
 pub async fn qualify_model_on_upstream(
