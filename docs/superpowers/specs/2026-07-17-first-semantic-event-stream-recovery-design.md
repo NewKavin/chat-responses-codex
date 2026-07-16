@@ -19,8 +19,8 @@ The recovery boundary is deliberately narrow:
 
 - The upstream response has a successful HTTP status and an SSE content type.
 - No non-comment semantic SSE event has been exposed downstream.
-- The first semantic event is an upstream error, or the stream fails before a
-  first semantic event can be produced.
+- The first semantic event is an upstream error, or the protocol parser rejects
+  the stream before a normal first semantic event can be produced.
 - Recovery uses the existing bounded `SsePassThrough` to `Json` transition.
 - A normal first semantic event permanently commits the request to streaming.
 
@@ -86,9 +86,21 @@ then reads from the network response. Existing proxied, translated, and
 aggregated stream code uses this operation instead of calling
 `reqwest::Response::chunk` directly.
 
+The reader is the single watchdog owner from successful upstream HTTP headers
+through terminal stream cleanup. Prefetch transfers the same reader into the
+proxied or translated body; body construction must not create a new watchdog or
+reset the idle or maximum-duration clocks. Each network chunk, including an
+upstream comment, records activity exactly once when read. Replaying prefetched
+bytes does not record activity again.
+
 Raw bytes, frame delimiters, CRLF line endings, comments, and multi-line `data:`
 fields are never reconstructed during replay. The bytes consumed by prefetch are
-the bytes later delivered to the existing stream parser.
+the bytes later delivered to the existing stream parser. Prefetch stores each
+complete raw network chunk in the replay FIFO and scans a separate accumulated
+view with a cursor. It waits when a frame delimiter is split across chunks. If a
+chunk contains the first semantic frame plus later frames or a partial later
+frame, every trailing byte remains in the FIFO and is replayed in its original
+order.
 
 ### First semantic event classifier
 
@@ -118,6 +130,23 @@ retries the same upstream and key once. A failed JSON attempt follows the normal
 key and candidate fallback policy. A successful JSON response is synthesized
 back into the downstream's requested SSE protocol.
 
+Recovery eligibility follows the existing category policy:
+
+| Category | Status | Recover as JSON before output |
+| --- | ---: | --- |
+| `upstream_stream_error_event` | 502 | Yes |
+| `upstream_stream_decode_error`, `upstream_stream_limit_exceeded`, `upstream_stream_incomplete` | 502 | Yes |
+| `stream_upstream_read_error`, `stream_upstream_body_decode_error` | 502 | No behavior change |
+| `stream_upstream_timeout`, `stream_idle_timeout`, `stream_max_duration` | 504 | No |
+| `stream_client_cancelled`, `stream_incomplete_close`, `stream_interrupted` | 499 | No |
+
+The SSE-to-JSON transition budget is one per upstream key. If the JSON attempt
+fails with an error that permits key rotation, the next key starts with a fresh
+attempt mode selected from the downstream request and route capabilities. A new
+upstream candidate does the same. The finite key and candidate sets therefore
+bound all recovery attempts; the mode is never left as `Json` accidentally when
+moving to a new key or candidate.
+
 ## Data Flow
 
 1. The downstream sends a streaming Chat Completions or Responses request.
@@ -137,6 +166,13 @@ back into the downstream's requested SSE protocol.
 After step 5, any later failure remains an in-stream structured error. The
 gateway never retries after normal semantic output because doing so could
 duplicate text, reasoning, or tool calls.
+
+Prefetch remains inside the request future already selected against downstream
+channel closure; it must not run as a detached task. If the downstream closes
+before the recovery decision, dropping that future cancels the in-flight body
+read, the pre-header cancellation context records 499 and releases resources,
+and no JSON retry starts. Cancellation winning a race with the first-event error
+always takes precedence over recovery.
 
 ## Error And Resource Semantics
 
@@ -182,10 +218,15 @@ Additional coverage will verify:
 
 - A normal first event is replayed once with LF, CRLF, comments, split chunks,
   and multi-line data.
+- Later frames and partial-frame bytes in the same prefetched network chunk are
+  replayed once and in order.
+- Idle and maximum-duration clocks include prefetch time and are not reset at
+  body handoff.
 - A normal first event followed by an error is not retried.
 - A first-event failure followed by JSON failure advances through the existing
   candidate policy without an unbounded retry.
-- Downstream cancellation during prefetch records 499 and releases slots.
+- Downstream cancellation during prefetch records 499, releases slots, aborts
+  the body read, and starts no JSON retry.
 - Responses-to-Responses and Chat-to-Responses client paths preserve their
   existing public event shapes.
 
