@@ -208,7 +208,7 @@ readonly HERMES_PYTHON_BIN HERMES_MCP_PYTHONPATH
 TEXT_MARKER="CLIENT_TEXT_SMOKE_OK"
 READ_MARKER="read-only-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 printf '%s\n' "$READ_MARKER" >"$TASKDIR/probe.txt"
-TEXT_PROMPT="Reply with exactly ${TEXT_MARKER}."
+TEXT_PROMPT="Analyze a protocol converter that must preserve unknown JSON fields across request and response translation. In two concise sentences, explain one compatibility risk and one mitigation. End with exactly ${TEXT_MARKER} on its own line."
 READ_FILE_PROMPT='Read probe.txt using one available read-only filesystem tool. Reply with exactly the file contents.'
 HERMES_READ_PROMPT='Call the mcp_smoke_readonly_lookup tool exactly once. Do not use any other tool. Reply with exactly the returned text.'
 

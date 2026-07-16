@@ -805,6 +805,21 @@ fi
 }
 
 #[test]
+fn installed_client_smoke_uses_a_substantive_text_task() {
+    let script = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
+    let text_prompt = script
+        .lines()
+        .find(|line| line.starts_with("TEXT_PROMPT="))
+        .expect("TEXT_PROMPT assignment");
+
+    assert!(text_prompt.contains("protocol converter"));
+    assert!(text_prompt.contains("two concise sentences"));
+    assert!(!text_prompt.contains("Reply with exactly ${TEXT_MARKER}."));
+    assert!(!text_prompt.to_ascii_lowercase().contains("hello"));
+    assert!(!text_prompt.contains("你好"));
+}
+
+#[test]
 fn opencode_smoke_uses_inline_config_and_temporary_xdg_paths() {
     let script = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
     assert!(script.contains("OPENCODE_CONFIG_CONTENT=\"$OPENCODE_CONFIG_CONTENT\""));
