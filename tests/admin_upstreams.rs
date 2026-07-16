@@ -20,11 +20,13 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     build_key_qualification_decision, confirmed_level, qualify_model_on_upstream, unix_seconds,
-    ApiKeyModelConfig, AppConfig, AppState, ModelQualificationCategory, ModelQualificationLevel,
-    PersistedState, QualificationObservation, UpstreamConfig,
+    ApiKeyModelConfig, AppConfig, AppState, DownstreamConfig, KeyQualificationDecision,
+    ModelQualificationCategory, ModelQualificationLevel, PersistedState, QualificationObservation,
+    StateStore, StoreFuture, UpstreamConfig, UpstreamQualificationDecision,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -275,6 +277,156 @@ fn qualification_decision_requires_two_matching_attempts_before_removal() {
             ModelQualificationCategory::EmptyResponse,
         ]),
         ModelQualificationLevel::Unusable
+    );
+}
+
+#[derive(Clone, Default)]
+struct FailingQualificationStore;
+
+impl StateStore for FailingQualificationStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Err(io::Error::other("qualification persistence failed")) })
+    }
+}
+
+fn qualification_persisted_state() -> PersistedState {
+    PersistedState {
+        upstreams: vec![UpstreamConfig {
+            id: "qualified-upstream".to_string(),
+            name: "Qualified Upstream".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            api_key: "secret-key".to_string(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            supported_models: vec!["old".to_string()],
+            active: true,
+            ..Default::default()
+        }],
+        downstreams: vec![DownstreamConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            hash: String::new(),
+            plaintext_key: None,
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["old".to_string()],
+            rate_limit_enabled: true,
+            per_minute_limit: 60,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        ..Default::default()
+    }
+}
+
+fn qualification_decisions(retained: BTreeSet<String>) -> Vec<UpstreamQualificationDecision> {
+    vec![UpstreamQualificationDecision {
+        upstream_id: "qualified-upstream".to_string(),
+        keys: vec![KeyQualificationDecision {
+            api_key: "secret-key".to_string(),
+            full: retained
+                .iter()
+                .filter(|model| model.as_str() == "full")
+                .cloned()
+                .collect(),
+            adapted: retained
+                .iter()
+                .filter(|model| model.as_str() == "adapted")
+                .cloned()
+                .collect(),
+            retained,
+            removed: BTreeSet::from(["old".to_string()]),
+        }],
+        evidence: vec![],
+    }]
+}
+
+#[tokio::test]
+async fn qualification_apply_updates_upstreams_and_test_downstream_together() {
+    let state = AppState::new(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+    );
+    let summary = state
+        .apply_model_qualification(
+            qualification_decisions(BTreeSet::from(["adapted".to_string(), "full".to_string()])),
+            "test",
+        )
+        .await
+        .unwrap();
+    let snapshot = state.snapshot().await;
+    assert_eq!(
+        snapshot.upstreams[0].api_key_models[0].supported_models,
+        vec!["adapted", "full"]
+    );
+    assert_eq!(
+        snapshot.downstreams[0].model_allowlist,
+        vec!["adapted", "full"]
+    );
+    assert_eq!(summary.retained_models, 2);
+}
+
+#[tokio::test]
+async fn qualification_apply_refuses_to_erase_the_last_model() {
+    let state = AppState::new(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+    );
+    let error = state
+        .apply_model_qualification(qualification_decisions(BTreeSet::new()), "test")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(!state.snapshot().await.upstreams[0]
+        .route_models()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn qualification_apply_refuses_an_empty_decision_set() {
+    let state = AppState::new(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+    );
+    let error = state
+        .apply_model_qualification(Vec::new(), "test")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        state.snapshot().await.downstreams[0].model_allowlist,
+        vec!["old"]
+    );
+}
+
+#[tokio::test]
+async fn qualification_apply_persistence_failure_leaves_runtime_and_downstream_unchanged() {
+    let state = AppState::new_with_store(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(FailingQualificationStore),
+    );
+    let before = state.snapshot().await;
+    assert!(state
+        .apply_model_qualification(
+            qualification_decisions(BTreeSet::from(["adapted".to_string(), "full".to_string(),])),
+            "test",
+        )
+        .await
+        .is_err());
+    let after = state.snapshot().await;
+    assert_eq!(after.upstreams, before.upstreams);
+    assert_eq!(
+        serde_json::to_value(after.downstreams).unwrap(),
+        serde_json::to_value(before.downstreams).unwrap()
     );
 }
 

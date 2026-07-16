@@ -68,8 +68,8 @@ pub use model_discovery::{
 pub use model_qualification::{
     build_key_qualification_decision, classify_qualification_level, confirmed_level,
     qualify_model_on_upstream, DirectQualificationResult, KeyQualificationDecision,
-    ModelQualificationCategory, ModelQualificationEvidence, ModelQualificationLevel,
-    QualificationObservation, UpstreamQualificationDecision,
+    ModelQualificationApplySummary, ModelQualificationCategory, ModelQualificationEvidence,
+    ModelQualificationLevel, QualificationObservation, UpstreamQualificationDecision,
 };
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
@@ -2890,6 +2890,109 @@ impl AppState {
         }
 
         Ok(decisions)
+    }
+
+    pub async fn apply_model_qualification(
+        &self,
+        decisions: Vec<UpstreamQualificationDecision>,
+        downstream_id: &str,
+    ) -> io::Result<ModelQualificationApplySummary> {
+        if decisions.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "qualification produced no upstream decisions",
+            ));
+        }
+        let downstream_id = downstream_id.trim().to_string();
+        if downstream_id.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "downstream_id is required",
+            ));
+        }
+
+        self.mutate_persisted_state_io(move |state| {
+            let mut updated = HashSet::new();
+            for decision in &decisions {
+                if !updated.insert(decision.upstream_id.clone()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "duplicate upstream qualification decision",
+                    ));
+                }
+                let upstream = state
+                    .upstreams
+                    .iter_mut()
+                    .find(|value| value.id == decision.upstream_id)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "upstream disappeared")
+                    })?;
+                let configured_keys = upstream
+                    .available_keys()
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                if decision
+                    .keys
+                    .iter()
+                    .any(|key| !configured_keys.contains(key.api_key.trim()))
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "qualification referenced an unknown upstream key",
+                    ));
+                }
+
+                upstream.api_key_models = decision
+                    .keys
+                    .iter()
+                    .map(|key| ApiKeyModelConfig {
+                        api_key: key.api_key.clone(),
+                        supported_models: key.retained.iter().cloned().collect(),
+                    })
+                    .collect();
+                let retained = decision
+                    .keys
+                    .iter()
+                    .flat_map(|key| key.retained.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                upstream
+                    .premium_models
+                    .retain(|model| retained.contains(model));
+                upstream.supported_models = retained
+                    .into_iter()
+                    .filter(|model| !upstream.premium_models.contains(model))
+                    .collect();
+                upstream.normalize_for_storage();
+                upstream.validate_configuration().map_err(|error| {
+                    io::Error::new(io::ErrorKind::InvalidInput, error)
+                })?;
+            }
+
+            let exposed = state
+                .upstreams
+                .iter()
+                .filter(|upstream| upstream.active)
+                .flat_map(UpstreamConfig::route_models)
+                .collect::<BTreeSet<_>>();
+            if exposed.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "qualification would remove the final routable model",
+                ));
+            }
+            let downstream = state
+                .downstreams
+                .iter_mut()
+                .find(|value| value.id == downstream_id)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "downstream not found"))?;
+            downstream.model_allowlist = exposed.iter().cloned().collect();
+
+            Ok(ModelQualificationApplySummary {
+                upstreams_updated: updated.len(),
+                retained_models: exposed.len(),
+            })
+        })
+        .await
     }
 
     async fn mutate_persisted_state<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>

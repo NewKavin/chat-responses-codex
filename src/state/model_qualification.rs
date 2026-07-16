@@ -97,6 +97,12 @@ pub struct UpstreamQualificationDecision {
     pub evidence: Vec<ModelQualificationEvidence>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelQualificationApplySummary {
+    pub upstreams_updated: usize,
+    pub retained_models: usize,
+}
+
 pub fn confirmed_level(categories: &[ModelQualificationCategory]) -> ModelQualificationLevel {
     if categories.contains(&ModelQualificationCategory::Passed) {
         return ModelQualificationLevel::Adapted;
