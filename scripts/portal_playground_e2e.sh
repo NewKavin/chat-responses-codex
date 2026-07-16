@@ -1,29 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set +x
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:3000}"
-ADMIN_USER="${ADMIN_USER:-admin}"
-DOWNSTREAM_ID="${DOWNSTREAM_ID:-test}"
+: "${DOWNSTREAM_KEY:?DOWNSTREAM_KEY is required}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-60}"
-DOTENV_PATH="${DOTENV_PATH:-${HOME}/docker/chat-responses-codex/.env}"
-
-# Retry configuration for 429 errors
-MAX_RETRIES="${MAX_RETRIES:-3}"
-RETRY_BASE_DELAY_SEC="${RETRY_BASE_DELAY_SEC:-5}"
-RETRY_MAX_DELAY_SEC="${RETRY_MAX_DELAY_SEC:-60}"
 
 action_status=0
+temp_dir=""
 
 need_cmd() {
   local cmd="$1"
   if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "[FAIL] missing dependency: $cmd"
+    echo "[FAIL] missing dependency: $cmd" >&2
     return 1
   fi
-}
-
-print_section() {
-  echo "================ $1 ================"
 }
 
 log_info() {
@@ -43,330 +34,156 @@ log_fail() {
   action_status=1
 }
 
-require_or_exit() {
-  if ! "$@"; then
-    action_status=1
-    return 1
-  fi
-}
-
 now_ms() {
   date +%s%3N
 }
 
-# Calculate delay with exponential backoff and jitter
-calc_retry_delay() {
-  local attempt="$1"
-  local base_delay="$RETRY_BASE_DELAY_SEC"
-  local max_delay="$RETRY_MAX_DELAY_SEC"
-  
-  # Exponential backoff: base * 2^(attempt-1)
-  local delay=$((base_delay * (2 ** (attempt - 1))))
-  
-  # Cap at max delay
-  if [[ $delay -gt $max_delay ]]; then
-    delay=$max_delay
+cleanup() {
+  if [[ -n "$temp_dir" ]]; then
+    rm -rf "$temp_dir"
   fi
-  
-  # Add jitter: random 0-50% of delay
-  local jitter=$((RANDOM % (delay / 2 + 1)))
-  echo $((delay + jitter))
 }
 
-# Retry wrapper for commands that may hit 429
-# Usage: with_retry <max_attempts> <cmd...>
-with_retry() {
-  local max_attempts="$1"
-  shift
-  local attempt=1
-  
-  while [[ $attempt -le $max_attempts ]]; do
-    if "$@"; then
-      return 0
-    fi
-    
-    if [[ $attempt -lt $max_attempts ]]; then
-      local delay
-      delay=$(calc_retry_delay "$attempt")
-      log_warn "Attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
-      sleep "$delay"
-    fi
-    ((attempt++))
-  done
-  
-  return 1
-}
-
-ADMIN_PASSWORD=$(awk -F= '$1=="ADMIN_PASSWORD" {print $2}' "$DOTENV_PATH")
-if [[ -z "${ADMIN_PASSWORD:-}" ]]; then
-  echo "[FAIL] 未在 $DOTENV_PATH 读取到 ADMIN_PASSWORD"
-  exit 1
-fi
-
-need_cmd curl || exit 1
-need_cmd jq || exit 1
-
-healthz() {
-  local body_file
-  body_file=$(mktemp)
+fetch_live_models() {
+  local body_file="$temp_dir/models.json"
   local code
-  code=$(curl -ks -m 30 -o "$body_file" -w '%{http_code}' "$BASE_URL/healthz")
-  if [[ "$code" == "200" ]]; then
-    log_pass "HEALTHZ 200 body=$(cat "$body_file")"
-  else
-    log_fail "HEALTHZ status=$code"
-  fi
-  rm -f "$body_file"
-}
+  local start
+  local end
+  local elapsed
 
-admin_login() {
-  local body_file
-  body_file=$(mktemp)
-  local code
-  code=$(curl -ks -m 30 -o "$body_file" -w '%{http_code}' \
-    -X POST "$BASE_URL/api/admin/login" \
-    -H 'Content-Type: application/json' \
-    -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASSWORD\"}")
-  if [[ "$code" != "200" ]]; then
-    log_fail "ADMIN_LOGIN status=$code body=$(cat \"$body_file\")"
-    rm -f "$body_file"
-    return 1
-  fi
-
-  ADMIN_TOKEN=$(jq -r '.token // empty' "$body_file")
-  rm -f "$body_file"
-  if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
-    log_fail "ADMIN_LOGIN success but token missing"
-    return 1
-  fi
-
-  log_pass "ADMIN_LOGIN 200"
-}
-
-rotate_downstream_key() {
-  local body_file
-  body_file=$(mktemp)
-  local code
-  code=$(curl -ks -m 30 -o "$body_file" -w '%{http_code}' \
-    -X POST "$BASE_URL/api/admin/downstreams/$DOWNSTREAM_ID/rotate" \
-    -H "Authorization: Bearer $ADMIN_TOKEN")
-  if [[ "$code" != "200" && "$code" != "201" ]]; then
-    log_fail "PORTAL_KEY_ROTATE status=$code body=$(cat \"$body_file\")"
-    rm -f "$body_file"
-    return 1
-  fi
-
-  PORTAL_KEY=$(jq -r '.plaintext_key // empty' "$body_file")
-  rm -f "$body_file"
-  if [[ -z "$PORTAL_KEY" || "$PORTAL_KEY" == "null" ]]; then
-    log_fail "PORTAL_KEY_ROTATE success but plaintext_key missing"
-    return 1
-  fi
-  log_pass "PORTAL_KEY_ROTATE ${code}"
-}
-
-portal_login() {
-  local body_file
-  body_file=$(mktemp)
-  local code
-  code=$(curl -ks -m 30 -o "$body_file" -w '%{http_code}' \
-    -X POST "$BASE_URL/api/portal/login" \
-    -H 'Content-Type: application/json' \
-    -d "{\"employee_id\":\"$DOWNSTREAM_ID\",\"key\":\"$PORTAL_KEY\"}")
-  if [[ "$code" != "200" ]]; then
-    log_fail "PORTAL_LOGIN status=$code body=$(cat \"$body_file\")"
-    rm -f "$body_file"
-    return 1
-  fi
-  PORTAL_TOKEN=$(jq -r '.token // empty' "$body_file")
-  rm -f "$body_file"
-  if [[ -z "$PORTAL_TOKEN" || "$PORTAL_TOKEN" == "null" ]]; then
-    log_fail "PORTAL_LOGIN success but token missing"
-    return 1
-  fi
-  log_pass "PORTAL_LOGIN 200"
-}
-
-portal_key() {
-  local body_file
-  body_file=$(mktemp)
-  local code
-  code=$(curl -ks -m 30 -o "$body_file" -w '%{http_code}' \
-    -H "Authorization: Bearer $PORTAL_TOKEN" \
-    "$BASE_URL/api/portal/key")
-  if [[ "$code" != "200" ]]; then
-    log_fail "PORTAL_KEY status=$code body=$(cat \"$body_file\")"
-    rm -f "$body_file"
-    return 1
-  fi
-
-  PORTAL_DOWNSTREAM_KEY=$(jq -r '.plaintext_key // empty' "$body_file")
-  rm -f "$body_file"
-  if [[ -z "$PORTAL_DOWNSTREAM_KEY" || "$PORTAL_DOWNSTREAM_KEY" == "null" ]]; then
-    log_fail "PORTAL_KEY success but plaintext_key missing"
-    return 1
-  fi
-  log_pass "PORTAL_KEY 200"
-}
-
-gateway_models() {
-  local body_file
-  body_file=$(mktemp)
-  local code
-  code=$(curl -ks -m 60 -o "$body_file" -w '%{http_code}' \
-    -H "Authorization: Bearer $PORTAL_DOWNSTREAM_KEY" \
+  start=$(now_ms)
+  code=$(curl -ksS -m "$TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
+    -H "Authorization: Bearer $DOWNSTREAM_KEY" \
     "$BASE_URL/v1/models")
+  end=$(now_ms)
+  elapsed=$((end - start))
+
   if [[ "$code" != "200" ]]; then
-    log_fail "GATEWAY_MODELS status=$code body=$(cat \"$body_file\")"
-    rm -f "$body_file"
+    log_fail "model=catalog status=$code duration_ms=$elapsed meaningful_frames=0 error_category=http_$code terminal_present=false"
     return 1
   fi
 
-  MODEL_COUNT=$(jq -r '.data | length // 0' "$body_file")
-  mapfile -t MODEL_LIST < <(jq -r '.data[].id // empty' "$body_file" | awk 'NF' | head -n 5)
-  rm -f "$body_file"
-  if [[ "$MODEL_COUNT" == "0" ]]; then
-    log_fail "GATEWAY_MODELS no models"
+  if ! jq -e '.data | type == "array"' "$body_file" >/dev/null 2>&1; then
+    log_fail "model=catalog status=$code duration_ms=$elapsed meaningful_frames=0 error_category=invalid_catalog terminal_present=false"
     return 1
   fi
-  log_pass "GATEWAY_MODELS 200 count=$MODEL_COUNT"
+
+  mapfile -t MODEL_LIST < <(
+    jq -r '.data[]?.id | select(type == "string")' "$body_file" | awk 'NF && !seen[$0]++'
+  )
+  if [[ "${#MODEL_LIST[@]}" -eq 0 ]]; then
+    log_fail "model=catalog status=$code duration_ms=$elapsed meaningful_frames=0 error_category=empty_catalog terminal_present=false"
+    return 1
+  fi
 }
 
-chat_completion_single() {
+inspect_stream() {
+  local body_file="$1"
+  local line
+  local data
+  local category
+
+  MEANINGFUL_FRAMES=0
+  ERROR_CATEGORY="none"
+  TERMINAL_PRESENT="false"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == data:* ]] || continue
+    data="${line#data:}"
+    data="${data#"${data%%[![:space:]]*}"}"
+
+    if [[ "$data" == "[DONE]" ]]; then
+      TERMINAL_PRESENT="true"
+      continue
+    fi
+
+    category=$(jq -r '.error.category // .category // .error.code // .error.type // empty' \
+      <<<"$data" 2>/dev/null || true)
+    if [[ -n "$category" ]]; then
+      ERROR_CATEGORY="$category"
+    fi
+
+    if jq -e '
+      ((((.choices // [])[0].delta.content // "") | type == "string" and length > 0) or
+       (((.choices // [])[0].delta.reasoning_content // "") | type == "string" and length > 0))
+    ' <<<"$data" >/dev/null 2>&1; then
+      MEANINGFUL_FRAMES=$((MEANINGFUL_FRAMES + 1))
+    fi
+
+    if jq -e '((.choices // [])[0].finish_reason // "") != ""' \
+      <<<"$data" >/dev/null 2>&1; then
+      TERMINAL_PRESENT="true"
+    fi
+  done <"$body_file"
+}
+
+smoke_model() {
   local model="$1"
+  local safe_name="$2"
+  local body_file="$temp_dir/chat-$safe_name.sse"
   local payload
   local code
-  local body_file
-  local start end elapsed
+  local start
+  local end
+  local elapsed
 
-  payload=$(jq -nc --arg model "$model" '{model:$model,messages:[{role:"user",content:"请返回字符串 \"ok\""}],stream:false}')
-  body_file=$(mktemp)
-  
+  payload="$(jq -nc --arg model "$model" '{
+    model: $model,
+    messages: [{role:"user",content:"Reply with exactly PLAYGROUND_OK"}],
+    stream: true
+  }')"
+
   start=$(now_ms)
-  code=$(curl -ks -m "$TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
+  code=$(curl -ksS -m "$TIMEOUT_SEC" -o "$body_file" -w '%{http_code}' \
     -X POST "$BASE_URL/v1/chat/completions" \
-    -H "Authorization: Bearer $PORTAL_DOWNSTREAM_KEY" \
+    -H "Authorization: Bearer $DOWNSTREAM_KEY" \
     -H 'Content-Type: application/json' \
     -d "$payload")
   end=$(now_ms)
   elapsed=$((end - start))
 
-  # Handle 429 specially - return code for retry logic
-  if [[ "$code" == "429" ]]; then
-    local retry_after
-    retry_after=$(grep -i '^retry-after:' "$body_file" 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || echo "")
-    local error_body
-    error_body=$(cat "$body_file" | tr '\n' ' ' | head -c 120)
-    rm -f "$body_file"
-    log_warn "CHAT_COMPLETION model=$model status=429 (rate limited) elapsed=${elapsed}ms retry_after=${retry_after:-N/A} error=$error_body"
-    echo "429"
-    return 0  # Return success but echo "429" for caller to handle
-  fi
-
-  if [[ "$code" == "200" ]]; then
-    local assistant
-    assistant=$(jq -r '.choices[0].message.content // empty' "$body_file")
-    log_pass "CHAT_COMPLETION status=200 model=$model elapsed=${elapsed}ms response_prefix=$(echo "$assistant" | head -c 30)"
-    rm -f "$body_file"
-    echo "200"
+  inspect_stream "$body_file"
+  if [[ "$code" == "200" && "$MEANINGFUL_FRAMES" -gt 0 && "$TERMINAL_PRESENT" == "true" && "$ERROR_CATEGORY" == "none" ]]; then
+    log_pass "model=$model status=$code duration_ms=$elapsed meaningful_frames=$MEANINGFUL_FRAMES error_category=$ERROR_CATEGORY terminal_present=$TERMINAL_PRESENT"
     return 0
   fi
 
-  local error_body
-  error_body=$(cat "$body_file" | tr '\n' ' ' | head -c 120)
-  log_warn "CHAT_COMPLETION model=$model status=$code elapsed=${elapsed}ms error=$error_body"
-  rm -f "$body_file"
-  echo "$code"
-  return 0
-}
-
-chat_completion() {
-  local candidate=()
-  local extra_default
-  extra_default=(
-    "grok-4.20-fast"
-    "deepseek-ai/DeepSeek-V4-Pro"
-    "deepseek-chat"
-    "GLM-5"
-    "Qwen3.7-Plus"
-  )
-
-  if [[ "${#MODEL_LIST[@]}" -gt 0 ]]; then
-    candidate+=("${MODEL_LIST[@]}")
-  fi
-
-  for item in "${extra_default[@]}"; do
-    local found=0
-    for existing in "${candidate[@]}"; do
-      if [[ "$existing" == "$item" ]]; then
-        found=1
-        break
-      fi
-    done
-    if [[ "$found" -eq 0 ]]; then
-      candidate+=("$item")
+  if [[ "$ERROR_CATEGORY" == "none" ]]; then
+    if [[ "$code" != "200" ]]; then
+      ERROR_CATEGORY="http_$code"
+    elif [[ "$MEANINGFUL_FRAMES" -eq 0 ]]; then
+      ERROR_CATEGORY="empty_stream"
+    else
+      ERROR_CATEGORY="missing_terminal"
     fi
-  done
-
-  local model
-  local attempt
-  local result
-  local delay
-
-  for model in "${candidate[@]}"; do
-    attempt=1
-    while [[ $attempt -le $MAX_RETRIES ]]; do
-      result=$(chat_completion_single "$model")
-      
-      case "$result" in
-        "200")
-          # Success!
-          return 0
-          ;;
-        "429")
-          # Rate limited - wait and retry same model
-          if [[ $attempt -lt $MAX_RETRIES ]]; then
-            delay=$(calc_retry_delay "$attempt")
-            log_warn "Rate limited on model=$model, attempt $attempt/$MAX_RETRIES, waiting ${delay}s before retry..."
-            sleep "$delay"
-            ((attempt++))
-            continue
-          else
-            log_warn "Rate limited on model=$model after $MAX_RETRIES attempts, trying next model..."
-            break  # Exit retry loop, move to next model
-          fi
-          ;;
-        *)
-          # Other error - try next model
-          break
-          ;;
-      esac
-    done
-  done
-
-  log_fail "CHAT_COMPLETION all candidates failed after retries"
+  fi
+  log_warn "model=$model status=$code duration_ms=$elapsed meaningful_frames=$MEANINGFUL_FRAMES error_category=$ERROR_CATEGORY terminal_present=$TERMINAL_PRESENT"
   return 1
 }
 
 main() {
-  print_section "Portal Playground E2E"
-  log_info "Retry config: MAX_RETRIES=$MAX_RETRIES, BASE_DELAY=${RETRY_BASE_DELAY_SEC}s, MAX_DELAY=${RETRY_MAX_DELAY_SEC}s"
-  healthz
-  require_or_exit admin_login
-  require_or_exit rotate_downstream_key
-  require_or_exit portal_login
-  require_or_exit portal_key
-  require_or_exit gateway_models
-  require_or_exit chat_completion
+  need_cmd curl || return 1
+  need_cmd jq || return 1
+  need_cmd awk || return 1
+  need_cmd date || return 1
 
-  if [[ "$action_status" -eq 0 ]]; then
-    log_pass "ENDPOINT_SMOKE_TESTS completed"
-  else
-    log_fail "ENDPOINT_SMOKE_TESTS failed"
-  fi
+  temp_dir=$(mktemp -d)
+  trap cleanup EXIT
 
+  fetch_live_models || return 1
+
+  local index=0
+  local model
+  for model in "${MODEL_LIST[@]}"; do
+    index=$((index + 1))
+    if smoke_model "$model" "$index"; then
+      return 0
+    fi
+  done
+
+  log_fail "model=all-live-models status=failed duration_ms=0 meaningful_frames=0 error_category=no_playable_model terminal_present=false"
   return "$action_status"
 }
 
 main "$@"
-exit "$action_status"

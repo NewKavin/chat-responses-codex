@@ -212,6 +212,24 @@ fn portal_playground_status_stdout_is_not_polluted_by_logs() {
 }
 
 #[test]
+fn portal_playground_e2e_never_rotates_or_prints_downstream_keys() {
+    let script = fs::read_to_string("scripts/portal_playground_e2e.sh").unwrap();
+    assert!(script.contains(": \"${DOWNSTREAM_KEY:?DOWNSTREAM_KEY is required}\""));
+    assert!(!script.contains("/rotate"));
+    assert!(!script.contains("rotate_downstream_key"));
+    assert!(!script.contains("ADMIN_PASSWORD"));
+    assert!(script.contains("set +x"));
+}
+
+#[test]
+fn portal_playground_e2e_uses_live_models_without_hardcoded_candidates() {
+    let script = fs::read_to_string("scripts/portal_playground_e2e.sh").unwrap();
+    assert!(script.contains("$BASE_URL/v1/models"));
+    assert!(!script.contains("extra_default"));
+    assert!(!script.contains("deepseek-chat"));
+}
+
+#[test]
 fn compatibility_matrix_script_defaults_to_four_clients_and_semantic_jq_failures() {
     let script = fs::read_to_string("scripts/compatibility_matrix.sh")
         .expect("read compatibility matrix script");
