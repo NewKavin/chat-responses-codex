@@ -12,7 +12,9 @@ Codex and OpenCode are the primary installed-client acceptance targets. Claude
 Code and Hermes remain covered by deterministic regression tests and the admin
 compatibility matrix, but they do not impose a blanket deletion rule on models
 that remain useful to Codex or OpenCode. The portal troubleshooting surface is
-removed; the authenticated admin troubleshooting center and matrix remain.
+removed; the authenticated admin troubleshooting center and matrix remain. The
+portal playground uses the live routable catalog as its execution source and no
+longer offers stale historical or allowlist-only models.
 
 ## Current Evidence
 
@@ -27,6 +29,12 @@ removed; the authenticated admin troubleshooting center and matrix remain.
 - OpenCode 1.17.9 passed deterministic matrix coverage but its installed CLI
   text smoke exited unsuccessfully. This is an integration failure to diagnose,
   not sufficient evidence that the selected model is unusable.
+- The `test` downstream currently reports 12 allowlisted models while the live
+  gateway catalog reports 10. Three allowlist entries are not live routes, and
+  one live DeepSeek slug differs from its stale allowlist alias.
+- A playground-style streaming request succeeds for the default Qwen VL route
+  and the Qwen 235B route, while a stale `deepseek-v4-flash` selection fails
+  before dispatch with `gateway_no_routable_upstream`.
 
 These results show that deleting a model after any strict semantic failure would
 discard routes the gateway can still serve through protocol conversion.
@@ -137,6 +145,53 @@ gateway envelope, route selection, converter, and upstream boundaries. If the
 model remains text-usable, its unsupported capability is downgraded. The model
 is deleted only if no useful Codex/OpenCode path remains.
 
+## Portal Playground Reliability
+
+### Live models are the execution authority
+
+The playground always fetches the authenticated gateway `/v1/models` response.
+If the downstream has a non-empty portal allowlist, the selectable list is the
+allowlist-order-preserving intersection with the live catalog. If the allowlist
+is empty, the selectable list is the live catalog itself.
+
+Historical portal model statistics are display-only evidence and never become
+selectable execution options. If the live catalog is unavailable or the
+intersection is empty, the playground shows an actionable error and disables
+sending instead of offering a model that cannot route.
+
+### Requests start with the smallest compatible shape
+
+The default playground request contains only `model`, `messages`, and `stream`.
+Temperature, output-token limits, and inference strength use an explicit
+automatic/unset state and are included only after the user enables or changes
+them. The gateway remains responsible for capability resolution, protocol
+conversion, token-field selection, and bounded downgrades.
+
+The page continues to use Chat Completions SSE as its stable browser-facing
+protocol. It accepts keepalives, content, reasoning, usage, `[DONE]`, and
+structured gateway error frames. A completed stream with no content or
+reasoning is shown as an empty-response failure rather than a successful answer.
+
+### Attachments are honest about supported input
+
+This iteration accepts text-readable attachments only. Text MIME types and
+explicit JSON, YAML, XML, CSV, Markdown, and source-code extensions are read as
+bounded UTF-8 text blocks. Images, archives, PDFs, office documents, and other
+binary inputs are rejected before sending with a clear message; they are never
+passed through `File.text()` as corrupted model input.
+
+Native image/file playground support is deferred until the live portal catalog
+can expose a route's verified media capabilities and the browser can emit the
+corresponding structured content safely.
+
+### E2E verification does not mutate credentials
+
+The playground E2E script requires an existing downstream key through a
+protected environment variable or another non-printing caller-provided channel.
+It must not rotate the `test` key, change downstream configuration, or print the
+key. It tests the same live-catalog selection and minimal streaming payload as
+the page, then verifies that the service remains healthy.
+
 ## Portal Troubleshooting Removal
 
 Remove the complete portal-only surface:
@@ -180,6 +235,13 @@ Gateway and frontend tests prove:
 
 - Codex/OpenCode request shapes use the capability-aware route
 - unsupported required features fail before upstream dispatch
+- playground options are the allowlist/live-catalog intersection
+- historical models never become executable playground options
+- default playground payloads omit unset optional controls
+- binary attachments fail locally and bounded text attachments remain usable
+- playground streaming handles keepalive, reasoning, content, usage, terminal,
+  structured error, and empty-response cases
+- playground E2E does not rotate or print downstream credentials
 - portal troubleshooting routes, API methods, navigation, and page are absent
 - admin troubleshooting and matrix routes remain
 
@@ -204,7 +266,11 @@ smoke tests.
    evidence instead of slug classification.
 8. The portal troubleshooting surface is absent while admin troubleshooting
    remains operational.
-9. Verification evidence is sanitized and all automated gates pass.
+9. The portal playground exposes only currently routable downstream models,
+   sends a minimal default request, and does not misrepresent binary files as
+   text attachments.
+10. Playground E2E verification leaves the `test` downstream key unchanged.
+11. Verification evidence is sanitized and all automated gates pass.
 
 ## Non-Goals
 
@@ -213,3 +279,6 @@ smoke tests.
 - Treating an HTTP 200 or model listing as compatibility evidence
 - Deleting a model because of one transient upstream or local CLI failure
 - Adding model-name or provider-hostname classifiers to production routing
+- Treating historical usage statistics as an executable model catalog
+- Adding image, PDF, archive, or arbitrary binary playground attachments before
+  verified media capabilities are available to the portal
