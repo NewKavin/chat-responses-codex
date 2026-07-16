@@ -583,6 +583,9 @@ impl ProxiedStreamState {
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
+            if self.canonicalizer.is_some() && chat_stream_event_is_semantically_complete(&event) {
+                self.semantic_completion_emitted = true;
+            }
             let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
                 canonicalizer
                     .push(event)
@@ -747,8 +750,8 @@ impl Drop for ProxiedStreamState {
         let usage = self.usage;
 
         if self.finished || self.semantic_completion_emitted {
-            // The upstream Responses stream is complete once `response.completed`
-            // has been seen, even if `[DONE]` has not arrived yet.
+            // Responses completes at `response.completed`; Chat completes when
+            // all choices in a terminal chunk carry a finish reason.
             spawn_stream_normal_completion_cleanup(completion_context, log_context, usage);
         } else {
             spawn_stream_interruption_cleanup(
@@ -759,6 +762,21 @@ impl Drop for ProxiedStreamState {
             );
         }
     }
+}
+
+fn chat_stream_event_is_semantically_complete(event: &Value) -> bool {
+    event
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            !choices.is_empty()
+                && choices.iter().all(|choice| {
+                    choice
+                        .get("finish_reason")
+                        .and_then(Value::as_str)
+                        .is_some_and(|reason| !reason.trim().is_empty())
+                })
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

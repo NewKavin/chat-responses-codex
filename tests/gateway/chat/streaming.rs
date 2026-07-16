@@ -3505,6 +3505,132 @@ async fn stream_interruption_marks_interrupted_not_success() {
 }
 
 #[tokio::test]
+async fn drop_after_terminal_chat_chunk_is_logged_as_success() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            let terminal = stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"id\":\"chatcmpl-terminal\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Complete\"},\"finish_reason\":\"stop\"}]}\n\n",
+                ))
+            });
+            (
+                StatusCode::OK,
+                headers,
+                Body::from_stream(terminal),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                request_quota_window_hours: 24,
+                request_quota_requests: 1000,
+                requests_per_minute: 60,
+                max_concurrency: 10,
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "messages": [{"role": "user", "content": "Analyze one compatibility risk."}],
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let terminal_frame = body
+        .frame()
+        .await
+        .expect("expected terminal chat chunk")
+        .expect("expected valid SSE frame")
+        .into_data()
+        .expect("expected SSE data");
+    let terminal_frame = String::from_utf8_lossy(&terminal_frame);
+    assert!(terminal_frame.contains("Complete"));
+    assert!(terminal_frame.contains("\"finish_reason\":\"stop\""));
+    drop(body);
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while state.snapshot().await.usage_logs.len() != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal drop should emit one usage log");
+
+    let snapshot = state.snapshot().await;
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.status_code, 200);
+    assert_eq!(log.error_category, None);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
+}
+
+#[tokio::test]
 async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
