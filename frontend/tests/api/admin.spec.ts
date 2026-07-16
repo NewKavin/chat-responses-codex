@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { adminApi, adminHttp, createAdminApiClient, hasUsableAdminToken, splitDashboardResponse } from '../../src/api/admin'
-import type { DashboardSummaryResponse } from '@/types'
+import type {
+  CompatibilityMatrixRunResponse,
+  DashboardSummaryResponse,
+  DialectProfileSummary
+} from '@/types'
 
 describe('admin api auth behavior', () => {
   it('treats 401 as failed status', () => {
@@ -87,6 +91,30 @@ describe('admin api auth behavior', () => {
     expect(spy).toHaveBeenCalledWith('/admin/model-probe')
   })
 
+  it('qualifies live upstream models with explicit apply intent', async () => {
+    const spy = vi.spyOn(adminHttp, 'post').mockResolvedValue({
+      data: { summary: { retained_models: 3 } }
+    } as never)
+
+    await adminApi.qualifyUpstreamModels({
+      apply: true,
+      upstream_ids: [],
+      downstream_id: 'test',
+      excluded_models: []
+    })
+
+    expect(spy).toHaveBeenCalledWith(
+      '/admin/upstreams/qualify-models',
+      {
+        apply: true,
+        upstream_ids: [],
+        downstream_id: 'test',
+        excluded_models: []
+      },
+      { timeout: 10 * 60 * 1000 }
+    )
+  })
+
   it('calls the logs endpoint with error category filters', async () => {
     const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
       data: {
@@ -158,6 +186,50 @@ describe('admin api auth behavior', () => {
     })
   })
 
+  it('accepts a stale compatibility matrix cell with null probe metadata', () => {
+    const staleProfileMetadata: Pick<
+      DialectProfileSummary,
+      'profile_age_seconds' | 'probe_version'
+    > = {
+      profile_age_seconds: null,
+      probe_version: null
+    }
+    const response: CompatibilityMatrixRunResponse = {
+      run_id: 'matrix_stale_1',
+      downstream_id: 'test',
+      models: ['GLM-5.1'],
+      client_profiles: ['codex'],
+      summary: {
+        passed: 0,
+        warning: 1,
+        failed: 0
+      },
+      cells: [
+        {
+          client_family: 'codex',
+          model_slug: 'GLM-5.1',
+          endpoint: '/v1/responses',
+          profile_state: 'unknown',
+          profile_currentness: 'stale',
+          profile_age_seconds: null,
+          probe_version: null,
+          status: 'warning',
+          http_status: 200,
+          summary: 'Compatibility checks completed with warnings',
+          details: 'Stale capability profile',
+          duration_ms: 10
+        }
+      ],
+      duration_ms: 10,
+      copy_summary: 'compatibility matrix completed with stale profile'
+    }
+
+    expect(staleProfileMetadata.profile_age_seconds).toBeNull()
+    expect(staleProfileMetadata.probe_version).toBeNull()
+    expect(response.cells[0].profile_age_seconds).toBeNull()
+    expect(response.cells[0].probe_version).toBeNull()
+  })
+
   it('loads admin active troubleshooting requests', async () => {
     const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
       data: { active_requests: [] }
@@ -166,6 +238,46 @@ describe('admin api auth behavior', () => {
     await adminApi.getActiveTroubleshootingRequests()
 
     expect(spy).toHaveBeenCalledWith('/admin/troubleshooting/active-requests')
+  })
+
+  it('exports, imports, inspects, and probes capabilities through the admin api', async () => {
+    const getSpy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: { schema_version: 1 }
+    } as never)
+    const postSpy = vi.spyOn(adminHttp, 'post').mockResolvedValue({
+      data: { ok: true }
+    } as never)
+
+    await adminApi.exportCapabilities()
+    await adminApi.importCapabilities({ schema_version: 1, revision: 42 } as never)
+    await adminApi.getResolvedCapabilities({
+      upstream_id: 'up-1',
+      model: 'opaque',
+      protocol: 'chat_completions'
+    })
+    await adminApi.queueDialectProbe({
+      upstream_id: 'up-1',
+      runtime_model_slug: 'opaque',
+      protocol: 'chat_completions'
+    })
+
+    expect(getSpy).toHaveBeenCalledWith('/admin/capabilities/export')
+    expect(postSpy).toHaveBeenCalledWith('/admin/capabilities/import', {
+      schema_version: 1,
+      revision: 42
+    })
+    expect(getSpy).toHaveBeenCalledWith('/admin/capabilities/resolved', {
+      params: {
+        upstream_id: 'up-1',
+        model: 'opaque',
+        protocol: 'chat_completions'
+      }
+    })
+    expect(postSpy).toHaveBeenCalledWith('/admin/capabilities/probe', {
+      upstream_id: 'up-1',
+      runtime_model_slug: 'opaque',
+      protocol: 'chat_completions'
+    })
   })
 })
 

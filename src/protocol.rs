@@ -1,27 +1,390 @@
+#[path = "protocol/image_adapter.rs"]
+pub mod image_adapter;
+#[path = "protocol/reasoning_adapter.rs"]
+pub mod reasoning_adapter;
+#[path = "protocol/stream_aggregate.rs"]
+pub mod stream_aggregate;
+#[path = "protocol/tool_adapter.rs"]
+pub mod tool_adapter;
+
+pub use stream_aggregate::{StreamAggregateResult, StreamResponseAggregator};
+
+use crate::capabilities::{ReasoningCarrier, ResolvedCapabilities};
 use crate::routing::UpstreamProtocol;
 use crate::state::unix_seconds;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpstreamStreamErrorKind {
+    Decode,
+    LimitExceeded,
+    UpstreamEvent,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
+    CapabilityUnsupported,
     InvalidPayload(String),
+    InvalidUpstreamStream {
+        kind: UpstreamStreamErrorKind,
+        message: &'static str,
+    },
     MissingField(&'static str),
+    UnsupportedImageSource,
 }
 
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::CapabilityUnsupported => write!(f, "required protocol capability is unsupported"),
             Self::InvalidPayload(message) => write!(f, "{message}"),
+            Self::InvalidUpstreamStream { message, .. } => {
+                write!(f, "invalid upstream SSE stream: {message}")
+            }
             Self::MissingField(field) => write!(f, "missing field: {field}"),
+            Self::UnsupportedImageSource => write!(f, "unsupported image source"),
         }
     }
 }
 
 impl std::error::Error for ProtocolError {}
 
+/// Normalizes provider Chat-completions SSE events before any downstream
+/// protocol adapter consumes them. The state is request-local: provider
+/// identity fields cannot change between chunks, while usage is deferred to
+/// the official choices-empty terminal chunk.
+#[derive(Debug, Clone)]
+pub struct ChatStreamCanonicalizer {
+    id: String,
+    model: String,
+    created: u64,
+    identity_locked: bool,
+    choice_indices: Vec<Option<u64>>,
+    terminal_indices: BTreeSet<u64>,
+    terminal_reason: Option<String>,
+    saw_output: bool,
+    saw_tool_call: bool,
+    usage: Option<Value>,
+}
+
+impl ChatStreamCanonicalizer {
+    pub fn new(id: impl Into<String>, model: impl Into<String>, created: u64) -> Self {
+        Self {
+            id: id.into(),
+            model: model.into(),
+            created,
+            identity_locked: false,
+            choice_indices: Vec::new(),
+            terminal_indices: BTreeSet::new(),
+            terminal_reason: None,
+            saw_output: false,
+            saw_tool_call: false,
+            usage: None,
+        }
+    }
+
+    pub fn latest_usage(&self) -> Option<&Value> {
+        self.usage.as_ref()
+    }
+
+    pub fn push(&mut self, mut event: Value) -> Result<Vec<Value>, ProtocolError> {
+        let object = event
+            .as_object_mut()
+            .ok_or_else(|| ProtocolError::InvalidUpstreamStream {
+                kind: UpstreamStreamErrorKind::UpstreamEvent,
+                message: "Chat stream event must be an object",
+            })?;
+        self.stabilize_identity(object)?;
+
+        if let Some(usage) = object.get("usage").filter(|usage| !usage.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+
+        let choices = object
+            .entry("choices")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let choices =
+            choices
+                .as_array_mut()
+                .ok_or_else(|| ProtocolError::InvalidUpstreamStream {
+                    kind: UpstreamStreamErrorKind::UpstreamEvent,
+                    message: "Chat stream choices must be an array",
+                })?;
+
+        if choices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        for (position, choice) in choices.iter_mut().enumerate() {
+            let choice =
+                choice
+                    .as_object_mut()
+                    .ok_or_else(|| ProtocolError::InvalidUpstreamStream {
+                        kind: UpstreamStreamErrorKind::UpstreamEvent,
+                        message: "Chat stream choice must be an object",
+                    })?;
+            let incoming_index = choice.get("index").and_then(Value::as_u64);
+            let canonical_index = match self.choice_indices.get(position).copied().flatten() {
+                Some(index) => {
+                    if incoming_index.is_some_and(|incoming| incoming != index) {
+                        return Err(Self::invalid_stream());
+                    }
+                    index
+                }
+                None => {
+                    let index = incoming_index.unwrap_or(position as u64);
+                    if self.choice_indices.len() <= position {
+                        self.choice_indices.resize(position + 1, None);
+                    }
+                    self.choice_indices[position] = Some(index);
+                    index
+                }
+            };
+            choice.insert("index".into(), Value::from(canonical_index));
+
+            let delta = choice
+                .entry("delta")
+                .or_insert_with(|| Value::Object(Map::new()));
+            let delta = delta.as_object_mut().ok_or_else(Self::invalid_stream)?;
+            for field in ["tool_calls", "function_call", "function_calls"] {
+                if delta.get(field).is_some_and(Value::is_null) {
+                    delta.remove(field);
+                }
+            }
+            self.saw_output |= delta
+                .get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+                || delta
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty());
+            self.saw_tool_call |= delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+                || delta
+                    .get("function_call")
+                    .is_some_and(|call| !call.is_null());
+
+            let finish_reason = choice.entry("finish_reason").or_insert(Value::Null).clone();
+            if !finish_reason.is_null() {
+                let finish_reason = finish_reason.as_str().ok_or_else(Self::invalid_stream)?;
+                let normalized = self.normalize_finish_reason(finish_reason)?;
+                if !self.terminal_indices.insert(canonical_index) {
+                    return Err(Self::invalid_stream());
+                }
+                if let Some(previous) = self.terminal_reason.as_ref() {
+                    if previous != &normalized {
+                        return Err(Self::invalid_stream());
+                    }
+                } else {
+                    self.terminal_reason = Some(normalized.clone());
+                }
+                choice.insert("finish_reason".into(), Value::String(normalized));
+            }
+        }
+
+        object.insert("id".into(), Value::String(self.id.clone()));
+        object.insert(
+            "object".into(),
+            Value::String("chat.completion.chunk".into()),
+        );
+        object.insert("created".into(), Value::from(self.created));
+        object.insert("model".into(), Value::String(self.model.clone()));
+        object.remove("usage");
+        Ok(vec![event])
+    }
+
+    /// Finishes on an upstream EOF. A provider must have emitted an explicit
+    /// terminal reason before closing; otherwise the gateway cannot infer why
+    /// generation stopped without changing semantics.
+    pub fn finish(&mut self) -> Result<Vec<Value>, ProtocolError> {
+        self.finish_inner(false)
+    }
+
+    /// Finishes after the provider's `[DONE]` marker. `[DONE]` proves stream
+    /// completion, so a missing reason can be mapped from observed semantics.
+    pub fn finish_after_done(&mut self) -> Result<Vec<Value>, ProtocolError> {
+        self.finish_inner(true)
+    }
+
+    fn finish_inner(&mut self, allow_missing_terminal: bool) -> Result<Vec<Value>, ProtocolError> {
+        let mut output = Vec::new();
+        if self.terminal_indices.is_empty() {
+            if !allow_missing_terminal {
+                return Err(Self::invalid_stream());
+            }
+            let reason = if self.saw_tool_call {
+                "tool_calls"
+            } else if self.saw_output {
+                "stop"
+            } else {
+                return Err(Self::invalid_stream());
+            };
+            let indices = if self.choice_indices.is_empty() {
+                vec![0]
+            } else {
+                self.choice_indices.iter().flatten().copied().collect()
+            };
+            let choices = indices
+                .into_iter()
+                .map(|index| {
+                    json!({
+                        "index": index,
+                        "delta": {},
+                        "finish_reason": reason,
+                    })
+                })
+                .collect::<Vec<_>>();
+            output.push(self.envelope(choices));
+            self.terminal_reason = Some(reason.into());
+            self.terminal_indices = self.choice_indices.iter().flatten().copied().collect();
+        }
+        if let Some(usage) = self.usage.take() {
+            let mut event = self.envelope(Vec::new());
+            event["usage"] = usage;
+            output.push(event);
+        }
+        Ok(output)
+    }
+
+    fn envelope(&self, choices: Vec<Value>) -> Value {
+        json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": choices,
+        })
+    }
+
+    fn stabilize_identity(&mut self, object: &Map<String, Value>) -> Result<(), ProtocolError> {
+        let incoming_id = Self::optional_string(object, "id")?;
+        let incoming_model = Self::optional_string(object, "model")?;
+        let incoming_created = Self::optional_u64(object, "created")?;
+
+        if self.identity_locked {
+            if incoming_id.is_some_and(|value| value != self.id)
+                || incoming_model.is_some_and(|value| value != self.model)
+                || incoming_created.is_some_and(|value| value != self.created)
+            {
+                return Err(Self::invalid_stream());
+            }
+            return Ok(());
+        }
+
+        if let Some(id) = incoming_id {
+            self.id = id.to_string();
+        }
+        if let Some(model) = incoming_model {
+            self.model = model.to_string();
+        }
+        if let Some(created) = incoming_created {
+            self.created = created;
+        }
+        self.identity_locked = true;
+        Ok(())
+    }
+
+    fn optional_string<'a>(
+        object: &'a Map<String, Value>,
+        field: &str,
+    ) -> Result<Option<&'a str>, ProtocolError> {
+        match object.get(field) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value)),
+            Some(_) => Err(Self::invalid_stream()),
+        }
+    }
+
+    fn optional_u64(
+        object: &Map<String, Value>,
+        field: &str,
+    ) -> Result<Option<u64>, ProtocolError> {
+        match object.get(field) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(value)) => value.as_u64().map(Some).ok_or_else(Self::invalid_stream),
+            Some(_) => Err(Self::invalid_stream()),
+        }
+    }
+
+    fn normalize_finish_reason(&self, reason: &str) -> Result<String, ProtocolError> {
+        let normalized = match reason {
+            "stop" | "length" | "content_filter" => reason,
+            "function_call" if self.saw_tool_call => "tool_calls",
+            "tool_calls" if self.saw_tool_call => "tool_calls",
+            "end_turn" if !self.saw_tool_call => "stop",
+            "max_tokens" | "max_output_tokens" => "length",
+            "tool_use" if self.saw_tool_call => "tool_calls",
+            _ => return Err(Self::invalid_stream()),
+        };
+        if normalized == "stop" && self.saw_tool_call {
+            return Err(Self::invalid_stream());
+        }
+        if normalized == "function_call" && !self.saw_tool_call {
+            return Err(Self::invalid_stream());
+        }
+        Ok(normalized.into())
+    }
+
+    fn invalid_stream() -> ProtocolError {
+        ProtocolError::InvalidUpstreamStream {
+            kind: UpstreamStreamErrorKind::UpstreamEvent,
+            message: "Chat stream event has an invalid envelope or terminal",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ConversionContext {
+    pub image_dialect: image_adapter::ImageDialect,
+    pub reasoning_carrier: ReasoningCarrier,
+    pub tool_registry: tool_adapter::ToolAdapterRegistry,
+}
+
+impl ConversionContext {
+    pub fn new(
+        resolved: &ResolvedCapabilities,
+        tool_registry: tool_adapter::ToolAdapterRegistry,
+    ) -> Self {
+        Self {
+            image_dialect: image_adapter::ImageDialect::from_resolved(resolved),
+            reasoning_carrier: resolved.reasoning_carrier,
+            tool_registry,
+        }
+    }
+
+    pub fn reasoning_content() -> Self {
+        Self {
+            image_dialect: image_adapter::ImageDialect::all(),
+            reasoning_carrier: ReasoningCarrier::ReasoningContent,
+            tool_registry: tool_adapter::ToolAdapterRegistry::empty(),
+        }
+    }
+}
+
+impl Default for ConversionContext {
+    fn default() -> Self {
+        Self {
+            image_dialect: image_adapter::ImageDialect::all(),
+            reasoning_carrier: ReasoningCarrier::None,
+            tool_registry: tool_adapter::ToolAdapterRegistry::empty(),
+        }
+    }
+}
+
 pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, ProtocolError> {
+    chat_request_to_responses_payload_with_context(input, &ConversionContext::default())
+}
+
+pub fn chat_request_to_responses_payload_with_context(
+    input: &Value,
+    context: &ConversionContext,
+) -> Result<Value, ProtocolError> {
     let model = string_field(input, "model")?;
     let messages = array_field(input, "messages")?;
     let mut instructions = Vec::new();
@@ -44,7 +407,12 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
     }
 
     for message in messages {
-        translate_chat_message_to_responses(message, &mut instructions, &mut response_input)?;
+        translate_chat_message_to_responses(
+            message,
+            &mut instructions,
+            &mut response_input,
+            context,
+        )?;
     }
 
     let mut output = Map::new();
@@ -105,10 +473,7 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
     if let Some(stream_options) = input.get("stream_options").and_then(Value::as_object) {
         let mut output_stream_options = Map::new();
         if let Some(include_obfuscation) = stream_options.get("include_obfuscation") {
-            output_stream_options.insert(
-                "include_obfuscation".into(),
-                include_obfuscation.clone(),
-            );
+            output_stream_options.insert("include_obfuscation".into(), include_obfuscation.clone());
         }
         if !output_stream_options.is_empty() {
             output.insert(
@@ -121,22 +486,41 @@ pub fn chat_request_to_responses_payload(input: &Value) -> Result<Value, Protoco
     // Codex sends `reasoning_effort` as a top-level chat field; the Responses
     // protocol expects it nested under `reasoning.effort`.
     if let Some(effort) = input.get("reasoning_effort").and_then(Value::as_str) {
-        output.insert(
-            "reasoning".into(),
-            json!({"effort": effort}),
-        );
+        output.insert("reasoning".into(), json!({"effort": effort}));
     }
     output.insert("input".into(), Value::Array(response_input));
     Ok(Value::Object(output))
 }
 
+pub fn responses_request_to_chat_payload_with_tool_registry(
+    input: &Value,
+    tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+) -> Result<Value, ProtocolError> {
+    let context = ConversionContext {
+        image_dialect: image_adapter::ImageDialect::all(),
+        reasoning_carrier: ReasoningCarrier::None,
+        tool_registry: tool_registry
+            .cloned()
+            .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty),
+    };
+    responses_request_to_chat_payload_with_context(input, &context)
+}
+
 pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, ProtocolError> {
+    responses_request_to_chat_payload_with_context(input, &ConversionContext::default())
+}
+
+pub fn responses_request_to_chat_payload_with_context(
+    input: &Value,
+    context: &ConversionContext,
+) -> Result<Value, ProtocolError> {
     let model = string_field(input, "model")?;
     let mut messages = Vec::new();
     let mut pending_assistant = None;
 
     if let Some(instructions) = input.get("instructions") {
-        let content = responses_content_to_chat_content(instructions)?;
+        let content =
+            responses_content_to_chat_content_with_dialect(instructions, context.image_dialect)?;
         messages.push(json!({
             "role": "system",
             "content": content,
@@ -156,11 +540,21 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
         }
         Value::Array(items) => {
             for item in items {
-                translate_responses_input_item(item, &mut pending_assistant, &mut messages)?;
+                translate_responses_input_item(
+                    item,
+                    &mut pending_assistant,
+                    &mut messages,
+                    context,
+                )?;
             }
         }
         Value::Object(_) => {
-            translate_responses_input_item(input_value, &mut pending_assistant, &mut messages)?;
+            translate_responses_input_item(
+                input_value,
+                &mut pending_assistant,
+                &mut messages,
+                context,
+            )?;
         }
         other => {
             return Err(ProtocolError::InvalidPayload(format!(
@@ -229,10 +623,7 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
     if let Some(stream_options) = input.get("stream_options").and_then(Value::as_object) {
         let mut output_stream_options = Map::new();
         if let Some(include_obfuscation) = stream_options.get("include_obfuscation") {
-            output_stream_options.insert(
-                "include_obfuscation".into(),
-                include_obfuscation.clone(),
-            );
+            output_stream_options.insert("include_obfuscation".into(), include_obfuscation.clone());
         }
         if !output_stream_options.is_empty() {
             output.insert(
@@ -246,7 +637,33 @@ pub fn responses_request_to_chat_payload(input: &Value) -> Result<Value, Protoco
 }
 
 pub fn chat_response_to_responses_payload(input: &Value) -> Result<Value, ProtocolError> {
+    chat_response_to_responses_payload_with_context(input, &ConversionContext::default())
+}
+
+pub fn chat_response_to_responses_payload_with_tool_registry(
+    input: &Value,
+    tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+) -> Result<Value, ProtocolError> {
+    let context = ConversionContext {
+        image_dialect: image_adapter::ImageDialect::all(),
+        reasoning_carrier: ReasoningCarrier::None,
+        tool_registry: tool_registry
+            .cloned()
+            .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty),
+    };
+    chat_response_to_responses_payload_with_context(input, &context)
+}
+
+fn responses_incomplete_reason(finish_reason: Option<&str>) -> Option<&'static str> {
+    (finish_reason == Some("length")).then_some("max_output_tokens")
+}
+
+pub fn chat_response_to_responses_payload_with_context(
+    input: &Value,
+    context: &ConversionContext,
+) -> Result<Value, ProtocolError> {
     let model = string_field(input, "model")?;
+    let response_id = input.get("id").and_then(Value::as_str).unwrap_or("resp");
     let choices = array_field(input, "choices")?;
     if choices.len() > 1 {
         return Err(ProtocolError::InvalidPayload(
@@ -256,17 +673,32 @@ pub fn chat_response_to_responses_payload(input: &Value) -> Result<Value, Protoc
     let Some(choice) = choices.first() else {
         return Err(ProtocolError::MissingField("choices[0]"));
     };
+    let incomplete_reason =
+        responses_incomplete_reason(choice.get("finish_reason").and_then(Value::as_str));
     let message = choice
         .get("message")
         .ok_or(ProtocolError::MissingField("choices[0].message"))?;
     let mut output_items = Vec::new();
 
+    if let Some((_, reasoning_item)) = reasoning_adapter::chat_reasoning_item(
+        message,
+        format!("rs-{response_id}"),
+        context.reasoning_carrier,
+    )? {
+        output_items.push(reasoning_item);
+    }
+
     if let Some(content) = message.get("content") {
         if !content.is_null() {
             output_items.push(json!({
+                "id": format!("msg-{response_id}"),
                 "type": "message",
+                "status": "completed",
                 "role": "assistant",
-                "content": chat_content_to_responses_output_content(content)?,
+                "content": chat_content_to_responses_output_content_with_dialect(
+                    content,
+                    context.image_dialect,
+                )?,
             }));
         }
     }
@@ -282,13 +714,28 @@ pub fn chat_response_to_responses_payload(input: &Value) -> Result<Value, Protoc
     if output_items.is_empty() {
         return Err(ProtocolError::MissingField("choices[0].message.content"));
     }
+    if incomplete_reason.is_some() {
+        for item in &mut output_items {
+            if let Some(item) = item.as_object_mut() {
+                item.insert("status".into(), Value::String("incomplete".into()));
+            }
+        }
+    }
 
     let mut output = Map::new();
-    output.insert(
-        "id".into(),
-        input.get("id").cloned().unwrap_or_else(|| json!("resp")),
-    );
+    output.insert("id".into(), Value::String(response_id.to_string()));
     output.insert("object".into(), Value::String("response".into()));
+    output.insert(
+        "status".into(),
+        Value::String(if incomplete_reason.is_some() {
+            "incomplete".into()
+        } else {
+            "completed".into()
+        }),
+    );
+    if let Some(reason) = incomplete_reason {
+        output.insert("incomplete_details".into(), json!({"reason": reason}));
+    }
     output.insert(
         "created".into(),
         input.get("created").cloned().unwrap_or_else(|| json!(0)),
@@ -298,7 +745,23 @@ pub fn chat_response_to_responses_payload(input: &Value) -> Result<Value, Protoc
     if let Some(usage) = input.get("usage") {
         output.insert("usage".into(), chat_usage_to_responses_usage(usage));
     }
-    Ok(Value::Object(output))
+    let mut output = Value::Object(output);
+    if let Some(tool_registry) = Some(&context.tool_registry) {
+        if let Some(items) = output.get_mut("output").and_then(Value::as_array_mut) {
+            for item in items {
+                let Some(object) = item.as_object() else {
+                    continue;
+                };
+                if object.get("type").and_then(Value::as_str) != Some("function_call") {
+                    continue;
+                }
+                let restored =
+                    tool_registry.restore_function_call(&Value::Object(object.clone()))?;
+                *item = restored;
+            }
+        }
+    }
+    Ok(output)
 }
 
 pub fn responses_response_to_chat_payload(input: &Value) -> Result<Value, ProtocolError> {
@@ -307,8 +770,13 @@ pub fn responses_response_to_chat_payload(input: &Value) -> Result<Value, Protoc
     let mut assistant_message = None;
     let mut saw_assistant_message = false;
     let mut tool_calls = Vec::new();
+    let mut reasoning_content = String::new();
 
     for item in output_items {
+        if let Some(reasoning) = reasoning_adapter::responses_reasoning_text(item)? {
+            reasoning_content.push_str(&reasoning);
+            continue;
+        }
         if let Some(message) = response_output_item_to_chat_message(item)? {
             if saw_assistant_message {
                 return Err(ProtocolError::InvalidPayload(
@@ -353,6 +821,9 @@ pub fn responses_response_to_chat_payload(input: &Value) -> Result<Value, Protoc
     }
     if !tool_calls.is_empty() {
         message.insert("tool_calls".into(), Value::Array(tool_calls));
+    }
+    if !reasoning_content.is_empty() {
+        message.insert("reasoning_content".into(), Value::String(reasoning_content));
     }
 
     let finish_reason = if message.contains_key("tool_calls") {
@@ -412,7 +883,36 @@ fn chat_usage_to_responses_usage(usage: &Value) -> Value {
     {
         output.insert("output_tokens_details".into(), details.clone());
     }
-    Value::Object(output)
+    let mut usage = Value::Object(output);
+    normalize_responses_usage_details(&mut usage);
+    usage
+}
+
+pub fn normalize_responses_usage_details(usage: &mut Value) {
+    let Some(usage) = usage.as_object_mut() else {
+        return;
+    };
+    ensure_usage_detail(usage, "input_tokens_details", "cached_tokens");
+    ensure_usage_detail(usage, "output_tokens_details", "reasoning_tokens");
+}
+
+fn ensure_usage_detail(usage: &mut Map<String, Value>, details_field: &str, required_field: &str) {
+    let details = usage
+        .entry(details_field.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !details.is_object() {
+        *details = Value::Object(Map::new());
+    }
+    let details = details
+        .as_object_mut()
+        .expect("usage details were normalized to an object");
+    if details
+        .get(required_field)
+        .and_then(Value::as_u64)
+        .is_none()
+    {
+        details.insert(required_field.to_string(), Value::Number(0.into()));
+    }
 }
 
 fn responses_usage_to_chat_usage(usage: &Value) -> Value {
@@ -483,6 +983,7 @@ fn translate_chat_message_to_responses(
     message: &Value,
     instructions: &mut Vec<String>,
     response_input: &mut Vec<Value>,
+    context: &ConversionContext,
 ) -> Result<(), ProtocolError> {
     let role = string_field(message, "role")?;
 
@@ -498,9 +999,21 @@ fn translate_chat_message_to_responses(
         "assistant" => {
             let mut has_payload = false;
 
+            if let Some((_, reasoning_item)) = reasoning_adapter::chat_reasoning_item(
+                message,
+                format!("rs-{}", Uuid::new_v4()),
+                context.reasoning_carrier,
+            )? {
+                response_input.push(reasoning_item);
+                has_payload = true;
+            }
+
             if let Some(content) = message.get("content") {
                 if !content.is_null() {
-                    let converted = chat_content_to_responses_input_content(content)?;
+                    let converted = chat_content_to_responses_input_content_with_dialect(
+                        content,
+                        context.image_dialect,
+                    )?;
                     response_input.push(json!({
                         "role": "assistant",
                         "content": converted,
@@ -534,7 +1047,10 @@ fn translate_chat_message_to_responses(
                 .ok_or(ProtocolError::MissingField("content"))?;
             response_input.push(json!({
                 "role": role,
-                "content": chat_content_to_responses_input_content(content)?,
+                "content": chat_content_to_responses_input_content_with_dialect(
+                    content,
+                    context.image_dialect,
+                )?,
             }));
         }
     }
@@ -546,6 +1062,7 @@ fn translate_responses_input_item(
     item: &Value,
     pending_assistant: &mut Option<Map<String, Value>>,
     messages: &mut Vec<Value>,
+    context: &ConversionContext,
 ) -> Result<(), ProtocolError> {
     match item {
         Value::String(content) => {
@@ -559,6 +1076,21 @@ fn translate_responses_input_item(
         Value::Object(object) => {
             let item_type = object.get("type").and_then(Value::as_str);
             match item_type {
+                Some("reasoning") => {
+                    if let Some(reasoning) = reasoning_adapter::responses_reasoning_text(item)? {
+                        if !reasoning.is_empty() {
+                            merge_assistant_chat_message(
+                                pending_assistant,
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "reasoning_content": reasoning,
+                                }),
+                            )?;
+                        }
+                    }
+                    Ok(())
+                }
                 Some("function_call") => {
                     merge_assistant_chat_message(
                         pending_assistant,
@@ -572,7 +1104,10 @@ fn translate_responses_input_item(
                     Ok(())
                 }
                 Some("message") => {
-                    let message = responses_message_object_to_chat_message(object)?;
+                    let message = responses_message_object_to_chat_message_with_dialect(
+                        object,
+                        context.image_dialect,
+                    )?;
                     if object.get("role").and_then(Value::as_str) == Some("assistant") {
                         merge_assistant_chat_message(pending_assistant, message)?;
                     } else {
@@ -584,7 +1119,10 @@ fn translate_responses_input_item(
                 Some(other) if object.contains_key("role") || object.contains_key("content") => {
                     let mut cloned = object.clone();
                     cloned.insert("type".into(), Value::String(other.to_string()));
-                    let message = responses_message_object_to_chat_message(&cloned)?;
+                    let message = responses_message_object_to_chat_message_with_dialect(
+                        &cloned,
+                        context.image_dialect,
+                    )?;
                     if cloned.get("role").and_then(Value::as_str) == Some("assistant") {
                         merge_assistant_chat_message(pending_assistant, message)?;
                     } else {
@@ -598,7 +1136,10 @@ fn translate_responses_input_item(
                     || object.contains_key("tool_call_id")
                     || object.contains_key("tool_calls") =>
                 {
-                    let message = responses_message_object_to_chat_message(object)?;
+                    let message = responses_message_object_to_chat_message_with_dialect(
+                        object,
+                        context.image_dialect,
+                    )?;
                     let role = message.get("role").and_then(Value::as_str);
                     if role == Some("assistant") {
                         merge_assistant_chat_message(pending_assistant, message)?;
@@ -635,7 +1176,10 @@ fn merge_assistant_chat_message(
     let object = message.as_object().ok_or_else(|| {
         ProtocolError::InvalidPayload(format!("unsupported assistant message: {message}"))
     })?;
-    let role = object.get("role").and_then(Value::as_str).unwrap_or("assistant");
+    let role = object
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("assistant");
     if role != "assistant" {
         return Err(ProtocolError::InvalidPayload(format!(
             "expected assistant message, got role: {role}"
@@ -651,7 +1195,22 @@ fn merge_assistant_chat_message(
 
     if let Some(content) = object.get("content") {
         let current = pending.get("content").cloned().unwrap_or(Value::Null);
-        pending.insert("content".into(), merge_chat_message_content(current, content.clone())?);
+        pending.insert(
+            "content".into(),
+            merge_chat_message_content(current, content.clone())?,
+        );
+    }
+
+    if let Some(reasoning_content) = object.get("reasoning_content").and_then(Value::as_str) {
+        if !reasoning_content.is_empty() {
+            let current = pending
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut merged = current.to_string();
+            merged.push_str(reasoning_content);
+            pending.insert("reasoning_content".into(), Value::String(merged));
+        }
     }
 
     if let Some(tool_calls) = object.get("tool_calls").and_then(Value::as_array) {
@@ -696,13 +1255,24 @@ fn chat_content_value_to_parts(value: Value) -> Result<Vec<Value>, ProtocolError
     }
 }
 
+#[allow(dead_code)]
 fn responses_message_object_to_chat_message(
     object: &Map<String, Value>,
+) -> Result<Value, ProtocolError> {
+    responses_message_object_to_chat_message_with_dialect(
+        object,
+        image_adapter::ImageDialect::all(),
+    )
+}
+
+fn responses_message_object_to_chat_message_with_dialect(
+    object: &Map<String, Value>,
+    dialect: image_adapter::ImageDialect,
 ) -> Result<Value, ProtocolError> {
     let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
 
     if role == "tool" || role == "function" || object.contains_key("tool_call_id") {
-        return responses_tool_output_object_to_chat_message(object);
+        return responses_tool_output_object_to_chat_message_with_dialect(object, dialect);
     }
 
     let role = match role {
@@ -717,10 +1287,19 @@ fn responses_message_object_to_chat_message(
     if let Some(content) = object.get("content") {
         message.insert(
             "content".into(),
-            responses_content_to_chat_content(content)?,
+            responses_content_to_chat_content_with_dialect(content, dialect)?,
         );
     } else {
         message.insert("content".into(), Value::Null);
+    }
+
+    if let Some(reasoning_content) = object.get("reasoning_content").and_then(Value::as_str) {
+        if !reasoning_content.is_empty() {
+            message.insert(
+                "reasoning_content".into(),
+                Value::String(reasoning_content.to_string()),
+            );
+        }
     }
 
     if let Some(tool_calls) = object.get("tool_calls").and_then(Value::as_array) {
@@ -743,6 +1322,16 @@ fn responses_message_object_to_chat_message(
 
 fn responses_tool_output_object_to_chat_message(
     object: &Map<String, Value>,
+) -> Result<Value, ProtocolError> {
+    responses_tool_output_object_to_chat_message_with_dialect(
+        object,
+        image_adapter::ImageDialect::all(),
+    )
+}
+
+fn responses_tool_output_object_to_chat_message_with_dialect(
+    object: &Map<String, Value>,
+    _dialect: image_adapter::ImageDialect,
 ) -> Result<Value, ProtocolError> {
     let call_id = object
         .get("tool_call_id")
@@ -931,6 +1520,7 @@ fn chat_tool_call_to_function_call(tool_call: &Value) -> Result<Value, ProtocolE
         "call_id": call_id,
         "name": name,
         "arguments": arguments,
+        "status": "completed",
     }))
 }
 
@@ -958,6 +1548,7 @@ fn chat_function_call_to_function_call(function_call: &Value) -> Result<Value, P
         "call_id": call_id,
         "name": name,
         "arguments": arguments,
+        "status": "completed",
     }))
 }
 
@@ -1153,13 +1744,24 @@ fn function_definition_to_tool(function: &Value) -> Result<Value, ProtocolError>
     }
 }
 
+#[allow(dead_code)]
 fn chat_content_to_responses_input_content(content: &Value) -> Result<Value, ProtocolError> {
+    chat_content_to_responses_input_content_with_dialect(
+        content,
+        image_adapter::ImageDialect::all(),
+    )
+}
+
+fn chat_content_to_responses_input_content_with_dialect(
+    content: &Value,
+    dialect: image_adapter::ImageDialect,
+) -> Result<Value, ProtocolError> {
     match content {
         Value::String(text) => Ok(Value::String(text.clone())),
         Value::Array(parts) => {
             let converted = parts
                 .iter()
-                .map(chat_content_part_to_responses_input_part)
+                .map(|part| chat_content_part_to_responses_input_part_with_dialect(part, dialect))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Array(converted))
         }
@@ -1170,7 +1772,15 @@ fn chat_content_to_responses_input_content(content: &Value) -> Result<Value, Pro
     }
 }
 
+#[allow(dead_code)]
 fn chat_content_part_to_responses_input_part(part: &Value) -> Result<Value, ProtocolError> {
+    chat_content_part_to_responses_input_part_with_dialect(part, image_adapter::ImageDialect::all())
+}
+
+fn chat_content_part_to_responses_input_part_with_dialect(
+    part: &Value,
+    dialect: image_adapter::ImageDialect,
+) -> Result<Value, ProtocolError> {
     if let Some(text) = part.as_str() {
         return Ok(json!({
             "type": "input_text",
@@ -1194,20 +1804,11 @@ fn chat_content_part_to_responses_input_part(part: &Value) -> Result<Value, Prot
                 "text": text,
             }))
         }
-        "image_url" | "input_image" => {
-            let image_url =
-                image_url_string(object).ok_or(ProtocolError::MissingField("image_url"))?;
-            let mut image = Map::new();
-            image.insert("type".into(), Value::String("input_image".into()));
-            image.insert("image_url".into(), Value::String(image_url));
-            if let Some(detail) = object.get("detail").and_then(Value::as_str) {
-                image.insert("detail".into(), Value::String(detail.to_string()));
-            }
-            if let Some(file_id) = object.get("file_id").and_then(Value::as_str) {
-                image.insert("file_id".into(), Value::String(file_id.to_string()));
-            }
-            Ok(Value::Object(image))
-        }
+        "image_url" | "input_image" => Ok(image_adapter::chat_image_to_responses_part(
+            &Value::Object(object.clone()),
+            dialect,
+        )?
+        .value),
         "file" | "input_file" => {
             let file_id = object
                 .get("file_id")
@@ -1231,7 +1832,18 @@ fn chat_content_part_to_responses_input_part(part: &Value) -> Result<Value, Prot
     }
 }
 
+#[allow(dead_code)]
 fn chat_content_to_responses_output_content(content: &Value) -> Result<Value, ProtocolError> {
+    chat_content_to_responses_output_content_with_dialect(
+        content,
+        image_adapter::ImageDialect::all(),
+    )
+}
+
+fn chat_content_to_responses_output_content_with_dialect(
+    content: &Value,
+    dialect: image_adapter::ImageDialect,
+) -> Result<Value, ProtocolError> {
     match content {
         Value::String(text) => Ok(json!([{
             "type": "output_text",
@@ -1240,7 +1852,7 @@ fn chat_content_to_responses_output_content(content: &Value) -> Result<Value, Pr
         Value::Array(parts) => {
             let converted = parts
                 .iter()
-                .map(chat_content_part_to_responses_output_part)
+                .map(|part| chat_content_part_to_responses_output_part_with_dialect(part, dialect))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Array(converted))
         }
@@ -1251,7 +1863,18 @@ fn chat_content_to_responses_output_content(content: &Value) -> Result<Value, Pr
     }
 }
 
+#[allow(dead_code)]
 fn chat_content_part_to_responses_output_part(part: &Value) -> Result<Value, ProtocolError> {
+    chat_content_part_to_responses_output_part_with_dialect(
+        part,
+        image_adapter::ImageDialect::all(),
+    )
+}
+
+fn chat_content_part_to_responses_output_part_with_dialect(
+    part: &Value,
+    _dialect: image_adapter::ImageDialect,
+) -> Result<Value, ProtocolError> {
     if let Some(text) = part.as_str() {
         return Ok(json!({
             "type": "output_text",
@@ -1282,13 +1905,20 @@ fn chat_content_part_to_responses_output_part(part: &Value) -> Result<Value, Pro
 }
 
 fn responses_content_to_chat_content(content: &Value) -> Result<Value, ProtocolError> {
+    responses_content_to_chat_content_with_dialect(content, image_adapter::ImageDialect::all())
+}
+
+fn responses_content_to_chat_content_with_dialect(
+    content: &Value,
+    dialect: image_adapter::ImageDialect,
+) -> Result<Value, ProtocolError> {
     match content {
         Value::Null => Ok(Value::Null),
         Value::String(text) => Ok(Value::String(text.clone())),
         Value::Array(parts) => {
             let converted = parts
                 .iter()
-                .map(responses_content_part_to_chat_content_part)
+                .map(|part| responses_content_part_to_chat_content_part_with_dialect(part, dialect))
                 .collect::<Result<Vec<_>, _>>()?;
             if converted.iter().all(is_chat_text_part) {
                 let mut text = String::new();
@@ -1308,7 +1938,18 @@ fn responses_content_to_chat_content(content: &Value) -> Result<Value, ProtocolE
     }
 }
 
+#[allow(dead_code)]
 fn responses_content_part_to_chat_content_part(part: &Value) -> Result<Value, ProtocolError> {
+    responses_content_part_to_chat_content_part_with_dialect(
+        part,
+        image_adapter::ImageDialect::all(),
+    )
+}
+
+fn responses_content_part_to_chat_content_part_with_dialect(
+    part: &Value,
+    dialect: image_adapter::ImageDialect,
+) -> Result<Value, ProtocolError> {
     if let Some(text) = part.as_str() {
         return Ok(json!({
             "type": "text",
@@ -1327,16 +1968,12 @@ fn responses_content_part_to_chat_content_part(part: &Value) -> Result<Value, Pr
         }));
     }
 
-    if let Some(image_url) = image_url_string(object) {
-        let mut image = Map::new();
-        image.insert("type".into(), Value::String("image_url".into()));
-        let mut image_url_object = Map::new();
-        image_url_object.insert("url".into(), Value::String(image_url));
-        if let Some(detail) = object.get("detail").and_then(Value::as_str) {
-            image_url_object.insert("detail".into(), Value::String(detail.to_string()));
-        }
-        image.insert("image_url".into(), Value::Object(image_url_object));
-        return Ok(Value::Object(image));
+    if image_url_string(object).is_some() {
+        return Ok(image_adapter::responses_image_to_chat_part(
+            &Value::Object(object.clone()),
+            dialect,
+        )?
+        .value);
     }
 
     Err(ProtocolError::InvalidPayload(format!(
@@ -1422,9 +2059,19 @@ enum StreamTranslatorState {
 
 impl StreamTranslator {
     pub fn new(source: UpstreamProtocol, target: UpstreamProtocol) -> Option<Self> {
+        Self::new_with_tool_registry(source, target, None)
+    }
+
+    pub fn new_with_tool_registry(
+        source: UpstreamProtocol,
+        target: UpstreamProtocol,
+        tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
+    ) -> Option<Self> {
         match (source, target) {
             (UpstreamProtocol::ChatCompletions, UpstreamProtocol::Responses) => Some(Self {
-                state: StreamTranslatorState::ChatToResponses(ChatToResponsesState::new()),
+                state: StreamTranslatorState::ChatToResponses(ChatToResponsesState::new(
+                    tool_registry,
+                )),
             }),
             (UpstreamProtocol::Responses, UpstreamProtocol::ChatCompletions) => Some(Self {
                 state: StreamTranslatorState::ResponsesToChat(ResponsesToChatState::new()),
@@ -1455,44 +2102,75 @@ struct ChatToResponsesState {
     created_at: Option<u64>,
     created_emitted: bool,
     completed_emitted: bool,
+    incomplete_reason: Option<&'static str>,
     sequence_number: u64,
+    next_output_index: usize,
     text_item_id: Option<String>,
+    text_output_index: Option<usize>,
     text_item_added_emitted: bool,
     text_item_done_emitted: bool,
     usage: Option<Value>,
     text: String,
+    reasoning: Option<ReasoningStreamState>,
     tool_calls: BTreeMap<usize, ChatToolCallState>,
+    tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
 }
 
 #[derive(Debug)]
 struct ChatToolCallState {
     item_id: String,
     call_id: String,
+    output_index: usize,
     name: Option<String>,
     arguments: String,
     added_emitted: bool,
     done_emitted: bool,
 }
 
+#[derive(Debug)]
+struct ReasoningStreamState {
+    item_id: String,
+    output_index: usize,
+    text: String,
+    started_emitted: bool,
+    done_emitted: bool,
+    done_status: Option<&'static str>,
+}
+
 impl ChatToResponsesState {
-    fn new() -> Self {
+    fn new(tool_registry: Option<tool_adapter::ToolAdapterRegistry>) -> Self {
         Self {
             response_id: None,
             model: None,
             created_at: None,
             created_emitted: false,
             completed_emitted: false,
+            incomplete_reason: None,
             sequence_number: 0,
+            next_output_index: 0,
             text_item_id: None,
+            text_output_index: None,
             text_item_added_emitted: false,
             text_item_done_emitted: false,
             usage: None,
             text: String::new(),
+            reasoning: None,
             tool_calls: BTreeMap::new(),
+            tool_registry,
         }
     }
 
     fn translate_event(&mut self, event: &Value) -> Result<Vec<Value>, ProtocolError> {
+        if self.completed_emitted {
+            return Ok(Vec::new());
+        }
+
+        self.initialize_metadata(event);
+        let usage = event.get("usage").filter(|usage| !usage.is_null());
+        if let Some(usage) = usage {
+            self.usage = Some(chat_usage_to_responses_usage(usage));
+        }
+
         let Some(choices) = event.get("choices").and_then(Value::as_array) else {
             return Ok(Vec::new());
         };
@@ -1502,13 +2180,13 @@ impl ChatToResponsesState {
             ));
         }
         let Some(choice) = choices.first() else {
-            return Ok(Vec::new());
+            return if usage.is_some() {
+                self.finish()
+            } else {
+                Ok(Vec::new())
+            };
         };
 
-        self.initialize_metadata(event);
-        if let Some(usage) = event.get("usage") {
-            self.usage = Some(chat_usage_to_responses_usage(usage));
-        }
         let mut output = Vec::new();
         let delta = choice.get("delta").unwrap_or(&Value::Null);
 
@@ -1518,17 +2196,75 @@ impl ChatToResponsesState {
             saw_relevant_content = true;
         }
 
+        if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str) {
+            if !reasoning_content.is_empty() {
+                self.emit_created(&mut output);
+                let response_id = self.response_id_value();
+                let (item_id, output_index, started_emitted) = {
+                    if self.reasoning.is_none() {
+                        let output_index = self.allocate_output_index();
+                        self.reasoning = Some(ReasoningStreamState {
+                            item_id: format!("rs-{}", Uuid::new_v4()),
+                            output_index,
+                            text: String::new(),
+                            started_emitted: false,
+                            done_emitted: false,
+                            done_status: None,
+                        });
+                    }
+                    let reasoning_state = self.reasoning.as_mut().expect("reasoning state");
+                    let started_emitted = reasoning_state.started_emitted;
+                    if !reasoning_state.started_emitted {
+                        reasoning_state.started_emitted = true;
+                    }
+                    reasoning_state.text.push_str(reasoning_content);
+                    (
+                        reasoning_state.item_id.clone(),
+                        reasoning_state.output_index,
+                        started_emitted,
+                    )
+                };
+                if !started_emitted {
+                    output.push(json!({
+                        "type": "response.output_item.added",
+                        "sequence_number": self.next_sequence(),
+                        "response_id": response_id,
+                        "output_index": output_index,
+                        "item": {
+                            "id": item_id,
+                            "type": "reasoning",
+                            "status": "in_progress",
+                            "summary": [],
+                            "content": []
+                        }
+                    }));
+                }
+                output.push(json!({
+                    "type": "response.reasoning_text.delta",
+                    "sequence_number": self.next_sequence(),
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "content_index": 0,
+                    "delta": reasoning_content,
+                }));
+                saw_relevant_content = true;
+            }
+        }
+
         if let Some(content) = delta.get("content") {
             if !content.is_null() {
                 let text = content_to_plain_text(content)?;
                 if !text.is_empty() {
                     self.emit_created(&mut output);
+                    self.emit_reasoning_done(&mut output);
                     let response_id = self.response_id_value();
                     let text_item_id = self.ensure_text_item(&mut output);
                     self.text.push_str(&text);
                     output.push(make_response_output_text_delta_event(
                         &response_id,
                         &text_item_id,
+                        self.text_output_index.expect("text output index"),
                         &text,
                         self.next_sequence(),
                     ));
@@ -1540,6 +2276,7 @@ impl ChatToResponsesState {
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for (fallback_index, tool_call) in tool_calls.iter().enumerate() {
                 self.emit_created(&mut output);
+                self.emit_reasoning_done(&mut output);
                 self.emit_chat_tool_call_delta(tool_call, fallback_index, &mut output)?;
                 saw_relevant_content = true;
             }
@@ -1547,6 +2284,7 @@ impl ChatToResponsesState {
 
         if let Some(function_call) = delta.get("function_call") {
             self.emit_created(&mut output);
+            self.emit_reasoning_done(&mut output);
             self.emit_chat_function_call_delta(function_call, &mut output)?;
             saw_relevant_content = true;
         }
@@ -1555,13 +2293,9 @@ impl ChatToResponsesState {
             self.emit_created(&mut output);
         }
 
-        if choice
-            .get("finish_reason")
-            .and_then(Value::as_str)
-            .is_some()
-        {
+        if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.incomplete_reason = responses_incomplete_reason(Some(finish_reason));
             self.emit_created(&mut output);
-            output.extend(self.finish()?);
         }
 
         Ok(output)
@@ -1574,18 +2308,20 @@ impl ChatToResponsesState {
 
         let mut output = Vec::new();
         self.emit_created(&mut output);
+        self.emit_reasoning_done(&mut output);
         self.emit_text_done(&mut output);
         self.emit_tool_call_done(&mut output);
 
         let response_id = self.response_id_value();
         let model = self.model_value();
         let created_at = self.created_at_value();
-        output.push(make_response_completed_event(
+        output.push(make_response_terminal_event(
             &response_id,
             created_at,
             &model,
             self.completed_output_items(),
             self.usage.clone(),
+            self.incomplete_reason,
             self.next_sequence(),
         ));
         self.completed_emitted = true;
@@ -1647,6 +2383,20 @@ impl ChatToResponsesState {
         self.sequence_number
     }
 
+    fn allocate_output_index(&mut self) -> usize {
+        let output_index = self.next_output_index;
+        self.next_output_index = self.next_output_index.saturating_add(1);
+        output_index
+    }
+
+    fn terminal_item_status(&self) -> &'static str {
+        if self.incomplete_reason.is_some() {
+            "incomplete"
+        } else {
+            "completed"
+        }
+    }
+
     fn emit_created(&mut self, output: &mut Vec<Value>) {
         if self.created_emitted {
             return;
@@ -1665,6 +2415,10 @@ impl ChatToResponsesState {
     }
 
     fn ensure_text_item(&mut self, output: &mut Vec<Value>) -> String {
+        if self.text_output_index.is_none() {
+            self.text_output_index = Some(self.allocate_output_index());
+        }
+        let output_index = self.text_output_index.expect("text output index");
         let item_id = self
             .text_item_id
             .get_or_insert_with(|| format!("msg-{}", Uuid::new_v4()))
@@ -1675,6 +2429,7 @@ impl ChatToResponsesState {
             output.push(make_response_output_item_added_message_event(
                 &response_id,
                 &item_id,
+                output_index,
                 self.next_sequence(),
             ));
             self.text_item_added_emitted = true;
@@ -1694,33 +2449,86 @@ impl ChatToResponsesState {
             .clone()
             .unwrap_or_else(|| format!("msg-{}", Uuid::new_v4()));
         let text = self.text.clone();
+        let output_index = self.text_output_index.expect("text output index");
+        let status = self.terminal_item_status();
         output.push(make_response_output_text_done_event(
             &response_id,
             &item_id,
+            output_index,
             &text,
             self.next_sequence(),
         ));
         output.push(make_response_output_item_done_message_event(
             &response_id,
             &item_id,
+            output_index,
+            status,
             &text,
             self.next_sequence(),
         ));
         self.text_item_done_emitted = true;
     }
 
+    fn emit_reasoning_done(&mut self, output: &mut Vec<Value>) {
+        let status = self.terminal_item_status();
+        let Some((item_id, output_index, text)) = self.reasoning.as_mut().and_then(|reasoning| {
+            if reasoning.done_emitted || !reasoning.started_emitted {
+                return None;
+            }
+            reasoning.done_emitted = true;
+            reasoning.done_status = Some(status);
+            Some((
+                reasoning.item_id.clone(),
+                reasoning.output_index,
+                reasoning.text.clone(),
+            ))
+        }) else {
+            return;
+        };
+
+        let response_id = self.response_id_value();
+        let reasoning_done_sequence = self.next_sequence();
+        output.push(json!({
+            "type": "response.reasoning_text.done",
+            "sequence_number": reasoning_done_sequence,
+            "response_id": response_id,
+            "item_id": item_id,
+            "output_index": output_index,
+            "content_index": 0,
+            "text": text,
+        }));
+        let item_done_sequence = self.next_sequence();
+        output.push(json!({
+            "type": "response.output_item.done",
+            "sequence_number": item_done_sequence,
+            "response_id": response_id,
+            "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "reasoning",
+                    "status": status,
+                "summary": [],
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": text,
+                }]
+            }
+        }));
+    }
+
     fn emit_tool_call_done(&mut self, output: &mut Vec<Value>) {
         let response_id = self.response_id_value();
+        let status = self.terminal_item_status();
         let pending = self
             .tool_calls
             .iter_mut()
-            .filter_map(|(index, tool_call)| {
+            .filter_map(|(_, tool_call)| {
                 if tool_call.done_emitted {
                     return None;
                 }
                 tool_call.done_emitted = true;
                 Some((
-                    *index,
+                    tool_call.output_index,
                     tool_call.item_id.clone(),
                     tool_call.call_id.clone(),
                     tool_call.name.clone(),
@@ -1730,22 +2538,28 @@ impl ChatToResponsesState {
             .collect::<Vec<_>>();
 
         for (index, item_id, call_id, name, arguments) in pending {
-            let name = name.as_deref().unwrap_or("");
+            let upstream_name = name.as_deref().unwrap_or("");
+            let (name, namespace) = self.restored_tool_identity(upstream_name);
             output.push(make_response_function_call_arguments_done_event(
                 &response_id,
                 &item_id,
                 index,
-                name,
+                &name,
                 &arguments,
                 self.next_sequence(),
             ));
+            let item = make_response_function_call_item(
+                &item_id,
+                call_id.as_str(),
+                &name,
+                namespace.as_deref(),
+                &arguments,
+                status,
+            );
             output.push(make_response_output_item_done_function_call_event(
                 &response_id,
-                &item_id,
                 index,
-                call_id.as_str(),
-                name,
-                &arguments,
+                item,
                 self.next_sequence(),
             ));
         }
@@ -1778,6 +2592,11 @@ impl ChatToResponsesState {
         let response_id = self.response_id_value();
         let mut added_event = None;
         let mut delta_event = None;
+        let output_index = self
+            .tool_calls
+            .get(&index)
+            .map(|tool_call| tool_call.output_index)
+            .unwrap_or_else(|| self.allocate_output_index());
 
         {
             let entry = self
@@ -1786,6 +2605,7 @@ impl ChatToResponsesState {
                 .or_insert_with(|| ChatToolCallState {
                     item_id: call_id.clone(),
                     call_id: call_id.clone(),
+                    output_index,
                     name: name.clone(),
                     arguments: String::new(),
                     added_emitted: false,
@@ -1817,13 +2637,14 @@ impl ChatToResponsesState {
         }
 
         if let Some((item_id, call_id, name)) = added_event {
-            output.push(make_response_output_item_added_function_call_event(
+            let sequence_number = self.next_sequence();
+            output.push(self.make_response_output_item_added_function_call_event(
                 &response_id,
                 &item_id,
-                index,
+                output_index,
                 &call_id,
                 &name,
-                self.next_sequence(),
+                sequence_number,
             ));
         }
 
@@ -1831,13 +2652,51 @@ impl ChatToResponsesState {
             output.push(make_response_function_call_arguments_delta_event(
                 &response_id,
                 &item_id,
-                index,
+                output_index,
                 &fragment,
                 self.next_sequence(),
             ));
         }
 
         Ok(())
+    }
+
+    fn make_response_output_item_added_function_call_event(
+        &self,
+        response_id: &str,
+        item_id: &str,
+        output_index: usize,
+        call_id: &str,
+        name: &str,
+        sequence_number: u64,
+    ) -> Value {
+        let (name, namespace) = self.restored_tool_identity(name);
+        let mut item = Map::new();
+        item.insert("id".into(), Value::String(item_id.to_string()));
+        item.insert("type".into(), Value::String("function_call".into()));
+        item.insert("status".into(), Value::String("in_progress".into()));
+        item.insert("call_id".into(), Value::String(call_id.to_string()));
+        item.insert("name".into(), Value::String(name));
+        item.insert("arguments".into(), Value::String(String::new()));
+        if let Some(namespace) = namespace {
+            item.insert("namespace".into(), Value::String(namespace));
+        }
+
+        json!({
+            "type": "response.output_item.added",
+            "sequence_number": sequence_number,
+            "response_id": response_id,
+            "output_index": output_index,
+            "item": Value::Object(item)
+        })
+    }
+
+    fn restored_tool_identity(&self, upstream_name: &str) -> (String, Option<String>) {
+        self.tool_registry
+            .as_ref()
+            .and_then(|registry| registry.restore_streamed_call_name(upstream_name).ok())
+            .map(|identity| (identity.name.clone(), identity.namespace.clone()))
+            .unwrap_or_else(|| (upstream_name.to_string(), None))
     }
 
     fn emit_chat_function_call_delta(
@@ -1866,6 +2725,11 @@ impl ChatToResponsesState {
         let response_id = self.response_id_value();
         let mut added_event = None;
         let mut delta_event = None;
+        let output_index = self
+            .tool_calls
+            .get(&index)
+            .map(|tool_call| tool_call.output_index)
+            .unwrap_or_else(|| self.allocate_output_index());
 
         {
             let entry = self
@@ -1874,6 +2738,7 @@ impl ChatToResponsesState {
                 .or_insert_with(|| ChatToolCallState {
                     item_id: call_id.to_string(),
                     call_id: call_id.to_string(),
+                    output_index,
                     name: Some(name.to_string()),
                     arguments: String::new(),
                     added_emitted: false,
@@ -1908,7 +2773,7 @@ impl ChatToResponsesState {
             output.push(make_response_output_item_added_function_call_event(
                 &response_id,
                 &item_id,
-                index,
+                output_index,
                 &call_id,
                 &name,
                 self.next_sequence(),
@@ -1919,7 +2784,7 @@ impl ChatToResponsesState {
             output.push(make_response_function_call_arguments_delta_event(
                 &response_id,
                 &item_id,
-                index,
+                output_index,
                 &fragment,
                 self.next_sequence(),
             ));
@@ -1930,26 +2795,56 @@ impl ChatToResponsesState {
 
     fn completed_output_items(&self) -> Value {
         let mut output_items = Vec::new();
+        let status = self.terminal_item_status();
+
+        if let Some(reasoning) = self.reasoning.as_ref() {
+            if reasoning.started_emitted {
+                let reasoning_status = reasoning.done_status.unwrap_or(status);
+                output_items.push((
+                    reasoning.output_index,
+                    json!({
+                    "id": reasoning.item_id,
+                    "type": "reasoning",
+                    "status": reasoning_status,
+                        "summary": [],
+                        "content": [{
+                            "type": "reasoning_text",
+                            "text": reasoning.text,
+                        }]
+                    }),
+                ));
+            }
+        }
 
         if self.text_item_added_emitted {
-            output_items.push(make_response_message_item(
-                self.text_item_id.as_deref().unwrap_or(""),
-                "completed",
-                Some(&self.text),
+            output_items.push((
+                self.text_output_index.expect("text output index"),
+                make_response_message_item(
+                    self.text_item_id.as_deref().unwrap_or(""),
+                    status,
+                    Some(&self.text),
+                ),
             ));
         }
 
         for tool_call in self.tool_calls.values() {
-            output_items.push(make_response_function_call_item(
-                tool_call.item_id.as_str(),
-                tool_call.call_id.as_str(),
-                tool_call.name.as_deref().unwrap_or(""),
-                &tool_call.arguments,
-                "completed",
+            let upstream_name = tool_call.name.as_deref().unwrap_or("");
+            let (name, namespace) = self.restored_tool_identity(upstream_name);
+            output_items.push((
+                tool_call.output_index,
+                make_response_function_call_item(
+                    tool_call.item_id.as_str(),
+                    tool_call.call_id.as_str(),
+                    &name,
+                    namespace.as_deref(),
+                    &tool_call.arguments,
+                    status,
+                ),
             ));
         }
 
-        Value::Array(output_items)
+        output_items.sort_by_key(|(output_index, _)| *output_index);
+        Value::Array(output_items.into_iter().map(|(_, item)| item).collect())
     }
 }
 
@@ -2502,27 +3397,42 @@ fn make_response_created_event(
     })
 }
 
-fn make_response_completed_event(
+fn make_response_terminal_event(
     response_id: &str,
     created_at: u64,
     model: &str,
     output: Value,
     usage: Option<Value>,
+    incomplete_reason: Option<&str>,
     sequence_number: u64,
 ) -> Value {
     let mut response = Map::new();
     response.insert("id".into(), Value::String(response_id.to_string()));
     response.insert("object".into(), Value::String("response".to_string()));
     response.insert("created_at".into(), Value::Number(created_at.into()));
-    response.insert("status".into(), Value::String("completed".to_string()));
+    response.insert(
+        "status".into(),
+        Value::String(if incomplete_reason.is_some() {
+            "incomplete".to_string()
+        } else {
+            "completed".to_string()
+        }),
+    );
     response.insert("model".into(), Value::String(model.to_string()));
     response.insert("output".into(), output);
+    if let Some(reason) = incomplete_reason {
+        response.insert("incomplete_details".into(), json!({"reason": reason}));
+    }
     if let Some(usage) = usage {
         response.insert("usage".into(), usage);
     }
 
     json!({
-        "type": "response.completed",
+        "type": if incomplete_reason.is_some() {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        },
         "sequence_number": sequence_number,
         "response": Value::Object(response)
     })
@@ -2531,13 +3441,14 @@ fn make_response_completed_event(
 fn make_response_output_item_added_message_event(
     response_id: &str,
     item_id: &str,
+    output_index: usize,
     sequence_number: u64,
 ) -> Value {
     json!({
         "type": "response.output_item.added",
         "sequence_number": sequence_number,
         "response_id": response_id,
-        "output_index": 0,
+        "output_index": output_index,
         "item": {
             "id": item_id,
             "type": "message",
@@ -2551,6 +3462,8 @@ fn make_response_output_item_added_message_event(
 fn make_response_output_item_done_message_event(
     response_id: &str,
     item_id: &str,
+    output_index: usize,
+    status: &str,
     text: &str,
     sequence_number: u64,
 ) -> Value {
@@ -2558,11 +3471,11 @@ fn make_response_output_item_done_message_event(
         "type": "response.output_item.done",
         "sequence_number": sequence_number,
         "response_id": response_id,
-        "output_index": 0,
+        "output_index": output_index,
         "item": {
             "id": item_id,
             "type": "message",
-            "status": "completed",
+            "status": status,
             "role": "assistant",
             "content": [{
                 "type": "output_text",
@@ -2576,6 +3489,7 @@ fn make_response_output_item_done_message_event(
 fn make_response_output_text_delta_event(
     response_id: &str,
     item_id: &str,
+    output_index: usize,
     delta: &str,
     sequence_number: u64,
 ) -> Value {
@@ -2584,7 +3498,7 @@ fn make_response_output_text_delta_event(
         "sequence_number": sequence_number,
         "response_id": response_id,
         "item_id": item_id,
-        "output_index": 0,
+        "output_index": output_index,
         "content_index": 0,
         "delta": delta
     })
@@ -2593,6 +3507,7 @@ fn make_response_output_text_delta_event(
 fn make_response_output_text_done_event(
     response_id: &str,
     item_id: &str,
+    output_index: usize,
     text: &str,
     sequence_number: u64,
 ) -> Value {
@@ -2601,7 +3516,7 @@ fn make_response_output_text_done_event(
         "sequence_number": sequence_number,
         "response_id": response_id,
         "item_id": item_id,
-        "output_index": 0,
+        "output_index": output_index,
         "content_index": 0,
         "text": text
     })
@@ -2669,11 +3584,8 @@ fn make_response_function_call_arguments_done_event(
 
 fn make_response_output_item_done_function_call_event(
     response_id: &str,
-    item_id: &str,
     output_index: usize,
-    call_id: &str,
-    name: &str,
-    arguments: &str,
+    item: Value,
     sequence_number: u64,
 ) -> Value {
     json!({
@@ -2681,14 +3593,7 @@ fn make_response_output_item_done_function_call_event(
         "sequence_number": sequence_number,
         "response_id": response_id,
         "output_index": output_index,
-        "item": {
-            "id": item_id,
-            "type": "function_call",
-            "status": "completed",
-            "call_id": call_id,
-            "name": name,
-            "arguments": arguments
-        }
+        "item": item
     })
 }
 
@@ -2696,17 +3601,22 @@ fn make_response_function_call_item(
     item_id: &str,
     call_id: &str,
     name: &str,
+    namespace: Option<&str>,
     arguments: &str,
     status: &str,
 ) -> Value {
-    json!({
+    let mut item = json!({
         "id": item_id,
         "type": "function_call",
         "status": status,
         "call_id": call_id,
         "name": name,
         "arguments": arguments
-    })
+    });
+    if let Some(namespace) = namespace {
+        item["namespace"] = Value::String(namespace.to_string());
+    }
+    item
 }
 
 fn make_response_message_item(item_id: &str, status: &str, text: Option<&str>) -> Value {

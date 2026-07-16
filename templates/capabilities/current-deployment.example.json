@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "revision": 2,
+  "route_overrides": [],
+  "bundles": [
+    {
+      "id": "agent_core",
+      "required": [
+        "text_input",
+        "text_stream",
+        "function_tools",
+        "forced_tool_choice",
+        "tool_continuation",
+        "indexed_tool_argument_stream"
+      ]
+    },
+    {
+      "id": "reasoning_agent",
+      "required": [
+        "reasoning_output",
+        "reasoning_replay",
+        "reasoning_stream"
+      ]
+    },
+    {
+      "id": "image_agent",
+      "required": [
+        "image_https",
+        "image_data_url",
+        "text_stream",
+        "function_tools"
+      ]
+    }
+  ],
+  "policies": [
+    {
+      "id": "glm-5.2",
+      "priority": 10,
+      "selector": { "runtime_model": "glm-5.2" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": true,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "context_window": 131072,
+        "max_output_tokens": 8192
+      },
+      "probe_candidates": {
+        "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      },
+      "extension_probes": [
+        {
+          "id": "glm-5.2-service-tier",
+          "protocol": "chat_completions",
+          "request_patch": { "service_tier": "auto" },
+          "response_predicate": { "path": "/id", "operator": "exists" }
+        }
+      ],
+      "evidence": [
+        {
+          "title": "GLM 5.2",
+          "url": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2",
+          "retrieved_at": "2026-07-10",
+          "version": "glm-5.2"
+        }
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "priority": 10,
+      "selector": { "runtime_model": "deepseek-v4-flash" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": true,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "context_window": 131072,
+        "max_output_tokens": 8192,
+        "omit_sampling_fields": [
+          "temperature",
+          "top_p",
+          "presence_penalty",
+          "frequency_penalty",
+          "logprobs",
+          "top_logprobs"
+        ]
+      },
+      "probe_candidates": {
+        "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      },
+      "extension_probes": [
+        {
+          "id": "deepseek-v4-flash-service-tier",
+          "protocol": "chat_completions",
+          "request_patch": { "service_tier": "auto" },
+          "response_predicate": { "path": "/id", "operator": "exists" }
+        }
+      ],
+      "evidence": [
+        {
+          "title": "DeepSeek thinking mode",
+          "url": "https://api-docs.deepseek.com/guides/thinking_mode",
+          "retrieved_at": "2026-07-10",
+          "version": "v4-flash"
+        }
+      ]
+    },
+    {
+      "id": "minimax-m2.5",
+      "priority": 10,
+      "selector": { "runtime_model": "MiniMax/MiniMax-M2.5" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": false,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "context_window": 204800,
+        "max_output_tokens": 65536
+      },
+      "probe_candidates": {
+        "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      },
+      "extension_probes": [
+        {
+          "id": "minimax-m2.5-service-tier",
+          "protocol": "chat_completions",
+          "request_patch": { "service_tier": "auto" },
+          "response_predicate": { "path": "/id", "operator": "exists" }
+        }
+      ],
+      "evidence": [
+        {
+          "title": "MiniMax Chat Completions",
+          "url": "https://platform.minimax.io/docs/api-reference/text-chat-openai",
+          "retrieved_at": "2026-07-10",
+          "version": "MiniMax-M2.5"
+        }
+      ]
+    },
+    {
+      "id": "minimax-m2.7",
+      "priority": 10,
+      "selector": { "runtime_model": "MiniMax/MiniMax-M2.7" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": false,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "context_window": 204800,
+        "max_output_tokens": 65536
+      },
+      "probe_candidates": {
+        "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      },
+      "extension_probes": [
+        {
+          "id": "minimax-m2.7-service-tier",
+          "protocol": "chat_completions",
+          "request_patch": { "service_tier": "auto" },
+          "response_predicate": { "path": "/id", "operator": "exists" }
+        }
+      ],
+      "evidence": [
+        {
+          "title": "MiniMax Responses",
+          "url": "https://platform.minimax.io/docs/api-reference/responses-create",
+          "retrieved_at": "2026-07-10",
+          "version": "MiniMax-M2.7"
+        }
+      ]
+    },
+    {
+      "id": "kimi-k2.5",
+      "priority": 10,
+      "selector": { "runtime_model": "moonshotai/Kimi-K2.5" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": true,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "context_window": 262144,
+        "max_output_tokens": 32768
+      },
+      "probe_candidates": {
+        "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      },
+      "extension_probes": [
+        {
+          "id": "kimi-k2.5-service-tier",
+          "protocol": "chat_completions",
+          "request_patch": { "service_tier": "auto" },
+          "response_predicate": { "path": "/id", "operator": "exists" }
+        }
+      ],
+      "evidence": [
+        {
+          "title": "Kimi Chat API",
+          "url": "https://platform.kimi.ai/docs/api/chat",
+          "retrieved_at": "2026-07-10",
+          "version": "Kimi-K2.5"
+        }
+      ]
+    },
+    {
+      "id": "kimi-k2.6",
+      "priority": 10,
+      "selector": { "runtime_model": "moonshotai/kimi-k2.6" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": true,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "context_window": 262144,
+        "max_output_tokens": 32768
+      },
+      "probe_candidates": {
+        "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      },
+      "extension_probes": [
+        {
+          "id": "kimi-k2.6-service-tier",
+          "protocol": "chat_completions",
+          "request_patch": { "service_tier": "auto" },
+          "response_predicate": { "path": "/id", "operator": "exists" }
+        }
+      ],
+      "evidence": [
+        {
+          "title": "Kimi K2.6",
+          "url": "https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart",
+          "retrieved_at": "2026-07-10",
+          "version": "Kimi-K2.6"
+        }
+      ]
+    }
+  ],
+  "compatibility_expectations": [
+    {
+      "id": "glm-5.2-core",
+      "selector": { "exposed_model": "glm-5.2" },
+      "bundles": ["agent_core", "reasoning_agent"],
+      "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
+      "permitted_optional_downgrades": []
+    },
+    {
+      "id": "deepseek-v4-flash-core",
+      "selector": { "exposed_model": "deepseek-v4-flash" },
+      "bundles": ["agent_core", "reasoning_agent"],
+      "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
+      "permitted_optional_downgrades": []
+    },
+    {
+      "id": "minimax-m2.5-core",
+      "selector": { "exposed_model": "MiniMax/MiniMax-M2.5" },
+      "bundles": ["agent_core"],
+      "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
+      "permitted_optional_downgrades": []
+    },
+    {
+      "id": "minimax-m2.7-core",
+      "selector": { "exposed_model": "MiniMax/MiniMax-M2.7" },
+      "bundles": ["agent_core"],
+      "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
+      "permitted_optional_downgrades": []
+    },
+    {
+      "id": "kimi-k2.5-core",
+      "selector": { "exposed_model": "moonshotai/Kimi-K2.5" },
+      "bundles": ["agent_core", "reasoning_agent"],
+      "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
+      "permitted_optional_downgrades": []
+    },
+    {
+      "id": "kimi-k2.6-core",
+      "selector": { "exposed_model": "moonshotai/kimi-k2.6" },
+      "bundles": ["agent_core", "reasoning_agent"],
+      "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
+      "permitted_optional_downgrades": []
+    }
+  ]
+}

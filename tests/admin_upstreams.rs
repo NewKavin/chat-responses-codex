@@ -6,28 +6,44 @@
 //! - Upstream toggle (enable/disable)
 //! - Input validation and error handling
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use axum::routing::get;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use chat_responses_codex::capabilities::{
+    Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
+    WireProtocol,
+};
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    ApiKeyModelConfig, AppConfig, AppState, PersistedState, UpstreamConfig,
+    build_key_qualification_decision, confirmed_level, qualify_model_on_upstream, unix_seconds,
+    ApiKeyModelConfig, AppConfig, AppState, DownstreamConfig, KeyQualificationDecision,
+    ModelQualificationCategory, ModelQualificationLevel, PersistedState, QualificationObservation,
+    StateStore, StoreFuture, UpstreamConfig, UpstreamQualificationDecision,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::tempdir;
-use tokio::sync::Barrier;
+use tokio::sync::{mpsc, Barrier};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
     PathBuf::from(format!("/tmp/test_state_admin_upstreams_{unique}.json"))
+}
+
+fn attach_capability_probe_sink(state: AppState) -> AppState {
+    let (sender, mut receiver) = mpsc::channel(256);
+    state.set_capability_probe_sender(sender);
+    tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+    state
 }
 
 /// Helper function to create a test AppState
@@ -68,7 +84,7 @@ fn create_test_state() -> AppState {
         global_context_profiles: std::collections::HashMap::new(),
     };
 
-    AppState::new(state, unique_state_path(), config)
+    attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
 }
 
 fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState {
@@ -87,7 +103,540 @@ fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState 
         global_context_profiles: std::collections::HashMap::new(),
     };
 
-    AppState::new(state, unique_state_path(), config)
+    attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
+}
+
+fn qualification_mock_response(model: &str, protocol: UpstreamProtocol) -> Response {
+    match model {
+        "chat-ok" | "old" => Json(json!({
+            "choices": [{"message": {"content": "OK"}}]
+        }))
+        .into_response(),
+        "responses-ok" => Json(json!({"output_text": "OK"})).into_response(),
+        "empty" => match protocol {
+            UpstreamProtocol::ChatCompletions => {
+                Json(json!({"choices": [{"message": {"content": ""}}]})).into_response()
+            }
+            UpstreamProtocol::Responses => Json(json!({"output": []})).into_response(),
+        },
+        "malformed" => (StatusCode::OK, "not-json").into_response(),
+        "oversized" => (StatusCode::OK, "x".repeat(1_048_577)).into_response(),
+        "unauthorized" => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "secret-key rejected"}})),
+        )
+            .into_response(),
+        "limited" => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": {"message": "rate limited"}})),
+        )
+            .into_response(),
+        "missing" => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "model_not_found"}})),
+        )
+            .into_response(),
+        "unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "temporarily unavailable"}})),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "unknown model"}})),
+        )
+            .into_response(),
+    }
+}
+
+async fn spawn_qualification_upstream() -> String {
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                qualification_mock_response(
+                    body.get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    UpstreamProtocol::ChatCompletions,
+                )
+            }),
+        )
+        .route(
+            "/v1/responses",
+            post(|Json(body): Json<Value>| async move {
+                qualification_mock_response(
+                    body.get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    UpstreamProtocol::Responses,
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn qualification_probe_accepts_meaningful_chat_and_responses_output() {
+    let mock = spawn_qualification_upstream().await;
+    let client = reqwest::Client::new();
+
+    let chat = qualify_model_on_upstream(
+        &client,
+        &mock,
+        "secret-key",
+        "chat-ok",
+        UpstreamProtocol::ChatCompletions,
+        2,
+    )
+    .await;
+    assert_eq!(chat.category, ModelQualificationCategory::Passed);
+
+    let responses = qualify_model_on_upstream(
+        &client,
+        &mock,
+        "secret-key",
+        "responses-ok",
+        UpstreamProtocol::Responses,
+        2,
+    )
+    .await;
+    assert_eq!(responses.category, ModelQualificationCategory::Passed);
+}
+
+#[tokio::test]
+async fn qualification_probe_returns_sanitized_categories() {
+    let mock = spawn_qualification_upstream().await;
+    let client = reqwest::Client::new();
+    for (model, expected) in [
+        ("empty", ModelQualificationCategory::EmptyResponse),
+        ("malformed", ModelQualificationCategory::MalformedResponse),
+        ("oversized", ModelQualificationCategory::MalformedResponse),
+        ("unauthorized", ModelQualificationCategory::Authentication),
+        ("limited", ModelQualificationCategory::RateLimit),
+        ("missing", ModelQualificationCategory::ModelNotFound),
+        (
+            "unavailable",
+            ModelQualificationCategory::UpstreamUnavailable,
+        ),
+    ] {
+        let result = qualify_model_on_upstream(
+            &client,
+            &mock,
+            "secret-key",
+            model,
+            UpstreamProtocol::ChatCompletions,
+            2,
+        )
+        .await;
+        assert_eq!(result.category, expected);
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("secret-key"));
+        assert!(!serialized.contains(&mock));
+    }
+}
+
+fn observation(model: &str, level: ModelQualificationLevel) -> QualificationObservation {
+    QualificationObservation {
+        model: model.to_string(),
+        level,
+    }
+}
+
+#[test]
+fn qualification_decision_keeps_success_and_prior_models_after_operational_failure() {
+    let previous = BTreeSet::from(["known-good".to_string()]);
+    let observations = vec![
+        observation("new-good", ModelQualificationLevel::Adapted),
+        observation("known-good", ModelQualificationLevel::OperationalFailure),
+    ];
+    let decision = build_key_qualification_decision(previous, observations);
+    assert_eq!(
+        decision.retained,
+        BTreeSet::from(["known-good".to_string(), "new-good".to_string()])
+    );
+}
+
+#[test]
+fn qualification_decision_requires_two_matching_attempts_before_removal() {
+    assert_eq!(
+        confirmed_level(&[
+            ModelQualificationCategory::EmptyResponse,
+            ModelQualificationCategory::Passed,
+        ]),
+        ModelQualificationLevel::Adapted
+    );
+    assert_eq!(
+        confirmed_level(&[
+            ModelQualificationCategory::EmptyResponse,
+            ModelQualificationCategory::EmptyResponse,
+        ]),
+        ModelQualificationLevel::Unusable
+    );
+}
+
+#[derive(Clone, Default)]
+struct FailingQualificationStore;
+
+impl StateStore for FailingQualificationStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Err(io::Error::other("qualification persistence failed")) })
+    }
+}
+
+fn qualification_persisted_state() -> PersistedState {
+    PersistedState {
+        upstreams: vec![UpstreamConfig {
+            id: "qualified-upstream".to_string(),
+            name: "Qualified Upstream".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            api_key: "secret-key".to_string(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            supported_models: vec!["old".to_string()],
+            active: true,
+            ..Default::default()
+        }],
+        downstreams: vec![DownstreamConfig {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            hash: String::new(),
+            plaintext_key: None,
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["old".to_string()],
+            rate_limit_enabled: true,
+            per_minute_limit: 60,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        ..Default::default()
+    }
+}
+
+fn qualification_decisions(retained: BTreeSet<String>) -> Vec<UpstreamQualificationDecision> {
+    vec![UpstreamQualificationDecision {
+        upstream_id: "qualified-upstream".to_string(),
+        keys: vec![KeyQualificationDecision {
+            api_key: "secret-key".to_string(),
+            full: retained
+                .iter()
+                .filter(|model| model.as_str() == "full")
+                .cloned()
+                .collect(),
+            adapted: retained
+                .iter()
+                .filter(|model| model.as_str() == "adapted")
+                .cloned()
+                .collect(),
+            retained,
+            removed: BTreeSet::from(["old".to_string()]),
+        }],
+        evidence: vec![],
+    }]
+}
+
+#[tokio::test]
+async fn qualification_apply_updates_upstreams_and_test_downstream_together() {
+    let state = AppState::new(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+    );
+    let summary = state
+        .apply_model_qualification(
+            qualification_decisions(BTreeSet::from(["adapted".to_string(), "full".to_string()])),
+            "test",
+        )
+        .await
+        .unwrap();
+    let snapshot = state.snapshot().await;
+    assert_eq!(
+        snapshot.upstreams[0].api_key_models[0].supported_models,
+        vec!["adapted", "full"]
+    );
+    assert_eq!(
+        snapshot.downstreams[0].model_allowlist,
+        vec!["adapted", "full"]
+    );
+    assert_eq!(summary.retained_models, 2);
+}
+
+#[tokio::test]
+async fn qualification_apply_refuses_to_erase_the_last_model() {
+    let state = AppState::new(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+    );
+    let error = state
+        .apply_model_qualification(qualification_decisions(BTreeSet::new()), "test")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(!state.snapshot().await.upstreams[0]
+        .route_models()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn qualification_apply_refuses_an_empty_decision_set() {
+    let state = AppState::new(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+    );
+    let error = state
+        .apply_model_qualification(Vec::new(), "test")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        state.snapshot().await.downstreams[0].model_allowlist,
+        vec!["old"]
+    );
+}
+
+#[tokio::test]
+async fn qualification_apply_persistence_failure_leaves_runtime_and_downstream_unchanged() {
+    let state = AppState::new_with_store(
+        qualification_persisted_state(),
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(FailingQualificationStore),
+    );
+    let before = state.snapshot().await;
+    assert!(state
+        .apply_model_qualification(
+            qualification_decisions(BTreeSet::from(["adapted".to_string(), "full".to_string(),])),
+            "test",
+        )
+        .await
+        .is_err());
+    let after = state.snapshot().await;
+    assert_eq!(after.upstreams, before.upstreams);
+    assert_eq!(
+        serde_json::to_value(after.downstreams).unwrap(),
+        serde_json::to_value(before.downstreams).unwrap()
+    );
+}
+
+async fn qualification_app() -> (axum::Router, AppState, String) {
+    let mock = spawn_qualification_upstream().await;
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "qualified-upstream".to_string(),
+                name: "Qualified Upstream".to_string(),
+                base_url: mock.clone(),
+                api_key: "secret-key".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["old".to_string()],
+                active: true,
+                ..Default::default()
+            }],
+            ..qualification_persisted_state()
+        },
+        unique_state_path(),
+        AppConfig::default(),
+    );
+    (build_router(state.clone()), state, mock)
+}
+
+#[tokio::test]
+async fn qualify_models_admin_can_select_upstreams_without_applying() {
+    let (app, state, mock) = qualification_app().await;
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/qualify-models")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "apply": false,
+                        "upstream_ids": ["qualified-upstream"],
+                        "downstream_id": "test",
+                        "excluded_models": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["summary"]["retained_models"].as_u64().unwrap() > 0);
+    assert!(!payload.to_string().contains("secret-key"));
+    assert!(!payload.to_string().contains(&mock));
+    assert_eq!(
+        state.snapshot().await.upstreams[0].supported_models,
+        vec!["old"]
+    );
+}
+
+#[tokio::test]
+async fn qualify_models_apply_updates_the_test_downstream_atomically() {
+    let (app, state, _) = qualification_app().await;
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/qualify-models")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "apply": true,
+                        "upstream_ids": ["qualified-upstream"],
+                        "downstream_id": "test",
+                        "excluded_models": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["applied"], true);
+    let snapshot = state.snapshot().await;
+    assert_eq!(
+        snapshot.upstreams[0].api_key_models[0].supported_models,
+        vec!["old"]
+    );
+    assert_eq!(snapshot.downstreams[0].model_allowlist, vec!["old"]);
+}
+
+#[tokio::test]
+async fn qualify_models_exclusions_cannot_erase_the_final_route() {
+    let (app, state, _) = qualification_app().await;
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/qualify-models")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "apply": true,
+                        "upstream_ids": ["qualified-upstream"],
+                        "downstream_id": "test",
+                        "excluded_models": ["old"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.upstreams[0].supported_models, vec!["old"]);
+    assert_eq!(snapshot.downstreams[0].model_allowlist, vec!["old"]);
+}
+
+#[tokio::test]
+async fn qualify_models_apply_is_admin_authenticated() {
+    let app = qualification_app().await.0;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/qualify-models")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn qualification_decision_uses_exact_current_profile_for_full_level() {
+    let mock = spawn_qualification_upstream().await;
+    let upstream = UpstreamConfig {
+        id: "qualified-upstream".to_string(),
+        name: "Qualified Upstream".to_string(),
+        base_url: mock,
+        api_key: "secret-key".to_string(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["chat-ok".to_string()],
+        active: true,
+        ..Default::default()
+    };
+    let state = create_test_state_with_upstreams(vec![upstream.clone()]);
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: "chat-ok".to_string(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            &upstream,
+            "chat-ok",
+            "chat-ok",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
+    profile.state = DialectProfileState::Verified;
+    profile.last_success_at = Some(unix_seconds());
+    for capability in [
+        Capability::TextInput,
+        Capability::TextStream,
+        Capability::FunctionTools,
+        Capability::ToolContinuation,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    let decisions = state
+        .qualify_active_upstreams(&["qualified-upstream".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        decisions[0].keys[0].retained,
+        BTreeSet::from(["chat-ok".to_string()])
+    );
+    assert_eq!(
+        decisions[0].keys[0].full,
+        BTreeSet::from(["chat-ok".to_string()])
+    );
+    assert_eq!(decisions[0].evidence[0].model, "chat-ok");
+    assert_eq!(
+        decisions[0].evidence[0].level,
+        ModelQualificationLevel::Full
+    );
 }
 
 /// Helper function to get a valid JWT token
@@ -978,7 +1527,7 @@ async fn test_admin_freekey_sync_only_imports_valid_status() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let result: Value = serde_json::from_slice(&body).unwrap();
+    let _result: Value = serde_json::from_slice(&body).unwrap();
 
     // Only the valid key creates a new upstream; the invalid key is ignored
     // for creation (it would only matter when clearing an existing upstream).
@@ -1219,7 +1768,7 @@ async fn test_upstreams_toggle_changes_active_status() {
 
 #[test]
 fn upstream_config_available_keys_includes_legacy_and_new_keys() {
-    let mut upstream = UpstreamConfig {
+    let upstream = UpstreamConfig {
         id: "test-1".to_string(),
         name: "Test Upstream".to_string(),
         base_url: "https://api.example.com".to_string(),
@@ -1240,7 +1789,7 @@ fn upstream_config_available_keys_includes_legacy_and_new_keys() {
 
 #[test]
 fn upstream_config_available_keys_dedups_legacy_key() {
-    let mut upstream = UpstreamConfig {
+    let upstream = UpstreamConfig {
         id: "test-2".to_string(),
         name: "Test Upstream".to_string(),
         base_url: "https://api.example.com".to_string(),
@@ -1849,7 +2398,7 @@ async fn test_freekey_sync_then_list_shows_upstream() {
     );
 
     // 3. 验证列表中有我们创建的上游
-    assert!(list_json.as_array().unwrap().len() >= 1);
+    assert!(!list_json.as_array().unwrap().is_empty());
     let found = list_json
         .as_array()
         .unwrap()

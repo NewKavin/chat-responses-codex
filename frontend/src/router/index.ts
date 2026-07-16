@@ -25,7 +25,6 @@ const router = createRouter({
         { path: 'history', name: 'PortalHistory', component: () => import('@/views/portal/UsageHistory.vue') },
         { path: 'integration', name: 'PortalIntegration', component: () => import('@/views/portal/Integration.vue') },
         { path: 'playground', name: 'PortalPlayground', component: () => import('@/views/portal/Playground.vue') },
-        { path: 'troubleshooting', name: 'PortalTroubleshooting', component: () => import('@/views/portal/Troubleshooting.vue') },
         { path: 'key', name: 'PortalKeyManagement', component: () => import('@/views/portal/KeyManagement.vue') }
       ]
     },

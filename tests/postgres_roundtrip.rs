@@ -1,9 +1,12 @@
+use chat_responses_codex::capabilities::{
+    CapabilityConfiguration, DialectProfileKey, UpstreamDialectProfile, WireProtocol,
+};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DefaultModelContextConfig,
-    DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
-    PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
+    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, CompatibilityUsageMetadata,
+    DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile, ModelContextConfig,
+    ModelRequestCostConfig, PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
 };
 use serde_json::json;
 use serde_json::Map;
@@ -11,8 +14,14 @@ use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 use std::sync::OnceLock;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
+
+fn attach_capability_probe_sink(state: &AppState) {
+    let (sender, mut receiver) = mpsc::channel(256);
+    state.set_capability_probe_sender(sender);
+    tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+}
 
 #[test]
 fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
@@ -84,6 +93,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
     let state = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
 
     let downstream_key = generate_downstream_key("pg-roundtrip");
     let upstream = UpstreamConfig {
@@ -162,6 +172,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         total_tokens: 24,
         latency_ms: 78,
         created_at: 1_725_000_001,
+        compatibility: None,
     };
 
     state
@@ -181,7 +192,7 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         .await
         .expect("should flush usage log rows");
 
-    let reloaded = AppState::load_from_database_url(&database_url, config)
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should reload state from PostgreSQL");
     let snapshot = reloaded.snapshot().await;
@@ -234,6 +245,95 @@ async fn postgres_roundtrip_preserves_normalized_state() {
 }
 
 #[tokio::test]
+async fn postgres_roundtrip_preserves_compatibility_metadata() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!(
+            "skipping postgres compatibility roundtrip test: PG_TEST_DATABASE_URL is not set"
+        );
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    let log = UsageLog {
+        id: "compat-log-1".into(),
+        downstream_key_id: "down-1".into(),
+        upstream_key_id: "up-1".into(),
+        downstream_name: Some("team-a".into()),
+        upstream_name: Some("primary".into()),
+        endpoint: "/v1/chat/completions".into(),
+        model: "opaque/model".into(),
+        inference_strength: Some("high".into()),
+        billing_mode: Some("Token 计费".into()),
+        request_count: Some(1),
+        user_agent: Some("Codex/0.144.0".into()),
+        request_id: "req-compat-1".into(),
+        status_code: 200,
+        error_message: None,
+        error_category: None,
+        prompt_tokens: 13,
+        completion_tokens: 7,
+        total_tokens: 20,
+        latency_ms: 44,
+        created_at: 1_725_000_101,
+        compatibility: Some(CompatibilityUsageMetadata {
+            protocol_transition: "responses_to_chat".into(),
+            adapter_types: vec!["tool_adapter".into(), "reasoning_adapter".into()],
+            optional_downgrades: vec!["optional_reasoning_effort".into()],
+            policy_id: Some("opaque-policy".into()),
+            policy_schema_version: 1,
+            policy_digest: "digest-1".into(),
+            profile_state: "verified".into(),
+            probe_version: 1,
+            dialect_retry_count: 1,
+            fallback_stage: Some("history_replayed".into()),
+        }),
+    };
+
+    state
+        .append_usage_log(log.clone())
+        .await
+        .expect("should persist compatibility usage log rows");
+    state
+        .flush_usage_logs_for_test()
+        .await
+        .expect("should flush compatibility usage log rows");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL");
+    let page = reloaded
+        .query_usage_logs_page(UsageLogQuery {
+            start_time: Some(0),
+            end_time: Some(u64::MAX),
+            status_codes: vec![],
+            error_categories: vec![],
+            model_substring: None,
+            page: 1,
+            page_size: 10,
+        })
+        .await
+        .expect("PostgreSQL store-backed query should return compatibility usage logs");
+
+    assert_eq!(page.total, 1);
+    assert_eq!(page.logs[0].log.compatibility, log.compatibility);
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
 async fn postgres_roundtrip_preserves_api_key_model_mapping() {
     let _guard = env_lock().lock().await;
     let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
@@ -251,6 +351,7 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
     let state = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
 
     let upstream_json = json!({
         "id": "up-2",
@@ -292,7 +393,7 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
         .await
         .expect("should persist upstream rows");
 
-    let reloaded = AppState::load_from_database_url(&database_url, config)
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should reload state from PostgreSQL");
     let snapshot = reloaded.snapshot().await;
@@ -346,7 +447,7 @@ async fn postgres_roundtrip_preserves_announcement_state() {
         .await
         .expect("should persist announcement rows");
 
-    let reloaded = AppState::load_from_database_url(&database_url, config)
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should reload state from PostgreSQL");
     let snapshot = reloaded.snapshot().await;
@@ -423,6 +524,84 @@ async fn postgres_roundtrip_preserves_global_context_profiles() {
             .context_group,
         "glm",
     );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_roundtrip_preserves_capability_state() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
+
+    state
+        .insert_upstream(UpstreamConfig {
+            id: "up-1".into(),
+            name: "primary".into(),
+            base_url: "https://upstream.example".into(),
+            api_key: "upstream-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["Lab/Case-Sensitive".into()],
+            active: true,
+            ..UpstreamConfig::default()
+        })
+        .await
+        .expect("should persist upstream rows before capability profiles");
+
+    let capability_configuration = CapabilityConfiguration {
+        revision: 17,
+        ..CapabilityConfiguration::default()
+    };
+    state
+        .replace_capability_configuration(capability_configuration)
+        .await
+        .expect("should persist capability configuration");
+
+    let key = DialectProfileKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "Lab/Case-Sensitive".into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    state
+        .upsert_dialect_profile(UpstreamDialectProfile::unknown(key.clone()))
+        .await
+        .expect("should persist dialect profile");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should reload state from PostgreSQL");
+    let capability_snapshot = reloaded.capability_snapshot();
+
+    assert_eq!(capability_snapshot.configuration.source().revision, 17);
+    assert!(capability_snapshot.profiles.contains_key(&key));
+    assert!(!capability_snapshot
+        .profiles
+        .keys()
+        .any(|candidate| candidate.runtime_model_slug == "lab/case-sensitive"));
+
+    assert!(reloaded.remove_upstream("up-1").await.unwrap());
+
+    let removed = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL after upstream removal");
+    assert!(!removed.capability_snapshot().profiles.contains_key(&key));
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
@@ -534,6 +713,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
     let state = AppState::load_from_database_url(&database_url, config.clone())
         .await
         .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
 
     let downstream_key = generate_downstream_key("pg-preserve");
     let upstream = UpstreamConfig {
@@ -603,6 +783,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         total_tokens: 24,
         latency_ms: 78,
         created_at: 1_725_000_001,
+        compatibility: None,
     };
     let log_id = log.id.clone();
 
@@ -656,6 +837,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
     let state = AppState::load_from_database_url(&database_url, config)
         .await
         .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
 
     let downstream_key = generate_downstream_key("pg-ctid");
     let upstream = UpstreamConfig {
@@ -725,6 +907,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         total_tokens: 24,
         latency_ms: 78,
         created_at: 1_725_000_001,
+        compatibility: None,
     };
     let log_id = log.id.clone();
 

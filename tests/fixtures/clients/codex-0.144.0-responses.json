@@ -1,0 +1,30 @@
+{
+  "_fixture_metadata": {
+    "client": "codex",
+    "version": "0.144.0",
+    "source_commit": "767822446c7a594caa19609ca435281a9ec67e0d",
+    "captured_at": "2026-07-10",
+    "sanitized": true
+  },
+  "method": "POST",
+  "path": "/v1/responses",
+  "header_names": ["authorization", "content-type", "user-agent"],
+  "body": {
+    "model": "synthetic-model",
+    "input": "synthetic matrix request",
+    "stream": true,
+    "tools": [
+      {
+        "type": "function",
+        "name": "gateway_matrix_probe",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "nonce": {"type": "string"}
+          },
+          "required": ["nonce"]
+        }
+      }
+    ]
+  }
+}

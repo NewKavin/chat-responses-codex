@@ -1,4 +1,6 @@
 pub mod admin;
+#[path = "../../../src/capabilities/mod.rs"]
+pub mod capabilities;
 #[path = "../../../src/keys.rs"]
 pub mod keys;
 #[path = "../../../src/protocol.rs"]

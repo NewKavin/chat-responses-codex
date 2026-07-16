@@ -1,0 +1,4 @@
+data: {"type":"response.created","response":{"id":"resp_bad","output":[]}}
+
+data: {"type":"response.output_item.added","item":{"type":"message"}}
+

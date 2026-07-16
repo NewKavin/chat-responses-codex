@@ -27,6 +27,7 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=900`
+- `CAPABILITY_PROBE_QUEUE_CAPACITY=256`
 - `POSTGRES_POOL_MAX_SIZE=16`
 - `ADMIN_LOGS_PAGE_SIZE_MAX=200`
 - `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
@@ -36,6 +37,10 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50`
 - `UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=10`
 - `UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=2`
+
+`CAPABILITY_PROBE_QUEUE_CAPACITY` limits pending atomic probe submission batches,
+not the number of routes inside a batch. Accepted batches are expanded immediately
+into the route-key-deduplicating probe scheduler.
 - `UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10`
 - `UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800`
 - `UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400`
@@ -240,6 +245,33 @@ curl -s \
   -d '{"model":"<model_slug>","messages":[{"role":"user","content":"hello"}]}' \
   <gateway_origin>/v1/chat/completions
 ```
+
+## Capability Policy And Acceptance
+
+Capability configuration is deployment data, not compiled model classification. Start from `templates/capabilities/current-deployment.example.json`; it contains no credentials or upstream URLs. To add the selected Qwen multimodal route and its semantic image fixture:
+
+```bash
+QWEN_VLM_SLUG='<exposed_qwen_slug>' \
+IMAGE_FIXTURE_URL='https://example.invalid/fixture.png' \
+IMAGE_FIXTURE_EXPECTED_LABEL='<expected_label>' \
+scripts/render_live_capabilities.sh --output /tmp/live-capabilities.json
+```
+
+Import through the authenticated admin API or use `--import` with `BASE_URL` and `ADMIN_TOKEN`. Import compiles and validates the whole document before persistence and atomic snapshot replacement. An invalid import keeps the last valid revision. Export, exact-route profiles, resolved sources, and manual probes are available under `/api/admin/capabilities/*` and in the admin troubleshooting page.
+
+Policy semantics do not prove relay syntax. Exact `(upstream_id, runtime_model_slug, protocol)` probe evidence controls wire capability, and probes never run on the normal request path. A normal request makes one healthy dispatch attempt, except for the single bounded pre-stream dialect correction defined by a verified profile.
+
+After importing the deployment data, run the semantic matrix and installed clients:
+
+```bash
+BASE_URL='<gateway_origin>' DOWNSTREAM_ID='<downstream_id>' \
+scripts/compatibility_matrix.sh
+
+BASE_URL='<gateway_origin>' DOWNSTREAM_KEY='<downstream_key>' \
+MODEL_SLUG='<exposed_model_slug>' scripts/installed_client_smoke.sh
+```
+
+The matrix fails on semantic check failures and unpermitted downgrades. The installed-client smoke pins verified CLI versions, executes text and read-only tool tasks in a temporary directory, and never prints the downstream key. Preserve the existing image and data volumes before an upgrade; do not prune images or volumes during rollback preparation.
 
 ## Operational Notes
 

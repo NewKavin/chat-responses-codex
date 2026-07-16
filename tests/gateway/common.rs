@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, clippy::await_holding_lock)]
+
 pub use axum::body::{to_bytes, Body};
 pub use axum::extract::State;
 pub use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
@@ -6,7 +8,7 @@ pub use axum::Router;
 pub use base64::engine::general_purpose::STANDARD;
 pub use base64::Engine;
 pub use bytes::Bytes;
-pub use chat_responses_codex::keys::generate_downstream_key;
+pub use chat_responses_codex::keys::GeneratedDownstreamKey;
 pub use chat_responses_codex::routing::UpstreamProtocol;
 pub use chat_responses_codex::server::build_router;
 pub use chat_responses_codex::state::{
@@ -16,13 +18,27 @@ pub use chat_responses_codex::state::{
 pub use futures_util::stream;
 pub use http_body_util::BodyExt;
 pub use serde_json::{json, Value};
+pub use std::collections::hash_map::DefaultHasher;
 pub use std::env;
 pub use std::future::Future;
+pub use std::hash::{Hash, Hasher};
 pub use std::sync::atomic::{AtomicUsize, Ordering};
 pub use std::sync::{Arc, Mutex, OnceLock};
 pub use std::time::Duration;
 pub use tempfile::tempdir;
 pub use tower::ServiceExt;
+
+pub(crate) fn generate_downstream_key(prefix: &str) -> GeneratedDownstreamKey {
+    let plaintext = format!("{prefix}-{}", uuid::Uuid::new_v4().simple());
+    let salt = format!("test-{}", uuid::Uuid::new_v4().simple());
+    let mut hasher = DefaultHasher::new();
+    salt.hash(&mut hasher);
+    plaintext.hash(&mut hasher);
+    GeneratedDownstreamKey {
+        plaintext,
+        hash: format!("{salt}:{:016x}", hasher.finish()),
+    }
+}
 
 const PROXY_ENV_VARS: &[&str] = &[
     "HTTP_PROXY",
@@ -45,12 +61,40 @@ pub(crate) async fn with_proxy_env_cleared<F, T>(f: impl FnOnce() -> F) -> T
 where
     F: Future<Output = T>,
 {
-    let _lock = proxy_env_lock().lock().unwrap();
+    let _lock = proxy_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let saved = ProxyEnvSnapshot::capture();
     ProxyEnvSnapshot::clear();
     let result = f().await;
     saved.restore();
     result
+}
+
+pub(crate) async fn stamp_current_dialect_profile(
+    state: &AppState,
+    exposed_model: &str,
+    profile: &mut chat_responses_codex::capabilities::UpstreamDialectProfile,
+) {
+    use chat_responses_codex::capabilities::{WireProtocol, DIALECT_PROBE_SCHEMA_VERSION};
+
+    let upstream_id = profile.key.upstream_id.clone();
+    let runtime_model_slug = profile.key.runtime_model_slug.clone();
+    let protocol = match profile.key.protocol {
+        WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
+        WireProtocol::Responses => UpstreamProtocol::Responses,
+        WireProtocol::Messages => panic!("Messages profiles do not map to an upstream protocol"),
+    };
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == upstream_id)
+        .unwrap();
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(upstream, exposed_model, &runtime_model_slug, protocol)
+        .unwrap();
+    profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
 }
 
 fn proxy_env_lock() -> &'static Mutex<()> {

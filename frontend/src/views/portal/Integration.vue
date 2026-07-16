@@ -146,6 +146,7 @@
 
     <el-empty
       v-if="!hasConfigContent"
+      data-testid="integration-empty"
       class="integration-empty"
       description="当前还不能生成可直接复制的配置"
     >
@@ -154,7 +155,7 @@
       </p>
     </el-empty>
 
-    <el-card v-else class="tabs-card">
+    <el-card v-else data-testid="integration-config-tabs" class="tabs-card">
       <el-tabs v-model="activeTab" class="integration-tabs">
         <el-tab-pane label="Codex" name="codex">
           <div class="tab-body">
@@ -340,8 +341,7 @@
                 <div>
                   <h4>步骤 1: 写入 `~/.claude/settings.json`</h4>
                   <p>
-                    这个配置已经写好了 Anthropic 兼容网关所需的环境变量；如果模型名不是 Claude
-                    前缀，页面会自动补一个 custom model option。`ANTHROPIC_BASE_URL` 填的是网关根地址，
+                    这个配置已经写好了 Anthropic 兼容网关所需的环境变量；三套默认模型 alias 都会指向当前选中的网关模型。`ANTHROPIC_BASE_URL` 填的是网关根地址，
                     不要再手工加 `/v1`。
                   </p>
                 </div>
@@ -355,7 +355,7 @@
               type="success"
               :closable="false"
               show-icon
-              title="保存后重启 Claude Code 即可。默认模型会跟随门户使用量最高的模型，非 Claude 前缀模型会自动补 custom model option。"
+              title="保存后重启 Claude Code 即可。默认模型 alias 会统一映射到当前门户选择的模型。"
             />
           </div>
         </el-tab-pane>
@@ -435,27 +435,19 @@ import { portalApi } from '@/api/portal'
 import type { ModelContextEntry, PortalModelStat } from '@/types'
 import {
   buildClaudeCodeSettingsJson,
+  type CodexCatalogResponse,
   buildCodexAuthLoginCommand,
   buildCodexConfigToml,
   buildCodexModelCatalogJson,
-  buildModelUsageStats,
+  buildIntegrationCatalogViewState,
+  isCodexCatalogResponse,
   buildGatewayBaseUrl,
   buildGatewayModelsEndpoint,
   buildAnthropicCompatibleConfig,
   buildHermesConfigYaml,
   buildOpenAiCompatibleConfig,
-  buildOpenCodeConfig,
-  extractGatewayModelSlugs,
-  rankModelSlugsByUsage,
-  sortPortalModelStats
+  buildOpenCodeConfig
 } from '@/utils/integration'
-import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
-
-type GatewayModelsResponse = {
-  data?: Array<{
-    id?: unknown
-  }>
-}
 
 const activeTab = ref('codex')
 const loading = ref(true)
@@ -463,7 +455,7 @@ const gatewayBaseUrl = ref('')
 const portalKey = ref('')
 const portalModelStats = ref<PortalModelStat[]>([])
 const modelAllowlist = ref<string[]>([])
-const gatewayModelSlugs = ref<string[]>([])
+const codexCatalog = ref<CodexCatalogResponse | null>(null)
 const modelContexts = ref<Record<string, ModelContextEntry>>({})
 const loadWarnings = ref<string[]>([])
 const fatalError = ref('')
@@ -472,15 +464,16 @@ const gatewayApiBaseUrl = computed(() =>
   gatewayBaseUrl.value ? `${gatewayBaseUrl.value}/v1` : ''
 )
 
-const allModelSlugs = computed(() => {
-  const unfiltered = gatewayModelSlugs.value.length
-    ? rankModelSlugsByUsage(gatewayModelSlugs.value, portalModelStats.value)
-    : sortPortalModelStats(portalModelStats.value).map(stat => stat.model)
-  return resolvePortalQuotaModelSlugs(modelAllowlist.value, unfiltered)
-})
+const catalogViewState = computed(() =>
+  buildIntegrationCatalogViewState({
+    catalog: codexCatalog.value,
+    modelAllowlist: modelAllowlist.value,
+    portalModelStats: portalModelStats.value
+  })
+)
 
-
-const primaryModelSlug = computed(() => allModelSlugs.value[0] ?? '')
+const allModelSlugs = computed(() => catalogViewState.value.allModelSlugs)
+const primaryModelSlug = computed(() => catalogViewState.value.primaryModelSlug)
 
 const hermesInstallNpm = computed(() => `# 在项目根目录
 bun install`)
@@ -491,7 +484,7 @@ python3 -m venv .hermes-venv
 .hermes-venv/bin/pip install hermes-agent`)
 
 const hermesConfigYaml = computed(() => {
-  if (!primaryModelSlug.value) return ''
+  if (!canGenerateConfigContent.value) return ''
   return buildHermesConfigYaml({
     gatewayBaseUrl: gatewayBaseUrl.value || 'http://127.0.0.1:3000',
     portalKey: portalKey.value,
@@ -500,6 +493,7 @@ const hermesConfigYaml = computed(() => {
 })
 
 const hermesLaunch = computed(() => {
+  if (!canGenerateConfigContent.value) return ''
   const model = primaryModelSlug.value
   return `# 项目根目录执行
 ./scripts/hermes.sh chat
@@ -507,19 +501,18 @@ const hermesLaunch = computed(() => {
 # 指定模型
 ./scripts/hermes.sh -m ${model} chat`
 })
-const sortedModelStats = computed(() => {
-  const stats = buildModelUsageStats(gatewayModelSlugs.value, portalModelStats.value)
-  if (!modelAllowlist.value.length) return stats
-  const allowed = new Set(modelAllowlist.value.map(s => s.trim()).filter(Boolean))
-  return stats.filter(stat => allowed.has(stat.model))
-})
+const sortedModelStats = computed(() => catalogViewState.value.sortedModelStats)
 
-const hasConfigContent = computed(
-  () => Boolean(portalKey.value.trim()) && allModelSlugs.value.length > 0 && !fatalError.value
+const canGenerateConfigContent = computed(
+  () =>
+    Boolean(portalKey.value.trim()) &&
+    catalogViewState.value.canGenerateConfigurationContent &&
+    !fatalError.value
 )
+const hasConfigContent = canGenerateConfigContent
 
 const codexConfigToml = computed(() =>
-  primaryModelSlug.value
+  canGenerateConfigContent.value
     ? buildCodexConfigToml({
         gatewayBaseUrl: gatewayBaseUrl.value,
         modelSlug: primaryModelSlug.value
@@ -527,50 +520,61 @@ const codexConfigToml = computed(() =>
     : ''
 )
 
-const codexModelCatalogJson = computed(() => buildCodexModelCatalogJson(allModelSlugs.value, modelContexts.value))
+const codexModelCatalogJson = computed(() => {
+  if (!canGenerateConfigContent.value || !codexCatalog.value) return ''
+  return buildCodexModelCatalogJson(codexCatalog.value)
+})
 
 const codexAuthLoginCommand = computed(() =>
-  portalKey.value ? buildCodexAuthLoginCommand(portalKey.value) : ''
+  canGenerateConfigContent.value ? buildCodexAuthLoginCommand(portalKey.value) : ''
 )
 
 const opencodeConfig = computed(() =>
-  buildOpenCodeConfig({
-    gatewayBaseUrl: gatewayBaseUrl.value,
-    portalKey: portalKey.value,
-    modelSlugs: allModelSlugs.value,
-    selectedModelSlug: primaryModelSlug.value
-  })
+  canGenerateConfigContent.value
+    ? buildOpenCodeConfig({
+      gatewayBaseUrl: gatewayBaseUrl.value,
+      portalKey: portalKey.value,
+      modelSlugs: allModelSlugs.value,
+      selectedModelSlug: primaryModelSlug.value
+    })
+    : ''
 )
 
 const claudeCodeSettingsJson = computed(() =>
-  buildClaudeCodeSettingsJson({
-    gatewayBaseUrl: gatewayBaseUrl.value,
-    portalKey: portalKey.value,
-    modelSlugs: allModelSlugs.value,
-    selectedModelSlug: primaryModelSlug.value
-  })
+  canGenerateConfigContent.value
+    ? buildClaudeCodeSettingsJson({
+      gatewayBaseUrl: gatewayBaseUrl.value,
+      portalKey: portalKey.value,
+      modelSlugs: allModelSlugs.value,
+      selectedModelSlug: primaryModelSlug.value
+    })
+    : ''
 )
 
 const anthropicCompatibleConfig = computed(() =>
-  buildAnthropicCompatibleConfig({
-    gatewayBaseUrl: gatewayBaseUrl.value,
-    portalKey: portalKey.value,
-    modelSlugs: allModelSlugs.value,
-    selectedModelSlug: primaryModelSlug.value
-  })
+  canGenerateConfigContent.value
+    ? buildAnthropicCompatibleConfig({
+      gatewayBaseUrl: gatewayBaseUrl.value,
+      portalKey: portalKey.value,
+      modelSlugs: allModelSlugs.value,
+      selectedModelSlug: primaryModelSlug.value
+    })
+    : ''
 )
 
 const openAiCompatibleConfig = computed(() =>
-  buildOpenAiCompatibleConfig({
-    gatewayBaseUrl: gatewayBaseUrl.value,
-    portalKey: portalKey.value,
-    modelSlugs: allModelSlugs.value,
-    selectedModelSlug: primaryModelSlug.value
-  })
+  canGenerateConfigContent.value
+    ? buildOpenAiCompatibleConfig({
+      gatewayBaseUrl: gatewayBaseUrl.value,
+      portalKey: portalKey.value,
+      modelSlugs: allModelSlugs.value,
+      selectedModelSlug: primaryModelSlug.value
+    })
+    : ''
 )
 
-const fetchGatewayModelSlugs = async (key: string) => {
-  const response = await fetch(buildGatewayModelsEndpoint(gatewayBaseUrl.value), {
+const fetchGatewayCodexCatalog = async (key: string) => {
+  const response = await fetch(`${buildGatewayModelsEndpoint(gatewayBaseUrl.value)}?client_version=0.144.0`, {
     headers: {
       Authorization: `Bearer ${key}`
     }
@@ -580,8 +584,18 @@ const fetchGatewayModelSlugs = async (key: string) => {
     throw new Error(`网关模型接口返回 ${response.status}`)
   }
 
-  const payload = (await response.json()) as GatewayModelsResponse
-  return extractGatewayModelSlugs(payload)
+  const payload: unknown = await response.json()
+  if (!isCodexCatalogResponse(payload)) {
+    throw new Error('live Codex catalog is unavailable')
+  }
+  if (payload.models.length === 0) {
+    throw new Error('live Codex catalog is empty')
+  }
+  return payload
+}
+
+const applyCodexCatalog = (catalog: CodexCatalogResponse) => {
+  codexCatalog.value = catalog
 }
 
 const loadIntegrationData = async () => {
@@ -591,7 +605,7 @@ const loadIntegrationData = async () => {
   portalKey.value = ''
   portalModelStats.value = []
   modelAllowlist.value = []
-  gatewayModelSlugs.value = []
+  codexCatalog.value = null
   modelContexts.value = {}
 
   try {
@@ -626,11 +640,12 @@ const loadIntegrationData = async () => {
     }
 
     try {
-      gatewayModelSlugs.value = await fetchGatewayModelSlugs(portalKey.value)
+      applyCodexCatalog(await fetchGatewayCodexCatalog(portalKey.value))
     } catch (error) {
-      gatewayModelSlugs.value = []
-      const message = error instanceof Error ? error.message : '无法读取网关模型列表'
-      loadWarnings.value.push(`${message}，将仅使用模型统计生成配置。`)
+      codexCatalog.value = null
+      const message = error instanceof Error ? error.message : '无法读取 live Codex catalog'
+      fatalError.value = `${message}，已停止生成可复制的 Codex 配置。`
+      return
     }
 
     if (!allModelSlugs.value.length) {

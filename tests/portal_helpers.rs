@@ -114,6 +114,7 @@ async fn test_compute_per_minute_usage_counts_recent_requests() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 30, // 30 seconds ago
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -136,6 +137,7 @@ async fn test_compute_per_minute_usage_counts_recent_requests() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 45, // 45 seconds ago
+            compatibility: None,
         },
     ];
 
@@ -174,6 +176,7 @@ async fn test_compute_per_minute_usage_excludes_old_requests() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 30, // 30 seconds ago (should be counted)
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -196,6 +199,7 @@ async fn test_compute_per_minute_usage_excludes_old_requests() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 120, // 2 minutes ago (should NOT be counted)
+            compatibility: None,
         },
     ];
 
@@ -236,6 +240,7 @@ async fn test_compute_request_quota_usage_calculates_sliding_window() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600, // 1 hour ago
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -258,6 +263,7 @@ async fn test_compute_request_quota_usage_calculates_sliding_window() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 7200, // 2 hours ago
+            compatibility: None,
         },
     ];
 
@@ -349,6 +355,7 @@ async fn test_compute_token_usage_calculates_daily_usage() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 600, // 10 minutes ago (today)
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -371,6 +378,7 @@ async fn test_compute_token_usage_calculates_daily_usage() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 300, // 5 minutes ago (today)
+            compatibility: None,
         },
     ];
 
@@ -412,6 +420,7 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             total_tokens: 1500,
             latency_ms: 500,
             created_at: now - 86400, // 1 day ago (this month)
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -434,6 +443,7 @@ async fn test_compute_token_usage_calculates_monthly_usage() {
             total_tokens: 750,
             latency_ms: 300,
             created_at: now - 172800, // 2 days ago (this month)
+            compatibility: None,
         },
     ];
 
@@ -475,6 +485,7 @@ async fn test_compute_token_usage_remaining_calculation() {
             total_tokens: 950,
             latency_ms: 500,
             created_at: now - 600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -497,6 +508,7 @@ async fn test_compute_token_usage_remaining_calculation() {
             total_tokens: 450,
             latency_ms: 300,
             created_at: now - 300,
+            compatibility: None,
         },
     ];
 
@@ -535,6 +547,7 @@ async fn test_compute_token_usage_remaining_saturates_at_zero() {
         status_code: 200,
         error_message: None,
         error_category: None,
+        compatibility: None,
         prompt_tokens: 5000,
         completion_tokens: 6000,
         total_tokens: 11000,
@@ -579,6 +592,7 @@ async fn test_compute_token_usage_matches_summary_path() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -601,6 +615,7 @@ async fn test_compute_token_usage_matches_summary_path() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 7200,
+            compatibility: None,
         },
     ];
 
@@ -645,6 +660,7 @@ async fn test_portal_overview_token_summary_matches_quota_summary() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -667,6 +683,7 @@ async fn test_portal_overview_token_summary_matches_quota_summary() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 7200,
+            compatibility: None,
         },
     ];
 
@@ -737,6 +754,7 @@ async fn test_compute_daily_stats_aggregates_by_day() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now, // Today
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -759,6 +777,7 @@ async fn test_compute_daily_stats_aggregates_by_day() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now, // Today
+            compatibility: None,
         },
         UsageLog {
             id: "log-3".to_string(),
@@ -781,6 +800,7 @@ async fn test_compute_daily_stats_aggregates_by_day() {
             total_tokens: 300,
             latency_ms: 600,
             created_at: now - 86400, // Yesterday
+            compatibility: None,
         },
     ];
 
@@ -823,6 +843,7 @@ async fn test_compute_daily_stats_includes_token_counts() {
         status_code: 200,
         error_message: None,
         error_category: None,
+        compatibility: None,
         prompt_tokens: 1000,
         completion_tokens: 500,
         total_tokens: 1500,
@@ -868,6 +889,7 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600, // Today
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -890,6 +912,7 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 300, // Today
+            compatibility: None,
         },
         UsageLog {
             id: "log-3".to_string(),
@@ -912,6 +935,7 @@ async fn test_compute_model_stats_calculates_usage_by_model() {
             total_tokens: 300,
             latency_ms: 200,
             created_at: now - 600, // Today
+            compatibility: None,
         },
     ];
 
@@ -958,6 +982,7 @@ async fn test_compute_model_stats_calculates_success_rate() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -980,6 +1005,7 @@ async fn test_compute_model_stats_calculates_success_rate() {
             total_tokens: 0,
             latency_ms: 100,
             created_at: now - 7200,
+            compatibility: None,
         },
     ];
 
@@ -1019,6 +1045,7 @@ async fn test_compute_model_stats_calculates_avg_latency() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -1041,6 +1068,7 @@ async fn test_compute_model_stats_calculates_avg_latency() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 7200,
+            compatibility: None,
         },
     ];
 
@@ -1080,6 +1108,7 @@ async fn test_compute_model_stats_token_sums() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -1102,6 +1131,7 @@ async fn test_compute_model_stats_token_sums() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 300,
+            compatibility: None,
         },
         UsageLog {
             id: "log-3".to_string(),
@@ -1124,6 +1154,7 @@ async fn test_compute_model_stats_token_sums() {
             total_tokens: 300,
             latency_ms: 200,
             created_at: now - 600,
+            compatibility: None,
         },
     ];
 
@@ -1168,6 +1199,7 @@ async fn test_compute_model_stats_allowlist_filtering() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -1190,6 +1222,7 @@ async fn test_compute_model_stats_allowlist_filtering() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 7200,
+            compatibility: None,
         },
         UsageLog {
             id: "log-3".to_string(),
@@ -1212,6 +1245,7 @@ async fn test_compute_model_stats_allowlist_filtering() {
             total_tokens: 300,
             latency_ms: 200,
             created_at: now - 10800,
+            compatibility: None,
         },
     ];
 
@@ -1254,6 +1288,7 @@ async fn test_compute_model_stats_empty_allowlist() {
             total_tokens: 150,
             latency_ms: 500,
             created_at: now - 3600,
+            compatibility: None,
         },
         UsageLog {
             id: "log-2".to_string(),
@@ -1276,6 +1311,7 @@ async fn test_compute_model_stats_empty_allowlist() {
             total_tokens: 75,
             latency_ms: 300,
             created_at: now - 7200,
+            compatibility: None,
         },
         UsageLog {
             id: "log-3".to_string(),
@@ -1298,6 +1334,7 @@ async fn test_compute_model_stats_empty_allowlist() {
             total_tokens: 300,
             latency_ms: 200,
             created_at: now - 10800,
+            compatibility: None,
         },
     ];
 

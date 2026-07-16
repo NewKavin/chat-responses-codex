@@ -6,6 +6,11 @@
       :downstreams="downstreamOptions"
       :run="runTroubleshooting"
       :load-active="loadActive"
+      :export-capabilities="exportCapabilities"
+      :import-capabilities="importCapabilities"
+      :load-dialect-profiles="loadDialectProfiles"
+      :get-resolved-capabilities="getResolvedCapabilities"
+      :queue-dialect-probe="queueDialectProbe"
     />
     <div class="matrix-panel-wrap">
       <CompatibilityMatrixPanel
@@ -23,7 +28,9 @@ import CompatibilityMatrixPanel from '@/components/CompatibilityMatrixPanel.vue'
 import TroubleshootingCenter from '@/components/TroubleshootingCenter.vue'
 import type {
   ActiveGatewayRequest,
+  CapabilityConfigurationDocument,
   CompatibilityMatrixRunRequest,
+  DialectProfileSummary,
   DownstreamConfig,
   TroubleshootingRunRequest
 } from '@/types'
@@ -60,6 +67,38 @@ const runCompatibilityMatrix = async (payload: CompatibilityMatrixRunRequest) =>
 const loadActive = async (): Promise<ActiveGatewayRequest[]> => {
   const { data } = await adminApi.getActiveTroubleshootingRequests()
   return data.active_requests
+}
+
+const exportCapabilities = async () => {
+  const { data } = await adminApi.exportCapabilities()
+  return data
+}
+
+const importCapabilities = async (payload: CapabilityConfigurationDocument) => {
+  await adminApi.importCapabilities(payload)
+}
+
+const loadDialectProfiles = async (): Promise<DialectProfileSummary[]> => {
+  const { data } = await adminApi.getDialectProfiles()
+  return data.profiles
+}
+
+const getResolvedCapabilities = async (payload: {
+  upstream_id: string
+  model: string
+  protocol: 'chat_completions' | 'responses'
+}) => {
+  const { data } = await adminApi.getResolvedCapabilities(payload)
+  return data
+}
+
+const queueDialectProbe = async (payload: {
+  upstream_id: string
+  runtime_model_slug: string
+  protocol: 'chat_completions' | 'responses'
+}) => {
+  const { data } = await adminApi.queueDialectProbe(payload)
+  return data
 }
 
 onMounted(loadData)

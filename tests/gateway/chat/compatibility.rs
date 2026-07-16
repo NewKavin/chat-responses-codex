@@ -29,7 +29,7 @@ async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
                                 "id": "chatcmpl-test",
                                 "object": "chat.completion",
                                 "created": 1,
-                                "model": "claude-opus-4-7",
+                                "model": "opaque-cap-model",
                                 "choices": [{
                                     "index": 0,
                                     "message": {"role": "assistant", "content": "ok"},
@@ -57,10 +57,10 @@ async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
                     api_key: "upstream-secret".into(),
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
-                    supported_models: vec!["claude-opus-4-7".into()],
+                    supported_models: vec!["opaque-cap-model".into()],
                     default_model_context: None,
                     model_contexts: vec![ModelContextConfig {
-                        slug: "claude-opus-4-7".into(),
+                        slug: "opaque-cap-model".into(),
                         context_limit: 200_000,
                         output_reserve: 4096,
                         max_output_tokens: 32_768,
@@ -76,7 +76,7 @@ async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["claude-opus-4-7".into()],
+                    model_allowlist: vec!["opaque-cap-model".into()],
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -104,7 +104,7 @@ async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
             .header("Content-Type", "application/json")
             .body(Body::from(
                 json!({
-                    "model": "claude-opus-4-7",
+                    "model": "opaque-cap-model",
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 65536,
                     "stream": false
@@ -118,13 +118,7 @@ async fn max_output_tokens_cap_clamps_excessive_max_tokens() {
 
         let captured = capture.lock().unwrap().clone();
         let request_body = captured.request_body.expect("upstream should have received the request");
-
-        // The excessive max_tokens (65536) should have been clamped to the configured cap (32768)
-        assert_eq!(
-            request_body["max_tokens"].as_u64(),
-            Some(32768),
-            "max_tokens should be clamped to configured max_output_tokens cap"
-        );
+        assert_eq!(request_body["max_tokens"].as_u64(), Some(32768));
     })
     .await;
 }
@@ -158,7 +152,7 @@ async fn max_output_tokens_cap_zero_passes_through() {
                                 "id": "chatcmpl-test",
                                 "object": "chat.completion",
                                 "created": 1,
-                                "model": "gpt-4.1-mini",
+                                "model": "opaque-pass-model",
                                 "choices": [{
                                     "index": 0,
                                     "message": {"role": "assistant", "content": "ok"},
@@ -186,10 +180,10 @@ async fn max_output_tokens_cap_zero_passes_through() {
                     api_key: "upstream-secret".into(),
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
-                    supported_models: vec!["gpt-4.1-mini".into()],
+                    supported_models: vec!["opaque-pass-model".into()],
                     default_model_context: None,
                     model_contexts: vec![ModelContextConfig {
-                        slug: "gpt-4.1-mini".into(),
+                        slug: "opaque-pass-model".into(),
                         context_limit: 200_000,
                         output_reserve: 4096,
                         max_output_tokens: 0,
@@ -205,7 +199,7 @@ async fn max_output_tokens_cap_zero_passes_through() {
                     hash: downstream_key.hash.clone(),
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
-                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    model_allowlist: vec!["opaque-pass-model".into()],
                     per_minute_limit: 60,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
@@ -233,7 +227,7 @@ async fn max_output_tokens_cap_zero_passes_through() {
             .header("Content-Type", "application/json")
             .body(Body::from(
                 json!({
-                    "model": "gpt-4.1-mini",
+                    "model": "opaque-pass-model",
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 1000,
                     "stream": false
@@ -247,65 +241,51 @@ async fn max_output_tokens_cap_zero_passes_through() {
 
         let captured = capture.lock().unwrap().clone();
         let request_body = captured.request_body.expect("upstream should have received the request");
-
-        // max_output_tokens=0 means no cap, so max_tokens should pass through unchanged
-        assert_eq!(
-            request_body["max_tokens"].as_u64(),
-            Some(1000),
-            "max_tokens should pass through when max_output_tokens cap is 0"
-        );
+        assert_eq!(request_body["max_tokens"].as_u64(), Some(1000));
     })
     .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn strict_chat_compatibility_strips_codex_fields_but_preserves_tools_for_glm() {
+async fn strict_chat_compatibility_strips_optional_fields_but_preserves_tools() {
     with_proxy_env_cleared(|| async move {
-        let request_body = json!({
-            "model": "ZhipuAI/GLM-5.1",
-            "messages": [{"role": "user", "content": "use the tool"}],
-            "max_output_tokens": 4096,
-            "reasoning_effort": "xhigh",
-            "service_tier": "auto",
-            "safety_identifier": "safe-user",
-            "prompt_cache_key": "cache-key",
-            "prompt_cache_retention": "24h",
-            "client_metadata": {"client": "codex"},
-            "store": true,
-            "metadata": {"trace": "abc"},
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 2
-            },
-            "input_tokens": 10,
-            "output_tokens": 2,
-            "prompt_tokens": 10,
-            "completion_tokens": 2,
-            "user": "downstream-user",
-            "verbosity": "high",
-            "text": {"verbosity": "high"},
-            "stream_options": {"include_usage": true},
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "lookup",
-                    "description": "Lookup a value",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string"}
+        let captured = capture_single_chat_request(
+            "opaque/tool-model",
+            true,
+            json!({
+                "model": "opaque/tool-model",
+                "messages": [{"role": "user", "content": "use the tool"}],
+                "max_output_tokens": 4096,
+                "reasoning_effort": "xhigh",
+                "service_tier": "auto",
+                "safety_identifier": "safe-user",
+                "prompt_cache_key": "cache-key",
+                "prompt_cache_retention": "24h",
+                "client_metadata": {"client": "codex"},
+                "store": true,
+                "metadata": {"trace": "abc"},
+                "user": "downstream-user",
+                "verbosity": "high",
+                "text": {"verbosity": "high"},
+                "stream_options": {"include_usage": true},
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "description": "Lookup a value",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}}
                         }
                     }
-                }
-            }],
-            "tool_choice": "auto",
-            "stream": false
-        });
-
-        let captured = capture_single_chat_request("ZhipuAI/GLM-5.1", true, request_body).await;
+                }],
+                "tool_choice": "auto",
+                "stream": false
+            }),
+        )
+        .await;
 
         for key in [
-            "reasoning_effort",
             "service_tier",
             "safety_identifier",
             "prompt_cache_key",
@@ -313,25 +293,20 @@ async fn strict_chat_compatibility_strips_codex_fields_but_preserves_tools_for_g
             "client_metadata",
             "store",
             "metadata",
-            "usage",
-            "input_tokens",
-            "output_tokens",
-            "prompt_tokens",
-            "completion_tokens",
             "user",
             "verbosity",
             "text",
             "max_output_tokens",
-            "max_completion_tokens",
         ] {
             assert!(
                 captured.get(key).is_none(),
-                "{key} should not be sent to a strict GLM ChatCompletions upstream: {captured}"
+                "{key} should be removed: {captured}"
             );
         }
 
         assert_eq!(captured["max_tokens"].as_u64(), Some(4096));
-        assert_eq!(captured["stream_options"]["include_usage"], true);
+        assert_eq!(captured["reasoning_effort"], "high");
+        assert!(captured.get("stream_options").is_none());
         assert_eq!(captured["tool_choice"], "auto");
         assert_eq!(captured["tools"][0]["type"], "function");
         assert_eq!(
@@ -343,202 +318,13 @@ async fn strict_chat_compatibility_strips_codex_fields_but_preserves_tools_for_g
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn strict_chat_compatibility_uses_max_completion_tokens_for_minimax() {
+async fn non_strict_chat_compatibility_keeps_metadata_and_user() {
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
-            "MiniMax/MiniMax-M2.7",
-            true,
-            json!({
-                "model": "MiniMax/MiniMax-M2.7",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_output_tokens": 8192,
-                "reasoning_effort": "high",
-                "stream": false
-            }),
-        )
-        .await;
-
-        assert_eq!(captured["max_completion_tokens"].as_u64(), Some(8192));
-        assert!(captured.get("max_output_tokens").is_none());
-        assert!(captured.get("max_tokens").is_none());
-        assert!(captured.get("reasoning_effort").is_none());
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn strict_chat_compatibility_caps_deepseek_v4_reasoning_effort_at_high() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "deepseek-ai/DeepSeek-V4-Pro",
-            true,
-            json!({
-                "model": "deepseek-ai/DeepSeek-V4-Pro",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_output_tokens": 2048,
-                "reasoning_effort": "xhigh",
-                "stream": false
-            }),
-        )
-        .await;
-
-        assert_eq!(captured["max_tokens"].as_u64(), Some(2048));
-        assert!(captured.get("max_output_tokens").is_none());
-        assert!(captured.get("max_completion_tokens").is_none());
-        assert_eq!(captured["reasoning_effort"], "high");
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn strict_chat_compatibility_preserves_supported_deepseek_v4_reasoning_effort() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "deepseek-v4-flash",
-            true,
-            json!({
-                "model": "deepseek-v4-flash",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_output_tokens": 1024,
-                "reasoning_effort": "medium",
-                "stream": false
-            }),
-        )
-        .await;
-
-        assert_eq!(captured["max_tokens"].as_u64(), Some(1024));
-        assert!(captured.get("max_output_tokens").is_none());
-        assert!(captured.get("max_completion_tokens").is_none());
-        assert_eq!(captured["reasoning_effort"], "medium");
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn strict_chat_compatibility_uses_max_completion_tokens_for_qwen() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "Qwen/Qwen3-235B-A22B",
-            true,
-            json!({
-                "model": "Qwen/Qwen3-235B-A22B",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_output_tokens": 3072,
-                "reasoning_effort": "high",
-                "stream": false,
-                "stream_options": {"include_usage": true}
-            }),
-        )
-        .await;
-
-        assert_eq!(captured["max_completion_tokens"].as_u64(), Some(3072));
-        assert!(captured.get("max_output_tokens").is_none());
-        assert!(captured.get("max_tokens").is_none());
-        assert!(captured.get("reasoning_effort").is_none());
-        assert_eq!(captured["stream_options"]["include_usage"], true);
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn known_chat_model_compatibility_applies_without_strict_flag_for_glm() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "GLM-5.1",
+            "opaque/non-strict-model",
             false,
             json!({
-                "model": "GLM-5.1",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_output_tokens": 1024,
-                "reasoning_effort": "high",
-                "stream": false
-            }),
-        )
-        .await;
-
-        assert_eq!(captured["max_tokens"].as_u64(), Some(1024));
-        assert!(captured.get("max_output_tokens").is_none());
-        assert!(captured.get("max_completion_tokens").is_none());
-        assert!(captured.get("reasoning_effort").is_none());
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn glm_5_2_chat_compatibility_downgrades_xhigh_reasoning_for_third_party_proxy() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "GLM-5.2",
-            false,
-            json!({
-                "model": "GLM-5.2",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_output_tokens": 1024,
-                "reasoning_effort": "xhigh",
-                "stream": false
-            }),
-        )
-        .await;
-
-        assert_eq!(captured["max_tokens"].as_u64(), Some(1024));
-        assert!(captured.get("max_output_tokens").is_none());
-        assert_eq!(captured["reasoning_effort"], "high");
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn known_proxy_model_compatibility_applies_without_strict_flag_for_claude_label() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "claude-sonnet-4-5-20250929",
-            false,
-            json!({
-                "model": "claude-sonnet-4-5-20250929",
-                "messages": [{"role": "user", "content": "use a tool"}],
-                "max_output_tokens": 2048,
-                "reasoning_effort": "high",
-                "verbosity": "high",
-                "stream": false,
-                "tools": [{
-                    "type": "function",
-                    "function": {
-                        "name": "inspect",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string"}
-                            }
-                        }
-                    }
-                }],
-                "tool_choice": "auto"
-            }),
-        )
-        .await;
-
-        assert_eq!(captured["max_tokens"].as_u64(), Some(2048));
-        assert!(captured.get("max_output_tokens").is_none());
-        assert!(captured.get("reasoning_effort").is_none());
-        assert!(captured.get("verbosity").is_none());
-        assert_eq!(captured["tool_choice"], "auto");
-        assert_eq!(captured["tools"][0]["function"]["name"], "inspect");
-        assert_eq!(
-            captured["tools"][0]["function"]["parameters"]["required"],
-            json!([])
-        );
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn third_party_chat_proxy_compatibility_applies_to_generic_gpt_alias() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "gpt-5.1-ca",
-            false,
-            json!({
-                "model": "gpt-5.1-ca",
+                "model": "opaque/non-strict-model",
                 "messages": [{"role": "user", "content": "hi"}],
                 "max_output_tokens": 1536,
                 "reasoning_effort": "high",
@@ -552,47 +338,12 @@ async fn third_party_chat_proxy_compatibility_applies_to_generic_gpt_alias() {
         .await;
 
         assert_eq!(captured["max_tokens"].as_u64(), Some(1536));
-        for key in [
-            "max_output_tokens",
-            "reasoning_effort",
-            "service_tier",
-            "verbosity",
-        ] {
-            assert!(
-                captured.get(key).is_none(),
-                "{key} should be removed for a third-party ChatCompletions proxy: {captured}"
-            );
-        }
+        assert!(captured.get("max_output_tokens").is_none());
+        assert_eq!(captured["reasoning_effort"], "high");
+        assert!(captured.get("service_tier").is_none());
+        assert!(captured.get("verbosity").is_none());
         assert_eq!(captured["metadata"], json!({"trace": "abc"}));
         assert_eq!(captured["user"], "audit-user");
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn strict_third_party_chat_proxy_strips_metadata_and_user() {
-    with_proxy_env_cleared(|| async move {
-        let captured = capture_single_chat_request(
-            "gpt-5.1-ca",
-            true,
-            json!({
-                "model": "gpt-5.1-ca",
-                "messages": [{"role": "user", "content": "hi"}],
-                "metadata": {"trace": "abc"},
-                "user": "audit-user",
-                "stream": false
-            }),
-        )
-        .await;
-
-        assert!(
-            captured.get("metadata").is_none(),
-            "metadata should be removed only when strict cleanup is enabled: {captured}"
-        );
-        assert!(
-            captured.get("user").is_none(),
-            "user should be removed only when strict cleanup is enabled: {captured}"
-        );
     })
     .await;
 }
@@ -601,10 +352,10 @@ async fn strict_third_party_chat_proxy_strips_metadata_and_user() {
 async fn chat_compatibility_preserves_explicit_max_tokens_over_max_output_tokens() {
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
-            "GLM-5.1",
+            "opaque/max-tokens-model",
             false,
             json!({
-                "model": "GLM-5.1",
+                "model": "opaque/max-tokens-model",
                 "messages": [{"role": "user", "content": "hi"}],
                 "max_tokens": 1000,
                 "max_output_tokens": 4096,
@@ -624,10 +375,10 @@ async fn chat_compatibility_preserves_explicit_max_tokens_over_max_output_tokens
 async fn chat_compatibility_preserves_explicit_max_completion_tokens_over_max_output_tokens() {
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(
-            "MiniMax/MiniMax-M2.7",
+            "opaque/max-completion-model",
             false,
             json!({
-                "model": "MiniMax/MiniMax-M2.7",
+                "model": "opaque/max-completion-model",
                 "messages": [{"role": "user", "content": "hi"}],
                 "max_completion_tokens": 1000,
                 "max_output_tokens": 4096,

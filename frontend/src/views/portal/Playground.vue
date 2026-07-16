@@ -40,25 +40,43 @@
         </div>
 
         <div class="sidebar-section">
-          <label class="sidebar-label">温度 {{ temperature.toFixed(1) }}</label>
+          <div class="sidebar-label-row">
+            <label class="sidebar-label">温度 {{ temperature.toFixed(1) }}</label>
+            <el-switch
+              v-model="temperatureEnabled"
+              inline-prompt
+              active-text="自定义"
+              inactive-text="自动"
+              :disabled="isBusy"
+            />
+          </div>
           <el-slider
             v-model="temperature"
             :min="0"
             :max="2"
             :step="0.1"
-            :disabled="isBusy"
+            :disabled="isBusy || !temperatureEnabled"
             :show-tooltip="false"
           />
         </div>
 
         <div class="sidebar-section">
-          <label class="sidebar-label">max_tokens</label>
+          <div class="sidebar-label-row">
+            <label class="sidebar-label">max_tokens</label>
+            <el-switch
+              v-model="maxTokensEnabled"
+              inline-prompt
+              active-text="自定义"
+              inactive-text="自动"
+              :disabled="isBusy"
+            />
+          </div>
           <el-input-number
             v-model="maxTokens"
             :min="1"
             :max="999999"
             :step="1024"
-            :disabled="isBusy"
+            :disabled="isBusy || !maxTokensEnabled"
             controls-position="right"
             style="width: 100%"
             size="default"
@@ -66,8 +84,21 @@
         </div>
 
         <div class="sidebar-section">
-          <label class="sidebar-label">推理强度</label>
-          <el-select v-model="inferenceStrength" style="width: 100%">
+          <div class="sidebar-label-row">
+            <label class="sidebar-label">推理强度</label>
+            <el-switch
+              v-model="inferenceStrengthEnabled"
+              inline-prompt
+              active-text="自定义"
+              inactive-text="自动"
+              :disabled="isBusy"
+            />
+          </div>
+          <el-select
+            v-model="inferenceStrength"
+            style="width: 100%"
+            :disabled="isBusy || !inferenceStrengthEnabled"
+          >
             <el-option
               v-for="level in inferenceStrengthOptions"
               :key="level"
@@ -212,12 +243,13 @@ import { extractReadableErrorMessage } from '@/utils/errorDisplay'
 import {
   buildPlaygroundAssistantResult,
   buildPlaygroundChatPayload,
+  classifyPlaygroundAttachment,
   extractChatCompletionText,
   extractChatCompletionUsage,
   formatPlaygroundStreamStatus,
   inferenceStrengthOptions,
-  parseGatewayModels,
   parseSSELine,
+  selectPlayableModels,
   type PlaygroundMessage,
   type PlaygroundStreamPhase,
   type UploadedFileContext
@@ -256,6 +288,9 @@ const selectedModel = ref('')
 const temperature = ref(0.7)
 const maxTokens = ref(16384)
 const inferenceStrength = ref<(typeof inferenceStrengthOptions)[number]>('high')
+const temperatureEnabled = ref(false)
+const maxTokensEnabled = ref(false)
+const inferenceStrengthEnabled = ref(false)
 const modelOptions = ref<string[]>([])
 const downstreamKey = ref('')
 const statusMessage = ref('')
@@ -356,16 +391,16 @@ const safeGetText = async (response: Response) => {
 }
 
 const loadModels = async () => {
-  const modelAllowlist = await fetchPortalModelAllowlist()
-  if (modelAllowlist.length > 0) {
-    modelOptions.value = modelAllowlist
-    setStatus('模型列表已加载', 'success')
-    return
-  }
-  await loadGatewayModels()
+  const allowlist = await fetchPortalModelAllowlist()
+  const response = await fetch(buildGatewayModelsEndpoint(gatewayBaseUrl.value), {
+    headers: { Authorization: `Bearer ${downstreamKey.value}` }
+  })
+  if (!response.ok) throw new Error(await safeGetText(response))
+  modelOptions.value = selectPlayableModels(allowlist, await response.json())
   if (modelOptions.value.length === 0) {
-    await fallbackToPortalModelStats()
+    throw new Error('当前下游没有可路由模型')
   }
+  setStatus('实时模型列表已加载', 'success')
 }
 
 const fetchPortalModelAllowlist = async (): Promise<string[]> => {
@@ -376,41 +411,6 @@ const fetchPortalModelAllowlist = async (): Promise<string[]> => {
   } catch {
     return []
   }
-}
-
-const loadGatewayModels = async () => {
-  try {
-    const response = await fetch(buildGatewayModelsEndpoint(gatewayBaseUrl.value), {
-      headers: { Authorization: `Bearer ${downstreamKey.value}` }
-    })
-    if (response.ok) {
-      const payload = await response.json()
-      const models = parseGatewayModels(payload)
-      if (models.length > 0) {
-        modelOptions.value = models
-        setStatus('模型列表已加载', 'success')
-        return
-      }
-    }
-  } catch {
-    // fall through
-  }
-}
-
-const fallbackToPortalModelStats = async () => {
-  try {
-    const { data } = await portalApi.getModels()
-    const fallback = [...new Set((data ?? []).map(item => item.model.trim()).filter(Boolean))]
-    if (fallback.length) {
-      modelOptions.value = fallback
-      setStatus('使用统计模型兜底', 'warning')
-      return
-    }
-  } catch {
-    // fall through
-  }
-  setStatus('无法读取模型，请配置上游', 'error')
-  modelOptions.value = []
 }
 
 const setStatus = (message: string, type: 'success' | 'info' | 'warning' | 'error' = 'info') => {
@@ -502,6 +502,18 @@ const onFileInputChange = async (event: Event) => {
           errorMessage: `文件超出限制，最大支持 ${formatFileSize(MAX_FILE_SIZE_BYTES)}。`
         }
       }
+      const classification = classifyPlaygroundAttachment(file.name, file.type)
+      if (!classification.accepted) {
+        return {
+          uid: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          content: '',
+          isError: true,
+          errorMessage: classification.message
+        }
+      }
       try {
         const text = trimUploadedContent(await file.text())
         return {
@@ -569,9 +581,9 @@ const sendQuestion = async () => {
       model: selectedModel.value,
       question: requestPrompt,
       history,
-      temperature: temperature.value,
-      maxTokens: maxTokens.value,
-      inferenceStrength: inferenceStrength.value,
+      temperature: temperatureEnabled.value ? temperature.value : undefined,
+      maxTokens: maxTokensEnabled.value ? maxTokens.value : undefined,
+      inferenceStrength: inferenceStrengthEnabled.value ? inferenceStrength.value : undefined,
       uploadedFiles: uploadedPayload,
       stream: true
     })
@@ -671,6 +683,9 @@ const sendQuestion = async () => {
     }
 
     const finalReasoning = streamingReasoning.value
+    if (!finalContent.trim() && !finalReasoning.trim()) {
+      throw new Error('模型返回空响应，请更换模型或检查上游兼容性')
+    }
     const assistantResult = buildPlaygroundAssistantResult({
       model: selectedModel.value,
       content: finalContent,
@@ -738,7 +753,16 @@ const loadInitialData = async () => {
   }
 
   downstreamKey.value = portalDownstreamKey
-  await loadModels()
+  try {
+    await loadModels()
+  } catch (error) {
+    selectedModel.value = ''
+    modelOptions.value = []
+    const message = error instanceof Error ? error.message : '读取实时模型列表失败'
+    setStatus(message, 'error')
+    isLoading.value = false
+    return
+  }
 
   if (modelOptions.value.length > 0) {
     selectedModel.value = modelOptions.value[0]
@@ -833,6 +857,13 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: #909399;
   font-weight: 500;
+}
+
+.sidebar-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .sidebar-actions {

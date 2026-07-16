@@ -7,6 +7,10 @@ use super::{
     ModelContextConfig, ModelRequestCostConfig, PersistedState, ResponseHistoryEntry,
     UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
+use crate::capabilities::{
+    CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
+    WireProtocol,
+};
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use serde_json::{Map, Value};
@@ -274,7 +278,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
                  endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
-                 status_code, error_message, error_category, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at \
+                 status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at \
                  FROM usage_logs WHERE created_at >= $1 ORDER BY created_at, request_id, id",
                 &[&runtime_usage_start],
             )
@@ -301,6 +305,111 @@ impl PostgresStateStore {
         sync_config_tables(&tx, state).await?;
         insert_usage_logs(&tx, &state.usage_logs).await?;
         tx.commit().await.map_err(io_other)
+    }
+
+    pub async fn load_capability_state(&self) -> io::Result<CapabilityStateDocument> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let mut document = CapabilityStateDocument::default();
+
+        if let Some(row) = conn
+            .query_opt(
+                "SELECT document
+                 FROM capability_configuration
+                 WHERE singleton_id = 'default'",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+        {
+            let config_json: String = row.get(0);
+            document.configuration = serde_json::from_str(&config_json)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        }
+
+        for row in conn
+            .query(
+                "SELECT upstream_id, runtime_model_slug, protocol, profile
+                 FROM dialect_profiles
+                 ORDER BY upstream_id, runtime_model_slug, protocol",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+        {
+            let upstream_id: String = row.get(0);
+            let runtime_model_slug: String = row.get(1);
+            let protocol = decode_wire_protocol_key(&row.get::<_, String>(2))?;
+            let profile_json: String = row.get(3);
+            let mut profile: UpstreamDialectProfile = serde_json::from_str(&profile_json)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let key = DialectProfileKey {
+                upstream_id,
+                runtime_model_slug,
+                protocol,
+            };
+            profile.key = key.clone();
+            document.profiles.insert(key, profile);
+        }
+
+        Ok(document)
+    }
+
+    pub async fn persist_capability_configuration(
+        &self,
+        config: &CapabilityConfiguration,
+    ) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let config_json = serde_json::to_string(config).map_err(io_other)?;
+        let updated_at = u64_to_i64(unix_seconds());
+        conn.execute(
+            "INSERT INTO capability_configuration (singleton_id, document, updated_at)
+             VALUES ('default', $1, $2)
+             ON CONFLICT (singleton_id) DO UPDATE SET
+                 document = EXCLUDED.document,
+                 updated_at = EXCLUDED.updated_at",
+            &[&config_json, &updated_at],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
+    }
+
+    pub async fn upsert_dialect_profile(&self, profile: &UpstreamDialectProfile) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let protocol = encode_wire_protocol_key(profile.key.protocol)?;
+        let profile_json = serde_json::to_string(profile).map_err(io_other)?;
+        let updated_at = u64_to_i64(unix_seconds());
+        conn.execute(
+            "INSERT INTO dialect_profiles (
+                upstream_id, runtime_model_slug, protocol, profile, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5
+            )
+            ON CONFLICT (upstream_id, runtime_model_slug, protocol) DO UPDATE SET
+                profile = EXCLUDED.profile,
+                updated_at = EXCLUDED.updated_at",
+            &[
+                &profile.key.upstream_id,
+                &profile.key.runtime_model_slug,
+                &protocol,
+                &profile_json,
+                &updated_at,
+            ],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
+    }
+
+    pub async fn delete_dialect_profiles_for_upstream(&self, upstream_id: &str) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        conn.execute(
+            "DELETE FROM dialect_profiles WHERE upstream_id = $1",
+            &[&upstream_id],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
     }
 
     pub async fn append_usage_logs(&self, logs: &[UsageLog]) -> io::Result<()> {
@@ -372,7 +481,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, error_message, error_category, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
+                        status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at <= $2
@@ -531,7 +640,12 @@ impl PostgresStateStore {
                  items = EXCLUDED.items,
                  state = EXCLUDED.state,
                  created_at = EXCLUDED.created_at",
-            &[&response_id, &items_json, &request_state_json, &created_at_db],
+            &[
+                &response_id,
+                &items_json,
+                &request_state_json,
+                &created_at_db,
+            ],
         )
         .await
         .map_err(io_other)?;
@@ -586,8 +700,8 @@ impl PostgresStateStore {
         let request_state_json: String = row.get(1);
         let created_at_db: i64 = row.get(2);
         let items = serde_json::from_str::<Vec<Value>>(&items_json).map_err(io_other)?;
-        let request_state = serde_json::from_str::<Map<String, Value>>(&request_state_json)
-            .map_err(io_other)?;
+        let request_state =
+            serde_json::from_str::<Map<String, Value>>(&request_state_json).map_err(io_other)?;
         Ok(Some(ResponseHistoryEntry {
             items,
             request_state,
@@ -980,6 +1094,10 @@ async fn sync_announcements(
 async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Result<()> {
     for log in logs {
         let request_count = log.request_count.map(|value| value as i64);
+        let compatibility = log
+            .compatibility
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok());
         let prompt_tokens = log.prompt_tokens as i64;
         let completion_tokens = log.completion_tokens as i64;
         let total_tokens = log.total_tokens as i64;
@@ -1002,6 +1120,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
             &status_code,
             &log.error_message,
             &log.error_category,
+            &compatibility,
             &prompt_tokens,
             &completion_tokens,
             &total_tokens,
@@ -1014,12 +1133,13 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
                 id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                 endpoint, model, inference_strength, billing_mode, request_count,
                 user_agent, request_id, status_code, error_message, error_category,
-                prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
+                compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20
+                $16, $17, $18, $19, $20,
+                $21
             ) ON CONFLICT (id) DO NOTHING",
             params,
         )
@@ -1088,11 +1208,14 @@ fn usage_log_from_row(row: &Row) -> UsageLog {
         status_code: row.get::<_, i32>(12).clamp(0, u16::MAX as i32) as u16,
         error_message: row.get::<_, Option<String>>(13),
         error_category: row.get::<_, Option<String>>(14),
-        prompt_tokens: i64_to_u64(row.get::<_, i64>(15)),
-        completion_tokens: i64_to_u64(row.get::<_, i64>(16)),
-        total_tokens: i64_to_u64(row.get::<_, i64>(17)),
-        latency_ms: i64_to_u64(row.get::<_, i64>(18)),
-        created_at: i64_to_u64(row.get::<_, i64>(19)),
+        compatibility: row
+            .get::<_, Option<String>>(15)
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        prompt_tokens: i64_to_u64(row.get::<_, i64>(16)),
+        completion_tokens: i64_to_u64(row.get::<_, i64>(17)),
+        total_tokens: i64_to_u64(row.get::<_, i64>(18)),
+        latency_ms: i64_to_u64(row.get::<_, i64>(19)),
+        created_at: i64_to_u64(row.get::<_, i64>(20)),
     }
 }
 
@@ -1115,6 +1238,21 @@ fn i64_to_usize(value: i64) -> usize {
 
 fn decode_protocol(value: String) -> io::Result<UpstreamProtocol> {
     serde_json::from_value(serde_json::Value::String(value))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn encode_wire_protocol_key(protocol: WireProtocol) -> io::Result<String> {
+    match serde_json::to_value(protocol).map_err(io_other)? {
+        Value::String(value) => Ok(value),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wire protocol did not serialize to a string",
+        )),
+    }
+}
+
+fn decode_wire_protocol_key(value: &str) -> io::Result<WireProtocol> {
+    serde_json::from_value(Value::String(value.to_string()))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
@@ -1181,7 +1319,7 @@ fn io_other<E>(error: E) -> io::Error
 where
     E: std::error::Error + Send + Sync + 'static,
 {
-    io::Error::new(io::ErrorKind::Other, error)
+    io::Error::other(error)
 }
 
 const SCHEMA_SQL: &str = r#"
@@ -1331,6 +1469,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     status_code INTEGER NOT NULL,
     error_message TEXT NULL,
     error_category TEXT NULL,
+    compatibility TEXT NULL,
     prompt_tokens BIGINT NOT NULL,
     completion_tokens BIGINT NOT NULL,
     total_tokens BIGINT NOT NULL,
@@ -1354,6 +1493,23 @@ ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_message TEXT NULL;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_category TEXT NULL;
+ALTER TABLE usage_logs
+    ADD COLUMN IF NOT EXISTS compatibility TEXT NULL;
+
+CREATE TABLE IF NOT EXISTS capability_configuration (
+    singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),
+    document TEXT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dialect_profiles (
+    upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
+    runtime_model_slug TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    PRIMARY KEY (upstream_id, runtime_model_slug, protocol)
+);
 
 CREATE TABLE IF NOT EXISTS response_history (
     response_id TEXT PRIMARY KEY,
@@ -1367,6 +1523,8 @@ ALTER TABLE response_history
 
 CREATE INDEX IF NOT EXISTS response_history_created_at_idx
     ON response_history (created_at DESC, response_id);
+CREATE INDEX IF NOT EXISTS dialect_profiles_upstream_idx
+    ON dialect_profiles (upstream_id);
 
 CREATE INDEX IF NOT EXISTS usage_logs_created_at_idx
     ON usage_logs (created_at DESC, id);

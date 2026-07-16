@@ -1,6 +1,11 @@
+use chat_responses_codex::protocol::tool_adapter::{ToolAdapterRegistry, ToolIdentity, ToolTarget};
 use chat_responses_codex::protocol::{
     chat_request_to_responses_payload, chat_response_to_responses_payload,
-    responses_request_to_chat_payload, responses_response_to_chat_payload, StreamTranslator,
+    chat_response_to_responses_payload_with_context,
+    chat_response_to_responses_payload_with_tool_registry, image_adapter,
+    responses_request_to_chat_payload, responses_request_to_chat_payload_with_context,
+    responses_response_to_chat_payload, ChatStreamCanonicalizer, ConversionContext,
+    StreamAggregateResult, StreamResponseAggregator, StreamTranslator,
 };
 use chat_responses_codex::routing::UpstreamProtocol;
 use serde_json::json;
@@ -41,6 +46,60 @@ fn responses_request_converts_to_chat_payload() {
     assert_eq!(converted["messages"][0]["content"], "You are terse.");
     assert_eq!(converted["messages"][1]["role"], "user");
     assert_eq!(converted["messages"][1]["content"], "Hello");
+}
+
+#[test]
+fn responses_chat_round_trip_preserves_url_detail_and_mixed_order() {
+    let responses = json!({
+        "model":"opaque",
+        "input":[{
+            "role":"user",
+            "content":[
+                {"type":"input_text","text":"before"},
+                {"type":"input_image","image_url":"https://images.example/red.png","detail":"high"},
+                {"type":"input_text","text":"after"}
+            ]
+        }]
+    });
+
+    let chat = responses_request_to_chat_payload(&responses).unwrap();
+    assert_eq!(
+        chat["messages"][0]["content"][1]["image_url"]["url"],
+        "https://images.example/red.png"
+    );
+    assert_eq!(
+        chat["messages"][0]["content"][1]["image_url"]["detail"],
+        "high"
+    );
+
+    let round_trip = chat_request_to_responses_payload(&chat).unwrap();
+    assert_eq!(
+        round_trip["input"][0]["content"],
+        responses["input"][0]["content"]
+    );
+}
+
+#[test]
+fn messages_base64_image_maps_to_mime_qualified_data_url_without_decode() {
+    let block = json!({"type":"image","source":{
+        "type":"base64","media_type":"image/png","data":"AAEC"}});
+    let chat =
+        image_adapter::messages_image_to_chat_part(&block, image_adapter::ImageDialect::all())
+            .unwrap();
+    assert_eq!(chat.value["image_url"]["url"], "data:image/png;base64,AAEC");
+}
+
+#[test]
+fn messages_url_image_maps_to_chat_url_without_fetch() {
+    let block = json!({"type":"image","source":{
+        "type":"url","url":"https://images.example/shape.png"}});
+    let chat =
+        image_adapter::messages_image_to_chat_part(&block, image_adapter::ImageDialect::all())
+            .unwrap();
+    assert_eq!(
+        chat.value["image_url"]["url"],
+        "https://images.example/shape.png"
+    );
 }
 
 #[test]
@@ -155,9 +214,149 @@ fn responses_request_rejects_unknown_input_items_for_chat_payload() {
     });
 
     let error = responses_request_to_chat_payload(&responses).expect_err("conversion should fail");
-    assert!(error
-        .to_string()
-        .contains("unsupported responses input item"));
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported") || message.contains("missing field"),
+        "unexpected error message: {message}"
+    );
+}
+
+#[test]
+fn chat_response_replays_namespace_function_calls_with_registry() {
+    let tools = json!([
+        {
+            "type": "namespace",
+            "name": "mcp__docs",
+            "description": "Developer docs",
+            "tools": [{
+                "type": "function",
+                "name": "search",
+                "parameters": {"type": "object"}
+            }]
+        }
+    ]);
+    let adaptation = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
+    let upstream_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::namespace("mcp__docs", "search"))
+        .unwrap()
+        .to_string();
+    let chat = json!({
+        "id": "chatcmpl-tool",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "gpt-4.1-mini",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": upstream_name,
+                        "arguments": "{\"q\":\"x\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let responses =
+        chat_response_to_responses_payload_with_tool_registry(&chat, Some(&adaptation.registry))
+            .expect("conversion should work");
+
+    assert_eq!(responses["output"][0]["type"], "function_call");
+    assert_eq!(responses["output"][0]["call_id"], "call_1");
+    assert_eq!(responses["output"][0]["name"], "search");
+    assert_eq!(responses["output"][0]["namespace"], "mcp__docs");
+    assert_eq!(responses["output"][0]["arguments"], "{\"q\":\"x\"}");
+}
+
+#[test]
+fn chat_stream_replays_namespace_identity_in_every_terminal_responses_item() {
+    let tools = json!([{
+        "type": "namespace",
+        "name": "mcp__docs",
+        "description": "Developer docs",
+        "tools": [{
+            "type": "function",
+            "name": "search",
+            "parameters": {"type": "object"}
+        }]
+    }]);
+    let adaptation = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
+    let upstream_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::namespace("mcp__docs", "search"))
+        .unwrap()
+        .to_string();
+    let mut translator = StreamTranslator::new_with_tool_registry(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+        Some(adaptation.registry),
+    )
+    .expect("translator should exist");
+
+    let first = json!({
+        "id": "chatcmpl-namespace",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": upstream_name, "arguments": "{\"q\":"}
+            }]},
+            "finish_reason": null
+        }]
+    });
+    let second = json!({
+        "id": "chatcmpl-namespace",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "\"x\"}"}
+            }]},
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let mut events = translator.translate_event(&first).unwrap();
+    events.extend(translator.translate_event(&second).unwrap());
+    events.extend(translator.finish().unwrap());
+
+    let added = events
+        .iter()
+        .find(|event| event["type"] == "response.output_item.added")
+        .expect("function call added event");
+    let arguments_done = events
+        .iter()
+        .find(|event| event["type"] == "response.function_call_arguments.done")
+        .expect("function arguments done event");
+    let item_done = events
+        .iter()
+        .find(|event| event["type"] == "response.output_item.done")
+        .expect("function call item done event");
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed event");
+
+    assert_eq!(added["item"]["name"], "search");
+    assert_eq!(added["item"]["namespace"], "mcp__docs");
+    assert_eq!(arguments_done["name"], "search");
+    assert_eq!(item_done["item"]["name"], "search");
+    assert_eq!(item_done["item"]["namespace"], "mcp__docs");
+    assert_eq!(completed["response"]["output"][0]["name"], "search");
+    assert_eq!(completed["response"]["output"][0]["namespace"], "mcp__docs");
 }
 
 #[test]
@@ -601,7 +800,10 @@ fn chat_response_converts_tool_calls_to_responses_output() {
 
     assert_eq!(converted["id"], "chatcmpl-1");
     assert_eq!(converted["object"], "response");
+    assert_eq!(converted["status"], "completed");
     assert_eq!(converted["output"][0]["type"], "function_call");
+    assert!(converted["output"][0]["id"].is_string());
+    assert_eq!(converted["output"][0]["status"], "completed");
     assert_eq!(converted["output"][0]["call_id"], "call_1");
     assert_eq!(converted["output"][0]["name"], "get_weather");
     assert_eq!(converted["output"][0]["arguments"], "{\"city\":\"Paris\"}");
@@ -613,6 +815,38 @@ fn chat_response_converts_tool_calls_to_responses_output() {
     assert_eq!(
         converted["usage"]["input_tokens_details"]["cached_tokens"],
         1
+    );
+    assert_eq!(
+        converted["usage"]["output_tokens_details"]["reasoning_tokens"],
+        0
+    );
+}
+
+#[test]
+fn chat_response_defaults_required_responses_usage_details() {
+    let chat_response = json!({
+        "id": "chatcmpl-usage-defaults",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "opaque-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Complete"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 4,
+            "completion_tokens": 2,
+            "total_tokens": 6
+        }
+    });
+
+    let converted =
+        chat_response_to_responses_payload(&chat_response).expect("conversion should work");
+
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cached_tokens"],
+        0
     );
     assert_eq!(
         converted["usage"]["output_tokens_details"]["reasoning_tokens"],
@@ -838,6 +1072,560 @@ fn responses_stream_translator_ignores_reasoning_items_with_completed_usage() {
 }
 
 #[test]
+fn chat_reasoning_content_becomes_responses_reasoning_before_function_call() {
+    let chat = json!({
+        "id":"chatcmpl-reasoning","model":"opaque","choices":[{"index":0,
+        "message":{"role":"assistant","content":null,"reasoning_content":"exact-thought",
+        "tool_calls":[{"id":"call_7","type":"function","function":{
+            "name":"lookup","arguments":"{\"key\":\"value\"}"}}]},
+        "finish_reason":"tool_calls"}]
+    });
+    let response = chat_response_to_responses_payload_with_context(
+        &chat,
+        &ConversionContext::reasoning_content(),
+    )
+    .unwrap();
+    assert_eq!(response["output"][0]["type"], "reasoning");
+    assert_eq!(
+        response["output"][0]["content"][0]["type"],
+        "reasoning_text"
+    );
+    assert_eq!(response["output"][0]["content"][0]["text"], "exact-thought");
+    assert_eq!(response["output"][1]["type"], "function_call");
+}
+
+#[test]
+fn responses_reasoning_and_call_replay_merge_into_one_chat_assistant_message() {
+    let responses = json!({"model":"opaque","input":[
+        {"type":"reasoning","id":"rs_7","content":[{"type":"reasoning_text","text":"exact-thought"}]},
+        {"type":"function_call","call_id":"call_7","name":"lookup","arguments":"{\"key\":\"value\"}"},
+        {"type":"function_call_output","call_id":"call_7","output":"result"}
+    ]});
+    let chat = responses_request_to_chat_payload_with_context(
+        &responses,
+        &ConversionContext::reasoning_content(),
+    )
+    .unwrap();
+    assert_eq!(chat["messages"][0]["reasoning_content"], "exact-thought");
+    assert_eq!(chat["messages"][0]["tool_calls"][0]["id"], "call_7");
+    assert_eq!(chat["messages"][1]["tool_call_id"], "call_7");
+}
+
+#[test]
+fn chat_stream_include_usage_tail_completes_with_usage() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let content = json!({
+        "id": "chatcmpl-usage-tail",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "OK"},
+            "finish_reason": null
+        }],
+        "usage": null
+    });
+    translator.translate_event(&content).unwrap();
+
+    let finish_reason = json!({
+        "id": "chatcmpl-usage-tail",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop"
+        }],
+        "usage": null
+    });
+    let finish_reason_events = translator.translate_event(&finish_reason).unwrap();
+    assert!(
+        !finish_reason_events.iter().any(|event| {
+            matches!(
+                event["type"].as_str(),
+                Some("response.completed" | "response.incomplete")
+            )
+        }),
+        "finish_reason must not precede a possible include_usage tail chunk"
+    );
+
+    let usage_tail = json!({
+        "id": "chatcmpl-usage-tail",
+        "created": 1,
+        "model": "opaque",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12
+        }
+    });
+    let tail_events = translator.translate_event(&usage_tail).unwrap();
+    let completed = tail_events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("usage tail should emit response.completed");
+    assert_eq!(completed["response"]["usage"]["input_tokens"], 10);
+    assert_eq!(completed["response"]["usage"]["output_tokens"], 2);
+    assert_eq!(completed["response"]["usage"]["total_tokens"], 12);
+}
+
+#[test]
+fn chat_stream_ignores_events_after_terminal_output() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let content = json!({
+        "id": "chatcmpl-terminal",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "first"},
+            "finish_reason": null
+        }]
+    });
+    translator.translate_event(&content).unwrap();
+    let terminal = translator.finish().unwrap();
+    assert!(terminal
+        .iter()
+        .any(|event| event["type"] == "response.completed"));
+
+    let duplicate = json!({
+        "id": "chatcmpl-terminal",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "duplicate"},
+            "finish_reason": "stop"
+        }]
+    });
+    assert!(translator.translate_event(&duplicate).unwrap().is_empty());
+    assert!(translator.finish().unwrap().is_empty());
+}
+
+#[test]
+fn chat_stream_canonicalizer_rejects_eof_without_explicit_terminal() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("chatcmpl-stable", "opaque", 1);
+    let events = canonicalizer
+        .push(json!({
+            "choices": [{
+                "delta": {"content": "partial"},
+                "finish_reason": null
+            }]
+        }))
+        .expect("partial event should be accepted");
+    assert_eq!(events[0]["id"], "chatcmpl-stable");
+    assert_eq!(events[0]["model"], "opaque");
+    assert_eq!(events[0]["created"], 1);
+
+    let error = canonicalizer
+        .finish()
+        .expect_err("EOF without an upstream terminal must fail closed");
+    assert!(error.to_string().contains("invalid upstream SSE stream"));
+}
+
+#[test]
+fn chat_stream_canonicalizer_stabilizes_sparse_identity_and_terminal_alias() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("chatcmpl-request", "glm-5.2", 42);
+    let first = canonicalizer
+        .push(json!({
+            "choices": [{"delta": {"content": "hello"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+        }))
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["id"], "chatcmpl-request");
+    assert_eq!(first[0]["object"], "chat.completion.chunk");
+    assert_eq!(first[0]["created"], 42);
+    assert_eq!(first[0]["model"], "glm-5.2");
+    assert_eq!(first[0]["choices"][0]["index"], 0);
+    assert!(first[0].get("usage").is_none());
+
+    let terminal = canonicalizer
+        .push(json!({
+            "choices": [{"delta": {}, "finish_reason": "end_turn"}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}
+        }))
+        .unwrap();
+    assert_eq!(terminal[0]["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        canonicalizer.finish_after_done().unwrap()[0]["usage"]["total_tokens"],
+        4
+    );
+}
+
+#[test]
+fn chat_stream_canonicalizer_rejects_unknown_or_contradictory_terminal() {
+    let mut unknown = ChatStreamCanonicalizer::new("id", "model", 1);
+    assert!(unknown
+        .push(json!({
+            "choices": [{"delta": {"content": "x"}, "finish_reason": "provider_done"}]
+        }))
+        .is_err());
+
+    let mut contradictory = ChatStreamCanonicalizer::new("id", "model", 1);
+    assert!(contradictory
+        .push(json!({
+            "choices": [{"delta": {"content": "x", "tool_calls": [{"index": 0}]}, "finish_reason": "stop"}]
+        }))
+        .is_err());
+}
+
+#[test]
+fn chat_stream_canonicalizer_removes_null_tool_extensions() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("fallback", "fallback", 1);
+    let events = canonicalizer
+        .push(json!({
+            "id": "chatcmpl-provider",
+            "created": 2,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": "OK",
+                    "tool_calls": null,
+                    "function_call": null,
+                    "function_calls": null
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .unwrap();
+    let delta = events[0]["choices"][0]["delta"].as_object().unwrap();
+    assert!(!delta.contains_key("tool_calls"));
+    assert!(!delta.contains_key("function_call"));
+    assert!(!delta.contains_key("function_calls"));
+}
+
+#[test]
+fn chat_stream_closes_reasoning_before_starting_message_item() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let reasoning = json!({
+        "id": "chatcmpl-lifecycle",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"reasoning_content": "plan"},
+            "finish_reason": null
+        }]
+    });
+    let reasoning_events = translator.translate_event(&reasoning).unwrap();
+    assert_eq!(reasoning_events[1]["output_index"], 0);
+
+    let message = json!({
+        "id": "chatcmpl-lifecycle",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "answer"},
+            "finish_reason": null
+        }]
+    });
+    let message_events = translator.translate_event(&message).unwrap();
+    let reasoning_done = message_events
+        .iter()
+        .position(|event| event["type"] == "response.output_item.done")
+        .expect("reasoning item must be closed before the message starts");
+    let message_added = message_events
+        .iter()
+        .position(|event| event["type"] == "response.output_item.added")
+        .expect("message item should be added");
+    assert!(reasoning_done < message_added);
+    assert_eq!(message_events[reasoning_done]["output_index"], 0);
+    assert_eq!(
+        message_events[reasoning_done]["item"]["status"],
+        "completed"
+    );
+    assert_eq!(message_events[message_added]["output_index"], 1);
+    assert!(message_events[message_added + 1]["type"] == "response.output_text.delta");
+    assert_eq!(message_events[message_added + 1]["output_index"], 1);
+}
+
+#[test]
+fn chat_stream_closes_reasoning_before_starting_tool_item() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    let reasoning = json!({
+        "id": "chatcmpl-tool-lifecycle",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"reasoning_content": "plan"},
+            "finish_reason": null
+        }]
+    });
+    translator.translate_event(&reasoning).unwrap();
+
+    let tool = json!({
+        "id": "chatcmpl-tool-lifecycle",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"}
+            }]},
+            "finish_reason": null
+        }]
+    });
+    let tool_events = translator.translate_event(&tool).unwrap();
+    let reasoning_done = tool_events
+        .iter()
+        .position(|event| event["type"] == "response.output_item.done")
+        .expect("reasoning item must be closed before the tool starts");
+    let tool_added = tool_events
+        .iter()
+        .position(|event| event["type"] == "response.output_item.added")
+        .expect("tool item should be added");
+    assert!(reasoning_done < tool_added);
+    assert_eq!(tool_events[reasoning_done]["output_index"], 0);
+    assert_eq!(tool_events[tool_added]["output_index"], 1);
+}
+
+#[test]
+fn chat_stream_length_keeps_closed_reasoning_completed() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+    let chunks = [
+        json!({
+            "id": "chatcmpl-reasoning-length",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "finished plan"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-reasoning-length",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "partial answer"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-reasoning-length",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "length"
+            }]
+        }),
+    ];
+
+    let mut events = chunks
+        .iter()
+        .flat_map(|chunk| translator.translate_event(chunk).unwrap())
+        .collect::<Vec<_>>();
+    events.extend(translator.finish().unwrap());
+
+    let incomplete = events
+        .iter()
+        .find(|event| event["type"] == "response.incomplete")
+        .expect("length should emit response.incomplete at stream termination");
+    assert_eq!(incomplete["response"]["output"][0]["type"], "reasoning");
+    assert_eq!(incomplete["response"]["output"][0]["status"], "completed");
+    assert_eq!(incomplete["response"]["output"][1]["type"], "message");
+    assert_eq!(incomplete["response"]["output"][1]["status"], "incomplete");
+}
+
+#[test]
+fn chat_stream_translator_assigns_unique_output_indexes_across_reasoning_text_and_tools() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+    let chunks = [
+        json!({
+            "id": "chatcmpl-mixed",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "plan"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-mixed",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "answer"},
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-mixed",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{\"key\":\"value\"}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl-mixed",
+            "created": 1,
+            "model": "opaque",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        }),
+    ];
+
+    let mut events = chunks
+        .iter()
+        .flat_map(|chunk| translator.translate_event(chunk).unwrap())
+        .collect::<Vec<_>>();
+    events.extend(translator.finish().unwrap());
+    let added = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.added")
+        .map(|event| {
+            (
+                event["output_index"].as_u64().unwrap(),
+                event["item"]["type"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        added,
+        vec![
+            (0, "reasoning".into()),
+            (1, "message".into()),
+            (2, "function_call".into()),
+        ]
+    );
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(completed["response"]["output"][0]["type"], "reasoning");
+    assert_eq!(completed["response"]["output"][1]["type"], "message");
+    assert_eq!(completed["response"]["output"][2]["type"], "function_call");
+}
+
+#[test]
+fn chat_response_length_becomes_incomplete_responses_payload() {
+    let chat = json!({
+        "id": "chatcmpl-length",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "partial"},
+            "finish_reason": "length"
+        }]
+    });
+
+    let response = chat_response_to_responses_payload(&chat).unwrap();
+
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(
+        response["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    assert_eq!(response["output"][0]["status"], "incomplete");
+}
+
+#[test]
+fn chat_stream_length_emits_response_incomplete() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+    let chunk = json!({
+        "id": "chatcmpl-length",
+        "created": 1,
+        "model": "opaque",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "partial"},
+            "finish_reason": "length"
+        }]
+    });
+
+    let finish_reason_events = translator.translate_event(&chunk).unwrap();
+
+    assert!(!finish_reason_events.iter().any(|event| matches!(
+        event["type"].as_str(),
+        Some("response.completed" | "response.incomplete")
+    )));
+    let events = translator.finish().unwrap();
+    assert!(!events
+        .iter()
+        .any(|event| event["type"] == "response.completed"));
+    let incomplete = events
+        .iter()
+        .find(|event| event["type"] == "response.incomplete")
+        .unwrap();
+    assert_eq!(incomplete["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    assert_eq!(incomplete["response"]["output"][0]["status"], "incomplete");
+    let output_done = events
+        .iter()
+        .find(|event| event["type"] == "response.output_item.done")
+        .unwrap();
+    assert_eq!(output_done["item"]["status"], "incomplete");
+}
+
+#[test]
 fn chat_stream_translator_maps_completed_usage_to_responses_usage() {
     let mut translator = StreamTranslator::new(
         UpstreamProtocol::ChatCompletions,
@@ -883,9 +1671,14 @@ fn chat_stream_translator_maps_completed_usage_to_responses_usage() {
         }
     });
 
-    let events = translator
+    let finish_reason_events = translator
         .translate_event(&final_chunk)
         .expect("final chunk should translate");
+    assert!(!finish_reason_events.iter().any(|event| matches!(
+        event["type"].as_str(),
+        Some("response.completed" | "response.incomplete")
+    )));
+    let events = translator.finish().expect("stream should finish");
     let completed = events
         .iter()
         .find(|event| event["type"] == "response.completed")
@@ -906,6 +1699,61 @@ fn chat_stream_translator_maps_completed_usage_to_responses_usage() {
     );
     assert_eq!(
         completed["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+        1
+    );
+}
+
+#[test]
+fn chat_stream_defaults_required_responses_usage_details() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Responses,
+    )
+    .expect("translator should exist");
+
+    translator
+        .translate_event(&json!({
+            "id": "chatcmpl-stream-defaults",
+            "created": 1,
+            "model": "opaque-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Complete"},
+                "finish_reason": null
+            }]
+        }))
+        .expect("delta should translate");
+    translator
+        .translate_event(&json!({
+            "id": "chatcmpl-stream-defaults",
+            "created": 1,
+            "model": "opaque-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "total_tokens": 6,
+                "completion_tokens_details": {
+                    "accepted_prediction_tokens": 1
+                }
+            }
+        }))
+        .expect("terminal chunk should translate");
+
+    let events = translator.finish().expect("stream should finish");
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("expected response.completed event");
+    let usage = &completed["response"]["usage"];
+    assert_eq!(usage["input_tokens_details"]["cached_tokens"], 0);
+    assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 0);
+    assert_eq!(
+        usage["output_tokens_details"]["accepted_prediction_tokens"],
         1
     );
 }
@@ -1167,4 +2015,633 @@ fn chat_request_forwards_parallel_tool_calls_to_responses() {
         result.get("parallel_tool_calls").is_some(),
         "parallel_tool_calls should be forwarded in chat→responses conversion"
     );
+}
+
+mod stream_aggregate_tests {
+    use super::*;
+    use chat_responses_codex::protocol::stream_aggregate::{
+        MAX_STREAM_AGGREGATE_FRAME_BYTES, MAX_STREAM_AGGREGATE_TOTAL_BYTES,
+    };
+
+    fn expect_complete(result: StreamAggregateResult) -> serde_json::Value {
+        match result {
+            StreamAggregateResult::Complete(value) => value,
+            StreamAggregateResult::Pending => panic!("expected a complete aggregate"),
+        }
+    }
+
+    #[test]
+    fn stream_aggregate_chat_handles_sse_framing_utf8_and_usage_tail() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        let metadata_frame = concat!(
+            ": keepalive\r\n\r\n",
+            "data:{\"id\":\"chatcmpl-aggregate\",\"object\":\"chat.completion.chunk\",\r\n",
+            "data: \"created\":17,\"model\":\"opaque/runtime\",\"service_tier\":\"priority\",",
+            "\"system_fingerprint\":\"fp_opaque\",\"choices\":[{\"index\":0,",
+            "\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\r\n\r\n"
+        );
+        let text_frame = format!(
+            "data: {}\r\n\r\n",
+            json!({
+                "id": "chatcmpl-aggregate",
+                "object": "chat.completion.chunk",
+                "created": 17,
+                "model": "opaque/runtime",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "\u{4f60}\u{597d}"},
+                    "finish_reason": null
+                }]
+            })
+        );
+        let finish_frame = format!(
+            "data: {}\n\n",
+            json!({
+                "id": "chatcmpl-aggregate",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"token": "done"}]}
+                }]
+            })
+        );
+        let usage_frame = format!(
+            "data:{}\n\n",
+            json!({
+                "id": "chatcmpl-aggregate",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5
+                }
+            })
+        );
+        let before_done = format!("{metadata_frame}{text_frame}{finish_frame}{usage_frame}");
+
+        for byte in before_done.as_bytes().chunks(1) {
+            assert_eq!(
+                aggregator.push(byte).expect("fragment should parse"),
+                StreamAggregateResult::Pending,
+                "finish_reason must not complete before a possible usage tail"
+            );
+        }
+        let value = expect_complete(
+            aggregator
+                .push(b"data:[DONE]\r\n\r\n")
+                .expect("done should complete"),
+        );
+
+        assert_eq!(value["id"], "chatcmpl-aggregate");
+        assert_eq!(value["object"], "chat.completion");
+        assert_eq!(value["created"], 17);
+        assert_eq!(value["model"], "opaque/runtime");
+        assert_eq!(value["service_tier"], "priority");
+        assert_eq!(value["system_fingerprint"], "fp_opaque");
+        assert_eq!(value["choices"][0]["index"], 0);
+        assert_eq!(value["choices"][0]["message"]["role"], "assistant");
+        assert_eq!(
+            value["choices"][0]["message"]["content"],
+            "\u{4f60}\u{597d}"
+        );
+        assert_eq!(value["choices"][0]["finish_reason"], "stop");
+        assert_eq!(
+            value["choices"][0]["logprobs"]["content"][0]["token"],
+            "done"
+        );
+        assert_eq!(value["usage"]["completion_tokens"], 2);
+    }
+
+    #[test]
+    fn stream_aggregate_chat_orders_sparse_choices_and_parallel_tools() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        let events = [
+            json!({
+                "id": "chatcmpl-tools",
+                "created": 21,
+                "model": "opaque",
+                "choices": [
+                    {"index": 2, "delta": {
+                        "role": "assistant",
+                        "reasoning_content": "plan ",
+                        "content": "answer "
+                    }, "finish_reason": null},
+                    {"index": 0, "delta": {"refusal": "not "}, "finish_reason": null}
+                ]
+            }),
+            json!({
+                "id": "chatcmpl-tools",
+                "choices": [{"index": 2, "delta": {"tool_calls": [
+                    {"index": 5, "id": "call_", "type": "function", "function": {
+                        "name": "look", "arguments": "{\"q\":"
+                    }},
+                    {"index": 1, "id": "call_b", "type": "function", "function": {
+                        "name": "sum", "arguments": "{\"x\":"
+                    }}
+                ]}, "finish_reason": null}]
+            }),
+            json!({
+                "id": "chatcmpl-tools",
+                "choices": [
+                    {"index": 2, "delta": {
+                        "reasoning_content": "then act",
+                        "content": "done",
+                        "tool_calls": [
+                            {"index": 5, "id": "five", "function": {
+                                "name": "up", "arguments": "\"v\"}"
+                            }},
+                            {"index": 1, "id": "_1", "function": {
+                                "name": "_all", "arguments": "1}"
+                            }}
+                        ]
+                    }, "finish_reason": "tool_calls"},
+                    {"index": 0, "delta": {"refusal": "allowed"}, "finish_reason": "stop"}
+                ]
+            }),
+        ];
+        for event in events {
+            let frame = format!("data: {event}\n\n");
+            assert_eq!(
+                aggregator.push(frame.as_bytes()).unwrap(),
+                StreamAggregateResult::Pending
+            );
+        }
+        let value = expect_complete(aggregator.push(b"data: [DONE]\n\n").unwrap());
+
+        assert_eq!(value["choices"][0]["index"], 0);
+        assert_eq!(value["choices"][0]["message"]["refusal"], "not allowed");
+        assert_eq!(value["choices"][1]["index"], 2);
+        assert_eq!(
+            value["choices"][1]["message"]["reasoning_content"],
+            "plan then act"
+        );
+        assert_eq!(value["choices"][1]["message"]["content"], "answer done");
+        let tools = value["choices"][1]["message"]["tool_calls"]
+            .as_array()
+            .unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["index"], 1);
+        assert_eq!(tools[0]["id"], "call_b_1");
+        assert_eq!(tools[0]["function"]["name"], "sum_all");
+        assert_eq!(tools[0]["function"]["arguments"], "{\"x\":1}");
+        assert_eq!(tools[1]["index"], 5);
+        assert_eq!(tools[1]["id"], "call_five");
+        assert_eq!(tools[1]["function"]["name"], "lookup");
+        assert_eq!(tools[1]["function"]["arguments"], "{\"q\":\"v\"}");
+    }
+
+    #[test]
+    fn stream_aggregate_chat_keeps_stable_tool_identity_repeats_idempotent() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        for event in [
+            json!({
+                "id": "chatcmpl-repeat",
+                "created": 21,
+                "model": "opaque",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_stable",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "a"}
+                }]}, "finish_reason": null}]
+            }),
+            json!({
+                "id": "chatcmpl-repeat",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_stable",
+                    "function": {"name": "get_weather", "arguments": "a"}
+                }]}, "finish_reason": "tool_calls"}]
+            }),
+        ] {
+            let frame = format!("data: {event}\n\n");
+            assert_eq!(
+                aggregator.push(frame.as_bytes()).unwrap(),
+                StreamAggregateResult::Pending
+            );
+        }
+        let value = expect_complete(aggregator.push(b"data: [DONE]\n\n").unwrap());
+        let tool = &value["choices"][0]["message"]["tool_calls"][0];
+
+        assert_eq!(tool["id"], "call_stable");
+        assert_eq!(tool["function"]["name"], "get_weather");
+        assert_eq!(tool["function"]["arguments"], "aa");
+    }
+
+    #[test]
+    fn stream_aggregate_chat_accepts_cumulative_tool_identity_snapshots() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        for event in [
+            json!({
+                "id": "chatcmpl-cumulative",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_",
+                    "type": "function",
+                    "function": {"name": "look", "arguments": "a"}
+                }]}, "finish_reason": null}]
+            }),
+            json!({
+                "id": "chatcmpl-cumulative",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_cumulative",
+                    "function": {"name": "lookup", "arguments": "a"}
+                }]}, "finish_reason": null}]
+            }),
+            json!({
+                "id": "chatcmpl-cumulative",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_",
+                    "function": {"name": "look", "arguments": "a"}
+                }]}, "finish_reason": "tool_calls"}]
+            }),
+        ] {
+            let frame = format!("data: {event}\n\n");
+            assert_eq!(
+                aggregator.push(frame.as_bytes()).unwrap(),
+                StreamAggregateResult::Pending
+            );
+        }
+        let value = expect_complete(aggregator.push(b"data: [DONE]\n\n").unwrap());
+        let tool = &value["choices"][0]["message"]["tool_calls"][0];
+
+        assert_eq!(tool["id"], "call_cumulative");
+        assert_eq!(tool["function"]["name"], "lookup");
+        assert_eq!(tool["function"]["arguments"], "aaa");
+    }
+
+    #[test]
+    fn stream_aggregate_chat_appends_distinct_tool_identity_fragments() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        for (name, finish_reason) in [("get_", json!(null)), ("geo", json!("tool_calls"))] {
+            let event = json!({
+                "id": "chatcmpl-fragments",
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_fragments",
+                    "type": "function",
+                    "function": {"name": name, "arguments": ""}
+                }]}, "finish_reason": finish_reason}]
+            });
+            let frame = format!("data: {event}\n\n");
+            assert_eq!(
+                aggregator.push(frame.as_bytes()).unwrap(),
+                StreamAggregateResult::Pending
+            );
+        }
+        let value = expect_complete(aggregator.push(b"data: [DONE]\n\n").unwrap());
+        let tool = &value["choices"][0]["message"]["tool_calls"][0];
+
+        assert_eq!(tool["id"], "call_fragments");
+        assert_eq!(tool["function"]["name"], "get_geo");
+    }
+
+    #[test]
+    fn stream_aggregate_chat_legacy_function_call_completes_on_semantic_eof() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        let first = json!({
+            "id": "chatcmpl-legacy",
+            "created": 22,
+            "model": "opaque",
+            "choices": [{"index": 0, "delta": {"function_call": {
+                "name": "leg", "arguments": "{\"value\":"
+            }}, "finish_reason": null}]
+        });
+        assert_eq!(
+            aggregator
+                .push(format!("data: {first}\n\n").as_bytes())
+                .unwrap(),
+            StreamAggregateResult::Pending
+        );
+        let final_event = json!({
+            "id": "chatcmpl-legacy",
+            "choices": [{"index": 0, "delta": {"function_call": {
+                "name": "acy", "arguments": "1}"
+            }}, "finish_reason": "function_call"}]
+        });
+        assert_eq!(
+            aggregator
+                .push(format!("data: {final_event}").as_bytes())
+                .unwrap(),
+            StreamAggregateResult::Pending
+        );
+
+        let value = aggregator
+            .finish()
+            .expect("semantic finish makes a clean EOF complete");
+        assert_eq!(
+            value["choices"][0]["message"]["function_call"]["name"],
+            "legacy"
+        );
+        assert_eq!(
+            value["choices"][0]["message"]["function_call"]["arguments"],
+            "{\"value\":1}"
+        );
+        assert_eq!(value["choices"][0]["finish_reason"], "function_call");
+    }
+
+    #[test]
+    fn stream_aggregate_chat_rejects_truncated_eof() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        let frame = format!(
+            "data: {}\n\n",
+            json!({
+                "id": "chatcmpl-truncated",
+                "choices": [{"index": 0, "delta": {"content": "partial"}, "finish_reason": null}]
+            })
+        );
+        assert_eq!(
+            aggregator.push(frame.as_bytes()).unwrap(),
+            StreamAggregateResult::Pending
+        );
+        assert!(aggregator.finish().is_err());
+
+        let mut partial = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        assert_eq!(
+            partial.push(b"data: {\"choices\":[{\"index\":0").unwrap(),
+            StreamAggregateResult::Pending
+        );
+        assert!(partial.finish().is_err());
+    }
+
+    #[test]
+    fn stream_aggregate_completion_is_emitted_once_and_rejects_post_complete_calls() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        let terminal = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "id": "chatcmpl-move-only",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "done"},
+                    "finish_reason": "stop"
+                }]
+            })
+        );
+
+        let value = expect_complete(aggregator.push(terminal.as_bytes()).unwrap());
+        assert_eq!(value["choices"][0]["message"]["content"], "done");
+
+        let push_error = aggregator
+            .push(b": post-complete\n\n")
+            .expect_err("completion must not be cloned for later pushes");
+        assert!(matches!(
+            push_error,
+            chat_responses_codex::protocol::ProtocolError::InvalidUpstreamStream {
+                kind: chat_responses_codex::protocol::UpstreamStreamErrorKind::Decode,
+                ..
+            }
+        ));
+        let finish_error = aggregator
+            .finish()
+            .expect_err("completion must not be rebuilt by finish");
+        assert!(matches!(
+            finish_error,
+            chat_responses_codex::protocol::ProtocolError::InvalidUpstreamStream {
+                kind: chat_responses_codex::protocol::UpstreamStreamErrorKind::Decode,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stream_aggregate_responses_returns_authoritative_completed_snapshot() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        for event in [
+            json!({"type": "response.created", "response": {
+                "id": "resp-aggregate", "status": "in_progress", "output": []
+            }}),
+            json!({"type": "response.output_text.delta", "output_index": 1,
+                "content_index": 0, "delta": "ignored partial"}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 3,
+                "item_id": "fc-2", "delta": "{\"partial\":"}),
+        ] {
+            let frame = format!("data: {event}\n\n");
+            assert_eq!(
+                aggregator.push(frame.as_bytes()).unwrap(),
+                StreamAggregateResult::Pending
+            );
+        }
+        let expected = json!({
+            "id": "resp-aggregate",
+            "object": "response",
+            "created_at": 31,
+            "status": "completed",
+            "model": "opaque/responses",
+            "output": [
+                {"id": "rs-1", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "plan"}], "summary": []},
+                {"id": "msg-1", "type": "message", "status": "completed", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer", "annotations": []}]},
+                {"id": "fc-1", "type": "function_call", "status": "completed",
+                    "call_id": "call-1", "name": "first", "arguments": "{\"x\":1}"},
+                {"id": "fc-2", "type": "function_call", "status": "completed",
+                    "call_id": "call-2", "name": "second", "arguments": "{\"y\":2}"}
+            ],
+            "usage": {"input_tokens": 4, "output_tokens": 6, "total_tokens": 10}
+        });
+        let terminal = format!(
+            "event: response.completed\r\ndata: {}\r\n\r\n",
+            json!({"type": "response.completed", "response": expected.clone()})
+        );
+        let value = expect_complete(aggregator.push(terminal.as_bytes()).unwrap());
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn stream_aggregate_responses_accepts_incomplete_terminal_snapshot() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        let expected = json!({
+            "id": "resp-incomplete",
+            "object": "response",
+            "status": "incomplete",
+            "model": "opaque",
+            "output": [{"id": "msg-1", "type": "message", "status": "incomplete",
+                "role": "assistant", "content": [{"type": "output_text", "text": "partial"}]}],
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        });
+        let frame = format!(
+            "data: {}",
+            json!({"type": "response.incomplete", "response": expected.clone()})
+        );
+
+        assert_eq!(
+            aggregator.push(frame.as_bytes()).unwrap(),
+            StreamAggregateResult::Pending
+        );
+        let value = aggregator.finish().unwrap();
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn stream_aggregate_responses_rejects_error_events_and_envelopes() {
+        let frames = [
+            format!(
+                "data: {}\n\n",
+                json!({"type": "response.failed", "response": {
+                    "id": "resp-failed", "status": "failed", "error": {"message": "failed"}
+                }})
+            ),
+            format!(
+                "event: error\ndata: {}\n\n",
+                json!({"type": "error", "message": "failed"})
+            ),
+            format!("data: {}\n\n", json!({"error": {"message": "failed"}})),
+            "data: {not-json}\n\n".to_string(),
+        ];
+
+        for frame in frames {
+            let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+            assert!(
+                aggregator.push(frame.as_bytes()).is_err(),
+                "frame must fail: {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_aggregate_responses_rejects_error_event_after_terminal_in_same_push() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        let terminal = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp-terminal-error",
+                "object": "response",
+                "status": "completed",
+                "output": []
+            }
+        });
+        let stream = format!("event: response.completed\ndata: {terminal}\n\nevent: error\n\n");
+
+        let error = aggregator
+            .push(stream.as_bytes())
+            .expect_err("post-terminal error event must not be ignored");
+
+        assert!(matches!(
+            error,
+            chat_responses_codex::protocol::ProtocolError::InvalidUpstreamStream {
+                kind: chat_responses_codex::protocol::UpstreamStreamErrorKind::UpstreamEvent,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stream_aggregate_responses_consumes_benign_same_push_terminal_tail() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        let expected = json!({
+            "id": "resp-terminal-tail",
+            "object": "response",
+            "status": "completed",
+            "output": []
+        });
+        let terminal = json!({
+            "type": "response.completed",
+            "response": expected.clone()
+        });
+        let stream = format!(
+            "event: response.completed\ndata: {terminal}\n\n: keepalive\n\ndata: [DONE]\n\n"
+        );
+        let mut observed_payloads = Vec::new();
+
+        let value = expect_complete(
+            aggregator
+                .push_observing(stream.as_bytes(), |event| {
+                    observed_payloads.push(event.data().to_owned());
+                })
+                .unwrap(),
+        );
+
+        assert_eq!(value, expected);
+        assert_eq!(observed_payloads.len(), 2);
+        assert_eq!(observed_payloads[1], "[DONE]");
+        assert!(aggregator.push(b": after-complete\n\n").is_err());
+    }
+
+    #[test]
+    fn stream_aggregate_rejects_header_only_error_event() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        assert!(aggregator.push(b"event: error\n\n").is_err());
+    }
+
+    #[test]
+    fn stream_aggregate_rejects_header_only_response_failed_event() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        assert!(aggregator
+            .push(b"event: response.failed\ndata: {}\n\n")
+            .is_err());
+    }
+
+    #[test]
+    fn stream_aggregate_accepts_terminal_type_from_sse_event_header() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        let expected = json!({
+            "id": "resp-header-terminal",
+            "object": "response",
+            "status": "completed",
+            "model": "opaque",
+            "output": []
+        });
+        let frame = format!(
+            "event: response.completed\ndata: {}\n\n",
+            json!({"response": expected.clone()})
+        );
+
+        let value = expect_complete(aggregator.push(frame.as_bytes()).unwrap());
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn stream_aggregate_responses_rejects_eof_without_terminal_snapshot() {
+        let mut aggregator = StreamResponseAggregator::new(UpstreamProtocol::Responses);
+        let frame = format!(
+            "data: {}\n\n",
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": "partial"})
+        );
+        assert_eq!(
+            aggregator.push(frame.as_bytes()).unwrap(),
+            StreamAggregateResult::Pending
+        );
+        assert!(aggregator.finish().is_err());
+    }
+
+    fn comment_frame(total_bytes: usize) -> Vec<u8> {
+        assert!(total_bytes >= 3);
+        let mut frame = Vec::with_capacity(total_bytes);
+        frame.push(b':');
+        frame.resize(total_bytes - 2, b'x');
+        frame.extend_from_slice(b"\n\n");
+        frame
+    }
+
+    #[test]
+    fn stream_aggregate_enforces_exact_frame_and_total_byte_bounds() {
+        let exact_frame = comment_frame(MAX_STREAM_AGGREGATE_FRAME_BYTES);
+        let mut frame_ok = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        assert_eq!(
+            frame_ok.push(&exact_frame).unwrap(),
+            StreamAggregateResult::Pending
+        );
+
+        let oversized_frame = comment_frame(MAX_STREAM_AGGREGATE_FRAME_BYTES + 1);
+        let mut frame_too_large = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        assert!(frame_too_large.push(&oversized_frame).is_err());
+
+        assert_eq!(
+            MAX_STREAM_AGGREGATE_TOTAL_BYTES % MAX_STREAM_AGGREGATE_FRAME_BYTES,
+            0
+        );
+        let mut total = StreamResponseAggregator::new(UpstreamProtocol::ChatCompletions);
+        for _ in 0..(MAX_STREAM_AGGREGATE_TOTAL_BYTES / MAX_STREAM_AGGREGATE_FRAME_BYTES) {
+            assert_eq!(
+                total.push(&exact_frame).unwrap(),
+                StreamAggregateResult::Pending
+            );
+        }
+        assert!(total.push(b":").is_err());
+    }
 }

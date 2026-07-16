@@ -67,17 +67,16 @@ impl UpstreamFeedbackClassification {
         }
 
         // Check for rate limit headers
-        if headers.contains_key("x-ratelimit-remaining")
+        if (headers.contains_key("x-ratelimit-remaining")
             || headers.contains_key("x-rate-limit-remaining")
-            || headers.contains_key("ratelimit-remaining")
+            || headers.contains_key("ratelimit-remaining"))
+            && status == 429
         {
-            if status == 429 {
-                return Self::RateLimited;
-            }
+            return Self::RateLimited;
         }
 
         // 5xx errors are temporary unavailability
-        if status >= 500 && status < 600 {
+        if (500..600).contains(&status) {
             return Self::TemporaryUnavailable;
         }
 

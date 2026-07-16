@@ -1,4 +1,14 @@
 use super::*;
+use crate::capabilities::{
+    Capability, CapabilityRuntimeSnapshot, DialectProfileKey, DialectProfileState,
+    RequestedFeatures, ResolvedCapabilities, RouteIdentity, WireProtocol,
+    DIALECT_PROBE_SCHEMA_VERSION,
+};
+use crate::protocol::image_adapter::ImageDialect;
+use std::collections::BTreeSet;
+
+const GATEWAY_CLAUDE_METADATA_KEY: &str = "_gateway_claude";
+const GATEWAY_CLAUDE_THINKING_KEY: &str = "_gateway_claude_thinking";
 
 pub(super) fn parse_retry_after_seconds(
     headers: &reqwest::header::HeaderMap,
@@ -208,16 +218,389 @@ pub(super) fn should_retry_without_stream(error: &GatewayError) -> bool {
     }
 }
 
+fn append_downgrade_header(headers: &mut HeaderMap, codes: &BTreeSet<String>) {
+    if codes.is_empty() {
+        return;
+    }
+    let value = codes.iter().cloned().collect::<Vec<_>>().join(",");
+    if let Ok(header_value) = HeaderValue::from_str(&value) {
+        headers.insert(
+            header::HeaderName::from_static("x-chat2responses-downgrade"),
+            header_value,
+        );
+    }
+}
+
+fn unsupported_reasoning_replay_error() -> GatewayError {
+    GatewayError::classified(
+        StatusCode::BAD_REQUEST,
+        "selected route cannot preserve required capability ReasoningReplay",
+        "invalid_request_error",
+        "gateway_protocol_capability_unsupported",
+        "gateway_protocol_capability_unsupported",
+        None,
+        Some(json!({ "scope": "gateway" })),
+    )
+}
+
+fn upstream_protocol_label(protocol: UpstreamProtocol) -> &'static str {
+    match protocol {
+        UpstreamProtocol::ChatCompletions => "chat_completions",
+        UpstreamProtocol::Responses => "responses",
+    }
+}
+
+fn apply_claude_thinking_controls_and_replay(
+    body: &mut Value,
+    resolved: Option<&ResolvedCapabilities>,
+    signature_context: &ClaudeThinkingSignatureContext,
+    downgrades: &mut BTreeSet<String>,
+) -> Result<(), GatewayError> {
+    let Some(object) = body.as_object_mut() else {
+        return Ok(());
+    };
+
+    let metadata = object.remove(GATEWAY_CLAUDE_METADATA_KEY);
+    let adaptive = metadata
+        .as_ref()
+        .and_then(|value| value.pointer("/thinking/type"))
+        .and_then(Value::as_str)
+        == Some("adaptive");
+    let has_reasoning_history = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|thinking| !thinking.is_empty())
+                    || message
+                        .get(GATEWAY_CLAUDE_THINKING_KEY)
+                        .and_then(Value::as_array)
+                        .is_some_and(|blocks| !blocks.is_empty())
+            })
+        });
+    if adaptive {
+        let Some(resolved) = resolved else {
+            if has_reasoning_history {
+                return Err(unsupported_reasoning_replay_error());
+            }
+            downgrades.insert("optional_adaptive_thinking".into());
+            return Ok(());
+        };
+        if !resolved.supports(Capability::ReasoningOutput)
+            || !resolved.supports(Capability::ReasoningReplay)
+        {
+            if has_reasoning_history {
+                return Err(unsupported_reasoning_replay_error());
+            }
+            downgrades.insert("optional_adaptive_thinking".into());
+            return Ok(());
+        }
+        if let Some(requested) = metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/output_config/effort"))
+            .and_then(Value::as_str)
+        {
+            if resolved.reasoning_control_field.is_none()
+                || !resolved.effort_map.contains_key(requested)
+            {
+                downgrades.insert("optional_reasoning_effort".into());
+            }
+        }
+
+        if let Some(edits) = metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/context_management/edits"))
+            .and_then(Value::as_array)
+        {
+            for edit in edits {
+                let keep_all = edit.get("keep").and_then(Value::as_str) == Some("all");
+                let supported = edit.get("type").and_then(Value::as_str)
+                    == Some("clear_thinking_20251015")
+                    && keep_all;
+                if !supported {
+                    downgrades.insert("optional_context_management".into());
+                }
+            }
+        }
+    }
+
+    let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for message in messages {
+        let Some(message_object) = message.as_object_mut() else {
+            continue;
+        };
+        let Some(thinking_blocks) = message_object
+            .remove(GATEWAY_CLAUDE_THINKING_KEY)
+            .and_then(|value| value.as_array().cloned())
+        else {
+            continue;
+        };
+
+        let tool_call_ids = message_object
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|tool_calls| {
+                tool_calls
+                    .iter()
+                    .filter_map(|tool_call| {
+                        tool_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut merged_thinking = String::new();
+        for block in thinking_blocks {
+            let thinking = block
+                .get("thinking")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if thinking.is_empty() {
+                continue;
+            }
+            let signature = block
+                .get("signature")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let associated_ids = block
+                .get("tool_use_ids")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|ids| !ids.is_empty())
+                .unwrap_or_else(|| tool_call_ids.clone());
+            let associated_refs = associated_ids
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>();
+            let input = super::thinking_signature::ThinkingSignatureInput {
+                thinking,
+                model: &signature_context.model,
+                upstream_id: &signature_context.upstream_id,
+                protocol: &signature_context.protocol,
+                profile_fingerprint: &signature_context.profile_fingerprint,
+                call_ids: &associated_refs,
+            };
+            if !super::thinking_signature::verify_thinking(
+                signature_context.secret.as_bytes(),
+                &input,
+                signature,
+            ) {
+                return Err(GatewayError::BadRequest(
+                    "invalid Claude thinking signature".into(),
+                ));
+            }
+            merged_thinking.push_str(thinking);
+        }
+
+        if !merged_thinking.is_empty() {
+            message_object.insert("reasoning_content".into(), Value::String(merged_thinking));
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_resolved_claude_effort_control(
+    body: &mut Value,
+    protocol: UpstreamProtocol,
+    resolved: Option<&ResolvedCapabilities>,
+    requested: Option<&str>,
+) -> Result<(), GatewayError> {
+    let (Some(resolved), Some(requested)) = (resolved, requested) else {
+        return Ok(());
+    };
+    if !resolved.supports(Capability::ReasoningOutput)
+        || !resolved.supports(Capability::ReasoningReplay)
+    {
+        return Ok(());
+    }
+    let (Some(field), Some(mapped)) = (
+        resolved.reasoning_control_field.as_deref(),
+        resolved.effort_map.get(requested),
+    ) else {
+        return Ok(());
+    };
+    let Some(object) = body.as_object_mut() else {
+        return Ok(());
+    };
+
+    let canonical_effort_field = field == "reasoning_effort";
+    let reserved_field = matches!(
+        field,
+        "" | "model"
+            | "input"
+            | "messages"
+            | "instructions"
+            | "tools"
+            | "tool_choice"
+            | "parallel_tool_calls"
+            | "stream"
+            | "stream_options"
+            | "max_tokens"
+            | "max_completion_tokens"
+            | "max_output_tokens"
+            | "reasoning"
+            | "metadata"
+            | "previous_response_id"
+            | "store"
+            | "include"
+            | "modalities"
+            | "response_format"
+            | "text"
+            | "stop"
+            | "stop_sequences"
+            | "user"
+            | "n"
+            | "temperature"
+            | "top_p"
+            | "frequency_penalty"
+            | "presence_penalty"
+            | "seed"
+            | "logprobs"
+            | "top_logprobs"
+            | "service_tier"
+            | GATEWAY_CLAUDE_METADATA_KEY
+            | GATEWAY_CLAUDE_THINKING_KEY
+    );
+    if !canonical_effort_field && (reserved_field || object.contains_key(field)) {
+        return Err(GatewayError::classified(
+            StatusCode::BAD_REQUEST,
+            format!("reasoning control field \"{field}\" collides with request data"),
+            "invalid_request_error",
+            "gateway_reasoning_control_field_collision",
+            "gateway_reasoning_control_field_collision",
+            None,
+            Some(json!({ "scope": "gateway", "field": field })),
+        ));
+    }
+
+    object.remove("reasoning_effort");
+    if protocol == UpstreamProtocol::Responses {
+        let remove_reasoning = object
+            .get_mut("reasoning")
+            .and_then(Value::as_object_mut)
+            .is_some_and(|reasoning| {
+                reasoning.remove("effort");
+                reasoning.is_empty()
+            });
+        if remove_reasoning {
+            object.remove("reasoning");
+        }
+    }
+    object.insert(field.to_string(), Value::String(mapped.clone()));
+    Ok(())
+}
+
+fn applied_claude_effort_control_evidence(
+    body: &Value,
+    resolved: Option<&ResolvedCapabilities>,
+    requested: Option<&str>,
+) -> Option<AppliedEffortControl> {
+    let resolved = resolved?;
+    let requested = requested?;
+    let field = resolved.reasoning_control_field.as_deref()?;
+    let mapped = resolved.effort_map.get(requested)?;
+    (body.get(field).and_then(Value::as_str) == Some(mapped.as_str())).then(|| {
+        AppliedEffortControl {
+            requested: requested.to_string(),
+            field: field.to_string(),
+            value: mapped.clone(),
+        }
+    })
+}
+
+fn compatibility_profile_state(state: DialectProfileState) -> &'static str {
+    match state {
+        DialectProfileState::Verified => "verified",
+        DialectProfileState::Partial => "partial",
+        DialectProfileState::Unsupported => "unsupported",
+        DialectProfileState::Unknown => "unknown",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_compatibility_usage_metadata(
+    snapshot: &CapabilityRuntimeSnapshot,
+    upstream: &UpstreamConfig,
+    exposed_model_slug: &str,
+    runtime_model_slug: &str,
+    upstream_protocol: UpstreamProtocol,
+    endpoint: EndpointKind,
+    resolved: &ResolvedCapabilities,
+    downgrade_codes: &BTreeSet<String>,
+    dialect_retry_count: u8,
+    claude_request: bool,
+    attempt_mode: UpstreamAttemptMode,
+) -> CompatibilityUsageMetadata {
+    let mut route = RouteIdentity {
+        upstream_id: upstream.id.clone(),
+        exposed_model_slug: exposed_model_slug.to_string(),
+        runtime_model_slug: runtime_model_slug.to_string(),
+        protocol: WireProtocol::from(upstream_protocol),
+        tags: BTreeSet::new(),
+    };
+    snapshot.configuration.apply_route_tags(&mut route);
+    let profile_key = DialectProfileKey::from_route(&route);
+    let probe_version = snapshot
+        .profiles
+        .get(&profile_key)
+        .map(|profile| profile.probe_schema_version)
+        .unwrap_or(DIALECT_PROBE_SCHEMA_VERSION);
+    let mut adapter_types = Vec::new();
+    if endpoint.native_protocol() != upstream_protocol {
+        adapter_types.push(protocol_transition_label(endpoint, upstream_protocol).to_string());
+    }
+    if claude_request {
+        adapter_types.push("messages_to_chat".into());
+        adapter_types.push("claude_thinking".into());
+    }
+    if attempt_mode.aggregates_sse() {
+        adapter_types.push("stream_to_json".into());
+    }
+
+    CompatibilityUsageMetadata {
+        protocol_transition: protocol_transition_label(endpoint, upstream_protocol).to_string(),
+        adapter_types,
+        optional_downgrades: downgrade_codes.iter().cloned().collect(),
+        policy_id: snapshot
+            .configuration
+            .policy_ids_for(&route)
+            .last()
+            .map(|value| (*value).to_string()),
+        policy_schema_version: snapshot.configuration.source().schema_version,
+        policy_digest: snapshot.configuration.digest().to_string(),
+        profile_state: compatibility_profile_state(resolved.profile_state).to_string(),
+        probe_version,
+        dialect_retry_count,
+        fallback_stage: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_to_upstream(
     state: &AppState,
     upstream: &UpstreamConfig,
     api_key: &str,
+    resolved_capabilities: Option<&ResolvedCapabilities>,
+    capability_snapshot: &CapabilityRuntimeSnapshot,
+    requested_features: &RequestedFeatures,
     upstream_protocol: UpstreamProtocol,
     body: &Value,
     endpoint: EndpointKind,
     request_stream: bool,
-    try_upstream_stream: bool,
+    attempt_mode: UpstreamAttemptMode,
     started: Instant,
     request_id: &str,
     model: &str,
@@ -229,14 +612,107 @@ pub(super) async fn send_to_upstream(
     chat_fallback_requested: bool,
     global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
-    response_history_context: Option<ResponseHistoryContext>,
+    mut response_history_context: Option<ResponseHistoryContext>,
+    active_request_guard: &mut ActiveGatewayRequestGuard,
+    stream_only_recovery_request_safe: bool,
+    stream_only_recovery: &mut StreamOnlyRecoveryState,
+    stream_only_recovery_leader: &mut Option<StreamOnlyRecoveryLeader>,
+    stream_only_recovery_identity: &mut Option<(DialectProfileKey, String)>,
 ) -> Result<DispatchResult, GatewayError> {
+    let mut active_capability_snapshot = capability_snapshot.clone();
+    let mut resolved_capabilities = resolved_capabilities.cloned();
+    let mut attempt_mode = attempt_mode;
+    let mut downgrade_codes = BTreeSet::new();
+    let mut dialect_retry_count = 0u8;
+    let request_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
+    let mut final_upstream_model =
+        upstream.resolved_model_name(request_model).ok_or_else(|| {
+            GatewayError::BadRequest(format!(
+                "model \"{request_model}\" is not configured for upstream \"{}\"",
+                upstream.name
+            ))
+        })?;
+    let selected_upstream_model = final_upstream_model.clone();
+    let model_rewritten = final_upstream_model != request_model;
+    let claude_request = body.get(GATEWAY_CLAUDE_METADATA_KEY).is_some()
+        || body
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message
+                        .get(GATEWAY_CLAUDE_THINKING_KEY)
+                        .and_then(Value::as_array)
+                        .is_some_and(|blocks| !blocks.is_empty())
+                })
+            });
+    let claude_requested_effort = body
+        .get(GATEWAY_CLAUDE_METADATA_KEY)
+        .filter(|metadata| {
+            metadata.pointer("/thinking/type").and_then(Value::as_str) == Some("adaptive")
+        })
+        .and_then(|metadata| metadata.pointer("/output_config/effort"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let preconversion_signature_context = if claude_request
+        && endpoint == EndpointKind::ChatCompletions
+        && upstream_protocol == UpstreamProtocol::Responses
+    {
+        Some(ClaudeThinkingSignatureContext {
+            secret: state.config.jwt_secret.clone(),
+            model: final_upstream_model.clone(),
+            upstream_id: upstream.id.clone(),
+            protocol: upstream_protocol_label(upstream_protocol).to_string(),
+            profile_fingerprint: AppState::route_configuration_fingerprint_with_snapshot(
+                &active_capability_snapshot,
+                upstream,
+                request_model,
+                &final_upstream_model,
+                upstream_protocol,
+            )
+            .map_err(|error| {
+                GatewayError::upstream_invalid_response(
+                    format!("failed to compute route configuration fingerprint: {error}"),
+                    "upstream_invalid_response",
+                )
+            })?,
+        })
+    } else {
+        None
+    };
+    let mut canonical_body = body.clone();
+    if let Some(signature_context) = preconversion_signature_context.as_ref() {
+        apply_claude_thinking_controls_and_replay(
+            &mut canonical_body,
+            resolved_capabilities.as_ref(),
+            signature_context,
+            &mut downgrade_codes,
+        )?;
+    }
     let upstream_body = match (endpoint, upstream_protocol) {
-        (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => body.clone(),
+        (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => canonical_body,
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
-            chat_request_to_responses_payload(body).map_err(protocol_error_to_gateway)?
+            let conversion_context = resolved_capabilities
+                .as_ref()
+                .map(|resolved| ConversionContext::new(resolved, ToolAdapterRegistry::empty()))
+                .unwrap_or_default();
+            chat_request_to_responses_payload_with_context(&canonical_body, &conversion_context)
+                .map_err(protocol_error_to_gateway)?
         }
-        (EndpointKind::Responses, UpstreamProtocol::Responses) => body.clone(),
+        (EndpointKind::Responses, UpstreamProtocol::Responses) => {
+            let (adapted, downgrades) = apply_responses_hosted_tool_policy(
+                body,
+                resolved_capabilities
+                    .as_ref()
+                    .is_some_and(|resolved| resolved.supports(Capability::HostedTools)),
+            )
+            .map_err(protocol_error_to_gateway)?;
+            downgrade_codes.extend(downgrades);
+            adapted
+        }
         (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
             let fallback_report = responses_request_chat_fallback_report(body);
             let mut fallback_reasons = Vec::new();
@@ -264,23 +740,11 @@ pub(super) async fn send_to_upstream(
                     "responses request downgraded to ChatCompletions"
                 );
             }
-            responses_request_to_chat_payload_with_fallback(body)
+            responses_request_to_chat_payload_with_fallback(body, &mut downgrade_codes)
                 .map_err(protocol_error_to_gateway)?
         }
     };
     let mut upstream_body = upstream_body;
-    let request_model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| GatewayError::BadRequest("missing model".into()))?;
-    let mut final_upstream_model =
-        upstream.resolved_model_name(request_model).ok_or_else(|| {
-            GatewayError::BadRequest(format!(
-                "model \"{request_model}\" is not configured for upstream \"{}\"",
-                upstream.name
-            ))
-        })?;
-    let model_rewritten = final_upstream_model != request_model;
     let protocol_path = protocol_transition_label(endpoint, upstream_protocol);
     if let Some(object) = upstream_body.as_object_mut() {
         object.insert("model".into(), Value::String(final_upstream_model.clone()));
@@ -300,7 +764,7 @@ pub(super) async fn send_to_upstream(
         model_rewritten = model_rewritten,
         protocol_transition = %protocol_path,
         request_stream,
-        try_upstream_stream,
+        upstream_attempt_mode = attempt_mode.as_str(),
         "prepared upstream request body"
     );
     if model_rewritten {
@@ -318,21 +782,6 @@ pub(super) async fn send_to_upstream(
             "upstream model alias rewrote request model"
         );
     }
-    if !try_upstream_stream {
-        if let Some(object) = upstream_body.as_object_mut() {
-            object.insert("stream".into(), Value::Bool(false));
-        }
-    } else if upstream_protocol == UpstreamProtocol::ChatCompletions {
-        if let Some(object) = upstream_body.as_object_mut() {
-            object.insert(
-                "stream_options".into(),
-                json!({
-                    "include_usage": true
-                }),
-            );
-        }
-    }
-
     let context_budget_report = apply_context_budget_controls(
         upstream,
         global_context_profile,
@@ -341,6 +790,11 @@ pub(super) async fn send_to_upstream(
     );
     if let Some(report) = context_budget_report.as_ref() {
         if let Some(switched_model) = report.fallback_model.as_ref() {
+            if requested_features.continuation_profile.is_some() {
+                return Err(response_history_invalid(
+                    "exact gateway continuation cannot change runtime model during context fallback",
+                ));
+            }
             final_upstream_model = switched_model.clone();
         }
         tracing::info!(
@@ -382,6 +836,222 @@ pub(super) async fn send_to_upstream(
                 max_output_tokens_cap = report.max_output_tokens_cap,
                 "clamped max_tokens to upstream max_output_tokens cap"
             );
+        }
+    }
+
+    if final_upstream_model != selected_upstream_model {
+        let fallback_profile_key = DialectProfileKey {
+            upstream_id: upstream.id.clone(),
+            runtime_model_slug: final_upstream_model.clone(),
+            protocol: WireProtocol::from(upstream_protocol),
+        };
+        if !active_capability_snapshot
+            .profiles
+            .contains_key(&fallback_profile_key)
+        {
+            return Err(GatewayError::classified(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "context fallback model \"{final_upstream_model}\" has no exact capability profile"
+                ),
+                "invalid_request_error",
+                "gateway_protocol_capability_unsupported",
+                "gateway_protocol_capability_unsupported",
+                None,
+                Some(json!({
+                    "scope": "gateway",
+                    "upstream_id": upstream.id,
+                    "runtime_model": final_upstream_model,
+                    "protocol": upstream_protocol_label(upstream_protocol),
+                })),
+            ));
+        }
+        resolved_capabilities = resolve_route_capabilities_with_snapshot(
+            &active_capability_snapshot,
+            upstream,
+            request_model,
+            &final_upstream_model,
+            upstream_protocol,
+            requested_features,
+        );
+        if resolved_capabilities.is_none() {
+            return Err(GatewayError::classified(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "context fallback model \"{final_upstream_model}\" cannot preserve requested capabilities"
+                ),
+                "invalid_request_error",
+                "gateway_protocol_capability_unsupported",
+                "gateway_protocol_capability_unsupported",
+                None,
+                Some(json!({
+                    "scope": "gateway",
+                    "upstream_id": upstream.id,
+                    "runtime_model": final_upstream_model,
+                    "protocol": upstream_protocol_label(upstream_protocol),
+                })),
+            ));
+        }
+    }
+
+    // A context fallback has its own exact capability profile. Non-stream
+    // downstream requests must use that final route's evidence, while a
+    // downstream SSE retry explicitly forced to JSON stays forced to JSON.
+    if !request_stream
+        && final_upstream_model != selected_upstream_model
+        && !stream_only_recovery.consumed
+    {
+        attempt_mode = select_upstream_attempt_mode(false, resolved_capabilities.as_ref());
+    }
+    if stream_only_recovery_request_safe
+        && !stream_only_recovery.consumed
+        && stream_only_recovery_leader.is_none()
+        && stream_only_recovery_identity.is_none()
+        && route_has_raw_stream_delivery_evidence(resolved_capabilities.as_ref())
+    {
+        let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+            &active_capability_snapshot,
+            upstream,
+            request_model,
+            &final_upstream_model,
+            upstream_protocol,
+        )
+        .map_err(|error| {
+            GatewayError::upstream_invalid_response(
+                format!("failed to compute route configuration fingerprint: {error}"),
+                "upstream_invalid_response",
+            )
+        })?;
+        let profile_key = DialectProfileKey {
+            upstream_id: upstream.id.clone(),
+            runtime_model_slug: final_upstream_model.clone(),
+            protocol: WireProtocol::from(upstream_protocol),
+        };
+        match begin_stream_only_recovery(
+            state,
+            profile_key.clone(),
+            configuration_fingerprint.clone(),
+        ) {
+            StreamOnlyRecoveryRole::Leader(leader) => {
+                *stream_only_recovery_leader = Some(leader);
+                *stream_only_recovery_identity = Some((profile_key, configuration_fingerprint));
+            }
+            StreamOnlyRecoveryRole::Follower(follower) => {
+                follower.wait().await;
+                stream_only_recovery.consumed = true;
+                stream_only_recovery.final_attempt = true;
+                let fresh = state.capability_snapshot();
+                active_capability_snapshot = (*fresh).clone();
+                resolved_capabilities = resolve_route_capabilities_with_snapshot(
+                    &active_capability_snapshot,
+                    upstream,
+                    request_model,
+                    &final_upstream_model,
+                    upstream_protocol,
+                    requested_features,
+                );
+                attempt_mode = select_upstream_attempt_mode(false, resolved_capabilities.as_ref());
+            }
+            StreamOnlyRecoveryRole::AtCapacity => {
+                stream_only_recovery.consumed = true;
+            }
+        }
+    }
+    if let Some(context) = response_history_context.take() {
+        let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+            &active_capability_snapshot,
+            upstream,
+            request_model,
+            &final_upstream_model,
+            upstream_protocol,
+        )
+        .map_err(|error| {
+            GatewayError::upstream_invalid_response(
+                format!("failed to compute continuation route fingerprint: {error}"),
+                "gateway_response_history_invalid",
+            )
+        })?;
+        let profile_key = DialectProfileKey {
+            upstream_id: upstream.id.clone(),
+            runtime_model_slug: final_upstream_model.clone(),
+            protocol: WireProtocol::from(upstream_protocol),
+        };
+        let profile_reasoning_carrier = active_capability_snapshot
+            .profiles
+            .get(&profile_key)
+            .filter(|profile| {
+                profile.configuration_fingerprint == configuration_fingerprint
+                    && profile.probe_schema_version
+                        == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
+            })
+            .and_then(|profile| profile.reasoning_carrier);
+        let continuation = GatewayContinuationState::new(
+            profile_key,
+            configuration_fingerprint,
+            profile_reasoning_carrier,
+            requested_features.required.clone(),
+            WireProtocol::from(endpoint.native_protocol()),
+            WireProtocol::from(upstream_protocol),
+            context.tool_registry_version(),
+        );
+        response_history_context = Some(context.with_selected_route(continuation, None)?);
+    }
+    if let Some(object) = upstream_body.as_object_mut() {
+        object.insert(
+            "stream".into(),
+            Value::Bool(attempt_mode.uses_upstream_sse()),
+        );
+        if attempt_mode.uses_upstream_sse()
+            && upstream_protocol == UpstreamProtocol::ChatCompletions
+        {
+            if attempt_mode.requests_usage_stream(resolved_capabilities.as_ref()) {
+                let stream_options = object
+                    .entry("stream_options".to_string())
+                    .or_insert_with(|| json!({}));
+                if !stream_options.is_object() {
+                    *stream_options = json!({});
+                }
+                if let Some(stream_options) = stream_options.as_object_mut() {
+                    stream_options.insert("include_usage".into(), Value::Bool(true));
+                }
+            } else {
+                object.remove("stream_options");
+            }
+        }
+    }
+
+    let claude_thinking_signature = if claude_request {
+        Some(ClaudeThinkingSignatureContext {
+            secret: state.config.jwt_secret.clone(),
+            model: final_upstream_model.clone(),
+            upstream_id: upstream.id.clone(),
+            protocol: upstream_protocol_label(upstream_protocol).to_string(),
+            profile_fingerprint: AppState::route_configuration_fingerprint_with_snapshot(
+                &active_capability_snapshot,
+                upstream,
+                request_model,
+                &final_upstream_model,
+                upstream_protocol,
+            )
+            .map_err(|error| {
+                GatewayError::upstream_invalid_response(
+                    format!("failed to compute route configuration fingerprint: {error}"),
+                    "upstream_invalid_response",
+                )
+            })?,
+        })
+    } else {
+        None
+    };
+
+    if preconversion_signature_context.is_none() {
+        if let Some(signature_context) = claude_thinking_signature.as_ref() {
+            apply_claude_thinking_controls_and_replay(
+                &mut upstream_body,
+                resolved_capabilities.as_ref(),
+                signature_context,
+                &mut downgrade_codes,
+            )?;
         }
     }
 
@@ -441,7 +1111,27 @@ pub(super) async fn send_to_upstream(
             strip_unknown_nonstandard_fields = upstream.strip_nonstandard_chat_fields,
             "normalized chat payload for upstream compatibility"
         );
+        if let Some(resolved) = resolved_capabilities.as_ref() {
+            normalize_chat_payload_for_capabilities(&mut upstream_body, resolved);
+        }
     }
+
+    if let Some(resolved) = resolved_capabilities.as_ref() {
+        if let Some(object) = upstream_body.as_object_mut() {
+            if let Some(code) = normalize_image_payload_for_capabilities(
+                object,
+                &ImageDialect::from_resolved(resolved),
+            ) {
+                downgrade_codes.insert(code);
+            }
+        }
+    }
+    apply_resolved_claude_effort_control(
+        &mut upstream_body,
+        upstream_protocol,
+        resolved_capabilities.as_ref(),
+        claude_requested_effort.as_deref(),
+    )?;
 
     let url = join_upstream_url(&upstream.base_url, endpoint_for_upstream(upstream_protocol));
     tracing::info!(
@@ -456,13 +1146,30 @@ pub(super) async fn send_to_upstream(
         final_upstream_model = %final_upstream_model,
         url = %url,
         request_stream,
-        try_upstream_stream,
+        upstream_attempt_mode = attempt_mode.as_str(),
         "dispatching request to upstream service"
     );
     let mut context_retry_attempted = false;
-    let mut tool_choice_tool_retry_attempted = false;
+    let mut dialect_retry_attempted = false;
+    let dialect_retry_source_body = upstream_body.clone();
     let response_header_timeout =
         Duration::from_secs(state.config.upstream_response_header_timeout_seconds.max(1));
+    if attempt_mode.aggregates_sse() {
+        active_request_guard.arm_aggregate_cancellation_log(GatewayUsageLogContext {
+            state: state.clone(),
+            request_id: request_id.to_string(),
+            downstream_id: downstream_key_id.to_string(),
+            downstream_name: downstream_name.to_string(),
+            upstream_id: upstream.id.clone(),
+            upstream_name: Some(upstream.name.clone()),
+            endpoint: endpoint.path().to_string(),
+            model: model.to_string(),
+            inference_strength: inference_strength.map(str::to_string),
+            user_agent: user_agent.map(str::to_string),
+            compatibility: None,
+            started,
+        });
+    }
     let response = loop {
         let send_future = state
             .client_for_url(&url)
@@ -521,17 +1228,30 @@ pub(super) async fn send_to_upstream(
 
         // Get headers before consuming response with .text()
         let headers = response.headers().clone();
-        let error_text = response.text().await.unwrap_or_default();
+        let error_body = response.bytes().await.unwrap_or_default();
+        let error_text = String::from_utf8_lossy(&error_body).to_string();
         let raw_upstream_error_message = extract_upstream_error_message(&error_text);
-        // Some upstreams (e.g. huazi) wrap the real error in a body whose
-        // `code`/`type` fields are the literal string "bad_response_status_code".
-        // That signals a request-format problem that may be caused by tools /
-        // tool_choice, so we detect it from the raw body rather than the
-        // extracted message (which now prefers the human-readable `message`
-        // field over the non-numeric `code`).
-        let upstream_error_is_bad_response_status_code =
-            error_text.contains("bad_response_status_code");
         let upstream_error_code = extract_upstream_error_code(&error_text);
+
+        if !stream_only_recovery.consumed && !dialect_retry_attempted {
+            if let Some(rule) = super::dialect_retry::correction_for_response(
+                status,
+                &error_body,
+                false,
+                resolved_capabilities
+                    .as_ref()
+                    .map(|resolved| resolved.correction_rules.as_slice())
+                    .unwrap_or(&[]),
+            ) {
+                let mut corrected_body = dialect_retry_source_body.clone();
+                if super::dialect_retry::apply_correction_rule(&mut corrected_body, &rule) {
+                    upstream_body = corrected_body;
+                    dialect_retry_attempted = true;
+                    dialect_retry_count = 1;
+                    continue;
+                }
+            }
+        }
 
         // Classify the upstream response to determine how to handle it
         let feedback = UpstreamFeedbackClassification::from_response(
@@ -547,8 +1267,8 @@ pub(super) async fn send_to_upstream(
             feedback,
             &raw_upstream_error_message,
         );
-        // Client-facing message: the upstream's real error text (e.g.
-        // "This token has no access to model deepseek-v4-pro"). Falls back to
+        // Client-facing message: the upstream's real error text when available.
+        // Falls back to
         // a status-based hint when the upstream body had no parseable message.
         let upstream_error_message =
             upstream_client_message(status, feedback, &raw_upstream_error_message);
@@ -610,11 +1330,22 @@ pub(super) async fn send_to_upstream(
                 upstream_body_has_completion_tokens = diagnostics.has_completion_tokens,
                 "upstream rejected request body; payload values withheld"
             );
+            let _ = maybe_queue_dialect_error_probe(
+                state,
+                &upstream.id,
+                normalized_model,
+                &final_upstream_model,
+                upstream_protocol,
+                status,
+                &error_text,
+            )
+            .await;
         }
 
-        // Handle context limit errors first (before feedback classification)
-        if is_context_limit_error(&error_text) {
-            if !context_retry_attempted {
+        // Only a bad-request response can enter the legacy context-cap retry.
+        // Auth, quota, conflict, and server failures keep their original category.
+        if status == StatusCode::BAD_REQUEST && is_context_limit_error(&error_text) {
+            if !stream_only_recovery.consumed && !context_retry_attempted {
                 if let Some((cap_field, current_cap, reduced_cap)) =
                     halve_generation_cap_for_context_retry(&mut upstream_body)
                 {
@@ -642,55 +1373,6 @@ pub(super) async fn send_to_upstream(
                 status.as_u16(),
                 error_excerpt
             ), status));
-        }
-
-        if !tool_choice_tool_retry_attempted
-            && protocol_path == "responses_to_chat"
-            && upstream_error_is_bad_response_status_code
-            && (upstream_body.get("tools").is_some() || upstream_body.get("tool_choice").is_some())
-        {
-            if let Some(object) = upstream_body.as_object_mut() {
-                object.remove("tools");
-                object.remove("tool_choice");
-            }
-            tool_choice_tool_retry_attempted = true;
-            tracing::warn!(
-                request_id = %request_id,
-                downstream_key_id = %downstream_key_id,
-                path = %endpoint.path(),
-                original_model = %model,
-                normalized_model = %normalized_model,
-                selected_upstream_id = %upstream.id,
-                selected_upstream_name = %upstream.name,
-                selected_upstream_protocol = ?upstream_protocol,
-                protocol_transition = %protocol_path,
-                status = status.as_u16(),
-                "responses_to_chat retrying without tools/tool_choice after bad_response_status_code (status={})",
-                status.as_u16()
-            );
-            continue;
-        }
-
-        // If we already retried without tools/tool_choice and still get bad_response_status_code,
-        // the upstream simply doesn't support this model/request. Try next upstream.
-        //
-        // However, if the persistent status is 401/403, the upstream is refusing
-        // authorization (bad API key or model not permitted for this key), not
-        // signalling a protocol/feature gap. Classifying that as
-        // upstream_protocol_unsupported (503) masks the real problem and prevents
-        // the outer loop from trying the next upstream/key. Surface it as an auth
-        // error instead.
-        if tool_choice_tool_retry_attempted && upstream_error_is_bad_response_status_code {
-            if matches!(status.as_u16(), 401 | 403) {
-                return Err(GatewayError::upstream_auth_error(
-                    upstream_error_message.clone(),
-                    status,
-                ));
-            }
-            return Err(GatewayError::upstream_temporary_unavailable(
-                upstream_error_message.clone(),
-                "upstream_protocol_unsupported",
-            ));
         }
 
         if matches!(status.as_u16(), 401 | 403) {
@@ -794,7 +1476,99 @@ pub(super) async fn send_to_upstream(
         }
     };
 
+    let applied_effort_control = applied_claude_effort_control_evidence(
+        &upstream_body,
+        resolved_capabilities.as_ref(),
+        claude_requested_effort.as_deref(),
+    );
     let status = response.status();
+
+    if attempt_mode.aggregates_sse() {
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !content_type.contains("text/event-stream") {
+            return Err(GatewayError::upstream_invalid_response(
+                "upstream returned a non-SSE response for stream aggregation",
+                "upstream_stream_content_type_invalid",
+            ));
+        }
+        let upstream_json = aggregate_upstream_sse_response(
+            response,
+            upstream_protocol,
+            StreamTimeouts::from_config(&state.config),
+        )
+        .await?;
+        let body = match (endpoint, upstream_protocol) {
+            (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
+            (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
+                responses_response_to_chat_payload(&upstream_json)
+                    .map_err(protocol_error_to_gateway)?
+            }
+            (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
+            (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
+                chat_response_to_responses_payload_with_tool_registry(
+                    &upstream_json,
+                    response_history_context
+                        .as_ref()
+                        .and_then(ResponseHistoryContext::tool_registry),
+                )
+                .map_err(protocol_error_to_gateway)?
+            }
+        };
+
+        if status == StatusCode::OK && is_empty_success_response(&body) {
+            return Err(GatewayError::upstream_invalid_response(
+                "upstream returned an empty response body (no content, zero tokens)",
+                "upstream_empty_response",
+            ));
+        }
+        if let Some(context) = response_history_context.as_ref() {
+            context.store_from_response_body(&body);
+        }
+        let usage = usage_from_body(&body);
+        let compatibility = resolved_capabilities.as_ref().map(|resolved| {
+            build_compatibility_usage_metadata(
+                &active_capability_snapshot,
+                upstream,
+                request_model,
+                &final_upstream_model,
+                upstream_protocol,
+                endpoint,
+                resolved,
+                &downgrade_codes,
+                dialect_retry_count,
+                claude_request,
+                attempt_mode,
+            )
+        });
+
+        return Ok(DispatchResult {
+            status,
+            body: DispatchBody::Json(body),
+            request_id: String::new(),
+            response_headers: {
+                let mut headers = HeaderMap::new();
+                append_downgrade_header(&mut headers, &downgrade_codes);
+                if dialect_retry_count > 0 {
+                    headers.insert(
+                        header::HeaderName::from_static("x-chat2responses-dialect-retry"),
+                        HeaderValue::from_static("1"),
+                    );
+                }
+                headers
+            },
+            applied_effort_control: applied_effort_control.clone(),
+            claude_thinking_signature,
+            compatibility,
+            usage,
+            usage_log_timing: UsageLogTiming::Immediate,
+            usage_log_context: None,
+        });
+    }
 
     if request_stream {
         let content_type = response
@@ -819,6 +1593,7 @@ pub(super) async fn send_to_upstream(
                 model: model.to_string(),
                 inference_strength: inference_strength.map(str::to_string),
                 user_agent: user_agent.map(str::to_string),
+                compatibility: None,
                 normalized_model: normalized_model.to_string(),
                 status,
                 error_message: None,
@@ -867,14 +1642,15 @@ pub(super) async fn send_to_upstream(
                 }
                 (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
                 (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
-                    chat_response_to_responses_payload(&upstream_json)
-                        .map_err(protocol_error_to_gateway)?
+                    chat_response_to_responses_payload_with_tool_registry(
+                        &upstream_json,
+                        response_history_context
+                            .as_ref()
+                            .and_then(ResponseHistoryContext::tool_registry),
+                    )
+                    .map_err(protocol_error_to_gateway)?
                 }
             };
-
-            if let Some(context) = response_history_context.as_ref() {
-                context.store_from_response_body(&final_body);
-            }
 
             if status == StatusCode::OK && is_empty_success_response(&final_body) {
                 return Err(GatewayError::upstream_invalid_response(
@@ -883,15 +1659,48 @@ pub(super) async fn send_to_upstream(
                 ));
             }
 
+            if let Some(context) = response_history_context.as_ref() {
+                context.store_from_response_body(&final_body);
+            }
+
             usage_body = Some(final_body.clone());
             synthesize_stream_body(endpoint, &final_body)?
         };
+
+        let compatibility = resolved_capabilities.as_ref().map(|resolved| {
+            build_compatibility_usage_metadata(
+                &active_capability_snapshot,
+                upstream,
+                request_model,
+                &final_upstream_model,
+                upstream_protocol,
+                endpoint,
+                resolved,
+                &downgrade_codes,
+                dialect_retry_count,
+                claude_request,
+                attempt_mode,
+            )
+        });
 
         return Ok(DispatchResult {
             status,
             body: DispatchBody::Stream(body),
             request_id: String::new(),
-            response_headers: HeaderMap::new(),
+            response_headers: {
+                let mut headers = HeaderMap::new();
+                append_downgrade_header(&mut headers, &downgrade_codes);
+                if dialect_retry_count > 0 {
+                    headers.insert(
+                        header::HeaderName::from_static("x-chat2responses-dialect-retry"),
+                        HeaderValue::from_static("1"),
+                    );
+                }
+                headers
+            },
+            applied_effort_control: applied_effort_control.clone(),
+            claude_thinking_signature,
+            compatibility,
             usage_log_timing: if usage_body.is_some() {
                 UsageLogTiming::Immediate
             } else {
@@ -915,6 +1724,10 @@ pub(super) async fn send_to_upstream(
         )
     })?;
 
+    let stream_only_recovery_candidate =
+        has_explicit_zero_output_usage(&upstream_json, upstream_protocol)
+            && is_empty_success_response(&upstream_json);
+
     let body = match (endpoint, upstream_protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
@@ -922,28 +1735,64 @@ pub(super) async fn send_to_upstream(
         }
         (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
         (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
-            chat_response_to_responses_payload(&upstream_json).map_err(protocol_error_to_gateway)?
+            chat_response_to_responses_payload_with_tool_registry(
+                &upstream_json,
+                response_history_context
+                    .as_ref()
+                    .and_then(ResponseHistoryContext::tool_registry),
+            )
+            .map_err(protocol_error_to_gateway)?
         }
     };
+
+    let usage = usage_from_body(&body);
+
+    if status == StatusCode::OK && is_empty_success_response(&body) {
+        return Err(if stream_only_recovery_candidate {
+            recoverable_upstream_empty_response_error()
+        } else {
+            upstream_empty_response_error()
+        });
+    }
 
     if let Some(context) = response_history_context.as_ref() {
         context.store_from_response_body(&body);
     }
 
-    let usage = usage_from_body(&body);
-
-    if status == StatusCode::OK && is_empty_success_response(&body) {
-        return Err(GatewayError::upstream_invalid_response(
-            "upstream returned an empty response body (no content, zero tokens)",
-            "upstream_empty_response",
-        ));
-    }
+    let compatibility = resolved_capabilities.as_ref().map(|resolved| {
+        build_compatibility_usage_metadata(
+            &active_capability_snapshot,
+            upstream,
+            request_model,
+            &final_upstream_model,
+            upstream_protocol,
+            endpoint,
+            resolved,
+            &downgrade_codes,
+            dialect_retry_count,
+            claude_request,
+            attempt_mode,
+        )
+    });
 
     Ok(DispatchResult {
         status,
         body: DispatchBody::Json(body),
         request_id: String::new(),
-        response_headers: HeaderMap::new(),
+        response_headers: {
+            let mut headers = HeaderMap::new();
+            append_downgrade_header(&mut headers, &downgrade_codes);
+            if dialect_retry_count > 0 {
+                headers.insert(
+                    header::HeaderName::from_static("x-chat2responses-dialect-retry"),
+                    HeaderValue::from_static("1"),
+                );
+            }
+            headers
+        },
+        applied_effort_control,
+        claude_thinking_signature,
+        compatibility,
         usage,
         usage_log_timing: UsageLogTiming::Immediate,
         usage_log_context: None,
@@ -1000,5 +1849,74 @@ pub(super) fn protocol_transition_label(
         (EndpointKind::Responses, UpstreamProtocol::Responses) => "native",
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => "chat_to_responses",
         (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => "responses_to_chat",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capabilities::{
+        CapabilitySource, EvidenceState, ReasoningCarrier, ReasoningMode, ResolvedCapability,
+        TokenLimitField,
+    };
+    use std::collections::BTreeMap;
+
+    fn reasoning_control(field: &str, mapped: &str) -> ResolvedCapabilities {
+        ResolvedCapabilities {
+            values: BTreeMap::from([
+                (
+                    Capability::ReasoningOutput,
+                    ResolvedCapability {
+                        state: EvidenceState::Supported,
+                        source: CapabilitySource::Probe,
+                    },
+                ),
+                (
+                    Capability::ReasoningReplay,
+                    ResolvedCapability {
+                        state: EvidenceState::Supported,
+                        source: CapabilitySource::Probe,
+                    },
+                ),
+            ]),
+            token_limit_field: TokenLimitField::Omit,
+            reasoning_mode: ReasoningMode::Optional,
+            reasoning_carrier: ReasoningCarrier::ResponsesReasoningItem,
+            correction_rules: Vec::new(),
+            reasoning_control_field: Some(field.into()),
+            effort_map: BTreeMap::from([("high".into(), mapped.into())]),
+            omit_sampling_fields: BTreeSet::new(),
+            context_window: None,
+            max_output_tokens: None,
+            omit_optional_extensions: false,
+            profile_state: DialectProfileState::Verified,
+            provisional: false,
+            native_preferred: false,
+            adapters: BTreeSet::new(),
+            request_extensions: Vec::new(),
+            field_sources: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn claude_effort_collision_preserves_responses_reasoning_object() {
+        let mut body = json!({
+            "model": "opaque-runtime",
+            "input": "hello",
+            "reasoning": {
+                "effort": "high",
+                "summary": "auto"
+            }
+        });
+        let before = body.clone();
+
+        let _result = apply_resolved_claude_effort_control(
+            &mut body,
+            UpstreamProtocol::Responses,
+            Some(&reasoning_control("reasoning", "maximum")),
+            Some("high"),
+        );
+
+        assert_eq!(body, before);
     }
 }

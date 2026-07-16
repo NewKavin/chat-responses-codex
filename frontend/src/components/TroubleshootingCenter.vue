@@ -53,6 +53,90 @@
             <el-button type="primary" :loading="running" @click="runDiagnostics">开始诊断</el-button>
           </el-form>
         </el-card>
+
+        <el-card v-if="admin && exportCapabilities && importCapabilities" shadow="never" class="panel capability-panel">
+          <template #header>Capability 策略</template>
+          <div class="capability-actions">
+            <el-button size="small" @click="handleExportCapabilities">导出 JSON</el-button>
+            <el-button size="small" @click="openImportDialog">导入 JSON</el-button>
+            <el-button size="small" :loading="loadingProfiles" @click="refreshDialectProfiles">刷新 Profiles</el-button>
+          </div>
+
+          <el-table :data="dialectProfiles" size="small" empty-text="暂无 profile">
+            <el-table-column prop="upstream_id" label="Upstream" min-width="110" />
+            <el-table-column prop="runtime_model_slug" label="Runtime Model" min-width="140" show-overflow-tooltip />
+            <el-table-column prop="protocol" label="Protocol" width="120" />
+            <el-table-column prop="state" label="State" width="110" />
+            <el-table-column prop="currentness" label="Current" width="100" />
+            <el-table-column label="Age" width="100">
+              <template #default="{ row }">
+                {{ row.profile_age_seconds ?? '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="Probe" width="90">
+              <template #default="{ row }">
+                {{ row.probe_version == null ? '-' : `v${row.probe_version}` }}
+              </template>
+            </el-table-column>
+            <el-table-column label="Fingerprint" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ row.fingerprint || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="Evidence" min-width="170" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ row.evidence.codes.join(', ') || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="180">
+              <template #default="{ row }">
+                <el-button size="small" text @click="loadResolved(row)">详情</el-button>
+                <el-button
+                  size="small"
+                  text
+                  @click="runManualProbe(row.upstream_id, row.runtime_model_slug, row.protocol)"
+                >
+                  手动探测
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-alert
+            v-if="resolvedError"
+            class="resolved-alert"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="resolvedError"
+          />
+          <div v-if="selectedResolved" class="resolved-summary">
+            <div class="resolved-meta">
+              <el-tag size="small" effect="plain">{{ selectedResolved.profile.currentness }}</el-tag>
+              <span>Fingerprint: {{ selectedResolved.profile.fingerprint || '-' }}</span>
+              <span>Token: {{ selectedResolved.token.field }} ({{ selectedResolved.token.source }})</span>
+              <span>Reasoning: {{ selectedResolved.reasoning.carrier }}</span>
+            </div>
+            <el-table :data="selectedResolvedCapabilityRows" size="small">
+              <el-table-column prop="capability" label="Capability" min-width="170" />
+              <el-table-column prop="state" label="State" width="120" />
+              <el-table-column prop="source" label="Source" width="120" />
+            </el-table>
+            <el-table :data="selectedResolved.conflicts" size="small" empty-text="No conflicts">
+              <el-table-column prop="subject" label="Conflict" min-width="180" />
+              <el-table-column label="Probe" min-width="160">
+                <template #default="{ row }">
+                  {{ row.probe.code }} ({{ row.probe.state }})
+                </template>
+              </el-table-column>
+              <el-table-column label="Policy" min-width="160">
+                <template #default="{ row }">
+                  {{ row.policy.code }} ({{ row.policy.state }})
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </el-card>
       </el-col>
 
       <el-col :xs="24" :lg="16">
@@ -119,6 +203,24 @@
       </el-col>
     </el-row>
   </div>
+
+  <el-dialog v-model="importDialogVisible" title="导入 Capability JSON" width="720px">
+    <el-input v-model="capabilityJson" type="textarea" :rows="18" spellcheck="false" />
+    <el-alert
+      v-if="importError"
+      class="import-error"
+      type="error"
+      :closable="false"
+      show-icon
+      :title="importError"
+    />
+    <template #footer>
+      <el-button @click="importDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="importingCapabilities" @click="handleImportCapabilities">
+        导入
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
@@ -127,8 +229,12 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type {
   ActiveGatewayRequest,
+  CapabilityConfigurationDocument,
+  DialectProfileSummary,
+  ResolvedCapabilitiesResponse,
   TroubleshootingCheck,
   TroubleshootingClientProfile,
+  TroubleshootingLogFilter,
   TroubleshootingRunRequest,
   TroubleshootingRunResponse
 } from '@/types'
@@ -147,13 +253,34 @@ const props = defineProps<{
   downstreams?: Array<{ id: string; name: string }>
   run: (payload: TroubleshootingRunRequest) => Promise<TroubleshootingRunResponse>
   loadActive: () => Promise<ActiveGatewayRequest[]>
+  exportCapabilities?: () => Promise<CapabilityConfigurationDocument>
+  importCapabilities?: (payload: CapabilityConfigurationDocument) => Promise<void>
+  loadDialectProfiles?: () => Promise<DialectProfileSummary[]>
+  getResolvedCapabilities?: (payload: {
+    upstream_id: string
+    model: string
+    protocol: 'chat_completions' | 'responses'
+  }) => Promise<ResolvedCapabilitiesResponse>
+  queueDialectProbe?: (payload: {
+    upstream_id: string
+    runtime_model_slug: string
+    protocol: 'chat_completions' | 'responses'
+  }) => Promise<{ queued?: boolean }>
 }>()
 
 const router = useRouter()
 const running = ref(false)
 const loadingActive = ref(false)
+const loadingProfiles = ref(false)
+const importingCapabilities = ref(false)
+const importDialogVisible = ref(false)
+const capabilityJson = ref('')
+const importError = ref('')
+const resolvedError = ref('')
 const lastRun = ref<TroubleshootingRunResponse | null>(null)
 const activeRequests = ref<ActiveGatewayRequest[]>([])
+const dialectProfiles = ref<DialectProfileSummary[]>([])
+const selectedResolved = ref<ResolvedCapabilitiesResponse | null>(null)
 
 const profileOptions = Object.entries(clientProfileDefaults).map(([value, profile]) => ({
   value: value as TroubleshootingClientProfile,
@@ -187,6 +314,15 @@ const form = reactive<{
 const modelOptions = computed(() => props.models)
 const downstreams = computed(() => props.downstreams || [])
 const currentProfile = computed(() => getClientProfileDefaults(form.client_profile))
+const selectedResolvedCapabilityRows = computed(() =>
+  selectedResolved.value
+    ? Object.entries(selectedResolved.value.capabilities).map(([capability, resolved]) => ({
+        capability,
+        state: resolved.state,
+        source: resolved.source
+      }))
+    : []
+)
 
 watch(
   () => props.models,
@@ -245,13 +381,93 @@ const loadActiveRequests = async () => {
   }
 }
 
+const refreshDialectProfiles = async () => {
+  if (!props.loadDialectProfiles) return
+  loadingProfiles.value = true
+  try {
+    dialectProfiles.value = await props.loadDialectProfiles()
+  } finally {
+    loadingProfiles.value = false
+  }
+}
+
+const handleExportCapabilities = async () => {
+  if (!props.exportCapabilities) return
+  const payload = await props.exportCapabilities()
+  capabilityJson.value = `${JSON.stringify(payload, null, 2)}\n`
+  await navigator.clipboard.writeText(capabilityJson.value)
+  ElMessage.success('Capability JSON 已复制')
+}
+
+const openImportDialog = () => {
+  importError.value = ''
+  importDialogVisible.value = true
+}
+
+const isCapabilityConfigurationDocument = (
+  value: unknown
+): value is CapabilityConfigurationDocument =>
+  typeof value === 'object' &&
+  value !== null &&
+  !Array.isArray(value) &&
+  'schema_version' in value &&
+  typeof value.schema_version === 'number' &&
+  'revision' in value &&
+  typeof value.revision === 'number'
+
+const handleImportCapabilities = async () => {
+  if (!props.importCapabilities) return
+  importingCapabilities.value = true
+  importError.value = ''
+  try {
+    const payload = JSON.parse(capabilityJson.value)
+    if (!isCapabilityConfigurationDocument(payload)) {
+      throw new Error('Capability JSON 必须包含 numeric schema_version 和 revision')
+    }
+    await props.importCapabilities(payload)
+    importDialogVisible.value = false
+    ElMessage.success('Capability JSON 已导入')
+    await refreshDialectProfiles()
+  } catch (error) {
+    importError.value = error instanceof Error ? error.message : '导入失败'
+    ElMessage.error(importError.value)
+  } finally {
+    importingCapabilities.value = false
+  }
+}
+
+const loadResolved = async (profile: DialectProfileSummary) => {
+  if (!props.getResolvedCapabilities) return
+  resolvedError.value = ''
+  try {
+    selectedResolved.value = await props.getResolvedCapabilities({
+      upstream_id: profile.key.upstream_id,
+      model: profile.key.runtime_model_slug,
+      protocol: profile.key.protocol
+    })
+  } catch (error) {
+    selectedResolved.value = null
+    resolvedError.value = error instanceof Error ? error.message : '无法读取 capability resolved 状态'
+  }
+}
+
+const runManualProbe = async (
+  upstream_id: string,
+  runtime_model_slug: string,
+  protocol: 'chat_completions' | 'responses'
+) => {
+  if (!props.queueDialectProbe) return
+  const result = await props.queueDialectProbe({ upstream_id, runtime_model_slug, protocol })
+  ElMessage.success(result.queued ? '探测任务已入队' : '当前探测队列不可用')
+}
+
 const copySummary = async () => {
   if (!lastRun.value) return
   await navigator.clipboard.writeText(buildTroubleshootingCopySummary(lastRun.value))
   ElMessage.success('诊断摘要已复制')
 }
 
-const openAdminLogs = (filter: Record<string, unknown> | null | undefined) => {
+const openAdminLogs = (filter: TroubleshootingLogFilter | null | undefined) => {
   if (!filter) return
   router.push({
     path: '/admin/logs',
@@ -261,6 +477,7 @@ const openAdminLogs = (filter: Record<string, unknown> | null | undefined) => {
 
 onMounted(() => {
   void loadActiveRequests()
+  void refreshDialectProfiles()
 })
 </script>
 
@@ -299,6 +516,10 @@ onMounted(() => {
   margin-top: 16px;
 }
 
+.capability-panel {
+  margin-top: 16px;
+}
+
 .full-width {
   width: 100%;
 }
@@ -307,6 +528,34 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.capability-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.resolved-alert,
+.import-error {
+  margin-top: 12px;
+}
+
+.resolved-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.resolved-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: #475569;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .result-toolbar,

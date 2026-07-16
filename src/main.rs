@@ -106,14 +106,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .max(1),
         dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
-        admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
-        upstream_http_pool_max_idle_per_host: env_usize("UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST", 32)
-            .max(8),
-        troubleshooting_check_timeout_seconds: env_u64(
-            "TROUBLESHOOTING_CHECK_TIMEOUT_SECONDS",
+        capability_probe_queue_capacity: env_usize("CAPABILITY_PROBE_QUEUE_CAPACITY", 256).max(1),
+        capability_probe_request_timeout_seconds: env_u64(
+            "CAPABILITY_PROBE_REQUEST_TIMEOUT_SECONDS",
             20,
         )
         .max(1),
+        admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
+        upstream_http_pool_max_idle_per_host: env_usize("UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST", 32)
+            .max(8),
+        troubleshooting_check_timeout_seconds: env_u64("TROUBLESHOOTING_CHECK_TIMEOUT_SECONDS", 20)
+            .max(1),
         upstream_connect_timeout_seconds: env_u64("UPSTREAM_CONNECT_TIMEOUT_SECONDS", 30).max(1),
         upstream_response_header_timeout_seconds: env_u64(
             "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS",
@@ -139,6 +142,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     init_tracing(&log_path);
+    if config.jwt_secret == "change_me_in_production" {
+        tracing::warn!(
+            "JWT_SECRET is using the development default; production deployments should set a strong secret because rotating it invalidates outstanding thinking continuations"
+        );
+    }
     tracing::info!(
         bind_addr = %bind_addr,
         state_path = %state_path.display(),
@@ -169,6 +177,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     state.maybe_attach_redis().await;
+    chat_responses_codex::server::CapabilityProbeService::spawn(state.clone());
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,

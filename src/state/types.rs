@@ -33,6 +33,10 @@ pub struct AppConfig {
     pub upstream_model_key_sync_interval_seconds: u64,
     pub dashboard_cache_ttl_seconds: u64,
     pub postgres_pool_max_size: u32,
+    /// Maximum pending atomic probe submission batches. Route jobs inside an
+    /// accepted batch are expanded and deduplicated by `ProbeQueueState`.
+    pub capability_probe_queue_capacity: usize,
+    pub capability_probe_request_timeout_seconds: u64,
     pub admin_logs_page_size_max: usize,
     pub upstream_http_pool_max_idle_per_host: usize,
     pub admin_upstream_timeout_seconds: u64,
@@ -74,6 +78,8 @@ impl Default for AppConfig {
             upstream_model_key_sync_interval_seconds: 900,
             dashboard_cache_ttl_seconds: 30,
             postgres_pool_max_size: 16,
+            capability_probe_queue_capacity: 256,
+            capability_probe_request_timeout_seconds: 20,
             admin_logs_page_size_max: 200,
             upstream_http_pool_max_idle_per_host: 32,
             admin_upstream_timeout_seconds: 30,
@@ -87,7 +93,7 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpstreamConfig {
     #[serde(default)]
     pub id: String,
@@ -293,6 +299,20 @@ impl DownstreamConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompatibilityUsageMetadata {
+    pub protocol_transition: String,
+    pub adapter_types: Vec<String>,
+    pub optional_downgrades: Vec<String>,
+    pub policy_id: Option<String>,
+    pub policy_schema_version: u32,
+    pub policy_digest: String,
+    pub profile_state: String,
+    pub probe_version: u32,
+    pub dialect_retry_count: u8,
+    pub fallback_stage: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageLog {
     pub id: String,
@@ -323,6 +343,8 @@ pub struct UsageLog {
     pub total_tokens: u64,
     pub latency_ms: u64,
     pub created_at: u64,
+    #[serde(default)]
+    pub compatibility: Option<CompatibilityUsageMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

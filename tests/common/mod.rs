@@ -15,6 +15,9 @@ pub async fn setup_test_app() -> (Router, AppState, TempDir) {
 
     let persisted_state = PersistedState::default();
     let state = AppState::new(persisted_state, state_path, config.clone());
+    let (probe_sender, mut probe_receiver) = tokio::sync::mpsc::channel(16);
+    state.set_capability_probe_sender(probe_sender);
+    tokio::spawn(async move { while probe_receiver.recv().await.is_some() {} });
     let app = chat_responses_codex::server::build_router(state.clone());
 
     (app, state, temp_dir)

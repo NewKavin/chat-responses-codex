@@ -18,6 +18,7 @@
 | Cline | Chat Completions | `/v1/chat/completions` | 门户 Cline preset（`baseURL` + `apiKey` + `model`） |
 | OpenCode | Chat Completions | `/v1/chat/completions` | `opencode.json` |
 | Claude Code | Messages | `/v1/messages` | `settings.json`（含 `ANTHROPIC_BASE_URL` 等环境变量） |
+| Hermes | Chat Completions | `/v1/chat/completions` | `config.yaml` |
 | 其他 Anthropic 兼容客户端 | Messages | `/v1/messages` | 门户 Anthropic preset（`baseURL` + `apiKey` + `model`） |
 
 如果你已经登录了门户，优先打开 `<gateway_origin>/portal/integration`。页面会自动读取当前下游 key、当前网关 URL 和 live `/v1/models`，直接生成 Codex / OpenCode / Claude Code / Cline / Anthropic 兼容 的可复制配置。下面这些手工步骤保留着，方便你离线配置或做模板化部署。
@@ -39,11 +40,34 @@
 3. 网关状态：`STATE_PATH` 指向的 JSON 文件，通常通过网关管理页维护
 4. 门户集成页：`<gateway_origin>/portal/integration`
 
-项目里已经准备了三个模板：
+项目里已经准备了客户端配置模板：
 
 - [codex-config.toml.example](../templates/codex/config.toml.example)
-- [codex-model-catalog.json](../templates/codex/model-catalog.json)
 - [gateway-state.example.json](../templates/state/gateway-state.example.json)
+- [opencode.json](../templates/opencode/opencode.json)
+- [claude-code-settings.json](../templates/claude-code/settings.json)
+- [hermes-config.yaml](../templates/hermes/config.yaml)
+
+Codex catalog 必须从已配置的网关读取。下面的流程不会把下游 key 写进 shell 历史，并且只会在 `.models` 是非空数组时更新本地目录：
+
+```bash
+(
+  set -euo pipefail
+  mkdir -p ~/.codex
+  catalog_tmp="$(mktemp)"
+  trap 'rm -f "$catalog_tmp"; unset CHAT2RESPONSES_DOWNSTREAM_KEY' EXIT
+  read -rsp 'Gateway downstream key: ' CHAT2RESPONSES_DOWNSTREAM_KEY
+  printf '\n'
+  curl -fsS '<gateway_origin>/v1/models?client_version=0.144.0' \
+    -H "Authorization: Bearer ${CHAT2RESPONSES_DOWNSTREAM_KEY}" \
+    > "$catalog_tmp"
+  jq -e '(.models | type == "array") and (.models | length > 0)' \
+    "$catalog_tmp" >/dev/null
+  install -m 600 "$catalog_tmp" ~/.codex/model-catalog.json
+)
+```
+
+这个响应中的能力字段来自网关选择的 live catalog witness。不要按模型名手写或补全工具、图像、推理等级等能力。
 
 ## 一把点亮版
 
@@ -54,8 +78,9 @@
 ```bash
 mkdir -p ~/.codex
 cp templates/codex/config.toml.example ~/.codex/config.toml
-cp templates/codex/model-catalog.json ~/.codex/model-catalog.json
 ```
+
+然后执行上一节的 live catalog 获取和非空校验流程。
 
 ### 2. 把 `~/.codex/config.toml` 改成这样
 
@@ -76,6 +101,7 @@ name = "chat-responses-codex"
 base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
+web_search = "disabled"
 ```
 
 把 `<gateway_origin>` 换成你的网关根地址，本机就填你本机监听的网关地址，远程就填你反向代理或公网域名对应的根地址。
@@ -160,6 +186,17 @@ cargo run
 - 如果你走了反向代理，也把代理后的根地址放进 `<gateway_origin>`
 
 Codex 里填的是网关地址，不是上游厂商地址。
+
+## Capability 与降级规则
+
+生产路由不会检查 GLM、DeepSeek、MiniMax、Kimi 或 Qwen 的名字。模型语义由外部 policy 提供，实际 wire 支持由精确 upstream/runtime slug/protocol probe profile 提供。文档能力不能替代 probe 证据。
+
+- 能原样表达时 preserve。
+- 能无损映射时 adapt，例如 Responses namespace/custom tool 到 Chat function tool，并在返回时恢复 identity。
+- 只有明确允许的可选项才 downgrade，并通过响应头和 usage metadata 报告。
+- 显式选择的 hosted tool、最后一个必需工具或其他无法保留的必需能力在调度前 reject。
+
+部署模板、Qwen VLM 渲染和四客户端矩阵见 [PROTOCOL_COMPATIBILITY.md](PROTOCOL_COMPATIBILITY.md) 与 [DEPLOYMENT.md](../DEPLOYMENT.md)。
 
 ## 第二步: 配置网关里的上游模型
 
@@ -319,10 +356,6 @@ requires_openai_auth = true
 
 这个文件也在你本机上，位置由 `~/.codex/config.toml` 里的 `model_catalog_json` 指定。
 
-项目里提供的是：
-
-- [codex-model-catalog.json](../templates/codex/model-catalog.json)
-
 ### 5.1 这个文件是干什么的
 
 它告诉 Codex：
@@ -332,7 +365,7 @@ requires_openai_auth = true
 - 默认推理等级是什么
 - 是否支持工具调用、搜索、流式等
 
-注意：这里的示例目录默认不声明 `supports_search_tool`。对这套网关来说，通用上游并不保证 `web_search` 全链路可用，所以先把搜索能力关掉更稳；只有你确认某个上游真的支持搜索工具时，再手动打开。
+这些字段必须来自 live catalog witness。不要手动声明搜索、工具、图像或推理能力；手写的乐观能力可能让 Codex 发出当前路由无法执行的请求。
 
 ### 5.2 为什么必须和网关一致
 
@@ -342,7 +375,13 @@ Codex 会根据这个目录决定模型是否存在。
 
 ### 5.3 你要改什么
 
-如果你只想先跑通三个模型，就保留这三个示例即可；如果你的环境不同，就把它们替换成你自己的 slug，并同步调整 `display_name`、`priority` 和推理等级。`model_catalog_json` 保持为 `model-catalog.json`，只要这个文件和 `config.toml` 放在同一个 `~/.codex` 目录下就能直接生效。门户集成页生成的目录会直接使用上游 `/v1/models` 返回的原始 slug，不会额外转成小写。
+重新执行前面的 live catalog 获取流程，然后从已验证的目录中选择模型：
+
+```bash
+jq -r '.models[].slug' ~/.codex/model-catalog.json
+```
+
+把其中一个原始 slug 写入 `~/.codex/config.toml` 的 `model` 和 `review_model`。`model_catalog_json` 保持为 `model-catalog.json`；不要把 slug 转成小写、改成别名或手动编辑目录里的能力字段。
 
 ## 第六步: 如果你想直接用模板
 
@@ -353,7 +392,7 @@ Codex 会根据这个目录决定模型是否存在。
 3. 配好上游模型
 4. 配好下游 key
 5. 把 `templates/codex/config.toml.example` 复制到 `~/.codex/config.toml`
-6. 把 `templates/codex/model-catalog.json` 复制到 `~/.codex/model-catalog.json`
+6. 使用下游 key 从 live `/v1/models?client_version=0.144.0` 获取目录，验证 `.models` 非空后写入 `~/.codex/model-catalog.json`
 7. 确认 `base_url` 是网关地址
 8. 确认 `model` 和 `review_model` 都是目录里真实存在的 slug
 
@@ -459,7 +498,7 @@ Codex 启动后选你在目录里写的模型，比如：
 优先检查：
 
 1. `~/.codex/config.toml`
-2. `templates/codex/model-catalog.json`
+2. `~/.codex/model-catalog.json`，必要时重新执行 live catalog 获取和非空校验
 3. 网关 `STATE_PATH`
 4. 网关上游 `protocol`
 5. 网关上游 `supported_models`
@@ -489,5 +528,4 @@ Codex 启动后选你在目录里写的模型，比如：
 - [README.md](../README.md)
 - [DEPLOYMENT.md](../DEPLOYMENT.md)
 - [codex-config.toml.example](../templates/codex/config.toml.example)
-- [codex-model-catalog.json](../templates/codex/model-catalog.json)
 - [gateway-state.example.json](../templates/state/gateway-state.example.json)

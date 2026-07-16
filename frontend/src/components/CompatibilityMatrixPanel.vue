@@ -4,7 +4,7 @@
       <div class="panel-head">
         <div>
           <h3>客户端兼容矩阵</h3>
-          <p>批量检查下游对 Codex、opencode 和 Hermes 的兼容路径与回退阶段。</p>
+          <p>批量检查下游对 Codex、opencode、Claude Code 和 Hermes 的兼容路径、语义证据与回退阶段。</p>
         </div>
         <div v-if="lastRun" class="summary-tags">
           <el-tag type="success" effect="light">{{ lastRun.summary.passed }} 通过</el-tag>
@@ -42,6 +42,47 @@
       </div>
 
       <el-table :data="lastRun.cells" size="small">
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="cell-details">
+              <div class="detail-meta">
+                <span>Profile: {{ row.profile_state || 'unknown' }}</span>
+                <span>Currentness: {{ row.profile_currentness || 'missing' }}</span>
+                <span>Profile age: {{ row.profile_age_seconds ?? '-' }} s</span>
+                <span>Probe {{ row.probe_version == null ? '-' : `v${row.probe_version}` }}</span>
+                <span>Runtime: {{ row.runtime_model_slug || row.model_slug }}</span>
+                <span>Transition: {{ row.protocol_transition || 'native' }}</span>
+                <span>Retry: {{ row.dialect_retry_count ?? 0 }}</span>
+                <span v-if="row.first_meaningful_event_ms != null">
+                  First event: {{ row.first_meaningful_event_ms }} ms
+                </span>
+              </div>
+              <div v-if="row.adapter_set?.length" class="detail-meta">
+                <span>Adapters: {{ row.adapter_set.join(', ') }}</span>
+              </div>
+              <el-table :data="row.check_results || []" size="small" class="check-table">
+                <el-table-column prop="id" label="检查项" min-width="180" />
+                <el-table-column label="结果" width="100">
+                  <template #default="{ row: check }">
+                    <el-tag :type="getMatrixCheckStatusMeta(check).type" effect="plain" size="small">
+                      {{ getMatrixCheckStatusMeta(check).label }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="观测值" width="110">
+                  <template #default="{ row: check }">
+                    {{ check.observed_value ?? '-' }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="证据代码" min-width="220">
+                  <template #default="{ row: check }">
+                    {{ (check.codes || []).join(', ') || '-' }}
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="model_slug" label="模型" min-width="180" />
         <el-table-column label="客户端" min-width="120">
           <template #default="{ row }">
@@ -57,6 +98,26 @@
         <el-table-column label="Fallback" min-width="140">
           <template #default="{ row }">
             {{ getFallbackStageLabel(row.fallback_stage) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="Profile" min-width="110">
+          <template #default="{ row }">
+            {{ row.profile_state || 'unknown' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="Transition" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.protocol_transition || 'native' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="Adapters" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.adapter_set?.join(', ') || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="Retry" width="80">
+          <template #default="{ row }">
+            {{ row.dialect_retry_count ?? 0 }}
           </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
@@ -89,6 +150,7 @@ import type {
 import {
   getClientProfileDefaults,
   getFallbackStageLabel,
+  getMatrixCheckStatusMeta,
   getTroubleshootingStatusMeta,
   matrixClientProfiles
 } from '@/utils/troubleshooting'
@@ -190,6 +252,24 @@ const copySummary = async () => {
 
 .matrix-meta {
   margin-bottom: 16px;
+}
+
+.cell-details {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.detail-meta {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.check-table {
+  width: 100%;
 }
 
 .downstream-select {

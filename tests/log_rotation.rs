@@ -39,6 +39,7 @@ async fn usage_logs_rotate_by_size_into_archive_files() {
                 total_tokens: 2,
                 latency_ms: 10,
                 created_at: index,
+                compatibility: None,
             })
             .await
             .unwrap();
@@ -111,6 +112,7 @@ async fn load_from_path_loads_rotated_usage_logs() {
                 total_tokens: 2,
                 latency_ms: 10,
                 created_at: index,
+                compatibility: None,
             })
             .await
             .unwrap();
@@ -174,6 +176,7 @@ async fn usage_log_archives_are_capped_by_count() {
                 total_tokens: 2,
                 latency_ms: 10,
                 created_at: index,
+                compatibility: None,
             })
             .await
             .unwrap();
@@ -229,6 +232,7 @@ async fn load_from_path_prunes_existing_usage_log_archives() {
                 total_tokens: 2,
                 latency_ms: 10,
                 created_at: index,
+                compatibility: None,
             })
             .await
             .unwrap();

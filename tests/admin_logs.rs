@@ -58,6 +58,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 150,
                 latency_ms: 500,
                 created_at: now,
+                compatibility: None,
             },
             UsageLog {
                 id: "log-2".to_string(),
@@ -80,6 +81,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 75,
                 latency_ms: 300,
                 created_at: now - 3600, // 1 hour ago
+                compatibility: None,
             },
             UsageLog {
                 id: "log-3".to_string(),
@@ -102,6 +104,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 0,
                 latency_ms: 100,
                 created_at: now - 7200, // 2 hours ago
+                compatibility: None,
             },
             UsageLog {
                 id: "log-4".to_string(),
@@ -124,6 +127,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 0,
                 latency_ms: 50,
                 created_at: now - 86000, // within 1 day
+                compatibility: None,
             },
             UsageLog {
                 id: "log-5".to_string(),
@@ -146,6 +150,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 300,
                 latency_ms: 800,
                 created_at: now - 604000, // within 7 days
+                compatibility: None,
             },
         ],
         announcement: None,

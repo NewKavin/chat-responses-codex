@@ -408,6 +408,7 @@ pub(super) async fn portal_rotate_key(
         let generated = generate_downstream_key("key");
         let plaintext_key = generated.plaintext;
         downstream.hash = generated.hash;
+        downstream.plaintext_key = Some(plaintext_key.clone());
 
         let prefix_len = plaintext_key.len().min(16);
         downstream.plaintext_key_prefix = Some(format!(

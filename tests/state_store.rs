@@ -31,6 +31,126 @@ async fn persisted_state_without_announcement_still_deserializes() {
 }
 
 #[tokio::test]
+async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_hash() {
+    let stored_plaintext = generate_downstream_key("stored").plaintext;
+    let authoritative_hash = generate_downstream_key("authoritative").hash;
+    let state = AppState::new(
+        PersistedState {
+            downstreams: vec![DownstreamConfig {
+                id: "downstream-mismatched-credential".to_string(),
+                name: "Mismatched credential".to_string(),
+                hash: authoritative_hash,
+                plaintext_key: Some(stored_plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![],
+                rate_limit_enabled: true,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        unique_state_path(),
+        AppConfig::default(),
+    );
+
+    assert!(state
+        .downstream_for_secret(&stored_plaintext)
+        .await
+        .is_none());
+    assert_eq!(state.snapshot().await.downstreams[0].plaintext_key, None);
+}
+
+#[tokio::test]
+async fn app_state_clears_invalid_plaintext_before_mutation_persistence_and_publication() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let stored_plaintext = generate_downstream_key("stored").plaintext;
+    let authoritative_hash = generate_downstream_key("authoritative").hash;
+    let state = AppState::new(
+        PersistedState::default(),
+        state_path.clone(),
+        AppConfig::default(),
+    );
+
+    state
+        .insert_downstream(DownstreamConfig {
+            id: "downstream-mismatched-mutation".to_string(),
+            name: "Mismatched mutation".to_string(),
+            hash: authoritative_hash,
+            plaintext_key: Some(stored_plaintext.clone()),
+            plaintext_key_prefix: None,
+            model_allowlist: vec![],
+            rate_limit_enabled: true,
+            per_minute_limit: 60,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        })
+        .await
+        .unwrap();
+
+    assert!(state
+        .downstream_for_secret(&stored_plaintext)
+        .await
+        .is_none());
+    assert_eq!(state.snapshot().await.downstreams[0].plaintext_key, None);
+    let persisted: PersistedState =
+        serde_json::from_slice(&tokio::fs::read(state_path).await.unwrap()).unwrap();
+    assert_eq!(persisted.downstreams[0].plaintext_key, None);
+}
+
+#[tokio::test]
+async fn legacy_add_downstream_clears_invalid_plaintext_before_publication() {
+    let stored_plaintext = generate_downstream_key("stored").plaintext;
+    let authoritative_hash = generate_downstream_key("authoritative").hash;
+    let state = AppState::new(
+        PersistedState::default(),
+        unique_state_path(),
+        AppConfig::default(),
+    );
+
+    state
+        .add_downstream(DownstreamConfig {
+            id: "legacy-add-mismatched-credential".to_string(),
+            name: "Legacy add mismatched credential".to_string(),
+            hash: authoritative_hash,
+            plaintext_key: Some(stored_plaintext.clone()),
+            plaintext_key_prefix: None,
+            model_allowlist: vec![],
+            rate_limit_enabled: true,
+            per_minute_limit: 60,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        })
+        .await
+        .unwrap();
+
+    assert!(state
+        .downstream_for_secret(&stored_plaintext)
+        .await
+        .is_none());
+    assert_eq!(state.snapshot().await.downstreams[0].plaintext_key, None);
+}
+
+#[tokio::test]
 async fn file_store_persists_announcement_payload() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -90,6 +210,7 @@ fn usage_log(
         total_tokens,
         latency_ms: 100,
         created_at,
+        compatibility: None,
     }
 }
 
@@ -184,6 +305,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     total_tokens: 20,
                     latency_ms: 100,
                     created_at: now - 60,
+                    compatibility: None,
                 },
                 UsageLog {
                     id: "a-log".to_string(),
@@ -206,6 +328,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     total_tokens: 30,
                     latency_ms: 100,
                     created_at: now - 60,
+                    compatibility: None,
                 },
             ],
             announcement: None,
@@ -465,6 +588,7 @@ async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
             total_tokens: 2,
             latency_ms: 10,
             created_at: chat_responses_codex::state::unix_seconds(),
+            compatibility: None,
         })
         .await
         .unwrap();

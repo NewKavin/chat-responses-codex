@@ -2,14 +2,48 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlaygroundAssistantResult,
   buildPlaygroundChatPayload,
+  classifyPlaygroundAttachment,
   extractChatCompletionText,
   formatPlaygroundCompletionMeta,
   formatPlaygroundStreamStatus,
   formatPlaygroundUsageText,
   parseGatewayModels,
   parseSSELine,
+  selectPlayableModels,
+  type GatewayModelResponse,
   type UploadedFileContext
 } from '../../src/utils/playground'
+
+describe('playground live model selection', () => {
+  const live: GatewayModelResponse = {
+    data: [
+      { id: 'Qwen/Qwen3-235B-A22B' },
+      { id: 'deepseek-ai/deepseek-v4-flash' },
+      { id: 'grok-4.20-fast' }
+    ]
+  }
+
+  it('preserves allowlist order while intersecting the live catalog', () => {
+    expect(
+      selectPlayableModels(
+        ['deepseek-v4-flash', 'grok-4.20-fast', 'Qwen/Qwen3-235B-A22B'],
+        live
+      )
+    ).toEqual(['grok-4.20-fast', 'Qwen/Qwen3-235B-A22B'])
+  })
+
+  it('uses every live model when the allowlist is empty', () => {
+    expect(selectPlayableModels([], live)).toEqual([
+      'Qwen/Qwen3-235B-A22B',
+      'deepseek-ai/deepseek-v4-flash',
+      'grok-4.20-fast'
+    ])
+  })
+
+  it('never accepts historical model statistics as an input', () => {
+    expect(selectPlayableModels(['stale-model'], { data: [] })).toEqual([])
+  })
+})
 
 describe('playground model parsing', () => {
   it('deduplicates and trims model ids from gateway response', () => {
@@ -38,6 +72,14 @@ describe('playground model parsing', () => {
 })
 
 describe('playground chat payload', () => {
+  it('omits optional controls in automatic mode', () => {
+    expect(buildPlaygroundChatPayload({ model: 'opaque', question: 'hello', stream: true })).toEqual({
+      model: 'opaque',
+      messages: [{ role: 'user', content: 'hello' }],
+      stream: true
+    })
+  })
+
   it('builds message list with trimmed content', () => {
     const payload = buildPlaygroundChatPayload({
       model: 'gpt-4',
@@ -149,6 +191,22 @@ describe('playground chat payload', () => {
     } as any)
 
     expect((payload as any).inference_strength).toBe('high')
+  })
+})
+
+describe('playground attachment classification', () => {
+  it('accepts bounded text and structured-text files', () => {
+    expect(classifyPlaygroundAttachment('notes.md', 'text/markdown')).toEqual({ accepted: true })
+    expect(classifyPlaygroundAttachment('config.json', 'application/json')).toEqual({ accepted: true })
+    expect(classifyPlaygroundAttachment('main.rs', '')).toEqual({ accepted: true })
+  })
+
+  it('rejects binary and image files before File.text()', () => {
+    expect(classifyPlaygroundAttachment('photo.png', 'image/png')).toEqual({
+      accepted: false,
+      message: '当前训练场仅支持文本附件'
+    })
+    expect(classifyPlaygroundAttachment('archive.zip', 'application/zip').accepted).toBe(false)
   })
 })
 

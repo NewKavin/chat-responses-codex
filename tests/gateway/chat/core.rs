@@ -1,4 +1,9 @@
 use super::*;
+use chat_responses_codex::capabilities::{
+    Capability, CapabilityConfiguration, DialectProfileKey, DialectProfileState, EvidenceState,
+    ReasoningCarrier, RouteCapabilityOverride, UpstreamDialectProfile, WireProtocol,
+};
+use std::collections::BTreeMap;
 
 #[tokio::test]
 async fn downstream_rejected_request_is_logged_with_error_status() {
@@ -645,6 +650,48 @@ async fn downstream_chat_request_uses_exact_model_name_for_upstream_request_body
         }))
         .unwrap();
         let state = AppState::new(state, state_path, AppConfig::default());
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                route_overrides: vec![RouteCapabilityOverride {
+                    id: "deepseek-reasoning".into(),
+                    priority: 10,
+                    selector: chat_responses_codex::capabilities::CapabilitySelector {
+                        upstream_id: Some("up-1".into()),
+                        runtime_model: Some("deepseek-ai/deepseek-v4-pro".into()),
+                        protocol: Some(WireProtocol::ChatCompletions),
+                        ..Default::default()
+                    },
+                    capabilities: BTreeMap::from([
+                        (Capability::ReasoningOutput, EvidenceState::Supported),
+                        (Capability::ReasoningReplay, EvidenceState::Supported),
+                    ]),
+                    reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            upstream_id: "up-1".into(),
+            runtime_model_slug: "deepseek-ai/deepseek-v4-pro".into(),
+            protocol: WireProtocol::ChatCompletions,
+        });
+        profile.state = DialectProfileState::Verified;
+        profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
+        profile
+            .capabilities
+            .insert(Capability::TextInput, EvidenceState::Supported);
+        profile
+            .capabilities
+            .insert(Capability::TextStream, EvidenceState::Supported);
+        profile
+            .capabilities
+            .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+        profile
+            .capabilities
+            .insert(Capability::ReasoningReplay, EvidenceState::Supported);
+        state.upsert_dialect_profile(profile).await.unwrap();
 
         let app = build_router(state.clone());
         let request = Request::builder()
