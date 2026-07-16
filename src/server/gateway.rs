@@ -1089,6 +1089,13 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/upstreams/qualify-models",
+            post(admin_qualify_upstream_models).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
             "/api/admin/models",
             get(admin_list_models).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),

@@ -3,14 +3,15 @@ use crate::state::{
     fetch_models_from_upstream_keys_concurrently, portal_model_is_allowed, unix_seconds,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState, DefaultModelContextConfig,
     DownstreamConfig, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
-    UpstreamConfig, UpstreamMutationError, UsageLog, UsageLogQuery,
+    ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
+    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -879,6 +880,57 @@ pub(super) struct DiscoverUpstreamModelsPayload {
     keys: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub(super) struct QualifyModelsPayload {
+    apply: bool,
+    upstream_ids: Vec<String>,
+    downstream_id: String,
+    excluded_models: Vec<String>,
+}
+
+impl Default for QualifyModelsPayload {
+    fn default() -> Self {
+        Self {
+            apply: false,
+            upstream_ids: Vec::new(),
+            downstream_id: "test".to_string(),
+            excluded_models: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct QualifyModelsSummary {
+    retained_models: usize,
+    full_models: usize,
+    adapted_models: usize,
+    removed_models: usize,
+    operational_failures: usize,
+    upstreams: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct QualifyModelsUpstreamResult {
+    upstream_id: String,
+    retained_models: Vec<String>,
+    full_models: Vec<String>,
+    adapted_models: Vec<String>,
+    removed_models: Vec<String>,
+    operational_models: Vec<String>,
+    evidence: Vec<ModelQualificationEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct QualifyModelsResponse {
+    applied: bool,
+    downstream_id: String,
+    summary: QualifyModelsSummary,
+    upstreams: Vec<QualifyModelsUpstreamResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apply_summary: Option<ModelQualificationApplySummary>,
+}
+
 pub(super) async fn build_model_probe_response(
     state: &AppState,
     allowlist: Option<&[String]>,
@@ -1261,6 +1313,145 @@ pub(super) async fn admin_discover_upstream_models(
 
     (StatusCode::OK, Json(response)).into_response()
 }
+
+pub(super) async fn admin_qualify_upstream_models(
+    State(state): State<AppState>,
+    Json(payload): Json<QualifyModelsPayload>,
+) -> Response {
+    let mut decisions = match state.qualify_active_upstreams(&payload.upstream_ids).await {
+        Ok(decisions) => decisions,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "模型资格验证失败"}})),
+            )
+                .into_response();
+        }
+    };
+    let excluded = payload
+        .excluded_models
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect::<BTreeSet<_>>();
+    for decision in &mut decisions {
+        for key in &mut decision.keys {
+            for model in &excluded {
+                if key.retained.remove(model) {
+                    key.removed.insert(model.clone());
+                }
+                key.full.remove(model);
+                key.adapted.remove(model);
+            }
+        }
+    }
+
+    let (summary, upstreams) = summarize_qualification(&decisions);
+    let apply_summary = if payload.apply {
+        match state
+            .apply_model_qualification(decisions, &payload.downstream_id)
+            .await
+        {
+            Ok(summary) => Some(summary),
+            Err(error) => {
+                let status = match error.kind() {
+                    std::io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
+                    std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                return (
+                    status,
+                    Json(json!({"error": {"message": "模型资格结果未能安全应用"}})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    Json(QualifyModelsResponse {
+        applied: payload.apply,
+        downstream_id: payload.downstream_id,
+        summary,
+        upstreams,
+        apply_summary,
+    })
+    .into_response()
+}
+
+fn summarize_qualification(
+    decisions: &[UpstreamQualificationDecision],
+) -> (QualifyModelsSummary, Vec<QualifyModelsUpstreamResult>) {
+    let mut global_retained = BTreeSet::new();
+    let mut global_full = BTreeSet::new();
+    let mut global_adapted = BTreeSet::new();
+    let mut global_removed = BTreeSet::new();
+    let mut global_operational = BTreeSet::new();
+    let mut upstreams = Vec::with_capacity(decisions.len());
+
+    for decision in decisions {
+        let retained = decision
+            .keys
+            .iter()
+            .flat_map(|key| key.retained.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let full = decision
+            .keys
+            .iter()
+            .flat_map(|key| key.full.iter().cloned())
+            .filter(|model| retained.contains(model))
+            .collect::<BTreeSet<_>>();
+        let adapted = decision
+            .keys
+            .iter()
+            .flat_map(|key| key.adapted.iter().cloned())
+            .filter(|model| retained.contains(model) && !full.contains(model))
+            .collect::<BTreeSet<_>>();
+        let removed = decision
+            .keys
+            .iter()
+            .flat_map(|key| key.removed.iter().cloned())
+            .filter(|model| !retained.contains(model))
+            .collect::<BTreeSet<_>>();
+        let operational = decision
+            .evidence
+            .iter()
+            .filter(|item| item.level == ModelQualificationLevel::OperationalFailure)
+            .map(|item| item.model.clone())
+            .collect::<BTreeSet<_>>();
+
+        global_retained.extend(retained.iter().cloned());
+        global_full.extend(full.iter().cloned());
+        global_adapted.extend(adapted.iter().cloned());
+        global_removed.extend(removed.iter().cloned());
+        global_operational.extend(operational.iter().cloned());
+        upstreams.push(QualifyModelsUpstreamResult {
+            upstream_id: decision.upstream_id.clone(),
+            retained_models: retained.into_iter().collect(),
+            full_models: full.into_iter().collect(),
+            adapted_models: adapted.into_iter().collect(),
+            removed_models: removed.into_iter().collect(),
+            operational_models: operational.into_iter().collect(),
+            evidence: decision.evidence.clone(),
+        });
+    }
+    global_adapted.retain(|model| !global_full.contains(model));
+    global_removed.retain(|model| !global_retained.contains(model));
+
+    (
+        QualifyModelsSummary {
+            retained_models: global_retained.len(),
+            full_models: global_full.len(),
+            adapted_models: global_adapted.len(),
+            removed_models: global_removed.len(),
+            operational_failures: global_operational.len(),
+            upstreams: upstreams.len(),
+        },
+        upstreams,
+    )
+}
+
 /// Create a new upstream
 pub(super) async fn admin_create_upstream(
     State(state): State<AppState>,
