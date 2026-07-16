@@ -1,4 +1,22 @@
 use chat_responses_codex::capabilities::*;
+use chat_responses_codex::state::{
+    classify_qualification_level, ModelQualificationCategory, ModelQualificationLevel,
+};
+
+fn verified_profile(
+    upstream_id: &str,
+    runtime_model_slug: &str,
+    protocol: WireProtocol,
+) -> UpstreamDialectProfile {
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: upstream_id.into(),
+        runtime_model_slug: runtime_model_slug.into(),
+        protocol,
+    });
+    profile.configuration_fingerprint = "test-fingerprint".into();
+    profile.state = DialectProfileState::Verified;
+    profile
+}
 
 #[test]
 fn route_fingerprint_changes_for_every_dialect_input() {
@@ -60,4 +78,56 @@ fn operational_probe_failure_does_not_erase_verified_evidence() {
         EvidenceState::Supported
     );
     assert_eq!(profile.last_attempt_at, Some(99));
+}
+
+#[test]
+fn direct_success_with_complete_agent_profile_is_full() {
+    let mut profile = verified_profile("up", "opaque", WireProtocol::ChatCompletions);
+    for capability in [
+        Capability::TextInput,
+        Capability::TextStream,
+        Capability::FunctionTools,
+        Capability::ToolContinuation,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    assert_eq!(
+        classify_qualification_level(ModelQualificationCategory::Passed, Some(&profile)),
+        ModelQualificationLevel::Full,
+    );
+}
+
+#[test]
+fn usable_text_with_partial_profile_is_adapted_not_unusable() {
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: "up".into(),
+        runtime_model_slug: "opaque".into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Partial;
+    profile
+        .capabilities
+        .insert(Capability::TextInput, EvidenceState::Supported);
+    assert_eq!(
+        classify_qualification_level(ModelQualificationCategory::Passed, Some(&profile)),
+        ModelQualificationLevel::Adapted,
+    );
+}
+
+#[test]
+fn transient_failures_never_classify_as_unusable() {
+    for category in [
+        ModelQualificationCategory::Authentication,
+        ModelQualificationCategory::RateLimit,
+        ModelQualificationCategory::UpstreamUnavailable,
+        ModelQualificationCategory::Timeout,
+        ModelQualificationCategory::Network,
+    ] {
+        assert_eq!(
+            classify_qualification_level(category, None),
+            ModelQualificationLevel::OperationalFailure,
+        );
+    }
 }
