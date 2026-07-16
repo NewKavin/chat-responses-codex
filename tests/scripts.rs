@@ -805,6 +805,23 @@ fi
 }
 
 #[test]
+fn opencode_smoke_uses_inline_config_and_temporary_xdg_paths() {
+    let script = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
+    assert!(script.contains("OPENCODE_CONFIG_CONTENT=\"$OPENCODE_CONFIG_CONTENT\""));
+    assert!(script.contains("OPENCODE_DISABLE_PROJECT_CONFIG=1"));
+    assert!(script.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
+    for name in [
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        assert!(script.contains(name), "missing {name}");
+    }
+    assert!(!script.contains("OPENCODE_CONFIG=\"$OPENCODE_CONFIG_FILE\""));
+}
+
+#[test]
 fn installed_client_smoke_keeps_exact_primary_versions() {
     let script = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
     assert!(script.contains("DEFAULT_CODEX_VERSION=\"0.144.0\""));

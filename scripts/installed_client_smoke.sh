@@ -256,8 +256,7 @@ EOF
 fi
 
 if client_enabled opencode; then
-  OPENCODE_CONFIG_FILE="$WORKDIR/opencode.json"
-  jq -n \
+  OPENCODE_CONFIG_CONTENT="$(jq -nc \
     --arg base_url "$API_BASE_URL" \
     --arg model "$MODEL_SLUG" \
     '{
@@ -273,14 +272,26 @@ if client_enabled opencode; then
       }
     },
     permission: {"*": "deny", read: "allow"}
-  }' >"$OPENCODE_CONFIG_FILE"
+  }')"
+  OPENCODE_XDG="$WORKDIR/opencode-xdg"
+  mkdir -p "$OPENCODE_XDG"/{data,config,state,cache}
+  OPENCODE_ENV=(
+    OPENCODE_CONFIG_CONTENT="$OPENCODE_CONFIG_CONTENT"
+    OPENCODE_DISABLE_PROJECT_CONFIG=1
+    OPENCODE_DISABLE_AUTOUPDATE=1
+    XDG_DATA_HOME="$OPENCODE_XDG/data"
+    XDG_CONFIG_HOME="$OPENCODE_XDG/config"
+    XDG_STATE_HOME="$OPENCODE_XDG/state"
+    XDG_CACHE_HOME="$OPENCODE_XDG/cache"
+    CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY"
+  )
 
   record_case opencode text_task "$TEXT_MARKER" "$WORKDIR/opencode-text.jsonl" \
-    env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+    env "${OPENCODE_ENV[@]}" \
     "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
     "$TEXT_PROMPT"
   record_case opencode read_only_tool_task "$READ_MARKER" "$WORKDIR/opencode-tool.jsonl" \
-    env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+    env "${OPENCODE_ENV[@]}" \
     "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
     "$READ_FILE_PROMPT"
 fi
@@ -496,7 +507,7 @@ if [[ -n "${ATTACHMENT_FILE:-}" ]]; then
     if "$OPENCODE_BIN" run --help 2>&1 | grep -q -- '--file'; then
       ATTACHMENT_MARKER="OPENCODE_ATTACHMENT_SMOKE_OK"
       record_case opencode attachment "$ATTACHMENT_MARKER" "$WORKDIR/opencode-attachment.jsonl" \
-        env OPENCODE_CONFIG="$OPENCODE_CONFIG_FILE" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+        env "${OPENCODE_ENV[@]}" \
         "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
         --file "$ATTACHMENT_FILE" \
         "Inspect the attached file, then reply with exactly ${ATTACHMENT_MARKER}."
