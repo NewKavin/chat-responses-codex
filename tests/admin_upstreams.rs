@@ -8,13 +8,15 @@
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use axum::routing::get;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    ApiKeyModelConfig, AppConfig, AppState, PersistedState, UpstreamConfig,
+    qualify_model_on_upstream, ApiKeyModelConfig, AppConfig, AppState, ModelQualificationCategory,
+    PersistedState, UpstreamConfig,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -94,6 +96,141 @@ fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState 
     };
 
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
+}
+
+fn qualification_mock_response(model: &str, protocol: UpstreamProtocol) -> Response {
+    match model {
+        "chat-ok" => Json(json!({
+            "choices": [{"message": {"content": "OK"}}]
+        }))
+        .into_response(),
+        "responses-ok" => Json(json!({"output_text": "OK"})).into_response(),
+        "empty" => match protocol {
+            UpstreamProtocol::ChatCompletions => {
+                Json(json!({"choices": [{"message": {"content": ""}}]})).into_response()
+            }
+            UpstreamProtocol::Responses => Json(json!({"output": []})).into_response(),
+        },
+        "malformed" => (StatusCode::OK, "not-json").into_response(),
+        "oversized" => (StatusCode::OK, "x".repeat(1_048_577)).into_response(),
+        "unauthorized" => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": {"message": "secret-key rejected"}})),
+        )
+            .into_response(),
+        "limited" => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": {"message": "rate limited"}})),
+        )
+            .into_response(),
+        "missing" => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"code": "model_not_found"}})),
+        )
+            .into_response(),
+        "unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "temporarily unavailable"}})),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "unknown model"}})),
+        )
+            .into_response(),
+    }
+}
+
+async fn spawn_qualification_upstream() -> String {
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                qualification_mock_response(
+                    body.get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    UpstreamProtocol::ChatCompletions,
+                )
+            }),
+        )
+        .route(
+            "/v1/responses",
+            post(|Json(body): Json<Value>| async move {
+                qualification_mock_response(
+                    body.get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    UpstreamProtocol::Responses,
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn qualification_probe_accepts_meaningful_chat_and_responses_output() {
+    let mock = spawn_qualification_upstream().await;
+    let client = reqwest::Client::new();
+
+    let chat = qualify_model_on_upstream(
+        &client,
+        &mock,
+        "secret-key",
+        "chat-ok",
+        UpstreamProtocol::ChatCompletions,
+        2,
+    )
+    .await;
+    assert_eq!(chat.category, ModelQualificationCategory::Passed);
+
+    let responses = qualify_model_on_upstream(
+        &client,
+        &mock,
+        "secret-key",
+        "responses-ok",
+        UpstreamProtocol::Responses,
+        2,
+    )
+    .await;
+    assert_eq!(responses.category, ModelQualificationCategory::Passed);
+}
+
+#[tokio::test]
+async fn qualification_probe_returns_sanitized_categories() {
+    let mock = spawn_qualification_upstream().await;
+    let client = reqwest::Client::new();
+    for (model, expected) in [
+        ("empty", ModelQualificationCategory::EmptyResponse),
+        ("malformed", ModelQualificationCategory::MalformedResponse),
+        ("oversized", ModelQualificationCategory::MalformedResponse),
+        ("unauthorized", ModelQualificationCategory::Authentication),
+        ("limited", ModelQualificationCategory::RateLimit),
+        ("missing", ModelQualificationCategory::ModelNotFound),
+        (
+            "unavailable",
+            ModelQualificationCategory::UpstreamUnavailable,
+        ),
+    ] {
+        let result = qualify_model_on_upstream(
+            &client,
+            &mock,
+            "secret-key",
+            model,
+            UpstreamProtocol::ChatCompletions,
+            2,
+        )
+        .await;
+        assert_eq!(result.category, expected);
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("secret-key"));
+        assert!(!serialized.contains(&mock));
+    }
 }
 
 /// Helper function to get a valid JWT token

@@ -65,8 +65,8 @@ pub use model_discovery::{
     KeyModelDiscoveryResult,
 };
 pub use model_qualification::{
-    classify_qualification_level, ModelQualificationCategory, ModelQualificationEvidence,
-    ModelQualificationLevel,
+    classify_qualification_level, qualify_model_on_upstream, DirectQualificationResult,
+    ModelQualificationCategory, ModelQualificationEvidence, ModelQualificationLevel,
 };
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
