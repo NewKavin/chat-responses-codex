@@ -29,6 +29,48 @@ export interface BuildPlaygroundChatRequestInput {
 
 export const inferenceStrengthOptions = ['xhigh', 'high', 'medium', 'low'] as const
 
+const TEXT_EXTENSIONS = new Set([
+  'txt',
+  'md',
+  'markdown',
+  'json',
+  'jsonl',
+  'yaml',
+  'yml',
+  'xml',
+  'csv',
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'vue',
+  'rs',
+  'py',
+  'go',
+  'java',
+  'kt',
+  'toml',
+  'ini',
+  'conf',
+  'sh',
+  'sql',
+  'html',
+  'css'
+])
+
+export const classifyPlaygroundAttachment = (name: string, mime: string) => {
+  const normalizedMime = mime.trim().toLowerCase()
+  const extension = name.split('.').pop()?.toLowerCase() ?? ''
+  const accepted =
+    normalizedMime.startsWith('text/') ||
+    ['application/json', 'application/xml', 'application/yaml'].includes(normalizedMime) ||
+    TEXT_EXTENSIONS.has(extension)
+
+  return accepted
+    ? { accepted: true as const }
+    : { accepted: false as const, message: '当前训练场仅支持文本附件' }
+}
+
 const formatUploadedFileText = (file: UploadedFileContext) => {
   const mimeType = file.type || 'application/octet-stream'
   const suffix = `${file.name} (${mimeType}, ${file.size}B)`

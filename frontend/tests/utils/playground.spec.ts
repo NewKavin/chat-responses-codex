@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlaygroundAssistantResult,
   buildPlaygroundChatPayload,
+  classifyPlaygroundAttachment,
   extractChatCompletionText,
   formatPlaygroundCompletionMeta,
   formatPlaygroundStreamStatus,
@@ -71,6 +72,14 @@ describe('playground model parsing', () => {
 })
 
 describe('playground chat payload', () => {
+  it('omits optional controls in automatic mode', () => {
+    expect(buildPlaygroundChatPayload({ model: 'opaque', question: 'hello', stream: true })).toEqual({
+      model: 'opaque',
+      messages: [{ role: 'user', content: 'hello' }],
+      stream: true
+    })
+  })
+
   it('builds message list with trimmed content', () => {
     const payload = buildPlaygroundChatPayload({
       model: 'gpt-4',
@@ -182,6 +191,22 @@ describe('playground chat payload', () => {
     } as any)
 
     expect((payload as any).inference_strength).toBe('high')
+  })
+})
+
+describe('playground attachment classification', () => {
+  it('accepts bounded text and structured-text files', () => {
+    expect(classifyPlaygroundAttachment('notes.md', 'text/markdown')).toEqual({ accepted: true })
+    expect(classifyPlaygroundAttachment('config.json', 'application/json')).toEqual({ accepted: true })
+    expect(classifyPlaygroundAttachment('main.rs', '')).toEqual({ accepted: true })
+  })
+
+  it('rejects binary and image files before File.text()', () => {
+    expect(classifyPlaygroundAttachment('photo.png', 'image/png')).toEqual({
+      accepted: false,
+      message: '当前训练场仅支持文本附件'
+    })
+    expect(classifyPlaygroundAttachment('archive.zip', 'application/zip').accepted).toBe(false)
   })
 })
 
