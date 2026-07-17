@@ -1,4 +1,5 @@
 use super::*;
+use axum::response::IntoResponse;
 
 #[tokio::test]
 async fn downstream_responses_stream_is_proxied_as_event_stream() {
@@ -30,14 +31,23 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
 
                         let chunks = vec![
                             Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                                b": upstream-comment\r\nevent: custom-response-event\r\nid: event-42\r\nretry: 1500\r\ndata: {\"id\":\"resp-stream\",\r\ndata: \"object\":\"response.chunk\"}\r\n\r\n",
+                                concat!(
+                                    ": upstream-comment\r\nevent: custom-response-event\r\n",
+                                    "id: event-42\r\nretry: 1500\r\n",
+                                    "data: {\"id\":\"resp-stream\",\r\n",
+                                    "data: \"object\":\"response.chunk\"}\r\n\r\n",
+                                    "event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n"
+                                )
+                                .as_bytes(),
                             )),
                             Ok(Bytes::from_static(
-                                b"event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n",
+                                concat!(
+                                    ": done-comment\r\nevent: terminal\r\n",
+                                    "id: done-42\r\nretry: 2500\r\ndata: [DONE]\r\n\r"
+                                )
+                                .as_bytes(),
                             )),
-                            Ok(Bytes::from_static(
-                                b": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]\r\n\r\n",
-                            )),
+                            Ok(Bytes::from_static(b"\n")),
                         ];
 
                         (
@@ -136,6 +146,9 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
     assert!(text.contains(
         ": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]"
     ));
+    assert_eq!(text.matches("event: custom-response-event").count(), 1);
+    assert_eq!(text.matches("event: metadata-only").count(), 1);
+    assert_eq!(text.matches("event: terminal").count(), 1);
 
     let captured = capture.lock().unwrap().clone();
     assert_eq!(captured.path, "/v1/responses");
@@ -316,6 +329,13 @@ async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logge
     drop(body);
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while state.snapshot().await.usage_logs.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("completed proxied stream should emit one usage log");
 
     let snapshot = state.snapshot().await;
     let log = snapshot
@@ -672,6 +692,146 @@ async fn downstream_responses_stream_retries_without_stream_when_upstream_reject
     assert_eq!(snapshot.usage_logs[0].prompt_tokens, 2);
     assert_eq!(snapshot.usage_logs[0].completion_tokens, 3);
     assert_eq!(snapshot.usage_logs[0].total_tokens, 5);
+}
+
+#[tokio::test]
+async fn downstream_responses_stream_recovers_when_chat_upstream_first_event_is_error() {
+    let captured_stream_modes = Arc::new(Mutex::new(Vec::<bool>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured_for_handler = captured_stream_modes.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let captured = captured_for_handler.clone();
+            async move {
+                let payload: Value = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX).await.unwrap(),
+                )
+                .unwrap();
+                let request_stream = payload["stream"].as_bool().unwrap_or(false);
+                captured.lock().unwrap().push(request_stream);
+
+                if request_stream {
+                    return (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(stream::iter([Ok::<Bytes, std::io::Error>(
+                            Bytes::from_static(
+                                b"event: error\ndata: {\"error\":{\"message\":\"temporary stream failure\"}}\n\n",
+                            ),
+                        )])),
+                    )
+                        .into_response();
+                }
+
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-recovered",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "recovered"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 2,
+                            "completion_tokens": 1,
+                            "total_tokens": 3
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{address}"),
+                api_key: "fixture-key".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "input": "Explain one protocol compatibility invariant."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(*captured_stream_modes.lock().unwrap(), vec![true, false]);
+    assert!(body.contains("response.created"));
+    assert!(body.contains("response.completed"));
+    assert!(body.contains("data: [DONE]"));
+    assert!(!body.contains("upstream_stream_error_event"));
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].status_code, 200);
 }
 
 #[tokio::test]

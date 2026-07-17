@@ -1581,6 +1581,12 @@ pub(super) async fn send_to_upstream(
 
         let mut usage_body = None;
         let body = if content_type.contains("text/event-stream") {
+            let reader = UpstreamStreamReader::new(response, stream_timeouts);
+            let reader = if attempt_mode == UpstreamAttemptMode::SsePassThrough {
+                prefetch_first_semantic_event(reader, upstream_protocol).await?
+            } else {
+                reader
+            };
             let stream_log_context = StreamUsageLogContext {
                 state: state.clone(),
                 request_id: request_id.to_string(),
@@ -1602,23 +1608,21 @@ pub(super) async fn send_to_upstream(
             };
             if upstream_protocol == endpoint.native_protocol() {
                 proxied_stream_body(
-                    response,
+                    reader,
                     endpoint,
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
-                    stream_timeouts,
                 )?
             } else {
                 translated_stream_body(
-                    response,
+                    reader,
                     upstream_protocol,
                     endpoint.native_protocol(),
                     endpoint,
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
-                    stream_timeouts,
                 )?
             }
         } else {
