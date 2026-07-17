@@ -26,4 +26,15 @@ describe('ui foundation composition', () => {
     expect(switcher).toContain("setThemeMode('auto')")
     expect(switcher).toContain('跟随系统')
   })
+
+  it('composes admin navigation through the shared shell', () => {
+    const app = readSource('../../src/App.vue')
+
+    expect(app).toContain('<AppShell')
+    expect(app).toContain('adminNavItems')
+    expect(app).toContain('admin-sidebar-collapsed')
+    expect(app).toContain('authStore.clearToken()')
+    expect(app).toContain("router.push('/admin/login')")
+    expect(app).not.toContain('linear-gradient')
+  })
 })
