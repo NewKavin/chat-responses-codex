@@ -138,7 +138,7 @@
       </div>
 
       <div class="crc-table-shell evidence-table-shell">
-        <el-table :data="dialectProfiles" size="small" empty-text="暂无 profile">
+        <el-table :data="paginatedDialectProfiles" size="small" empty-text="暂无 profile">
           <el-table-column prop="upstream_id" label="Upstream" min-width="110" />
           <el-table-column prop="runtime_model_slug" label="Runtime Model" min-width="140" show-overflow-tooltip />
           <el-table-column prop="protocol" label="Protocol" width="120" />
@@ -177,6 +177,17 @@
             </template>
           </el-table-column>
         </el-table>
+      </div>
+
+      <div class="capability-pagination">
+        <el-pagination
+          v-model:current-page="profilePage"
+          v-model:page-size="profilePageSize"
+          :page-sizes="profilePageSizes"
+          :total="dialectProfiles.length"
+          layout="total, sizes, prev, pager, next"
+          @size-change="handleProfilePageSizeChange"
+        />
       </div>
 
       <el-alert
@@ -300,6 +311,9 @@ const resolvedError = ref('')
 const lastRun = ref<TroubleshootingRunResponse | null>(null)
 const activeRequests = ref<ActiveGatewayRequest[]>([])
 const dialectProfiles = ref<DialectProfileSummary[]>([])
+const profilePage = ref(1)
+const profilePageSize = ref(10)
+const profilePageSizes = [10, 20, 50]
 const selectedResolved = ref<ResolvedCapabilitiesResponse | null>(null)
 
 const profileOptions = Object.entries(clientProfileDefaults).map(([value, profile]) => ({
@@ -334,6 +348,10 @@ const form = reactive<{
 const modelOptions = computed(() => props.models)
 const downstreams = computed(() => props.downstreams || [])
 const currentProfile = computed(() => getClientProfileDefaults(form.client_profile))
+const paginatedDialectProfiles = computed(() => {
+  const start = (profilePage.value - 1) * profilePageSize.value
+  return dialectProfiles.value.slice(start, start + profilePageSize.value)
+})
 const selectedResolvedCapabilityRows = computed(() =>
   selectedResolved.value
     ? Object.entries(selectedResolved.value.capabilities).map(([capability, resolved]) => ({
@@ -401,11 +419,21 @@ const loadActiveRequests = async () => {
   }
 }
 
+const normalizeProfilePage = () => {
+  const maxPage = Math.max(1, Math.ceil(dialectProfiles.value.length / profilePageSize.value))
+  profilePage.value = Math.min(profilePage.value, maxPage)
+}
+
+const handleProfilePageSizeChange = () => {
+  profilePage.value = 1
+}
+
 const refreshDialectProfiles = async () => {
   if (!props.loadDialectProfiles) return
   loadingProfiles.value = true
   try {
     dialectProfiles.value = await props.loadDialectProfiles()
+    normalizeProfilePage()
   } finally {
     loadingProfiles.value = false
   }
@@ -655,6 +683,15 @@ onMounted(() => {
   overflow-wrap: anywhere;
 }
 
+.capability-pagination {
+  display: flex;
+  max-width: 100%;
+  overflow-x: auto;
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-bottom: 4px;
+}
+
 @container diagnostic-workspace (max-width: 960px) {
   .diagnostic-workspace {
     grid-template-columns: minmax(0, 1fr);
@@ -680,6 +717,10 @@ onMounted(() => {
 
   .capability-actions .el-button {
     margin-left: 0;
+  }
+
+  .capability-pagination {
+    justify-content: flex-start;
   }
 }
 </style>
