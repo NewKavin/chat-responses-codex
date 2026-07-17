@@ -36,7 +36,12 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                                     "id: event-42\r\nretry: 1500\r\n",
                                     "data: {\"id\":\"resp-stream\",\r\n",
                                     "data: \"object\":\"response.chunk\"}\r\n\r\n",
-                                    "event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n"
+                                    "event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n",
+                                    "event: response.output_text.delta\r\n",
+                                    "data: {\"type\":\"response.output_text.delta\",",
+                                    "\"response_id\":\"resp-stream\",\"item_id\":\"msg-1\",",
+                                    "\"output_index\":0,\"content_index\":0,",
+                                    "\"delta\":\"usable output\"}\r\n\r\n"
                                 )
                                 .as_bytes(),
                             )),
@@ -144,10 +149,14 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
     ));
     assert!(text.contains("event: metadata-only\r\nid: event-43\r\nretry: 1600\r\n\r\n"));
     assert!(text.contains(
+        "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\""
+    ));
+    assert!(text.contains(
         ": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]"
     ));
     assert_eq!(text.matches("event: custom-response-event").count(), 1);
     assert_eq!(text.matches("event: metadata-only").count(), 1);
+    assert_eq!(text.matches("event: response.output_text.delta").count(), 1);
     assert_eq!(text.matches("event: terminal").count(), 1);
 
     let captured = capture.lock().unwrap().clone();
