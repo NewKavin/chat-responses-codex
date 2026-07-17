@@ -2,12 +2,13 @@
 
 ## Deployment
 
-- Verified at: `2026-07-17T03:39:39+08:00`
-- Deployed commit: `5a69acd`
-- Runtime and local-image binary SHA-256: `80fb6f2d0528a39397575a5f719018db7ed2040830190b07760d25f3ef125f71`
-- Gateway container: running and healthy after binary replacement
+- Verified at: `2026-07-17T10:46:29+08:00`
+- Deployed commit: `868e023`
+- Runtime and local-image binary SHA-256: `24b3738fa7cadb772d62244ce60e054cecc22a28cc152257ef85379703db37f1`
+- Gateway container: running and healthy with restart count 0 after binary replacement
 - PostgreSQL and Redis: retained existing containers and state
-- Exact clients: Codex `0.144.0`, OpenCode `1.17.9`
+- Downstream credential digest: identical before and after installed-client smoke
+- Exact clients: Codex `0.144.4`, OpenCode `1.17.18`
 
 ## Qualification
 
@@ -31,22 +32,20 @@ rerunning all 82 models.
 | `kimi-k2.5` | pass | pass | pass | pass | retained |
 | `glm-5.2` | pass | pass | pass | pass | retained |
 | `deepseek-v4-flash` | pass | pass | pass | pass | retained |
-| `MiniMax-M2.7` | pass after client retry | pass after client retry | pass | pass after client retry | retained with operational note |
+| `MiniMax-M2.7` | pass | pass after client retry | pass | pass | retained with operational note |
 | `qwen3.6-plus` | pass | pass | pass | pass | retained |
 
-The original `kimi-k2.5` Codex failure was reproduced before the fix as a
-strict Responses usage parse failure. After deployment, both Codex tasks
-completed without reconnect exhaustion. The 10-minute Kimi log window contained
-11 HTTP 200 records, no error categories, and no 499 records.
+All five focused models completed the substantive text and read-only tool tasks
+with both installed clients. The one-hour acceptance window contained 13 HTTP
+200 records for Kimi, 8 for GLM, 8 for DeepSeek, 8 for MiniMax, and 7 for Qwen.
 
-GLM, DeepSeek, and Qwen produced only HTTP 200 records in the focused window.
-MiniMax produced 7 HTTP 200 records and 3 HTTP 502 records classified as
-`upstream_stream_error_event`; no 499 was recorded. Both installed clients
-recovered and completed their tasks. A low-load direct tool probe and four
-concurrent direct tool probes all returned HTTP 200 with a tool delta and a
-terminal event, so the model remains usable and was not removed. The observed
-502s are retained as transient upstream operational evidence, not treated as a
-protocol incompatibility.
+MiniMax also produced one HTTP 502 `upstream_stream_error_event` on the Codex
+Responses path after usable output had begun. The gateway did not replay that
+committed stream; the client retried and completed. Qwen produced one HTTP 499
+`stream_incomplete_close` on the OpenCode Chat Completions path after usable
+output. This was a downstream close, not an upstream failure misclassified as
+499, and the client task completed. No other focused error categories were
+recorded, and no model was removed.
 
 ## Responses Compatibility Fix
 
@@ -60,10 +59,12 @@ protocol incompatibility.
 Verification:
 
 - `protocol`: 74 passed
-- `gateway`: 255 passed
-- full Rust workspace: 903 passed, 3 ignored, 47 suites
-- standalone `gateway-core`: 8 passed
-- touched-file rustfmt check: passed
+- `gateway`: 261 passed
+- `compatibility_semantics`: 32 passed
+- full Rust workspace: 908 passed, 3 ignored, 47 suites
+- standalone `gateway-core`: 13 passed
+- full rustfmt check: passed
+- Clippy with all targets, all features, and warnings denied: passed
 - `git diff --check`: passed
 
 The previously failing
@@ -72,6 +73,27 @@ was traced to repeated Argon2 validation of unchanged downstream keys during
 upstream failure/success persistence. The request-path fix is deployed and the
 original 2-second regression test now passes. Direct hash updates still clear a
 stored plaintext value when it no longer matches the authoritative hash.
+
+## First Semantic Event Recovery
+
+- Successful SSE pass-through responses prefetch through the first semantic
+  event with one replayable raw-chunk reader and one continuous watchdog.
+- An initial upstream protocol error retries the same key once with upstream
+  streaming disabled, then follows the existing key and candidate fallback
+  policy if the JSON attempt fails.
+- A normal first event commits the stream. Later errors remain structured 502
+  events and are never replayed.
+- Comments, CRLF delimiters, multi-line data, same-chunk trailing frames, and
+  split frame delimiters are replayed byte-for-byte and exactly once.
+- Cancellation during prefetch records one 499, releases both concurrency
+  guards, starts no JSON retry, and does not change upstream health.
+
+Controlled verification covered Chat and Responses recovery with exact upstream
+attempt order `[stream, json]`, no retry after normal output, cancellation during
+prefetch, and bounded candidate fallback `[first stream, first json, second
+stream]`. The live common-model run did not encounter an initial error eligible
+for this recovery path; its one MiniMax stream error occurred after usable
+output and therefore correctly remained unrecovered.
 
 ## Portal Playground
 
