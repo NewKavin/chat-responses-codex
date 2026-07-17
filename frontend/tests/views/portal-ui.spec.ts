@@ -38,7 +38,24 @@ describe('portal ui structure', () => {
     expect(page).toContain('integration-section')
     expect(page).toContain('code-surface')
     expect(page).toContain('aria-label="复制代码"')
+    expect(page).toContain('class="model-ranking"')
+    expect(page).toContain('class="model-ranking__item"')
+    expect(page).toContain('class="model-ranking__position"')
+    expect(page).toContain('v-if="stat.model === primaryModelSlug"')
+    expect(page).toContain('class="section-head config-section-head"')
     expect(page).not.toContain('integration-hero')
+
+    const tabNames = [
+      'name="codex"',
+      'name="opencode"',
+      'name="claude"',
+      'name="cline"',
+      'name="anthropic"',
+      'name="hermes"'
+    ]
+    for (let index = 1; index < tabNames.length; index += 1) {
+      expect(page.indexOf(tabNames[index])).toBeGreaterThan(page.indexOf(tabNames[index - 1]))
+    }
   })
 
   it('uses icon controls and a mobile settings drawer', () => {

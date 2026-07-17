@@ -14,7 +14,7 @@
 
     <section v-loading="loading" class="integration-summary">
 
-      <el-descriptions class="summary-grid" :column="2" border>
+      <el-descriptions class="summary-grid" :column="2" size="small" border>
         <el-descriptions-item label="网关地址">
           <code>{{ gatewayApiBaseUrl || '等待加载' }}</code>
         </el-descriptions-item>
@@ -127,10 +127,25 @@
         <el-tag effect="plain">{{ sortedModelStats.length }} 个统计项</el-tag>
       </div>
 
-      <div class="model-grid">
-        <div v-for="stat in sortedModelStats" :key="stat.model" class="model-chip">
-          <strong>{{ stat.model }}</strong>
-          <span>
+      <div class="model-ranking">
+        <div
+          v-for="(stat, index) in sortedModelStats"
+          :key="stat.model"
+          class="model-ranking__item"
+        >
+          <span class="model-ranking__position">{{ index + 1 }}</span>
+          <div class="model-ranking__identity">
+            <strong>{{ stat.model }}</strong>
+            <el-tag
+              v-if="stat.model === primaryModelSlug"
+              size="small"
+              type="success"
+              effect="plain"
+            >
+              默认
+            </el-tag>
+          </div>
+          <span class="model-ranking__metrics">
             月 {{ stat.month_count }} · 今 {{ stat.today_count }} · 成功率
             {{ Math.round(stat.success_rate * 100) }}%
           </span>
@@ -150,6 +165,13 @@
     </el-empty>
 
     <section v-else data-testid="integration-config-tabs" class="code-surface">
+      <div class="section-head config-section-head">
+        <div>
+          <h2>客户端配置</h2>
+          <p>优先提供 Codex 与 OpenCode，其他客户端按协议兼容方式配置。</p>
+        </div>
+        <el-tag effect="plain">实时目录已同步</el-tag>
+      </div>
       <el-tabs v-model="activeTab" class="integration-tabs">
         <el-tab-pane label="Codex" name="codex">
           <div class="tab-body">
@@ -268,6 +290,45 @@
             />
           </div>
         </el-tab-pane>
+
+        <el-tab-pane label="Claude Code" name="claude">
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="Claude Code 直接使用 `~/.claude/settings.json`。当前 key、网关根地址和默认模型都会写进去；Claude Code 会自己拼接 `/v1/messages`。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 写入 `~/.claude/settings.json`</h4>
+                  <p>
+                    这个配置已经写好了 Anthropic 兼容网关所需的环境变量；三套默认模型 alias 都会指向当前选中的网关模型。`ANTHROPIC_BASE_URL` 填的是网关根地址，
+                    不要再手工加 `/v1`。
+                  </p>
+                </div>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(claudeCodeSettingsJson)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
+              </div>
+              <pre class="code-block">{{ claudeCodeSettingsJson }}</pre>
+            </div>
+
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="保存后重启 Claude Code 即可。默认模型 alias 会统一映射到当前门户选择的模型。"
+            />
+          </div>
+        </el-tab-pane>
+
         <el-tab-pane label="Cline / OpenAI 兼容" name="cline">
           <div class="tab-body">
             <el-alert
@@ -347,44 +408,6 @@
             />
           </div>
         </el-tab-pane>
-        <el-tab-pane label="Claude Code" name="claude">
-          <div class="tab-body">
-            <el-alert
-              class="section-alert"
-              type="info"
-              :closable="false"
-              show-icon
-              title="Claude Code 直接使用 `~/.claude/settings.json`。当前 key、网关根地址和默认模型都会写进去；Claude Code 会自己拼接 `/v1/messages`。"
-            />
-
-            <div class="step-card">
-              <div class="step-head">
-                <div>
-                  <h4>步骤 1: 写入 `~/.claude/settings.json`</h4>
-                  <p>
-                    这个配置已经写好了 Anthropic 兼容网关所需的环境变量；三套默认模型 alias 都会指向当前选中的网关模型。`ANTHROPIC_BASE_URL` 填的是网关根地址，
-                    不要再手工加 `/v1`。
-                  </p>
-                </div>
-                <el-tooltip content="复制代码" placement="top">
-                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(claudeCodeSettingsJson)">
-                    <el-icon><CopyDocument /></el-icon>
-                  </el-button>
-                </el-tooltip>
-              </div>
-              <pre class="code-block">{{ claudeCodeSettingsJson }}</pre>
-            </div>
-
-            <el-alert
-              class="section-alert"
-              type="success"
-              :closable="false"
-              show-icon
-              title="保存后重启 Claude Code 即可。默认模型 alias 会统一映射到当前门户选择的模型。"
-            />
-          </div>
-        </el-tab-pane>
-
         <el-tab-pane label="Hermes Agent" name="hermes">
           <div class="tab-body">
             <el-alert
@@ -759,6 +782,10 @@ p {
   margin-bottom: 12px;
 }
 
+.summary-grid :deep(.el-descriptions__cell) {
+  padding: 10px 12px;
+}
+
 .status-alert {
   margin-top: 12px;
 }
@@ -786,32 +813,49 @@ p {
   font-size: 13px;
 }
 
-.model-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.model-chip {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 14px 16px;
+.model-ranking {
+  margin-top: 12px;
+  overflow: hidden;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius-sm);
-  background: var(--crc-surface);
 }
 
-.model-chip strong {
-  color: var(--crc-text-strong);
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-word;
+.model-ranking__item {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--crc-border);
 }
 
-.model-chip span {
+.model-ranking__item:last-child {
+  border-bottom: 0;
+}
+
+.model-ranking__position,
+.model-ranking__metrics {
   color: var(--crc-text-muted);
   font-size: 12px;
+}
+
+.model-ranking__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-ranking__identity strong {
+  min-width: 0;
+  color: var(--crc-text-strong);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.model-ranking__metrics {
+  white-space: nowrap;
 }
 
 .integration-empty {
@@ -830,6 +874,10 @@ p {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+}
+
+.config-section-head {
+  margin-bottom: 12px;
 }
 
 .tab-body {
@@ -986,9 +1034,17 @@ p {
     align-self: flex-end;
   }
 
-  .compat-grid,
-  .model-grid {
+  .compat-grid {
     grid-template-columns: 1fr;
+  }
+
+  .model-ranking__item {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .model-ranking__metrics {
+    grid-column: 2;
+    white-space: normal;
   }
 }
 </style>
