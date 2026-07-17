@@ -8,8 +8,8 @@
       <el-button :loading="loadingActive" @click="loadActiveRequests">刷新活跃请求</el-button>
     </div>
 
-    <el-row :gutter="16">
-      <el-col :xs="24" :lg="8">
+    <div class="diagnostic-workspace-container">
+      <div class="diagnostic-workspace">
         <section class="evidence-section diagnostic-config-section">
           <header class="evidence-section__header">
             <h3>诊断配置</h3>
@@ -56,168 +56,168 @@
           </el-form>
         </section>
 
-        <section v-if="admin && exportCapabilities && importCapabilities" class="evidence-section capability-panel">
-          <header class="evidence-section__header">
-            <h3>Capability 策略</h3>
-          </header>
-          <div class="capability-actions">
-            <el-button size="small" @click="handleExportCapabilities">导出 JSON</el-button>
-            <el-button size="small" @click="openImportDialog">导入 JSON</el-button>
-            <el-button size="small" :loading="loadingProfiles" @click="refreshDialectProfiles">刷新 Profiles</el-button>
-          </div>
-
-          <div class="crc-table-shell evidence-table-shell">
-            <el-table :data="dialectProfiles" size="small" empty-text="暂无 profile">
-            <el-table-column prop="upstream_id" label="Upstream" min-width="110" />
-            <el-table-column prop="runtime_model_slug" label="Runtime Model" min-width="140" show-overflow-tooltip />
-            <el-table-column prop="protocol" label="Protocol" width="120" />
-            <el-table-column prop="state" label="State" width="110" />
-            <el-table-column prop="currentness" label="Current" width="100" />
-            <el-table-column label="Age" width="100">
-              <template #default="{ row }">
-                {{ row.profile_age_seconds ?? '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="Probe" width="90">
-              <template #default="{ row }">
-                {{ row.probe_version == null ? '-' : `v${row.probe_version}` }}
-              </template>
-            </el-table-column>
-            <el-table-column label="Fingerprint" min-width="150" show-overflow-tooltip>
-              <template #default="{ row }">
-                {{ row.fingerprint || '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="Evidence" min-width="170" show-overflow-tooltip>
-              <template #default="{ row }">
-                {{ row.evidence.codes.join(', ') || '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="180">
-              <template #default="{ row }">
-                <el-button size="small" text @click="loadResolved(row)">详情</el-button>
-                <el-button
-                  size="small"
-                  text
-                  @click="runManualProbe(row.upstream_id, row.runtime_model_slug, row.protocol)"
+        <div class="diagnostic-results-stack">
+          <section class="evidence-section diagnostic-results-section">
+            <header class="evidence-section__header">
+              <h3>诊断结果</h3>
+            </header>
+            <el-empty v-if="!lastRun" description="还没有运行诊断" />
+            <div v-else>
+              <div class="result-toolbar">
+                <span>诊断 ID：{{ lastRun.run_id }}</span>
+                <el-button size="small" @click="copySummary">复制摘要</el-button>
+              </div>
+              <el-timeline>
+                <el-timeline-item
+                  v-for="result in lastRun.results"
+                  :key="result.id"
+                  :type="getTroubleshootingStatusMeta(result.status).type"
+                  :timestamp="`${result.duration_ms} ms`"
                 >
-                  手动探测
-                </el-button>
+                  <div class="result-item">
+                    <div class="result-title">
+                      <strong>{{ result.label }}</strong>
+                      <el-tag :type="getTroubleshootingStatusMeta(result.status).type" size="small">
+                        {{ getTroubleshootingStatusMeta(result.status).label }}
+                      </el-tag>
+                    </div>
+                    <p>{{ result.summary }}</p>
+                    <p v-if="result.error_category" class="category">分类：{{ result.error_category }}</p>
+                    <p v-if="result.details" class="details">{{ result.details }}</p>
+                    <p class="hint">
+                      {{ result.suggestion || getTroubleshootingSuggestion(result.error_category) }}
+                    </p>
+                    <el-button
+                      v-if="admin && result.log_filter"
+                      size="small"
+                      text
+                      @click="openAdminLogs(result.log_filter)"
+                    >
+                      查看相关日志
+                    </el-button>
+                  </div>
+                </el-timeline-item>
+              </el-timeline>
+            </div>
+          </section>
+
+          <section class="evidence-section active-panel">
+            <header class="evidence-section__header">
+              <h3>活跃长任务</h3>
+            </header>
+            <div class="crc-table-shell evidence-table-shell">
+              <el-table :data="activeRequests" size="small">
+                <el-table-column prop="model" label="模型" min-width="140" />
+                <el-table-column prop="endpoint" label="接口" min-width="160" />
+                <el-table-column prop="upstream_name" label="上游" min-width="120" />
+                <el-table-column prop="user_agent" label="客户端" min-width="160" show-overflow-tooltip />
+                <el-table-column label="状态" width="100">
+                  <template #default="{ row }">
+                    <el-tag :type="getActiveRequestHealth(row).type" size="small">
+                      {{ getActiveRequestHealth(row).label }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="elapsed_seconds" label="运行秒数" width="100" />
+                <el-table-column prop="idle_seconds" label="无增量秒数" width="110" />
+              </el-table>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <section v-if="admin && exportCapabilities && importCapabilities" class="evidence-section capability-panel">
+      <header class="evidence-section__header">
+        <h3>Capability 策略</h3>
+      </header>
+      <div class="capability-actions">
+        <el-button size="small" @click="handleExportCapabilities">导出 JSON</el-button>
+        <el-button size="small" @click="openImportDialog">导入 JSON</el-button>
+        <el-button size="small" :loading="loadingProfiles" @click="refreshDialectProfiles">刷新 Profiles</el-button>
+      </div>
+
+      <div class="crc-table-shell evidence-table-shell">
+        <el-table :data="dialectProfiles" size="small" empty-text="暂无 profile">
+          <el-table-column prop="upstream_id" label="Upstream" min-width="110" />
+          <el-table-column prop="runtime_model_slug" label="Runtime Model" min-width="140" show-overflow-tooltip />
+          <el-table-column prop="protocol" label="Protocol" width="120" />
+          <el-table-column prop="state" label="State" width="110" />
+          <el-table-column prop="currentness" label="Current" width="100" />
+          <el-table-column label="Age" width="100">
+            <template #default="{ row }">
+              {{ row.profile_age_seconds ?? '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="Probe" width="90">
+            <template #default="{ row }">
+              {{ row.probe_version == null ? '-' : `v${row.probe_version}` }}
+            </template>
+          </el-table-column>
+          <el-table-column label="Fingerprint" min-width="150" show-overflow-tooltip>
+            <template #default="{ row }">
+              {{ row.fingerprint || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="Evidence" min-width="170" show-overflow-tooltip>
+            <template #default="{ row }">
+              {{ row.evidence.codes.join(', ') || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="180">
+            <template #default="{ row }">
+              <el-button size="small" text @click="loadResolved(row)">详情</el-button>
+              <el-button
+                size="small"
+                text
+                @click="runManualProbe(row.upstream_id, row.runtime_model_slug, row.protocol)"
+              >
+                手动探测
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <el-alert
+        v-if="resolvedError"
+        class="resolved-alert"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="resolvedError"
+      />
+      <div v-if="selectedResolved" class="resolved-summary">
+        <div class="resolved-meta">
+          <el-tag size="small" effect="plain">{{ selectedResolved.profile.currentness }}</el-tag>
+          <span>Fingerprint: {{ selectedResolved.profile.fingerprint || '-' }}</span>
+          <span>Token: {{ selectedResolved.token.field }} ({{ selectedResolved.token.source }})</span>
+          <span>Reasoning: {{ selectedResolved.reasoning.carrier }}</span>
+        </div>
+        <div class="crc-table-shell evidence-table-shell">
+          <el-table :data="selectedResolvedCapabilityRows" size="small">
+            <el-table-column prop="capability" label="Capability" min-width="170" />
+            <el-table-column prop="state" label="State" width="120" />
+            <el-table-column prop="source" label="Source" width="120" />
+          </el-table>
+        </div>
+        <div class="crc-table-shell evidence-table-shell">
+          <el-table :data="selectedResolved.conflicts" size="small" empty-text="No conflicts">
+            <el-table-column prop="subject" label="Conflict" min-width="180" />
+            <el-table-column label="Probe" min-width="160">
+              <template #default="{ row }">
+                {{ row.probe.code }} ({{ row.probe.state }})
               </template>
             </el-table-column>
-            </el-table>
-          </div>
-
-          <el-alert
-            v-if="resolvedError"
-            class="resolved-alert"
-            type="warning"
-            :closable="false"
-            show-icon
-            :title="resolvedError"
-          />
-          <div v-if="selectedResolved" class="resolved-summary">
-            <div class="resolved-meta">
-              <el-tag size="small" effect="plain">{{ selectedResolved.profile.currentness }}</el-tag>
-              <span>Fingerprint: {{ selectedResolved.profile.fingerprint || '-' }}</span>
-              <span>Token: {{ selectedResolved.token.field }} ({{ selectedResolved.token.source }})</span>
-              <span>Reasoning: {{ selectedResolved.reasoning.carrier }}</span>
-            </div>
-            <div class="crc-table-shell evidence-table-shell">
-              <el-table :data="selectedResolvedCapabilityRows" size="small">
-                <el-table-column prop="capability" label="Capability" min-width="170" />
-                <el-table-column prop="state" label="State" width="120" />
-                <el-table-column prop="source" label="Source" width="120" />
-              </el-table>
-            </div>
-            <div class="crc-table-shell evidence-table-shell">
-              <el-table :data="selectedResolved.conflicts" size="small" empty-text="No conflicts">
-                <el-table-column prop="subject" label="Conflict" min-width="180" />
-                <el-table-column label="Probe" min-width="160">
-                  <template #default="{ row }">
-                    {{ row.probe.code }} ({{ row.probe.state }})
-                  </template>
-                </el-table-column>
-                <el-table-column label="Policy" min-width="160">
-                  <template #default="{ row }">
-                    {{ row.policy.code }} ({{ row.policy.state }})
-                  </template>
-                </el-table-column>
-              </el-table>
-            </div>
-          </div>
-        </section>
-      </el-col>
-
-      <el-col :xs="24" :lg="16">
-        <section class="evidence-section diagnostic-results-section">
-          <header class="evidence-section__header">
-            <h3>诊断结果</h3>
-          </header>
-          <el-empty v-if="!lastRun" description="还没有运行诊断" />
-          <div v-else>
-            <div class="result-toolbar">
-              <span>诊断 ID：{{ lastRun.run_id }}</span>
-              <el-button size="small" @click="copySummary">复制摘要</el-button>
-            </div>
-            <el-timeline>
-              <el-timeline-item
-                v-for="result in lastRun.results"
-                :key="result.id"
-                :type="getTroubleshootingStatusMeta(result.status).type"
-                :timestamp="`${result.duration_ms} ms`"
-              >
-                <div class="result-item">
-                  <div class="result-title">
-                    <strong>{{ result.label }}</strong>
-                    <el-tag :type="getTroubleshootingStatusMeta(result.status).type" size="small">
-                      {{ getTroubleshootingStatusMeta(result.status).label }}
-                    </el-tag>
-                  </div>
-                  <p>{{ result.summary }}</p>
-                  <p v-if="result.error_category" class="category">分类：{{ result.error_category }}</p>
-                  <p v-if="result.details" class="details">{{ result.details }}</p>
-                  <p class="hint">
-                    {{ result.suggestion || getTroubleshootingSuggestion(result.error_category) }}
-                  </p>
-                  <el-button
-                    v-if="admin && result.log_filter"
-                    size="small"
-                    text
-                    @click="openAdminLogs(result.log_filter)"
-                  >
-                    查看相关日志
-                  </el-button>
-                </div>
-              </el-timeline-item>
-            </el-timeline>
-          </div>
-        </section>
-
-        <section class="evidence-section active-panel">
-          <header class="evidence-section__header">
-            <h3>活跃长任务</h3>
-          </header>
-          <div class="crc-table-shell evidence-table-shell">
-            <el-table :data="activeRequests" size="small">
-              <el-table-column prop="model" label="模型" min-width="140" />
-              <el-table-column prop="endpoint" label="接口" min-width="160" />
-              <el-table-column prop="upstream_name" label="上游" min-width="120" />
-              <el-table-column prop="user_agent" label="客户端" min-width="160" show-overflow-tooltip />
-              <el-table-column label="状态" width="100">
-                <template #default="{ row }">
-                  <el-tag :type="getActiveRequestHealth(row).type" size="small">
-                    {{ getActiveRequestHealth(row).label }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="elapsed_seconds" label="运行秒数" width="100" />
-              <el-table-column prop="idle_seconds" label="无增量秒数" width="110" />
-            </el-table>
-          </div>
-        </section>
-      </el-col>
-    </el-row>
+            <el-table-column label="Policy" min-width="160">
+              <template #default="{ row }">
+                {{ row.policy.code }} ({{ row.policy.state }})
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+    </section>
   </div>
 
   <el-dialog
@@ -528,6 +528,32 @@ onMounted(() => {
   line-height: 1.6;
 }
 
+.diagnostic-workspace-container {
+  container-name: diagnostic-workspace;
+  container-type: inline-size;
+}
+
+.diagnostic-workspace {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.75fr) minmax(560px, 1.25fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.diagnostic-results-stack {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.diagnostic-config-section,
+.diagnostic-results-section,
+.active-panel,
+.capability-panel {
+  min-width: 0;
+}
+
 .evidence-section {
   padding: 18px 0;
   border-top: 1px solid var(--crc-border);
@@ -597,9 +623,14 @@ onMounted(() => {
 .result-toolbar,
 .result-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.result-toolbar .el-button {
+  flex: 0 0 auto;
 }
 
 .result-toolbar {
@@ -622,6 +653,12 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+@container diagnostic-workspace (max-width: 960px) {
+  .diagnostic-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 767px) {

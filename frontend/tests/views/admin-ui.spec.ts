@@ -71,10 +71,26 @@ describe('admin ui structure', () => {
     expect(page).toContain('crc-page troubleshooting-page')
     expect(center).toContain('evidence-section')
     expect(center).toContain('crc-table-shell')
+    expect(center).toContain('diagnostic-workspace-container')
+    expect(center).toContain('diagnostic-workspace')
+    expect(center).toContain('diagnostic-results-stack')
+    expect(center).toContain('container-name: diagnostic-workspace;')
+    expect(center).toContain('grid-template-columns: minmax(320px, 0.75fr) minmax(560px, 1.25fr);')
+    expect(center).toContain('@container diagnostic-workspace (max-width: 960px)')
+    expect(center).not.toContain('<el-row')
+    expect(center).not.toContain('<el-col')
     expect(matrix).toContain('compatibility-matrix-panel crc-surface')
     expect(matrix).toContain('matrix-table-shell')
     expect(center).not.toContain('<el-card')
     expect(matrix).not.toContain('<el-card')
+
+    const workspaceStart = center.indexOf('<div class="diagnostic-workspace-container">')
+    const capabilityStart = center.indexOf('class="evidence-section capability-panel"')
+    expect(workspaceStart).toBeGreaterThan(-1)
+    expect(capabilityStart).toBeGreaterThan(workspaceStart)
+    expect(center).toMatch(
+      /<\/div>\s*<\/div>\s*<section v-if="admin && exportCapabilities && importCapabilities" class="evidence-section capability-panel">/
+    )
   })
 
   it('uses a focused unframed announcement form', () => {
