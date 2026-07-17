@@ -58,4 +58,18 @@ describe('admin ui structure', () => {
     expect(page).toContain('load-error-alert')
     expect(page).toContain('resetFilters')
   })
+
+  it('uses unframed troubleshooting sections and one matrix tool surface', () => {
+    const page = source('views/admin/Troubleshooting.vue')
+    const center = source('components/TroubleshootingCenter.vue')
+    const matrix = source('components/CompatibilityMatrixPanel.vue')
+
+    expect(page).toContain('crc-page troubleshooting-page')
+    expect(center).toContain('evidence-section')
+    expect(center).toContain('crc-table-shell')
+    expect(matrix).toContain('compatibility-matrix-panel crc-surface')
+    expect(matrix).toContain('matrix-table-shell')
+    expect(center).not.toContain('<el-card')
+    expect(matrix).not.toContain('<el-card')
+  })
 })

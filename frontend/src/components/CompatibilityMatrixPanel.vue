@@ -1,18 +1,16 @@
 <template>
-  <el-card shadow="never" class="panel">
-    <template #header>
-      <div class="panel-head">
-        <div>
-          <h3>客户端兼容矩阵</h3>
-          <p>批量检查下游对 Codex、opencode、Claude Code 和 Hermes 的兼容路径、语义证据与回退阶段。</p>
-        </div>
-        <div v-if="lastRun" class="summary-tags">
-          <el-tag type="success" effect="light">{{ lastRun.summary.passed }} 通过</el-tag>
-          <el-tag type="warning" effect="light">{{ lastRun.summary.warning }} 警告</el-tag>
-          <el-tag type="danger" effect="light">{{ lastRun.summary.failed }} 失败</el-tag>
-        </div>
+  <section class="compatibility-matrix-panel crc-surface">
+    <header class="panel-head">
+      <div>
+        <h3>客户端兼容矩阵</h3>
+        <p>批量检查下游对 Codex、opencode、Claude Code 和 Hermes 的兼容路径、语义证据与回退阶段。</p>
       </div>
-    </template>
+      <div v-if="lastRun" class="summary-tags">
+        <el-tag type="success" effect="light">{{ lastRun.summary.passed }} 通过</el-tag>
+        <el-tag type="warning" effect="light">{{ lastRun.summary.warning }} 警告</el-tag>
+        <el-tag type="danger" effect="light">{{ lastRun.summary.failed }} 失败</el-tag>
+      </div>
+    </header>
 
     <div class="matrix-toolbar">
       <el-select
@@ -41,7 +39,8 @@
         <span>耗时：{{ lastRun.duration_ms }} ms</span>
       </div>
 
-      <el-table :data="lastRun.cells" size="small">
+      <div class="crc-table-shell matrix-table-shell">
+        <el-table :data="lastRun.cells" size="small">
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="cell-details">
@@ -60,26 +59,28 @@
               <div v-if="row.adapter_set?.length" class="detail-meta">
                 <span>Adapters: {{ row.adapter_set.join(', ') }}</span>
               </div>
-              <el-table :data="row.check_results || []" size="small" class="check-table">
-                <el-table-column prop="id" label="检查项" min-width="180" />
-                <el-table-column label="结果" width="100">
-                  <template #default="{ row: check }">
-                    <el-tag :type="getMatrixCheckStatusMeta(check).type" effect="plain" size="small">
-                      {{ getMatrixCheckStatusMeta(check).label }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="观测值" width="110">
-                  <template #default="{ row: check }">
-                    {{ check.observed_value ?? '-' }}
-                  </template>
-                </el-table-column>
-                <el-table-column label="证据代码" min-width="220">
-                  <template #default="{ row: check }">
-                    {{ (check.codes || []).join(', ') || '-' }}
-                  </template>
-                </el-table-column>
-              </el-table>
+              <div class="crc-table-shell check-table-shell">
+                <el-table :data="row.check_results || []" size="small" class="check-table">
+                  <el-table-column prop="id" label="检查项" min-width="180" />
+                  <el-table-column label="结果" width="100">
+                    <template #default="{ row: check }">
+                      <el-tag :type="getMatrixCheckStatusMeta(check).type" effect="plain" size="small">
+                        {{ getMatrixCheckStatusMeta(check).label }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="观测值" width="110">
+                    <template #default="{ row: check }">
+                      {{ check.observed_value ?? '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="证据代码" min-width="220">
+                    <template #default="{ row: check }">
+                      {{ (check.codes || []).join(', ') || '-' }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
             </div>
           </template>
         </el-table-column>
@@ -134,9 +135,10 @@
           </template>
         </el-table-column>
         <el-table-column prop="summary" label="摘要" min-width="260" show-overflow-tooltip />
-      </el-table>
+        </el-table>
+      </div>
     </template>
-  </el-card>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -213,8 +215,8 @@ const copySummary = async () => {
 </script>
 
 <style scoped>
-.panel {
-  border-radius: 8px;
+.compatibility-matrix-panel {
+  padding: 20px;
 }
 
 .panel-head {
@@ -226,13 +228,14 @@ const copySummary = async () => {
 
 .panel-head h3 {
   margin: 0 0 6px;
+  color: var(--crc-text-strong);
   font-size: 18px;
 }
 
 .panel-head p,
 .matrix-meta {
   margin: 0;
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -258,18 +261,25 @@ const copySummary = async () => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
 }
 
 .detail-meta {
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .check-table {
   width: 100%;
+  min-width: 680px;
+}
+
+.matrix-table-shell > :deep(.el-table) {
+  min-width: 1840px;
 }
 
 .downstream-select {
@@ -277,9 +287,22 @@ const copySummary = async () => {
   max-width: 100%;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
+  .compatibility-matrix-panel {
+    padding: 16px;
+  }
+
   .panel-head {
     flex-direction: column;
+  }
+
+  .matrix-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .matrix-toolbar .el-button {
+    margin-left: 0;
   }
 
   .downstream-select {
