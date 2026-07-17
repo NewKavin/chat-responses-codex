@@ -92,4 +92,11 @@ describe('ui foundation composition', () => {
 
     expect(new Set(values)).toEqual(new Set(['0']))
   })
+
+  it('keeps Element Plus primary controls on the dark theme accent', () => {
+    const tokens = readSource('../../src/styles/tokens.css')
+    const darkTokens = tokens.match(/html\.dark\s*\{([\s\S]*?)\n\}/)?.[1]
+
+    expect(darkTokens).toContain('--el-color-primary: var(--crc-accent);')
+  })
 })
