@@ -5,6 +5,17 @@ import { describe, expect, it } from 'vitest'
 const readSource = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
 
 describe('ui foundation composition', () => {
+  it('uses a crisp local accent favicon without font or network dependencies', () => {
+    const index = readSource('../../index.html')
+    const favicon = readSource('../../public/favicon.svg')
+
+    expect(index).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />')
+    expect(favicon).toContain('viewBox="0 0 64 64"')
+    expect(favicon).toContain('fill="#0f8f76"')
+    expect(favicon).toContain('<path')
+    expect(favicon).not.toMatch(/linearGradient|<text|font-family|<script|(?:href|src)="https?:/)
+  })
+
   it('initializes theme before mounting and imports global token layers', () => {
     const main = readSource('../../src/main.ts')
 

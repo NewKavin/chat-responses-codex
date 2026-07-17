@@ -29,7 +29,7 @@ Add this test to `frontend/tests/views/ui-foundation.spec.ts`:
     expect(favicon).toContain('viewBox="0 0 64 64"')
     expect(favicon).toContain('fill="#0f8f76"')
     expect(favicon).toContain('<path')
-    expect(favicon).not.toMatch(/linearGradient|<text|font-family|https?:|<script/)
+    expect(favicon).not.toMatch(/linearGradient|<text|font-family|<script|(?:href|src)="https?:/)
   })
 ```
 
@@ -77,4 +77,3 @@ Run the development server from `frontend/`, open `/favicon.svg`, and verify the
 rtk git add frontend/tests/views/ui-foundation.spec.ts frontend/public/favicon.svg
 rtk git commit -m "feat(ui): refresh the browser tab icon"
 ```
-
