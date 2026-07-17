@@ -1,36 +1,45 @@
 <template>
-  <div class="usage-history-container">
-    <el-card class="history-card">
-      <template #header>
-        <div class="header">
-          <h2>使用历史</h2>
-          <div class="header-actions">
-            <el-radio-group v-model="timeRange" @change="handleTimeRangeChange">
-              <el-radio-button label="1d" value="1d">1 天</el-radio-button>
-              <el-radio-button label="7d" value="7d">7 天</el-radio-button>
-              <el-radio-button label="30d" value="30d">30 天</el-radio-button>
-            </el-radio-group>
-            <el-button @click="reloadCurrentPage" :loading="loading" circle>
-              <el-icon><Refresh /></el-icon>
-            </el-button>
-          </div>
-        </div>
-      </template>
+  <div class="crc-page usage-history-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">使用历史</h1>
+        <p class="crc-page-description">查看请求量与 Token 趋势，并追踪最近调用记录。</p>
+      </div>
+    </header>
 
-      <div v-loading="loading" class="history-content">
-        <div class="charts-row">
-          <div class="chart-panel">
-            <h3>每日统计</h3>
+    <div class="crc-toolbar history-toolbar">
+      <el-radio-group v-model="timeRange" @change="handleTimeRangeChange">
+        <el-radio-button label="1d" value="1d">1 天</el-radio-button>
+        <el-radio-button label="7d" value="7d">7 天</el-radio-button>
+        <el-radio-button label="30d" value="30d">30 天</el-radio-button>
+      </el-radio-group>
+      <el-tooltip content="刷新用量历史" placement="top">
+        <el-button
+          aria-label="刷新用量历史"
+          :loading="loading"
+          circle
+          @click="reloadCurrentPage"
+        >
+          <el-icon><Refresh /></el-icon>
+        </el-button>
+      </el-tooltip>
+    </div>
+
+    <div v-loading="loading" class="history-content">
+        <div class="history-chart-grid">
+          <section class="crc-surface history-chart-surface">
+            <h2>每日请求</h2>
             <div ref="dailyChartRef" class="chart"></div>
-          </div>
-          <div class="chart-panel">
-            <h3>Token 使用趋势</h3>
+          </section>
+          <section class="crc-surface history-chart-surface">
+            <h2>Token 使用趋势</h2>
             <div ref="tokenChartRef" class="chart"></div>
-          </div>
+          </section>
         </div>
 
-        <div class="table-panel">
-          <h3>最近请求</h3>
+        <section class="history-table-section">
+          <h2>最近请求</h2>
+          <div class="crc-table-shell">
           <el-table
             :data="data.recent_logs"
             stripe
@@ -91,6 +100,7 @@
               </template>
             </el-table-column>
           </el-table>
+          </div>
 
           <div class="pagination-wrap">
             <el-pagination
@@ -103,14 +113,13 @@
               @size-change="handlePageSizeChange"
             />
           </div>
-        </div>
-      </div>
-    </el-card>
+        </section>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Top, Bottom, PieChart } from '@element-plus/icons-vue'
 import { portalApi } from '@/api/portal'
@@ -120,6 +129,8 @@ import { loadEcharts } from '@/utils/echartsLoader'
 import type { EChartsType } from 'echarts/core'
 import { formatCompactNumber } from '@/utils/numberFormat'
 import { formatInferenceStrength } from '@/utils/logDisplay'
+import { useTheme } from '@/composables/useTheme'
+import { buildChartTheme } from '@/utils/chartTheme'
 
 type ChartRange = '1d' | '7d' | '30d'
 
@@ -131,6 +142,7 @@ const daysByRange: Record<ChartRange, number> = {
 
 const loading = ref(false)
 const timeRange = ref<ChartRange>('7d')
+const { resolvedTheme } = useTheme()
 const dailyChartRef = ref<HTMLElement>()
 const tokenChartRef = ref<HTMLElement>()
 let dailyChart: EChartsType | null = null
@@ -209,6 +221,7 @@ const setupResizeObservers = () => {
 
 const updateDailyChart = () => {
   if (!dailyChart) return
+  const theme = buildChartTheme(resolvedTheme.value)
   const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], data.value.daily_stats)
   const dates = buckets.map(item => item.label)
   const requests = buckets.map(item => item.requests)
@@ -216,30 +229,44 @@ const updateDailyChart = () => {
   dailyChart.clear()
   dailyChart.resize()
   dailyChart.setOption({
-    tooltip: { trigger: 'axis' },
-    grid: { left: 40, right: 20, top: 24, bottom: 24 },
+    color: theme.series,
+    textStyle: { color: theme.text },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: theme.tooltipBackground,
+      borderColor: theme.tooltipBorder,
+      textStyle: { color: theme.text }
+    },
+    grid: { left: 48, right: 20, top: 24, bottom: 28 },
     xAxis: {
       type: 'category',
       data: dates,
-      boundaryGap: false
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: theme.border } },
+      axisLabel: { color: theme.muted }
     },
     yAxis: {
       type: 'value',
-      name: '请求数'
+      name: '请求数',
+      nameTextStyle: { color: theme.muted },
+      axisLabel: { color: theme.muted },
+      splitLine: { lineStyle: { color: theme.splitLine } }
     },
     series: [{
       name: '请求数',
       type: 'line',
       smooth: true,
       data: requests,
-      areaStyle: { color: 'rgba(64, 158, 255, 0.12)' },
-      itemStyle: { color: '#409EFF' }
+      areaStyle: { color: theme.series[0], opacity: 0.12 },
+      lineStyle: { color: theme.series[0] },
+      itemStyle: { color: theme.series[0] }
     }]
   })
 }
 
 const updateTokenChart = () => {
   if (!tokenChart) return
+  const theme = buildChartTheme(resolvedTheme.value)
   const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], data.value.daily_stats)
   const dates = buckets.map(item => item.label)
   const tokens = buckets.map(item => item.tokens)
@@ -249,6 +276,9 @@ const updateTokenChart = () => {
   tokenChart.setOption({
     tooltip: {
       trigger: 'axis',
+      backgroundColor: theme.tooltipBackground,
+      borderColor: theme.tooltipBorder,
+      textStyle: { color: theme.text },
       formatter: (params: any) => {
         if (!Array.isArray(params) || params.length === 0) {
           return ''
@@ -262,15 +292,22 @@ const updateTokenChart = () => {
           .join('<br/>')}`
       }
     },
-    grid: { left: 40, right: 20, top: 24, bottom: 24 },
+    color: theme.series,
+    textStyle: { color: theme.text },
+    grid: { left: 48, right: 20, top: 24, bottom: 28 },
     xAxis: {
       type: 'category',
-      data: dates
+      data: dates,
+      axisLine: { lineStyle: { color: theme.border } },
+      axisLabel: { color: theme.muted }
     },
     yAxis: {
       type: 'value',
       name: 'Token（K/M）',
+      nameTextStyle: { color: theme.muted },
+      splitLine: { lineStyle: { color: theme.splitLine } },
       axisLabel: {
+        color: theme.muted,
         formatter: (value: number) => formatCompactNumber(value)
       }
     },
@@ -278,7 +315,7 @@ const updateTokenChart = () => {
       name: 'Token',
       type: 'bar',
       data: tokens,
-      itemStyle: { color: '#67C23A' }
+      itemStyle: { color: theme.series[1] }
     }]
   })
 }
@@ -339,6 +376,16 @@ const handleResize = () => {
   tokenChart?.resize()
 }
 
+watch(resolvedTheme, async () => {
+  dailyChart?.dispose()
+  tokenChart?.dispose()
+  dailyChart = null
+  tokenChart = null
+  await nextTick()
+  await initCharts()
+  updateCharts()
+})
+
 onMounted(async () => {
   await nextTick()
   await initCharts()
@@ -359,88 +406,61 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.usage-history-container {
-  width: 100%;
-  padding: 0;
+.usage-history-page {
+  min-height: 100%;
 }
 
-:deep(.history-card .el-card__body) {
-  padding: 16px 20px 20px;
-}
-
-.header {
-  display: flex;
+.history-toolbar {
   justify-content: space-between;
-  align-items: center;
-}
-
-.header h2 {
-  margin: 0;
-}
-
-.header-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
 }
 
 .history-content {
-  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
+  min-height: 100%;
 }
 
-.charts-row {
+.history-chart-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.chart-panel {
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  background: #fff;
-  padding: 10px 12px 12px;
+.history-chart-surface {
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-height: 0;
+  padding: 16px;
 }
 
-.chart-panel h3 {
+.history-chart-surface h2,
+.history-table-section h2 {
   margin: 0;
+  color: var(--crc-text-strong);
   font-size: 14px;
-  color: #303133;
 }
 
 .chart {
   width: 100%;
-  height: 240px;
-  min-height: 240px;
-  background-color: #f5f7fa;
-  border-radius: 4px;
+  height: 280px;
+  min-height: 280px;
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
 }
 
-.table-panel {
-  min-height: 0;
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  background: #fff;
-  padding: 10px 12px 12px;
+.history-table-section {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-}
-
-.table-panel h3 {
-  margin: 0;
-  font-size: 14px;
-  color: #303133;
+  gap: 12px;
+  min-height: 0;
+  padding-top: 4px;
 }
 
 .recent-requests-table {
   width: 100%;
+  min-width: 1160px;
 }
 
 .token-cell {
@@ -463,19 +483,16 @@ onUnmounted(() => {
 }
 
 .token-line--prompt {
-  color: #409eff;
+  color: var(--crc-info);
 }
 
 .token-line--completion {
-  color: #67c23a;
+  color: var(--crc-success);
 }
 
-.token-line--total {
-  color: #303133;
-}
-
+.token-line--total,
 .token-line--total strong {
-  color: #303133;
+  color: var(--crc-text-strong);
 }
 
 .pagination-wrap {
@@ -488,8 +505,35 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1100px) {
-  .charts-row {
+  .history-chart-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 767px) {
+  .history-toolbar {
+    align-items: center;
+  }
+
+  .history-toolbar :deep(.el-radio-group) {
+    display: grid;
+    flex: 1;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .history-toolbar :deep(.el-radio-button__inner) {
+    width: 100%;
+  }
+
+  .chart {
+    height: 240px;
+    min-height: 240px;
+  }
+
+  .pagination-wrap {
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 4px;
   }
 }
 </style>
