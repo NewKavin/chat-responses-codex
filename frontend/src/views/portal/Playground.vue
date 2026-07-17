@@ -132,7 +132,7 @@
               type="textarea"
               :autosize="{ minRows: 1, maxRows: 6 }"
               :maxlength="4000"
-              placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
+              placeholder="输入消息..."
               :disabled="isBusy"
               @keydown="handleInputKeydown"
             />

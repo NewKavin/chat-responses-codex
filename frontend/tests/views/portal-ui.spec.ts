@@ -82,6 +82,8 @@ describe('portal ui structure', () => {
     expect(playground).toContain('message-reasoning')
     expect(playground).toContain('playground-composer')
     expect(playground).toContain('composer-actions')
+    expect(playground).toContain('placeholder="输入消息..."')
+    expect(playground).not.toContain('placeholder="输入消息... (Enter')
     expect(playground).toContain('overflow-wrap: anywhere')
   })
 
