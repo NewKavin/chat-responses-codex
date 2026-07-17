@@ -7,7 +7,10 @@ pub mod stream_aggregate;
 #[path = "protocol/tool_adapter.rs"]
 pub mod tool_adapter;
 
-pub use stream_aggregate::{StreamAggregateResult, StreamResponseAggregator};
+pub use stream_aggregate::{
+    FirstSemanticEventClassifier, FirstSemanticEventResult, StreamAggregateResult,
+    StreamResponseAggregator,
+};
 
 use crate::capabilities::{ReasoningCarrier, ResolvedCapabilities};
 use crate::routing::UpstreamProtocol;

@@ -156,6 +156,60 @@ impl SseDecoder {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstSemanticEventResult {
+    Pending,
+    Ready,
+}
+
+#[derive(Debug)]
+pub struct FirstSemanticEventClassifier {
+    decoder: SseDecoder,
+    validator: StreamResponseAggregator,
+    ready: bool,
+}
+
+impl FirstSemanticEventClassifier {
+    pub fn new(protocol: UpstreamProtocol) -> Self {
+        Self {
+            decoder: SseDecoder::new(),
+            validator: StreamResponseAggregator::new(protocol),
+            ready: false,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Result<FirstSemanticEventResult, ProtocolError> {
+        if self.ready {
+            return Ok(FirstSemanticEventResult::Ready);
+        }
+        self.decoder.append(chunk)?;
+        self.classify_next()
+    }
+
+    pub fn finish(mut self) -> Result<FirstSemanticEventResult, ProtocolError> {
+        if self.ready {
+            return Ok(FirstSemanticEventResult::Ready);
+        }
+        self.decoder.finish();
+        match self.classify_next()? {
+            FirstSemanticEventResult::Ready => Ok(FirstSemanticEventResult::Ready),
+            FirstSemanticEventResult::Pending => Err(invalid_stream(
+                UpstreamStreamErrorKind::Incomplete,
+                "stream ended before the first semantic event",
+            )),
+        }
+    }
+
+    fn classify_next(&mut self) -> Result<FirstSemanticEventResult, ProtocolError> {
+        let Some(event) = self.decoder.next_event()? else {
+            return Ok(FirstSemanticEventResult::Pending);
+        };
+        self.validator.process_event(&event)?;
+        self.ready = true;
+        Ok(FirstSemanticEventResult::Ready)
+    }
+}
+
 #[derive(Debug)]
 pub struct StreamResponseAggregator {
     protocol: UpstreamProtocol,
@@ -766,6 +820,89 @@ fn completion_already_emitted() -> ProtocolError {
         UpstreamStreamErrorKind::Decode,
         "aggregate completion was already emitted",
     )
+}
+
+#[cfg(test)]
+mod first_semantic_event_tests {
+    use super::*;
+
+    #[test]
+    fn first_semantic_event_classifier_waits_through_comments_and_split_frames() {
+        let mut classifier = FirstSemanticEventClassifier::new(UpstreamProtocol::ChatCompletions);
+
+        assert_eq!(
+            classifier.push(b": keepalive\r\n\r\ndata: {\"id\":\"chunk-1\","),
+            Ok(FirstSemanticEventResult::Pending)
+        );
+        assert_eq!(
+            classifier.push(
+                b"\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ready\"},\"finish_reason\":null}]}\r\n\r\n"
+            ),
+            Ok(FirstSemanticEventResult::Ready)
+        );
+    }
+
+    #[test]
+    fn first_semantic_event_classifier_stops_before_later_error_in_same_chunk() {
+        let mut classifier = FirstSemanticEventClassifier::new(UpstreamProtocol::ChatCompletions);
+        let input = concat!(
+            "data: {\"id\":\"chunk-1\",\"choices\":[{\"index\":0,",
+            "\"delta\":{\"content\":\"ready\"},\"finish_reason\":null}]}\n\n",
+            "event: error\n",
+            "data: {\"error\":{\"message\":\"later failure\"}}\n\n"
+        );
+
+        assert_eq!(
+            classifier.push(input.as_bytes()),
+            Ok(FirstSemanticEventResult::Ready)
+        );
+    }
+
+    #[test]
+    fn first_semantic_event_classifier_remains_ready_without_parsing_later_chunks() {
+        let mut classifier = FirstSemanticEventClassifier::new(UpstreamProtocol::ChatCompletions);
+
+        assert_eq!(
+            classifier.push(
+                b"data: {\"id\":\"chunk-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ready\"},\"finish_reason\":null}]}\n\n"
+            ),
+            Ok(FirstSemanticEventResult::Ready)
+        );
+        assert_eq!(
+            classifier.push(b"event: error\ndata: not-json\n\n"),
+            Ok(FirstSemanticEventResult::Ready)
+        );
+    }
+
+    #[test]
+    fn first_semantic_event_classifier_rejects_an_initial_error_event() {
+        let mut classifier = FirstSemanticEventClassifier::new(UpstreamProtocol::Responses);
+        let error = classifier
+            .push(b"event: error\ndata: {\"error\":{\"message\":\"temporary\"}}\n\n")
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidUpstreamStream {
+                kind: UpstreamStreamErrorKind::UpstreamEvent,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn first_semantic_event_classifier_rejects_eof_without_an_event() {
+        let classifier = FirstSemanticEventClassifier::new(UpstreamProtocol::Responses);
+        let error = classifier.finish().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidUpstreamStream {
+                kind: UpstreamStreamErrorKind::Incomplete,
+                ..
+            }
+        ));
+    }
 }
 
 #[cfg(test)]
