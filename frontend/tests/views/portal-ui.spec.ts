@@ -6,6 +6,11 @@ const source = (name: string) => readFileSync(
   'utf8'
 )
 
+const componentSource = (name: string) => readFileSync(
+  new URL(`../../src/components/${name}.vue`, import.meta.url),
+  'utf8'
+)
+
 describe('portal ui structure', () => {
   it('uses one flat quota summary and stable detail sections', () => {
     const overview = source('Overview')
@@ -78,6 +83,16 @@ describe('portal ui structure', () => {
     expect(playground).toContain('playground-composer')
     expect(playground).toContain('composer-actions')
     expect(playground).toContain('overflow-wrap: anywhere')
+  })
+
+  it('keeps automatic playground settings legible in the light theme', () => {
+    const settings = componentSource('PlaygroundSettings')
+
+    expect(settings.match(/inactive-text="自动"/g)).toHaveLength(3)
+    expect(settings).toContain(
+      '.playground-settings :deep(.el-switch:not(.is-checked) .el-switch__inner-wrapper)'
+    )
+    expect(settings).toContain('color: var(--crc-text-strong)')
   })
 
   it('uses focused key security and portal probe surfaces', () => {

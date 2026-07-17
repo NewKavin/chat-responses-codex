@@ -186,6 +186,10 @@ const emit = defineEmits<{
   width: 100%;
 }
 
+.playground-settings :deep(.el-switch:not(.is-checked) .el-switch__inner-wrapper) {
+  color: var(--crc-text-strong);
+}
+
 .playground-settings__actions {
   margin-top: auto;
   padding-top: 16px;
