@@ -1,162 +1,219 @@
 <template>
-  <div class="overview-container">
-    <!-- 配额概览卡片 -->
-    <el-card class="summary-card">
-      <template #header>
-        <div class="card-header">
-          <h2>配额使用概览</h2>
-          <span class="card-subtitle">实时刷新</span>
-        </div>
-      </template>
-      <el-row :gutter="20">
-        <el-col :span="8" v-if="data.quota_summary.request_quota">
-          <el-card shadow="hover" class="quota-tile">
-            <el-statistic
-              :title="`请求配额 (${data.quota_summary.request_quota.window_hours}h)`"
-              :value="data.quota_summary.request_quota.used"
-              :value-style="{ color: getQuotaColor(data.quota_summary.request_quota.percentage) }"
-            >
-              <template #suffix>/ {{ data.quota_summary.request_quota.limit }}</template>
-            </el-statistic>
-            <el-progress
-              :percentage="data.quota_summary.request_quota.percentage"
-              :color="getQuotaColor(data.quota_summary.request_quota.percentage)"
-              :show-text="false"
-              :stroke-width="6"
-              class="progress"
-            />
-          </el-card>
-        </el-col>
-        <el-col :span="8" v-if="data.quota_summary.token_daily">
-          <el-card shadow="hover" class="quota-tile">
-            <el-statistic
-              title="每日 Token"
-              :value="data.quota_summary.token_daily.used"
-              :value-style="{ color: getQuotaColor(data.quota_summary.token_daily.percentage) }"
-            >
-              <template #suffix>/ {{ formatCompact(data.quota_summary.token_daily.limit) }}</template>
-            </el-statistic>
-            <el-progress
-              :percentage="data.quota_summary.token_daily.percentage"
-              :color="getQuotaColor(data.quota_summary.token_daily.percentage)"
-              :show-text="false"
-              :stroke-width="6"
-              class="progress"
-            />
-          </el-card>
-        </el-col>
-        <el-col :span="8" v-if="data.quota_summary.token_monthly">
-          <el-card shadow="hover" class="quota-tile">
-            <el-statistic
-              title="每月 Token"
-              :value="data.quota_summary.token_monthly.used"
-              :value-style="{ color: getQuotaColor(data.quota_summary.token_monthly.percentage) }"
-            >
-              <template #suffix>/ {{ formatCompact(data.quota_summary.token_monthly.limit) }}</template>
-            </el-statistic>
-            <el-progress
-              :percentage="data.quota_summary.token_monthly.percentage"
-              :color="getQuotaColor(data.quota_summary.token_monthly.percentage)"
-              :show-text="false"
-              :stroke-width="6"
-              class="progress"
-            />
-          </el-card>
-        </el-col>
-      </el-row>
-    </el-card>
+  <div class="crc-page portal-overview-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">配额与访问概览</h1>
+        <p class="crc-page-description">查看请求与 Token 配额、模型范围以及当前下游的访问限制。</p>
+      </div>
+      <span class="overview-refresh-label">每 5 秒自动刷新</span>
+    </header>
 
-    <!-- 统计摘要 -->
-    <el-row :gutter="20" class="stats-row">
-      <el-col :span="12">
-        <el-card>
-          <template #header><div class="card-header"><h3>Token 使用</h3></div></template>
-          <el-descriptions :column="1" border>
-            <el-descriptions-item label="今日使用">{{ formatCompact(data.token_summary.today) }}</el-descriptions-item>
-            <el-descriptions-item label="本月使用">{{ formatCompact(data.token_summary.this_month) }}</el-descriptions-item>
-          </el-descriptions>
-        </el-card>
-      </el-col>
-      <el-col :span="12">
-        <el-card>
-          <template #header><div class="card-header"><h3>模型概况</h3></div></template>
-          <el-descriptions :column="1" border>
-            <el-descriptions-item label="可用模型">{{ data.model_summary.total_models }}</el-descriptions-item>
-            <el-descriptions-item label="活跃模型">{{ data.model_summary.active_models }}</el-descriptions-item>
-          </el-descriptions>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <!-- 配额明细(可折叠,原限额详情页内容) -->
-    <el-card class="detail-card" v-loading="quotaLoading">
-      <template #header>
-        <div class="card-header">
-          <h3>配额明细与白名单</h3>
-          <span class="card-subtitle">来自限额配置</span>
+    <section class="quota-summary-grid" aria-label="配额总览">
+      <article v-if="data.quota_summary.request_quota" class="quota-summary-item crc-surface">
+        <div class="quota-summary-head">
+          <span class="quota-summary-label">请求配额</span>
+          <span class="quota-summary-meta">{{ data.quota_summary.request_quota.window_hours }} 小时窗口</span>
         </div>
-      </template>
-      <el-collapse v-model="activeDetail" class="detail-collapse">
-        <el-collapse-item title="请求配额" name="request" v-if="quotaData.request_quota">
-          <el-descriptions :column="2" border>
-            <el-descriptions-item label="时间窗口">{{ quotaData.request_quota.window_hours }} 小时</el-descriptions-item>
-            <el-descriptions-item label="配额限制">{{ quotaData.request_quota.limit }}</el-descriptions-item>
-            <el-descriptions-item label="已使用">{{ quotaData.request_quota.used }}</el-descriptions-item>
-            <el-descriptions-item label="剩余">{{ quotaData.request_quota.remaining }}</el-descriptions-item>
-            <el-descriptions-item label="使用率" :span="2">
-              <el-progress
-                :percentage="formatPct(quotaData.request_quota.percentage)"
-                :color="getQuotaColor(quotaData.request_quota.percentage)"
-              />
-            </el-descriptions-item>
-          </el-descriptions>
-        </el-collapse-item>
-        <el-collapse-item title="每日 Token 配额" name="daily" v-if="quotaData.token_quota?.daily">
-          <el-descriptions :column="2" border>
-            <el-descriptions-item label="配额限制">{{ quotaData.token_quota.daily.limit.toLocaleString() }}</el-descriptions-item>
-            <el-descriptions-item label="已使用">{{ quotaData.token_quota.daily.used.toLocaleString() }}</el-descriptions-item>
-            <el-descriptions-item label="剩余">{{ quotaData.token_quota.daily.remaining.toLocaleString() }}</el-descriptions-item>
-            <el-descriptions-item label="使用率">
-              <el-progress
-                :percentage="formatPct(quotaData.token_quota.daily.percentage)"
-                :color="getQuotaColor(quotaData.token_quota.daily.percentage)"
-              />
-            </el-descriptions-item>
-          </el-descriptions>
-        </el-collapse-item>
-        <el-collapse-item title="每月 Token 配额" name="monthly" v-if="quotaData.token_quota?.monthly">
-          <el-descriptions :column="2" border>
-            <el-descriptions-item label="配额限制">{{ quotaData.token_quota.monthly.limit.toLocaleString() }}</el-descriptions-item>
-            <el-descriptions-item label="已使用">{{ quotaData.token_quota.monthly.used.toLocaleString() }}</el-descriptions-item>
-            <el-descriptions-item label="剩余">{{ quotaData.token_quota.monthly.remaining.toLocaleString() }}</el-descriptions-item>
-            <el-descriptions-item label="使用率">
-              <el-progress
-                :percentage="formatPct(quotaData.token_quota.monthly.percentage)"
-                :color="getQuotaColor(quotaData.token_quota.monthly.percentage)"
-              />
-            </el-descriptions-item>
-          </el-descriptions>
-        </el-collapse-item>
-        <el-collapse-item name="models">
+        <div class="quota-summary-value-row">
+          <strong>{{ data.quota_summary.request_quota.used }}</strong>
+          <span>/ {{ data.quota_summary.request_quota.limit }}</span>
+        </div>
+        <el-progress
+          :percentage="formatPct(data.quota_summary.request_quota.percentage)"
+          :color="getQuotaStatusColor(data.quota_summary.request_quota.percentage)"
+          :show-text="false"
+          :stroke-width="6"
+        />
+        <p class="quota-summary-foot">
+          剩余 {{ data.quota_summary.request_quota.remaining }} · {{ formatPct(data.quota_summary.request_quota.percentage) }}%
+        </p>
+      </article>
+
+      <article v-if="data.quota_summary.token_daily" class="quota-summary-item crc-surface">
+        <div class="quota-summary-head">
+          <span class="quota-summary-label">每日 Token</span>
+          <span class="quota-summary-meta">今日累计</span>
+        </div>
+        <div class="quota-summary-value-row">
+          <strong>{{ formatCompact(data.quota_summary.token_daily.used) }}</strong>
+          <span>/ {{ formatCompact(data.quota_summary.token_daily.limit) }}</span>
+        </div>
+        <el-progress
+          :percentage="formatPct(data.quota_summary.token_daily.percentage)"
+          :color="getQuotaStatusColor(data.quota_summary.token_daily.percentage)"
+          :show-text="false"
+          :stroke-width="6"
+        />
+        <p class="quota-summary-foot">
+          剩余 {{ formatCompact(data.quota_summary.token_daily.remaining) }} · {{ formatPct(data.quota_summary.token_daily.percentage) }}%
+        </p>
+      </article>
+
+      <article v-if="data.quota_summary.token_monthly" class="quota-summary-item crc-surface">
+        <div class="quota-summary-head">
+          <span class="quota-summary-label">每月 Token</span>
+          <span class="quota-summary-meta">本月累计</span>
+        </div>
+        <div class="quota-summary-value-row">
+          <strong>{{ formatCompact(data.quota_summary.token_monthly.used) }}</strong>
+          <span>/ {{ formatCompact(data.quota_summary.token_monthly.limit) }}</span>
+        </div>
+        <el-progress
+          :percentage="formatPct(data.quota_summary.token_monthly.percentage)"
+          :color="getQuotaStatusColor(data.quota_summary.token_monthly.percentage)"
+          :show-text="false"
+          :stroke-width="6"
+        />
+        <p class="quota-summary-foot">
+          剩余 {{ formatCompact(data.quota_summary.token_monthly.remaining) }} · {{ formatPct(data.quota_summary.token_monthly.percentage) }}%
+        </p>
+      </article>
+    </section>
+
+    <section class="overview-meta-grid">
+      <article class="overview-meta-item crc-surface">
+        <span class="overview-meta-label">今日 Token 使用</span>
+        <strong>{{ formatCompact(data.token_summary.today) }}</strong>
+      </article>
+      <article class="overview-meta-item crc-surface">
+        <span class="overview-meta-label">本月 Token 使用</span>
+        <strong>{{ formatCompact(data.token_summary.this_month) }}</strong>
+      </article>
+      <article class="overview-meta-item crc-surface">
+        <span class="overview-meta-label">可用模型</span>
+        <strong>{{ data.model_summary.total_models }}</strong>
+      </article>
+      <article class="overview-meta-item crc-surface">
+        <span class="overview-meta-label">活跃模型</span>
+        <strong>{{ data.model_summary.active_models }}</strong>
+      </article>
+    </section>
+
+    <section class="quota-details-shell" v-loading="quotaLoading">
+      <div class="quota-details-head">
+        <h2>配额明细与白名单</h2>
+        <p>根据当前限额配置展示请求窗口、Token 配额以及可访问范围。</p>
+      </div>
+
+      <el-collapse v-model="activeDetail" class="quota-detail-collapse">
+        <el-collapse-item name="request" v-if="quotaData.request_quota">
           <template #title>
-            <div class="collapse-title">
-              <span>模型白名单</span>
-              <span class="collapse-hint">{{ modelSectionHint }}</span>
+            <div class="quota-detail-title-row">
+              <span>请求配额</span>
+              <span class="quota-detail-title-meta">{{ quotaData.request_quota.window_hours }} 小时滑动窗口</span>
             </div>
           </template>
-          <template v-if="displayModelSlugs.length > 0">
-            <el-tag v-for="model in displayModelSlugs" :key="model" class="tag-chip">{{ model }}</el-tag>
-          </template>
-          <el-empty v-else :description="modelEmptyDescription" :image-size="60" />
+          <section class="quota-detail-section">
+            <div class="quota-detail-metrics">
+              <div class="quota-detail-metric">
+                <span>配额限制</span>
+                <strong>{{ quotaData.request_quota.limit }}</strong>
+              </div>
+              <div class="quota-detail-metric">
+                <span>已使用</span>
+                <strong>{{ quotaData.request_quota.used }}</strong>
+              </div>
+              <div class="quota-detail-metric">
+                <span>剩余</span>
+                <strong>{{ quotaData.request_quota.remaining }}</strong>
+              </div>
+            </div>
+            <el-progress
+              :percentage="formatPct(quotaData.request_quota.percentage)"
+              :color="getQuotaStatusColor(quotaData.request_quota.percentage)"
+            />
+          </section>
         </el-collapse-item>
-        <el-collapse-item title="IP 白名单" name="ips">
-          <template v-if="quotaData.ip_allowlist.length > 0">
-            <el-tag v-for="ip in quotaData.ip_allowlist" :key="ip" type="info" class="tag-chip">{{ ip }}</el-tag>
+
+        <el-collapse-item name="daily" v-if="quotaData.token_quota?.daily">
+          <template #title>
+            <div class="quota-detail-title-row">
+              <span>每日 Token 配额</span>
+              <span class="quota-detail-title-meta">当日累计</span>
+            </div>
           </template>
-          <el-empty v-else description="无限制" :image-size="60" />
+          <section class="quota-detail-section">
+            <div class="quota-detail-metrics">
+              <div class="quota-detail-metric">
+                <span>配额限制</span>
+                <strong>{{ quotaData.token_quota.daily.limit.toLocaleString() }}</strong>
+              </div>
+              <div class="quota-detail-metric">
+                <span>已使用</span>
+                <strong>{{ quotaData.token_quota.daily.used.toLocaleString() }}</strong>
+              </div>
+              <div class="quota-detail-metric">
+                <span>剩余</span>
+                <strong>{{ quotaData.token_quota.daily.remaining.toLocaleString() }}</strong>
+              </div>
+            </div>
+            <el-progress
+              :percentage="formatPct(quotaData.token_quota.daily.percentage)"
+              :color="getQuotaStatusColor(quotaData.token_quota.daily.percentage)"
+            />
+          </section>
+        </el-collapse-item>
+
+        <el-collapse-item name="monthly" v-if="quotaData.token_quota?.monthly">
+          <template #title>
+            <div class="quota-detail-title-row">
+              <span>每月 Token 配额</span>
+              <span class="quota-detail-title-meta">本月累计</span>
+            </div>
+          </template>
+          <section class="quota-detail-section">
+            <div class="quota-detail-metrics">
+              <div class="quota-detail-metric">
+                <span>配额限制</span>
+                <strong>{{ quotaData.token_quota.monthly.limit.toLocaleString() }}</strong>
+              </div>
+              <div class="quota-detail-metric">
+                <span>已使用</span>
+                <strong>{{ quotaData.token_quota.monthly.used.toLocaleString() }}</strong>
+              </div>
+              <div class="quota-detail-metric">
+                <span>剩余</span>
+                <strong>{{ quotaData.token_quota.monthly.remaining.toLocaleString() }}</strong>
+              </div>
+            </div>
+            <el-progress
+              :percentage="formatPct(quotaData.token_quota.monthly.percentage)"
+              :color="getQuotaStatusColor(quotaData.token_quota.monthly.percentage)"
+            />
+          </section>
+        </el-collapse-item>
+
+        <el-collapse-item name="models">
+          <template #title>
+            <div class="quota-detail-title-row">
+              <span>模型白名单</span>
+              <span class="quota-detail-title-meta">{{ modelSectionHint }}</span>
+            </div>
+          </template>
+          <section class="quota-detail-section">
+            <div v-if="displayModelSlugs.length > 0" class="quota-tag-list">
+              <el-tag v-for="model in displayModelSlugs" :key="model" class="quota-tag">{{ model }}</el-tag>
+            </div>
+            <el-empty v-else :description="modelEmptyDescription" :image-size="60" />
+          </section>
+        </el-collapse-item>
+
+        <el-collapse-item name="ips">
+          <template #title>
+            <div class="quota-detail-title-row">
+              <span>IP 白名单</span>
+              <span class="quota-detail-title-meta">{{ quotaData.ip_allowlist.length > 0 ? '按来源地址限制' : '当前不限制来源地址' }}</span>
+            </div>
+          </template>
+          <section class="quota-detail-section">
+            <div v-if="quotaData.ip_allowlist.length > 0" class="quota-tag-list">
+              <el-tag v-for="ip in quotaData.ip_allowlist" :key="ip" type="info" class="quota-tag">{{ ip }}</el-tag>
+            </div>
+            <el-empty v-else description="无限制" :image-size="60" />
+          </section>
         </el-collapse-item>
       </el-collapse>
-    </el-card>
+    </section>
   </div>
 </template>
 
@@ -188,7 +245,7 @@ const quotaData = ref<PortalQuota>({
 const quotaLoading = ref(false)
 const availableModelSlugs = ref<string[]>([])
 const modelLoadError = ref('')
-const activeDetail = ref<string[]>([])
+const activeDetail = ref(['request', 'daily', 'monthly', 'models', 'ips'])
 
 const displayModelSlugs = computed(() =>
   resolvePortalQuotaModelSlugs(quotaData.value.model_allowlist, availableModelSlugs.value)
@@ -196,9 +253,9 @@ const displayModelSlugs = computed(() =>
 const allowlistIsEmpty = computed(() => quotaData.value.model_allowlist.length === 0)
 const modelSectionHint = computed(() => {
   if (!allowlistIsEmpty.value) return '仅展示配置的模型白名单'
-  if (availableModelSlugs.value.length > 0) return '未配置白名单,展示全部可用模型'
-  if (modelLoadError.value) return '未配置白名单,暂无法读取全部模型'
-  return '未配置白名单,展示全部可用模型'
+  if (availableModelSlugs.value.length > 0) return '未配置白名单，当前展示全部可用模型'
+  if (modelLoadError.value) return '未配置白名单，暂时无法读取全部模型'
+  return '未配置白名单，当前展示全部可用模型'
 })
 const modelEmptyDescription = computed(() => {
   if (!allowlistIsEmpty.value) return '无限制'
@@ -206,9 +263,14 @@ const modelEmptyDescription = computed(() => {
   return '未发现可用模型'
 })
 
-const getQuotaColor = (p: number) => (p >= 90 ? '#f56c6c' : p >= 70 ? '#e6a23c' : '#67c23a')
-const formatCompact = (v: number) => formatCompactNumber(v)
-const formatPct = (v: number) => formatPercentageTwoDecimals(v)
+const getQuotaStatusColor = (percentage: number) => {
+  if (percentage >= 90) return 'var(--crc-danger)'
+  if (percentage >= 70) return 'var(--crc-warning)'
+  return 'var(--crc-success)'
+}
+
+const formatCompact = (value: number) => formatCompactNumber(value)
+const formatPct = (value: number) => formatPercentageTwoDecimals(value)
 
 let refreshTimer: number | null = null
 
@@ -227,24 +289,36 @@ const loadQuotaDetail = async () => {
     modelLoadError.value = ''
     availableModelSlugs.value = []
     const response = await portalApi.getQuota()
-    const r = response.data as any
+    const payload = response.data as PortalQuota
     quotaData.value = {
-      request_quota: r.request_quota,
-      token_quota: r.token_quota,
-      model_allowlist: r.model_allowlist || [],
-      ip_allowlist: r.ip_allowlist || []
+      request_quota: payload.request_quota,
+      token_quota: payload.token_quota,
+      model_allowlist: payload.model_allowlist || [],
+      ip_allowlist: payload.ip_allowlist || [],
+      model_contexts: payload.model_contexts
     }
     if (quotaData.value.model_allowlist.length === 0) {
       const keyResponse = await portalApi.getKey()
       const portalKey = keyResponse.data.plaintext_key?.trim() ?? ''
-      if (!portalKey) { modelLoadError.value = '当前下游没有可用秘钥,无法读取全部模型。'; return }
+      if (!portalKey) {
+        modelLoadError.value = '当前下游没有可用秘钥，无法读取全部模型。'
+        return
+      }
+
       const modelsResponse = await fetch(buildGatewayModelsEndpoint(window.location.origin), {
-        headers: { Authorization: `Bearer ${portalKey}` }
+        headers: { Authorization: 'Bearer ' + portalKey }
       })
-      if (!modelsResponse.ok) { modelLoadError.value = `网关模型接口返回 ${modelsResponse.status}`; return }
-      const payload = await modelsResponse.json()
-      availableModelSlugs.value = extractGatewayModelSlugs(payload)
-      if (availableModelSlugs.value.length === 0) modelLoadError.value = '未发现可用模型。'
+
+      if (!modelsResponse.ok) {
+        modelLoadError.value = '网关模型接口返回 ' + modelsResponse.status
+        return
+      }
+
+      const modelsPayload = await modelsResponse.json()
+      availableModelSlugs.value = extractGatewayModelSlugs(modelsPayload)
+      if (availableModelSlugs.value.length === 0) {
+        modelLoadError.value = '未发现可用模型。'
+      }
     }
   } catch (error) {
     ElMessage.error('加载限额详情失败')
@@ -257,27 +331,199 @@ const loadQuotaDetail = async () => {
 onMounted(() => {
   loadOverview()
   loadQuotaDetail()
-  refreshTimer = window.setInterval(() => { loadOverview() }, 5000)
+  refreshTimer = window.setInterval(() => {
+    loadOverview()
+  }, 5000)
 })
+
 onUnmounted(() => {
-  if (refreshTimer !== null) { clearInterval(refreshTimer); refreshTimer = null }
+  if (refreshTimer !== null) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
 })
 </script>
 
 <style scoped>
-.overview-container { padding: 20px; display: flex; flex-direction: column; gap: 20px; }
-.card-header { display: flex; align-items: baseline; justify-content: space-between; }
-.card-header h2, .card-header h3 { margin: 0; font-size: 16px; color: #303133; }
-.card-subtitle { font-size: 12px; color: #909399; }
-.quota-tile { height: 100%; }
-.progress { margin-top: 10px; }
-.stats-row { margin: 0; }
-.detail-card { margin: 0; }
-.detail-collapse { border: none; }
-.detail-collapse :deep(.el-collapse-item__header) { font-weight: 600; color: #303133; }
-.collapse-title { display: flex; align-items: baseline; gap: 10px; }
-.collapse-hint { font-size: 12px; color: #909399; font-weight: 400; }
-.tag-chip { margin: 0 8px 8px 0; }
-:deep(.el-statistic__content) { font-size: 26px; }
-:deep(.el-card__header) { padding: 14px 20px; }
+.portal-overview-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.overview-refresh-label {
+  color: var(--crc-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.quota-summary-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.quota-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+}
+
+.quota-summary-head,
+.quota-summary-value-row,
+.quota-detail-title-row,
+.quota-details-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quota-summary-label,
+.quota-summary-value-row strong,
+.quota-details-head h2,
+.quota-detail-metric strong {
+  color: var(--crc-text-strong);
+}
+
+.quota-summary-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.quota-summary-meta,
+.quota-summary-value-row span,
+.quota-summary-foot,
+.quota-details-head p,
+.quota-detail-title-meta,
+.quota-detail-metric span {
+  color: var(--crc-text-muted);
+}
+
+.quota-summary-meta,
+.quota-summary-foot,
+.quota-details-head p,
+.quota-detail-title-meta,
+.quota-detail-metric span {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.quota-summary-value-row strong {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.overview-meta-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.overview-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+}
+
+.overview-meta-label {
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
+.overview-meta-item strong {
+  color: var(--crc-text-strong);
+  font-size: 18px;
+}
+
+.quota-details-shell {
+  padding-top: 4px;
+}
+
+.quota-details-head {
+  margin-bottom: 16px;
+}
+
+.quota-details-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.quota-detail-collapse {
+  border-top: 1px solid var(--crc-border);
+  border-bottom: 1px solid var(--crc-border);
+}
+
+.quota-detail-collapse :deep(.el-collapse-item__header) {
+  min-height: 54px;
+  padding: 0 4px;
+  color: var(--crc-text-strong);
+  background: transparent;
+}
+
+.quota-detail-collapse :deep(.el-collapse-item__wrap) {
+  background: transparent;
+}
+
+.quota-detail-section {
+  padding: 4px 0 20px;
+}
+
+.quota-detail-metrics {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.quota-detail-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface);
+}
+
+.quota-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quota-tag {
+  margin: 0;
+}
+
+@media (max-width: 1023px) {
+  .quota-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .quota-summary-head,
+  .quota-summary-value-row,
+  .quota-detail-title-row,
+  .quota-details-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .overview-meta-grid,
+  .quota-detail-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-refresh-label {
+    display: none;
+  }
+}
 </style>
