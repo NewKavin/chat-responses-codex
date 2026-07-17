@@ -377,24 +377,38 @@ pub(super) async fn aggregate_upstream_sse_response(
     }
 }
 
-pub(super) async fn prefetch_first_semantic_event(
+pub(super) async fn prefetch_first_usable_output(
     mut reader: UpstreamStreamReader,
     protocol: UpstreamProtocol,
 ) -> Result<UpstreamStreamReader, GatewayError> {
-    let mut classifier = FirstSemanticEventClassifier::new(protocol);
+    let mut classifier = FirstUsableOutputClassifier::new(protocol);
 
     loop {
         match reader.next_network_chunk().await {
             StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                 reader.replay_later(chunk.clone());
-                match classifier.push(&chunk).map_err(protocol_error_to_gateway)? {
-                    FirstSemanticEventResult::Pending => {}
-                    FirstSemanticEventResult::Ready => return Ok(reader),
+                match classifier
+                    .push(&chunk, sse_event_has_usable_output)
+                    .map_err(protocol_error_to_gateway)?
+                {
+                    FirstUsableOutputResult::Pending => {}
+                    FirstUsableOutputResult::Ready => return Ok(reader),
+                    FirstUsableOutputResult::CompleteWithoutOutput => {
+                        return Err(upstream_empty_response_error());
+                    }
                 }
             }
             StreamReadOutcome::Chunk(Ok(None)) => {
-                classifier.finish().map_err(protocol_error_to_gateway)?;
-                return Ok(reader);
+                return match classifier
+                    .finish(sse_event_has_usable_output)
+                    .map_err(protocol_error_to_gateway)?
+                {
+                    FirstUsableOutputResult::Ready => Ok(reader),
+                    FirstUsableOutputResult::CompleteWithoutOutput => {
+                        Err(upstream_empty_response_error())
+                    }
+                    FirstUsableOutputResult::Pending => unreachable!("finish resolves pending"),
+                };
             }
             StreamReadOutcome::Chunk(Err(error)) => {
                 let message = error.to_string();
@@ -425,6 +439,14 @@ pub(super) async fn prefetch_first_semantic_event(
             }
         }
     }
+}
+
+fn sse_event_has_usable_output(event: &crate::protocol::stream_aggregate::SseEvent) -> bool {
+    let payload = event.data().trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return false;
+    }
+    serde_json::from_str::<Value>(payload).is_ok_and(|value| stream_event_has_usable_output(&value))
 }
 
 pub(super) fn proxied_stream_body(

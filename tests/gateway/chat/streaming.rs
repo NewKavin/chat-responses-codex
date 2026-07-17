@@ -2,6 +2,7 @@
 
 use super::*;
 use axum::response::IntoResponse;
+use futures_util::StreamExt;
 
 #[tokio::test]
 async fn downstream_streaming_request_reports_model_routing_failure_precisely() {
@@ -532,7 +533,15 @@ async fn first_sse_error_retries_without_stream_before_output() {
 
                 if request_stream {
                     let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                        b"event: error\ndata: {\"error\":{\"message\":\"temporary stream failure\"}}\n\n",
+                        concat!(
+                            "data: {\"id\":\"chatcmpl-pending\",",
+                            "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                            "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                            "\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+                            "event: error\n",
+                            "data: {\"error\":{\"message\":\"temporary stream failure\"}}\n\n"
+                        )
+                        .as_bytes(),
                     ))];
                     return (
                         StatusCode::OK,
@@ -664,6 +673,500 @@ async fn first_sse_error_retries_without_stream_before_output() {
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert_eq!(snapshot.usage_logs[0].status_code, 200);
+}
+
+#[tokio::test]
+async fn slow_first_output_hedge_uses_the_next_upstream_account() {
+    let slow_hits = Arc::new(AtomicUsize::new(0));
+    let fast_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let slow_hits_for_handler = slow_hits.clone();
+    let fast_hits_for_handler = fast_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let slow_hits = slow_hits_for_handler.clone();
+            let fast_hits = fast_hits_for_handler.clone();
+            async move {
+                let authorization = request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let payload = String::from_utf8(
+                    to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+
+                if authorization == "Bearer slow-key" {
+                    slow_hits.fetch_add(1, Ordering::SeqCst);
+                    if payload.contains("Return immediately from the primary account") {
+                        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                            concat!(
+                                "data: {\"id\":\"chatcmpl-primary\",",
+                                "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                                "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                                "\"delta\":{\"content\":\"primary winner\"},\"finish_reason\":null}]}\n\n",
+                                "data: {\"id\":\"chatcmpl-primary\",",
+                                "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                                "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                                "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                                "data: [DONE]\n\n"
+                            )
+                            .as_bytes(),
+                        ))];
+                        return (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            Body::from_stream(stream::iter(chunks)),
+                        )
+                            .into_response();
+                    }
+                    let lifecycle = Bytes::from_static(
+                        concat!(
+                            "data: {\"id\":\"chatcmpl-slow\",",
+                            "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                            "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                            "\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"
+                        )
+                        .as_bytes(),
+                    );
+                    let stream = stream::once(async {
+                        Ok::<Bytes, std::io::Error>(lifecycle)
+                    })
+                    .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+                    return (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(stream),
+                    )
+                        .into_response();
+                }
+
+                fast_hits.fetch_add(1, Ordering::SeqCst);
+                let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    concat!(
+                        "data: {\"id\":\"chatcmpl-fast\",",
+                        "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                        "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                        "\"delta\":{\"content\":\"hedge winner\"},\"finish_reason\":null}]}\n\n",
+                        "data: {\"id\":\"chatcmpl-fast\",",
+                        "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                        "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                    .as_bytes(),
+                ))];
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(stream::iter(chunks)),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let config = AppConfig {
+        upstream_hedge_enabled: true,
+        upstream_hedge_delay_ms: 50,
+        upstream_hedge_interval_ms: 50,
+        upstream_hedge_max_extra_attempts: 1,
+        ..AppConfig::default()
+    };
+    let persisted_state = PersistedState {
+        upstreams: vec![
+            UpstreamConfig {
+                id: "up-slow".into(),
+                name: "slow primary".into(),
+                base_url: format!("http://{address}"),
+                api_key: "slow-key".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                priority: 10,
+                active: true,
+                ..Default::default()
+            },
+            UpstreamConfig {
+                id: "up-fast".into(),
+                name: "fast hedge".into(),
+                base_url: format!("http://{address}"),
+                api_key: "fast-key".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                priority: 0,
+                active: true,
+                ..Default::default()
+            },
+        ],
+        downstreams: vec![DownstreamConfig {
+            id: "down-1".into(),
+            name: "team-a".into(),
+            hash: downstream_key.hash.clone(),
+            plaintext_key: Some(downstream_key.plaintext.clone()),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4.1-mini".into()],
+            rate_limit_enabled: true,
+            per_minute_limit: 60,
+            max_concurrency: 10,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }],
+        ..Default::default()
+    };
+    let state = AppState::new(
+        persisted_state.clone(),
+        tempdir.path().join("state.json"),
+        config.clone(),
+    );
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(
+                    "x-chat2responses-troubleshooting-route",
+                    state.troubleshooting_route_capture_token(),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "Compare two retry policies."}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-chat2responses-selected-upstream-id"],
+        "up-fast"
+    );
+    assert_eq!(
+        response.headers()["x-chat2responses-selected-upstream-name"],
+        "fast hedge"
+    );
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(2),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("the secondary account should win before the downstream timeout")
+    .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(body.contains("hedge winner"));
+    assert!(!body.contains("chatcmpl-slow"));
+    assert_eq!(slow_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(fast_hits.load(Ordering::SeqCst), 1);
+    wait_for_upstream_in_flight(&state, "up-slow", 0).await;
+    wait_for_upstream_in_flight(&state, "up-fast", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].status_code, 200);
+    assert_eq!(snapshot.usage_logs[0].upstream_key_id, "up-fast");
+    assert_eq!(
+        snapshot.usage_logs[0].upstream_name.as_deref(),
+        Some("fast hedge")
+    );
+    assert_ne!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("stream_client_cancelled")
+    );
+    assert!(snapshot
+        .upstreams
+        .iter()
+        .all(|upstream| upstream.failure_count == 0));
+    assert_ne!(
+        state.get_affinity_upstream("down-1", "gpt-4.1-mini"),
+        Some("up-slow".to_string())
+    );
+    let fast_primary_state = AppState::new(
+        persisted_state,
+        tempdir.path().join("fast-primary-state.json"),
+        config,
+    );
+
+    let response = build_router(fast_primary_state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "messages": [{
+                            "role": "user",
+                            "content": "Return immediately from the primary account"
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(1),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("a fast primary response should complete without a hedge")
+    .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        body.contains("primary winner"),
+        "unexpected fast-primary body: {body}; slow_hits={}, fast_hits={}",
+        slow_hits.load(Ordering::SeqCst),
+        fast_hits.load(Ordering::SeqCst)
+    );
+    assert_eq!(slow_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(fast_hits.load(Ordering::SeqCst), 1);
+    wait_for_upstream_in_flight(&fast_primary_state, "up-slow", 0).await;
+    wait_for_upstream_in_flight(&fast_primary_state, "up-fast", 0).await;
+}
+
+#[tokio::test]
+async fn hedge_admission_rejects_a_full_extra_candidate() {
+    let tempdir = tempdir().unwrap();
+    let upstream = UpstreamConfig {
+        id: "full-hedge-candidate".into(),
+        name: "full hedge candidate".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        api_key: "unused-secret".into(),
+        supported_models: vec!["gpt-4.1-mini".into()],
+        max_concurrency: 1,
+        active: true,
+        ..Default::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream.clone()],
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    state
+        .try_reserve_upstream_request(&upstream, "gpt-4.1-mini")
+        .await
+        .unwrap();
+    let rejection = state
+        .try_reserve_upstream_hedge(&upstream, "gpt-4.1-mini")
+        .await
+        .expect_err("a hedge must not exceed the candidate's hard capacity");
+    assert!(rejection.message.contains("concurrency capacity is full"));
+    let runtime = state.upstream_runtime_snapshots().await;
+    let runtime = runtime.get(&upstream.id).unwrap();
+    assert_eq!(runtime.in_flight, 1);
+    assert_eq!(runtime.minute_cost, 1.0);
+    assert_eq!(runtime.five_hour_cost, 1.0);
+
+    state.release_upstream_request(&upstream.id).await;
+    wait_for_upstream_in_flight(&state, &upstream.id, 0).await;
+}
+
+#[tokio::test]
+async fn full_cross_upstream_hedge_falls_through_to_the_next_key() {
+    let slow_hits = Arc::new(AtomicUsize::new(0));
+    let fallback_hits = Arc::new(AtomicUsize::new(0));
+    let full_candidate_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let slow_hits_for_handler = slow_hits.clone();
+    let fallback_hits_for_handler = fallback_hits.clone();
+    let full_candidate_hits_for_handler = full_candidate_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let slow_hits = slow_hits_for_handler.clone();
+            let fallback_hits = fallback_hits_for_handler.clone();
+            let full_candidate_hits = full_candidate_hits_for_handler.clone();
+            async move {
+                let authorization = request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if authorization == "Bearer slow-key" {
+                    slow_hits.fetch_add(1, Ordering::SeqCst);
+                    let lifecycle = Bytes::from_static(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+                    );
+                    let stream = stream::once(async {
+                        Ok::<Bytes, std::io::Error>(lifecycle)
+                    })
+                    .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+                    return (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(stream),
+                    )
+                        .into_response();
+                }
+                if authorization == "Bearer fallback-key" {
+                    fallback_hits.fetch_add(1, Ordering::SeqCst);
+                    return (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        concat!(
+                            "data: {\"id\":\"chatcmpl-fallback\",",
+                            "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                            "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                            "\"delta\":{\"content\":\"fallback key winner\"}}]}\n\n",
+                            "data: [DONE]\n\n"
+                        ),
+                    )
+                        .into_response();
+                }
+                full_candidate_hits.fetch_add(1, Ordering::SeqCst);
+                StatusCode::NO_CONTENT.into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let primary = UpstreamConfig {
+        id: "primary-with-fallback-key".into(),
+        name: "primary with fallback key".into(),
+        base_url: format!("http://{address}"),
+        api_key: "slow-key".into(),
+        api_keys: vec!["slow-key".into(), "fallback-key".into()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["gpt-4.1-mini".into()],
+        priority: 10,
+        active: true,
+        ..Default::default()
+    };
+    let full_candidate = UpstreamConfig {
+        id: "full-cross-upstream".into(),
+        name: "full cross upstream".into(),
+        base_url: format!("http://{address}"),
+        api_key: "full-key".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["gpt-4.1-mini".into()],
+        max_concurrency: 1,
+        active: true,
+        ..Default::default()
+    };
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![primary, full_candidate.clone()],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                rate_limit_enabled: true,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: true,
+            upstream_hedge_delay_ms: 10,
+            upstream_hedge_interval_ms: 10,
+            upstream_hedge_max_extra_attempts: 1,
+            ..AppConfig::default()
+        },
+    );
+    state
+        .try_reserve_upstream_request(&full_candidate, "gpt-4.1-mini")
+        .await
+        .unwrap();
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "messages": [{
+                            "role": "user",
+                            "content": "Compare capacity rejection with route failure."
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = tokio::time::timeout(
+        Duration::from_secs(1),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("a full route candidate should not consume the hedge launch budget")
+    .unwrap();
+    assert!(String::from_utf8(body.to_vec())
+        .unwrap()
+        .contains("fallback key winner"));
+    assert_eq!(slow_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(full_candidate_hits.load(Ordering::SeqCst), 0);
+    wait_for_upstream_in_flight(&state, "primary-with-fallback-key", 0).await;
+    wait_for_upstream_in_flight(&state, "full-cross-upstream", 1).await;
+    state.release_upstream_request("full-cross-upstream").await;
+    wait_for_upstream_in_flight(&state, "full-cross-upstream", 0).await;
 }
 
 #[tokio::test]
@@ -832,18 +1335,33 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
-                id: "up-1".into(),
-                name: "primary".into(),
-                base_url: format!("http://{address}"),
-                api_key: "fixture-key".into(),
-                protocol: UpstreamProtocol::ChatCompletions,
-                protocols: vec![UpstreamProtocol::ChatCompletions],
-                supported_models: vec!["gpt-4.1-mini".into()],
-                active: true,
-                failure_count: 0,
-                ..Default::default()
-            }],
+            upstreams: vec![
+                UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "fixture-key-1".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    priority: 10,
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                },
+                UpstreamConfig {
+                    id: "up-2".into(),
+                    name: "hedge".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "fixture-key-2".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    active: true,
+                    failure_count: 0,
+                    ..Default::default()
+                },
+            ],
             downstreams: vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
@@ -865,7 +1383,13 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
             ..Default::default()
         },
         tempdir.path().join("state.json"),
-        AppConfig::default(),
+        AppConfig {
+            upstream_hedge_enabled: true,
+            upstream_hedge_delay_ms: 10,
+            upstream_hedge_interval_ms: 10,
+            upstream_hedge_max_extra_attempts: 1,
+            ..AppConfig::default()
+        },
     );
     let downstream = state.snapshot().await.downstreams[0].clone();
     let response = build_router(state.clone())
@@ -896,8 +1420,9 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
 
     assert_eq!(response.status(), StatusCode::OK);
     wait_for_upstream_in_flight(&state, "up-1", 1).await;
+    wait_for_upstream_in_flight(&state, "up-2", 1).await;
     tokio::time::timeout(Duration::from_secs(1), async {
-        while upstream_hits.load(Ordering::SeqCst) == 0 {
+        while upstream_hits.load(Ordering::SeqCst) < 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -910,8 +1435,8 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
             let upstream_released = state
                 .upstream_runtime_snapshots()
                 .await
-                .get("up-1")
-                .is_some_and(|runtime| runtime.in_flight == 0);
+                .values()
+                .all(|runtime| runtime.in_flight == 0);
             let usage_recorded = state.snapshot().await.usage_logs.len() == 1;
             if upstream_released && usage_recorded {
                 break;
@@ -922,7 +1447,7 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
     .await
     .expect("prefetch cancellation should release the slot and emit one usage log");
 
-    assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 2);
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert_eq!(snapshot.usage_logs[0].status_code, 499);
@@ -930,7 +1455,10 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
         snapshot.usage_logs[0].error_category.as_deref(),
         Some("stream_client_cancelled")
     );
-    assert_eq!(snapshot.upstreams[0].failure_count, 0);
+    assert!(snapshot
+        .upstreams
+        .iter()
+        .all(|upstream| upstream.failure_count == 0));
     assert!(state
         .try_reserve_downstream_concurrency(&downstream)
         .is_ok());
@@ -4494,25 +5022,35 @@ async fn claude_drop_after_first_outer_frame(with_text_delta: bool) -> (String, 
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/event-stream"),
             );
-            let delta = if with_text_delta {
-                json!({"role": "assistant", "content": "Hello"})
+            let text_event = json!({
+                "id": "chatcmpl-claude-delivery",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "gpt-4",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "Hello"},
+                    "finish_reason": null
+                }]
+            });
+            let initial = if with_text_delta {
+                Bytes::from(format!("data: {text_event}\n\n"))
             } else {
-                json!({"role": "assistant"})
+                Bytes::from(format!(
+                    "data: {}\n\ndata: {text_event}\n\n",
+                    json!({
+                        "id": "chatcmpl-claude-delivery",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "gpt-4",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": null
+                        }]
+                    })
+                ))
             };
-            let initial = Bytes::from(format!(
-                "data: {}\n\n",
-                json!({
-                    "id": "chatcmpl-claude-delivery",
-                    "object": "chat.completion.chunk",
-                    "created": 1,
-                    "model": "gpt-4",
-                    "choices": [{
-                        "index": 0,
-                        "delta": delta,
-                        "finish_reason": null
-                    }]
-                })
-            ));
             (
                 StatusCode::OK,
                 headers,
@@ -4577,26 +5115,22 @@ async fn claude_drop_after_first_outer_frame(with_text_delta: bool) -> (String, 
         state_path,
         AppConfig::default(),
     );
-    let response = build_router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/messages")
-                .header("x-api-key", downstream_key.plaintext)
-                .header("Content-Type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "gpt-4",
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 128,
-                        "stream": true
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-api-key", downstream_key.plaintext)
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 128,
+                "stream": true
+            })
+            .to_string(),
+        ))
         .unwrap();
+    let response = build_router(state.clone()).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
     let first = tokio::time::timeout(Duration::from_secs(1), body.frame())
@@ -4606,7 +5140,17 @@ async fn claude_drop_after_first_outer_frame(with_text_delta: bool) -> (String, 
         .expect("expected valid first Claude frame")
         .into_data()
         .expect("expected Claude SSE data");
-    let first = String::from_utf8_lossy(&first).into_owned();
+    let mut first = String::from_utf8_lossy(&first).into_owned();
+    if !with_text_delta {
+        let second = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("timed out waiting for buffered Claude text frame")
+            .expect("expected buffered Claude text frame")
+            .expect("expected valid buffered Claude text frame")
+            .into_data()
+            .expect("expected buffered Claude SSE data");
+        first.push_str(&String::from_utf8_lossy(&second));
+    }
     drop(body);
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -4626,13 +5170,14 @@ async fn claude_drop_after_first_outer_frame(with_text_delta: bool) -> (String, 
 }
 
 #[tokio::test]
-async fn claude_message_start_only_delivery_is_cancelled_before_usable_output() {
+async fn claude_role_only_prefix_is_buffered_until_usable_output() {
     let (first, status, category) = claude_drop_after_first_outer_frame(false).await;
 
     assert!(first.contains("event: message_start"));
-    assert!(!first.contains("event: content_block_delta"));
+    assert!(first.contains("event: content_block_delta"));
+    assert!(first.contains("Hello"));
     assert_eq!(status, 499);
-    assert_eq!(category, "stream_client_cancelled");
+    assert_eq!(category, "stream_incomplete_close");
 }
 
 #[tokio::test]

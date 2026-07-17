@@ -588,11 +588,451 @@ fn build_compatibility_usage_metadata(
     }
 }
 
+struct HedgeStreamReady {
+    reader: UpstreamStreamReader,
+    reservation: Option<UpstreamRequestGuard>,
+    key_prefix: String,
+}
+
+struct RouteHedgeReady {
+    result: Box<DispatchResult>,
+}
+
+enum HedgeWinnerReady {
+    Stream(Box<HedgeStreamReady>),
+    Route(RouteHedgeReady),
+}
+
+enum PrefetchedStreamWinner {
+    Reader(Box<UpstreamStreamReader>),
+    Dispatch(Box<DispatchResult>),
+}
+
+struct HedgeStreamAttempt {
+    state: AppState,
+    upstream: UpstreamConfig,
+    api_key: String,
+    url: String,
+    upstream_body: Value,
+    request_model: String,
+    upstream_protocol: UpstreamProtocol,
+    response_header_timeout: Duration,
+    stream_timeouts: StreamTimeouts,
+}
+
+#[derive(Clone)]
+struct RouteHedgeContext {
+    state: AppState,
+    capability_snapshot: CapabilityRuntimeSnapshot,
+    requested_features: RequestedFeatures,
+    body: Value,
+    endpoint: EndpointKind,
+    started: Instant,
+    request_id: String,
+    model: String,
+    normalized_model: String,
+    downstream_key_id: String,
+    downstream_name: String,
+    inference_strength: Option<String>,
+    user_agent: Option<String>,
+    downstream_concurrency_guard: DownstreamConcurrencyGuard,
+    response_history_context: Option<ResponseHistoryContext>,
+    stream_only_recovery_request_safe: bool,
+}
+
+fn hedge_launch_delay(config: &AppConfig, launched_extra_attempts: usize) -> Duration {
+    let delay_ms = if launched_extra_attempts == 0 {
+        config.upstream_hedge_delay_ms
+    } else {
+        config.upstream_hedge_interval_ms
+    };
+    Duration::from_millis(delay_ms.max(1))
+}
+
+fn hedge_extra_attempt_limit(config: &AppConfig, available_accounts: usize) -> usize {
+    if !config.upstream_hedge_enabled {
+        return 0;
+    }
+    usize::try_from(config.upstream_hedge_max_extra_attempts)
+        .unwrap_or(usize::MAX)
+        .min(available_accounts)
+}
+
+fn send_route_hedge_attempt(
+    context: RouteHedgeContext,
+    candidate: RouteHedgeCandidate,
+    control: HedgeAttemptControl,
+) -> futures_util::future::BoxFuture<'static, Result<RouteHedgeReady, GatewayError>> {
+    async move {
+        context
+            .state
+            .try_reserve_upstream_hedge(&candidate.upstream, &context.model)
+            .await
+            .map_err(|error| {
+                GatewayError::upstream_temporary_unavailable(
+                    error.message,
+                    "upstream_hedge_capacity_unavailable",
+                )
+            })?;
+        let upstream_request_guard =
+            UpstreamRequestGuard::new(context.state.clone(), candidate.upstream.id.clone());
+        let completion = StreamCompletionContext {
+            state: context.state.clone(),
+            upstream_id: candidate.upstream.id.clone(),
+            upstream_request_guard: upstream_request_guard.clone(),
+            downstream_concurrency_guard: context.downstream_concurrency_guard.clone(),
+            hedge_control: Some(control.clone()),
+        };
+        let resolved_route = candidate.resolved_capabilities.clone();
+        let attempt_mode = select_upstream_attempt_mode(true, resolved_route.as_ref());
+        let global_context_profile = context
+            .state
+            .global_context_profile_for_upstream_base_url(&candidate.upstream.base_url)
+            .await;
+        let mut stream_only_recovery = StreamOnlyRecoveryState::default();
+        let mut stream_only_recovery_leader = None;
+        let mut stream_only_recovery_identity = None;
+        let result = send_to_upstream(
+            &context.state,
+            &candidate.upstream,
+            &candidate.api_key,
+            &[],
+            &[],
+            resolved_route.as_ref(),
+            &context.capability_snapshot,
+            &context.requested_features,
+            candidate.protocol,
+            &context.body,
+            context.endpoint,
+            true,
+            attempt_mode,
+            context.started,
+            &context.request_id,
+            &context.model,
+            &context.normalized_model,
+            &context.downstream_key_id,
+            &context.downstream_name,
+            context.inference_strength.as_deref(),
+            context.user_agent.as_deref(),
+            false,
+            global_context_profile.as_ref(),
+            Some(completion),
+            context.response_history_context,
+            None,
+            Some(control.clone()),
+            context.stream_only_recovery_request_safe,
+            &mut stream_only_recovery,
+            &mut stream_only_recovery_leader,
+            &mut stream_only_recovery_identity,
+        )
+        .await?;
+        drop(upstream_request_guard);
+        Ok(RouteHedgeReady {
+            result: Box::new(result),
+        })
+    }
+    .boxed()
+}
+
+async fn send_hedge_stream_attempt(
+    attempt: HedgeStreamAttempt,
+) -> Result<HedgeStreamReady, GatewayError> {
+    let HedgeStreamAttempt {
+        state,
+        upstream,
+        api_key,
+        url,
+        upstream_body,
+        request_model,
+        upstream_protocol,
+        response_header_timeout,
+        stream_timeouts,
+    } = attempt;
+    state
+        .try_reserve_upstream_hedge(&upstream, &request_model)
+        .await
+        .map_err(|error| {
+            GatewayError::upstream_temporary_unavailable(
+                error.message,
+                "upstream_hedge_capacity_unavailable",
+            )
+        })?;
+    let reservation = UpstreamRequestGuard::new(state.clone(), upstream.id.clone());
+    let response = tokio::time::timeout(
+        response_header_timeout,
+        state
+            .client_for_url(&url)
+            .post(url)
+            .header(header::AUTHORIZATION, format!("Bearer {api_key}"))
+            .json(&upstream_body)
+            .send(),
+    )
+    .await
+    .map_err(|_| GatewayError::upstream_timeout("hedged upstream response header timeout"))?
+    .map_err(|error| {
+        GatewayError::upstream_network_error(format!("hedged upstream request failed: {error}"))
+    })?;
+
+    if !response.status().is_success() {
+        return Err(GatewayError::upstream_temporary_unavailable(
+            format!("hedged upstream returned HTTP {}", response.status()),
+            "upstream_hedge_rejected",
+        ));
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !content_type.contains("text/event-stream") {
+        return Err(GatewayError::upstream_invalid_response(
+            "hedged streaming request did not return SSE",
+            "upstream_hedge_non_sse_response",
+        ));
+    }
+
+    let reader = prefetch_first_usable_output(
+        UpstreamStreamReader::new(response, stream_timeouts),
+        upstream_protocol,
+    )
+    .await?;
+    Ok(HedgeStreamReady {
+        reader,
+        reservation: Some(reservation),
+        key_prefix: key_prefix(&api_key),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prefetch_stream_with_hedges(
+    state: &AppState,
+    upstream: &UpstreamConfig,
+    primary_reader: UpstreamStreamReader,
+    primary_api_key: &str,
+    hedge_api_keys: &[String],
+    route_hedge_candidates: &[RouteHedgeCandidate],
+    route_hedge_context: Option<RouteHedgeContext>,
+    url: &str,
+    upstream_body: &Value,
+    request_model: &str,
+    upstream_protocol: UpstreamProtocol,
+    response_header_timeout: Duration,
+    stream_timeouts: StreamTimeouts,
+    request_id: &str,
+    started: Instant,
+) -> Result<PrefetchedStreamWinner, GatewayError> {
+    let route_hedge_count = route_hedge_context
+        .as_ref()
+        .map(|_| route_hedge_candidates.len())
+        .unwrap_or(0);
+    let extra_candidate_count = route_hedge_count.saturating_add(hedge_api_keys.len());
+    let max_extra_attempts = hedge_extra_attempt_limit(&state.config, extra_candidate_count);
+    if max_extra_attempts == 0 {
+        return prefetch_first_usable_output(primary_reader, upstream_protocol)
+            .await
+            .map(|reader| PrefetchedStreamWinner::Reader(Box::new(reader)));
+    }
+
+    type HedgeFuture =
+        futures_util::future::BoxFuture<'static, (u32, Result<HedgeWinnerReady, GatewayError>)>;
+    let mut attempts = futures_stream::FuturesUnordered::<HedgeFuture>::new();
+    let primary_key_prefix = key_prefix(primary_api_key);
+    attempts.push(
+        async move {
+            (
+                0,
+                prefetch_first_usable_output(primary_reader, upstream_protocol)
+                    .await
+                    .map(|reader| {
+                        HedgeWinnerReady::Stream(Box::new(HedgeStreamReady {
+                            reader,
+                            reservation: None,
+                            key_prefix: primary_key_prefix,
+                        }))
+                    }),
+            )
+        }
+        .boxed(),
+    );
+
+    let mut launched_extra_attempts = 0usize;
+    let mut next_candidate_index = 0usize;
+    let mut next_attempt_index = 1u32;
+    let mut next_launch_at = TokioInstant::now() + hedge_launch_delay(&state.config, 0);
+    let mut primary_error = None;
+    let mut last_error = None;
+    let mut route_controls = Vec::<(u32, HedgeAttemptControl)>::new();
+
+    loop {
+        if attempts.is_empty()
+            && (launched_extra_attempts >= max_extra_attempts
+                || next_candidate_index >= extra_candidate_count)
+        {
+            return Err(primary_error.or(last_error).unwrap_or_else(|| {
+                GatewayError::upstream_temporary_unavailable(
+                    "all hedged upstream attempts ended before usable output",
+                    "upstream_hedge_exhausted",
+                )
+            }));
+        }
+
+        tokio::select! {
+            outcome = attempts.next(), if !attempts.is_empty() => {
+                let Some((attempt_index, outcome)) = outcome else {
+                    continue;
+                };
+                match outcome {
+                    Ok(ready) => {
+                        for (control_index, control) in &route_controls {
+                            if *control_index != attempt_index {
+                                control.cancel_as_loser();
+                            }
+                        }
+                        let winner = match ready {
+                            HedgeWinnerReady::Stream(mut ready) => {
+                                if let Some(reservation) = ready.reservation.take() {
+                                    reservation.release().await;
+                                }
+                                tracing::info!(
+                                    request_id,
+                                    hedge_enabled = state.config.upstream_hedge_enabled,
+                                    hedge_winner_upstream_id = %upstream.id,
+                                    selected_upstream_id = %upstream.id,
+                                    hedge_winner_attempt = attempt_index,
+                                    hedge_winner_key_prefix = %ready.key_prefix,
+                                    hedge_extra_attempts_launched = launched_extra_attempts,
+                                    hedge_losers_cancelled = attempts.len(),
+                                    first_usable_output_latency_ms = started.elapsed().as_millis() as u64,
+                                    "selected first usable upstream stream"
+                                );
+                                PrefetchedStreamWinner::Reader(Box::new(ready.reader))
+                            }
+                            HedgeWinnerReady::Route(ready) => {
+                                tracing::info!(
+                                    request_id,
+                                    hedge_enabled = state.config.upstream_hedge_enabled,
+                                    hedge_winner_upstream_id = %ready.result.selected_upstream_id,
+                                    selected_upstream_id = %ready.result.selected_upstream_id,
+                                    hedge_winner_attempt = attempt_index,
+                                    hedge_extra_attempts_launched = launched_extra_attempts,
+                                    hedge_losers_cancelled = attempts.len(),
+                                    first_usable_output_latency_ms = started.elapsed().as_millis() as u64,
+                                    "selected first usable upstream route"
+                                );
+                                PrefetchedStreamWinner::Dispatch(ready.result)
+                            }
+                        };
+                        drop(attempts);
+                        return Ok(winner);
+                    }
+                    Err(error) => {
+                        if attempt_index == 0
+                            && (error.is_stream_only_recovery_candidate()
+                                || should_retry_without_stream(&error))
+                        {
+                            for (_, control) in &route_controls {
+                                control.cancel_as_loser();
+                            }
+                            drop(attempts);
+                            return Err(error);
+                        }
+                        route_controls.retain(|(control_index, _)| *control_index != attempt_index);
+                        let admission_skipped = attempt_index != 0
+                            && error.error_category() == "upstream_hedge_capacity_unavailable";
+                        if admission_skipped {
+                            launched_extra_attempts = launched_extra_attempts.saturating_sub(1);
+                        }
+                        if attempt_index == 0 {
+                            primary_error = Some(error);
+                        } else {
+                            last_error = Some(error);
+                        }
+                        if launched_extra_attempts < max_extra_attempts
+                            && next_candidate_index < extra_candidate_count
+                        {
+                            next_launch_at = TokioInstant::now();
+                        }
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(next_launch_at), if launched_extra_attempts < max_extra_attempts && next_candidate_index < extra_candidate_count => {
+                let candidate_index = next_candidate_index;
+                next_candidate_index += 1;
+                launched_extra_attempts += 1;
+                let attempt_index = next_attempt_index;
+                next_attempt_index = next_attempt_index.saturating_add(1);
+                if candidate_index < route_hedge_count {
+                    let candidate = route_hedge_candidates[candidate_index].clone();
+                    let context = route_hedge_context
+                        .as_ref()
+                        .expect("route hedge count requires context")
+                        .clone();
+                    let control = HedgeAttemptControl::default();
+                    route_controls.push((attempt_index, control.clone()));
+                    tracing::info!(
+                        request_id,
+                        selected_upstream_id = %candidate.upstream.id,
+                        hedge_attempt = attempt_index,
+                        hedge_key_prefix = %key_prefix(&candidate.api_key),
+                        "launching slow first-output route hedge"
+                    );
+                    let future = send_route_hedge_attempt(context, candidate, control);
+                    attempts.push(
+                        async move {
+                            (
+                                attempt_index,
+                                future.await.map(HedgeWinnerReady::Route),
+                            )
+                        }
+                        .boxed(),
+                    );
+                } else {
+                    let api_key = hedge_api_keys[candidate_index - route_hedge_count].clone();
+                    tracing::info!(
+                        request_id,
+                        selected_upstream_id = %upstream.id,
+                        hedge_attempt = attempt_index,
+                        hedge_key_prefix = %key_prefix(&api_key),
+                        "launching slow first-output key hedge"
+                    );
+                    let future = send_hedge_stream_attempt(HedgeStreamAttempt {
+                        state: state.clone(),
+                        upstream: upstream.clone(),
+                        api_key,
+                        url: url.to_string(),
+                        upstream_body: upstream_body.clone(),
+                        request_model: request_model.to_string(),
+                        upstream_protocol,
+                        response_header_timeout,
+                        stream_timeouts,
+                    });
+                    attempts.push(
+                        async move {
+                            (
+                                attempt_index,
+                                future
+                                    .await
+                                    .map(|ready| HedgeWinnerReady::Stream(Box::new(ready))),
+                            )
+                        }
+                        .boxed(),
+                    );
+                }
+                next_launch_at = TokioInstant::now()
+                    + hedge_launch_delay(&state.config, launched_extra_attempts);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_to_upstream(
     state: &AppState,
     upstream: &UpstreamConfig,
     api_key: &str,
+    hedge_api_keys: &[String],
+    route_hedge_candidates: &[RouteHedgeCandidate],
     resolved_capabilities: Option<&ResolvedCapabilities>,
     capability_snapshot: &CapabilityRuntimeSnapshot,
     requested_features: &RequestedFeatures,
@@ -613,7 +1053,8 @@ pub(super) async fn send_to_upstream(
     global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
     mut response_history_context: Option<ResponseHistoryContext>,
-    active_request_guard: &mut ActiveGatewayRequestGuard,
+    active_request_guard: Option<&mut ActiveGatewayRequestGuard>,
+    hedge_control: Option<HedgeAttemptControl>,
     stream_only_recovery_request_safe: bool,
     stream_only_recovery: &mut StreamOnlyRecoveryState,
     stream_only_recovery_leader: &mut Option<StreamOnlyRecoveryLeader>,
@@ -1155,20 +1596,22 @@ pub(super) async fn send_to_upstream(
     let response_header_timeout =
         Duration::from_secs(state.config.upstream_response_header_timeout_seconds.max(1));
     if attempt_mode.aggregates_sse() {
-        active_request_guard.arm_aggregate_cancellation_log(GatewayUsageLogContext {
-            state: state.clone(),
-            request_id: request_id.to_string(),
-            downstream_id: downstream_key_id.to_string(),
-            downstream_name: downstream_name.to_string(),
-            upstream_id: upstream.id.clone(),
-            upstream_name: Some(upstream.name.clone()),
-            endpoint: endpoint.path().to_string(),
-            model: model.to_string(),
-            inference_strength: inference_strength.map(str::to_string),
-            user_agent: user_agent.map(str::to_string),
-            compatibility: None,
-            started,
-        });
+        if let Some(active_request_guard) = active_request_guard {
+            active_request_guard.arm_aggregate_cancellation_log(GatewayUsageLogContext {
+                state: state.clone(),
+                request_id: request_id.to_string(),
+                downstream_id: downstream_key_id.to_string(),
+                downstream_name: downstream_name.to_string(),
+                upstream_id: upstream.id.clone(),
+                upstream_name: Some(upstream.name.clone()),
+                endpoint: endpoint.path().to_string(),
+                model: model.to_string(),
+                inference_strength: inference_strength.map(str::to_string),
+                user_agent: user_agent.map(str::to_string),
+                compatibility: None,
+                started,
+            });
+        }
     }
     let response = loop {
         let send_future = state
@@ -1567,6 +2010,9 @@ pub(super) async fn send_to_upstream(
             usage,
             usage_log_timing: UsageLogTiming::Immediate,
             usage_log_context: None,
+            selected_upstream_id: upstream.id.clone(),
+            selected_upstream_name: upstream.name.clone(),
+            selected_upstream_protocol: upstream_protocol,
         });
     }
 
@@ -1583,7 +2029,51 @@ pub(super) async fn send_to_upstream(
         let body = if content_type.contains("text/event-stream") {
             let reader = UpstreamStreamReader::new(response, stream_timeouts);
             let reader = if attempt_mode == UpstreamAttemptMode::SsePassThrough {
-                prefetch_first_semantic_event(reader, upstream_protocol).await?
+                let route_hedge_context =
+                    stream_completion_context
+                        .as_ref()
+                        .map(|completion| RouteHedgeContext {
+                            state: state.clone(),
+                            capability_snapshot: capability_snapshot.clone(),
+                            requested_features: requested_features.clone(),
+                            body: body.clone(),
+                            endpoint,
+                            started,
+                            request_id: request_id.to_string(),
+                            model: model.to_string(),
+                            normalized_model: normalized_model.to_string(),
+                            downstream_key_id: downstream_key_id.to_string(),
+                            downstream_name: downstream_name.to_string(),
+                            inference_strength: inference_strength.map(str::to_string),
+                            user_agent: user_agent.map(str::to_string),
+                            downstream_concurrency_guard: completion
+                                .downstream_concurrency_guard
+                                .clone(),
+                            response_history_context: response_history_context.clone(),
+                            stream_only_recovery_request_safe,
+                        });
+                match prefetch_stream_with_hedges(
+                    state,
+                    upstream,
+                    reader,
+                    api_key,
+                    hedge_api_keys,
+                    route_hedge_candidates,
+                    route_hedge_context,
+                    &url,
+                    &upstream_body,
+                    request_model,
+                    upstream_protocol,
+                    response_header_timeout,
+                    stream_timeouts,
+                    request_id,
+                    started,
+                )
+                .await?
+                {
+                    PrefetchedStreamWinner::Reader(reader) => *reader,
+                    PrefetchedStreamWinner::Dispatch(result) => return Ok(*result),
+                }
             } else {
                 reader
             };
@@ -1605,6 +2095,7 @@ pub(super) async fn send_to_upstream(
                 error_message: None,
                 error_category: None,
                 started,
+                hedge_control: hedge_control.clone(),
             };
             if upstream_protocol == endpoint.native_protocol() {
                 proxied_stream_body(
@@ -1715,6 +2206,9 @@ pub(super) async fn send_to_upstream(
                 .map(usage_from_body)
                 .unwrap_or((0, 0, 0)),
             usage_log_context: None,
+            selected_upstream_id: upstream.id.clone(),
+            selected_upstream_name: upstream.name.clone(),
+            selected_upstream_protocol: upstream_protocol,
         });
     }
 
@@ -1800,6 +2294,9 @@ pub(super) async fn send_to_upstream(
         usage,
         usage_log_timing: UsageLogTiming::Immediate,
         usage_log_context: None,
+        selected_upstream_id: upstream.id.clone(),
+        selected_upstream_name: upstream.name.clone(),
+        selected_upstream_protocol: upstream_protocol,
     })
 }
 
@@ -1864,6 +2361,33 @@ mod tests {
         TokenLimitField,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn hedge_schedule_uses_configured_initial_delay_and_interval() {
+        let config = AppConfig {
+            upstream_hedge_delay_ms: 25,
+            upstream_hedge_interval_ms: 80,
+            ..AppConfig::default()
+        };
+
+        assert_eq!(hedge_launch_delay(&config, 0), Duration::from_millis(25));
+        assert_eq!(hedge_launch_delay(&config, 1), Duration::from_millis(80));
+        assert_eq!(hedge_launch_delay(&config, 3), Duration::from_millis(80));
+    }
+
+    #[test]
+    fn hedge_attempt_limit_respects_toggle_budget_and_available_accounts() {
+        let mut config = AppConfig {
+            upstream_hedge_enabled: true,
+            upstream_hedge_max_extra_attempts: 3,
+            ..AppConfig::default()
+        };
+
+        assert_eq!(hedge_extra_attempt_limit(&config, 5), 3);
+        assert_eq!(hedge_extra_attempt_limit(&config, 2), 2);
+        config.upstream_hedge_enabled = false;
+        assert_eq!(hedge_extra_attempt_limit(&config, 5), 0);
+    }
 
     fn reasoning_control(field: &str, mapped: &str) -> ResolvedCapabilities {
         ResolvedCapabilities {

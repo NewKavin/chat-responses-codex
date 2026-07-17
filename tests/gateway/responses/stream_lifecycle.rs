@@ -3,6 +3,197 @@
 use super::*;
 
 #[tokio::test]
+async fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream() {
+    let slow_hits = Arc::new(AtomicUsize::new(0));
+    let fast_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let slow_hits_for_handler = slow_hits.clone();
+    let fast_hits_for_handler = fast_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let slow_hits = slow_hits_for_handler.clone();
+            let fast_hits = fast_hits_for_handler.clone();
+            async move {
+                let authorization = request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if authorization == "Bearer slow-responses-key" {
+                    slow_hits.fetch_add(1, Ordering::SeqCst);
+                    let lifecycle = Bytes::from_static(
+                        concat!(
+                            "data: {\"type\":\"response.created\",\"response\":{",
+                            "\"id\":\"resp-slow\",\"object\":\"response\",\"created_at\":1,",
+                            "\"status\":\"in_progress\",\"model\":\"gpt-4.1-mini\",\"output\":[]}}\n\n"
+                        )
+                        .as_bytes(),
+                    );
+                    let stream = stream::once(async {
+                        Ok::<Bytes, std::io::Error>(lifecycle)
+                    })
+                    .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+                    return (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(stream),
+                    )
+                        .into_response();
+                }
+
+                fast_hits.fetch_add(1, Ordering::SeqCst);
+                let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{",
+                        "\"id\":\"resp-fast\",\"object\":\"response\",\"created_at\":1,",
+                        "\"status\":\"in_progress\",\"model\":\"gpt-4.1-mini\",\"output\":[]}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",",
+                        "\"response_id\":\"resp-fast\",\"item_id\":\"msg-fast\",",
+                        "\"output_index\":0,\"content_index\":0,",
+                        "\"delta\":\"hedged Responses winner\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{",
+                        "\"id\":\"resp-fast\",\"object\":\"response\",\"created_at\":1,",
+                        "\"status\":\"completed\",\"model\":\"gpt-4.1-mini\",",
+                        "\"output\":[{\"id\":\"msg-fast\",\"type\":\"message\",",
+                        "\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",",
+                        "\"text\":\"hedged Responses winner\",\"annotations\":[]}]}]}}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                    .as_bytes(),
+                ))];
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(stream::iter(chunks)),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![
+                UpstreamConfig {
+                    id: "responses-slow".into(),
+                    name: "Responses slow primary".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "slow-responses-key".into(),
+                    protocol: UpstreamProtocol::Responses,
+                    protocols: vec![UpstreamProtocol::Responses],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    priority: 10,
+                    active: true,
+                    ..Default::default()
+                },
+                UpstreamConfig {
+                    id: "responses-fast".into(),
+                    name: "Responses fast hedge".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "fast-responses-key".into(),
+                    protocol: UpstreamProtocol::Responses,
+                    protocols: vec![UpstreamProtocol::Responses],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    priority: 0,
+                    active: true,
+                    ..Default::default()
+                },
+            ],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: true,
+            upstream_hedge_delay_ms: 50,
+            upstream_hedge_interval_ms: 50,
+            upstream_hedge_max_extra_attempts: 1,
+            ..AppConfig::default()
+        },
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(
+                    "x-chat2responses-troubleshooting-route",
+                    state.troubleshooting_route_capture_token(),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "input": "Compare bounded retries with slow-first-output hedging."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-chat2responses-selected-upstream-id"],
+        "responses-fast"
+    );
+    let body = tokio::time::timeout(
+        Duration::from_secs(2),
+        to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("the Responses hedge should win before the downstream timeout")
+    .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("hedged Responses winner"));
+    assert!(!body.contains("resp-slow"));
+    assert_eq!(body.matches("response.created").count(), 1);
+    assert_eq!(slow_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(fast_hits.load(Ordering::SeqCst), 1);
+    wait_for_upstream_in_flight(&state, "responses-slow", 0).await;
+    wait_for_upstream_in_flight(&state, "responses-fast", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].upstream_key_id, "responses-fast");
+    assert_eq!(snapshot.usage_logs[0].status_code, 200);
+    assert!(snapshot
+        .upstreams
+        .iter()
+        .all(|upstream| upstream.failure_count == 0));
+}
+
+#[tokio::test]
 async fn stream_disconnect_releases_runtime_state() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");

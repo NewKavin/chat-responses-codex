@@ -1498,6 +1498,68 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn try_reserve_upstream_hedge(
+        &self,
+        upstream: &UpstreamConfig,
+        model: &str,
+    ) -> Result<(), UpstreamAdmissionError> {
+        let request_cost = upstream.request_cost_for_model(model);
+        if request_cost <= 0.0 {
+            return Err(UpstreamAdmissionError::new(
+                "invalid upstream model request cost".into(),
+                1,
+            ));
+        }
+
+        let mut runtime_state = self.upstream_runtime_state.lock().await;
+        let state = runtime_state
+            .entry(upstream.id.clone())
+            .or_insert_with(UpstreamRuntimeState::default);
+        let now = unix_seconds();
+        prune_quota_events(&mut state.minute_events, now, 60);
+        prune_quota_events(
+            &mut state.five_hour_events,
+            now,
+            upstream.request_quota_window_seconds(),
+        );
+
+        if state.in_flight >= upstream.max_concurrency.max(1) {
+            return Err(UpstreamAdmissionError::new(
+                "upstream hedge concurrency capacity is full".into(),
+                1,
+            ));
+        }
+        let minute_cost = quota_event_cost(&state.minute_events);
+        if upstream.requests_per_minute > 0
+            && minute_cost + request_cost > f64::from(upstream.requests_per_minute)
+        {
+            return Err(UpstreamAdmissionError::new(
+                "upstream hedge minute quota is exhausted".into(),
+                1,
+            ));
+        }
+        let window_cost = quota_event_cost(&state.five_hour_events);
+        if upstream.request_quota_requests > 0
+            && window_cost + request_cost > f64::from(upstream.request_quota_requests)
+        {
+            return Err(UpstreamAdmissionError::new(
+                "upstream hedge request quota is exhausted".into(),
+                1,
+            ));
+        }
+
+        state.in_flight = state.in_flight.saturating_add(1);
+        state.minute_events.push_back(QuotaEvent {
+            created_at: now,
+            cost: request_cost,
+        });
+        state.five_hour_events.push_back(QuotaEvent {
+            created_at: now,
+            cost: request_cost,
+        });
+        Ok(())
+    }
+
     pub async fn upstream_runtime_snapshots(&self) -> HashMap<String, UpstreamRuntimeSnapshot> {
         let upstream_windows = {
             let state = self.inner.lock().await;

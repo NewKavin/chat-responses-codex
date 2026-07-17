@@ -162,6 +162,13 @@ pub enum FirstSemanticEventResult {
     Ready,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstUsableOutputResult {
+    Pending,
+    Ready,
+    CompleteWithoutOutput,
+}
+
 #[derive(Debug)]
 pub struct FirstSemanticEventClassifier {
     decoder: SseDecoder,
@@ -207,6 +214,69 @@ impl FirstSemanticEventClassifier {
         self.validator.process_event(&event)?;
         self.ready = true;
         Ok(FirstSemanticEventResult::Ready)
+    }
+}
+
+#[derive(Debug)]
+pub struct FirstUsableOutputClassifier {
+    decoder: SseDecoder,
+    validator: StreamResponseAggregator,
+    ready: bool,
+}
+
+impl FirstUsableOutputClassifier {
+    pub fn new(protocol: UpstreamProtocol) -> Self {
+        Self {
+            decoder: SseDecoder::new(),
+            validator: StreamResponseAggregator::new(protocol),
+            ready: false,
+        }
+    }
+
+    pub fn push(
+        &mut self,
+        chunk: &[u8],
+        mut is_usable: impl FnMut(&SseEvent) -> bool,
+    ) -> Result<FirstUsableOutputResult, ProtocolError> {
+        if self.ready {
+            return Ok(FirstUsableOutputResult::Ready);
+        }
+        self.decoder.append(chunk)?;
+        self.classify_available(&mut is_usable)
+    }
+
+    pub fn finish(
+        mut self,
+        mut is_usable: impl FnMut(&SseEvent) -> bool,
+    ) -> Result<FirstUsableOutputResult, ProtocolError> {
+        if self.ready {
+            return Ok(FirstUsableOutputResult::Ready);
+        }
+        self.decoder.finish();
+        match self.classify_available(&mut is_usable)? {
+            FirstUsableOutputResult::Pending => Err(invalid_stream(
+                UpstreamStreamErrorKind::Incomplete,
+                "stream ended before the first usable output",
+            )),
+            result => Ok(result),
+        }
+    }
+
+    fn classify_available(
+        &mut self,
+        is_usable: &mut impl FnMut(&SseEvent) -> bool,
+    ) -> Result<FirstUsableOutputResult, ProtocolError> {
+        while let Some(event) = self.decoder.next_event()? {
+            self.validator.process_event(&event)?;
+            if is_usable(&event) {
+                self.ready = true;
+                return Ok(FirstUsableOutputResult::Ready);
+            }
+            if self.validator.complete.is_some() {
+                return Ok(FirstUsableOutputResult::CompleteWithoutOutput);
+            }
+        }
+        Ok(FirstUsableOutputResult::Pending)
     }
 }
 

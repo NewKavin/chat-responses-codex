@@ -8,8 +8,8 @@ pub mod stream_aggregate;
 pub mod tool_adapter;
 
 pub use stream_aggregate::{
-    FirstSemanticEventClassifier, FirstSemanticEventResult, StreamAggregateResult,
-    StreamResponseAggregator,
+    FirstSemanticEventClassifier, FirstSemanticEventResult, FirstUsableOutputClassifier,
+    FirstUsableOutputResult, StreamAggregateResult, StreamResponseAggregator,
 };
 
 use crate::capabilities::{ReasoningCarrier, ResolvedCapabilities};

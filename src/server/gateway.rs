@@ -9,8 +9,8 @@ use crate::protocol::{
     chat_request_to_responses_payload_with_context,
     chat_response_to_responses_payload_with_tool_registry, responses_response_to_chat_payload,
     tool_adapter::{ToolAdapterRegistry, ToolTarget},
-    ChatStreamCanonicalizer, ConversionContext, FirstSemanticEventClassifier,
-    FirstSemanticEventResult, ProtocolError, StreamAggregateResult, StreamResponseAggregator,
+    ChatStreamCanonicalizer, ConversionContext, FirstUsableOutputClassifier,
+    FirstUsableOutputResult, ProtocolError, StreamAggregateResult, StreamResponseAggregator,
     StreamTranslator,
 };
 use crate::routing::UpstreamProtocol;
@@ -26,7 +26,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
-use futures_util::{stream as futures_stream, StreamExt};
+use futures_util::{stream as futures_stream, FutureExt, StreamExt};
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde_json::{json, Map, Value};
@@ -202,6 +202,29 @@ enum UpstreamAttemptMode {
     Json,
     SsePassThrough,
     SseAggregate,
+}
+
+#[derive(Clone)]
+struct RouteHedgeCandidate {
+    upstream: UpstreamConfig,
+    api_key: String,
+    protocol: UpstreamProtocol,
+    resolved_capabilities: Option<ResolvedCapabilities>,
+}
+
+#[derive(Clone, Default)]
+struct HedgeAttemptControl {
+    loser: Arc<AtomicBool>,
+}
+
+impl HedgeAttemptControl {
+    fn cancel_as_loser(&self) {
+        self.loser.store(true, Ordering::Release);
+    }
+
+    fn is_loser(&self) -> bool {
+        self.loser.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -514,6 +537,9 @@ struct DispatchResult {
     usage: (u64, u64, u64),
     usage_log_timing: UsageLogTiming,
     usage_log_context: Option<GatewayUsageLogContext>,
+    selected_upstream_id: String,
+    selected_upstream_name: String,
+    selected_upstream_protocol: UpstreamProtocol,
 }
 
 #[derive(Debug, Clone)]
@@ -728,6 +754,7 @@ struct StreamUsageLogContext {
     error_message: Option<String>,
     error_category: Option<String>,
     started: Instant,
+    hedge_control: Option<HedgeAttemptControl>,
 }
 
 impl std::fmt::Debug for StreamUsageLogContext {
@@ -747,6 +774,12 @@ impl std::fmt::Debug for StreamUsageLogContext {
 }
 
 impl StreamUsageLogContext {
+    fn is_hedge_loser(&self) -> bool {
+        self.hedge_control
+            .as_ref()
+            .is_some_and(HedgeAttemptControl::is_loser)
+    }
+
     fn touch_active_request(&self) {
         self.state.touch_active_gateway_request(&self.request_id);
     }
@@ -780,6 +813,7 @@ impl StreamUsageLogContext {
             error_message,
             error_category,
             started,
+            hedge_control: _,
         } = self;
 
         let log = UsageLog {
@@ -1675,12 +1709,21 @@ struct StreamCompletionContext {
     upstream_id: String,
     upstream_request_guard: UpstreamRequestGuard,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
+    hedge_control: Option<HedgeAttemptControl>,
 }
 
 impl StreamCompletionContext {
     async fn release_all(&self) {
-        self.downstream_concurrency_guard.release();
+        if !self.is_hedge_loser() {
+            self.downstream_concurrency_guard.release();
+        }
         self.upstream_request_guard.release().await;
+    }
+
+    fn is_hedge_loser(&self) -> bool {
+        self.hedge_control
+            .as_ref()
+            .is_some_and(HedgeAttemptControl::is_loser)
     }
 
     async fn mark_success(&self) {
@@ -2431,11 +2474,24 @@ async fn finalize_stream_error(
     error_message: String,
     mark_upstream_failure: bool,
 ) {
+    let hedge_loser = completion_context
+        .as_ref()
+        .is_some_and(StreamCompletionContext::is_hedge_loser)
+        || log_context
+            .as_ref()
+            .is_some_and(StreamUsageLogContext::is_hedge_loser);
     if let Some(context) = completion_context {
         context.release_all().await;
+        if hedge_loser {
+            return;
+        }
         if mark_upstream_failure {
             context.mark_failure().await;
         }
+    }
+
+    if hedge_loser {
+        return;
     }
 
     if let Some(mut log_context) = log_context {
@@ -2501,6 +2557,18 @@ fn spawn_stream_normal_completion_cleanup(
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
+            let hedge_loser = completion_context
+                .as_ref()
+                .is_some_and(StreamCompletionContext::is_hedge_loser)
+                || log_context
+                    .as_ref()
+                    .is_some_and(StreamUsageLogContext::is_hedge_loser);
+            if hedge_loser {
+                if let Some(context) = completion_context {
+                    context.release_all().await;
+                }
+                return;
+            }
             if let Some(mut ctx) = log_context {
                 ctx.finish_active_request();
                 ctx.status = StatusCode::OK;
@@ -3789,7 +3857,7 @@ async fn process_gateway_request_inner(
             "sorted upstream candidates"
         );
 
-        for upstream in upstreams {
+        for (upstream_index, upstream) in upstreams.into_iter().enumerate() {
             let runtime = upstream_runtime_snapshots
                 .get(&upstream.id)
                 .copied()
@@ -3895,6 +3963,7 @@ async fn process_gateway_request_inner(
                             upstream_id: upstream.id.clone(),
                             upstream_request_guard: upstream_request_guard.clone(),
                             downstream_concurrency_guard: downstream_concurrency_guard.clone(),
+                            hedge_control: None,
                         });
                     if let (Some(cancellation), Some(completion)) = (
                         pre_header_cancellation.as_ref(),
@@ -3920,6 +3989,7 @@ async fn process_gateway_request_inner(
                                 error_message: None,
                                 error_category: None,
                                 started,
+                                hedge_control: None,
                             },
                         );
                     }
@@ -4003,10 +4073,40 @@ async fn process_gateway_request_inner(
                             (body.clone(), response_history_context.clone(), None)
                         };
 
+                    let route_hedge_candidates = if request_stream
+                        && attempt_mode == UpstreamAttemptMode::SsePassThrough
+                        && chat_fallback_stage.is_none()
+                    {
+                        upstreams_for_retry
+                            .iter()
+                            .skip(upstream_index + 1)
+                            .filter_map(|candidate| {
+                                let keys = candidate.keys_for_model(model);
+                                let api_key = keys.first().cloned().or_else(|| {
+                                    candidate
+                                        .api_key_models
+                                        .is_empty()
+                                        .then(|| candidate.api_key.clone())
+                                })?;
+                                Some(RouteHedgeCandidate {
+                                    upstream: candidate.clone(),
+                                    api_key,
+                                    protocol,
+                                    resolved_capabilities: route_capability(candidate, protocol)
+                                        .and_then(|route| route.resolved.clone()),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+
                     let result = send_to_upstream(
                         &state,
                         &upstream,
                         api_key,
+                        &candidate_keys[key_index + 1..],
+                        &route_hedge_candidates,
                         resolved_route.as_ref(),
                         &candidate_capability_snapshot,
                         &requested_features,
@@ -4027,7 +4127,8 @@ async fn process_gateway_request_inner(
                         global_context_profile.as_ref(),
                         stream_completion_context.clone(),
                         dispatch_response_history_context.clone(),
-                        &mut active_request_guard,
+                        Some(&mut active_request_guard),
+                        None,
                         stream_only_recovery_request_safe,
                         &mut stream_only_recovery,
                         &mut stream_only_recovery_leader,
@@ -4060,6 +4161,17 @@ async fn process_gateway_request_inner(
 
                     match result {
                         Ok(mut result) => {
+                            let selected_upstream_id = result.selected_upstream_id.clone();
+                            let selected_upstream_name = result.selected_upstream_name.clone();
+                            let selected_upstream_protocol = result.selected_upstream_protocol;
+                            if selected_upstream_id != upstream.id {
+                                upstream_request_guard.release().await;
+                            }
+                            state.mark_active_gateway_request_upstream(
+                                &request_id,
+                                &selected_upstream_id,
+                                &selected_upstream_name,
+                            );
                             if stream_only_recovery.consumed
                                 && attempt_mode == UpstreamAttemptMode::SseAggregate
                             {
@@ -4076,7 +4188,7 @@ async fn process_gateway_request_inner(
                                     {
                                         tracing::warn!(
                                             request_id = %request_id,
-                                            selected_upstream_id = %upstream.id,
+                                            selected_upstream_id = %selected_upstream_id,
                                             error = %error,
                                             "failed to persist learned stream-only route evidence"
                                         );
@@ -4097,10 +4209,10 @@ async fn process_gateway_request_inner(
                                     });
                                 append_troubleshooting_route_headers(
                                     &mut result.response_headers,
-                                    &upstream.id,
-                                    &upstream.name,
-                                    protocol,
-                                    protocol_transition_label(endpoint, protocol),
+                                    &selected_upstream_id,
+                                    &selected_upstream_name,
+                                    selected_upstream_protocol,
+                                    protocol_transition_label(endpoint, selected_upstream_protocol),
                                     chat_fallback_stage.map(ChatFallbackStage::as_str),
                                     applied_effort_control,
                                     result
@@ -4134,17 +4246,20 @@ async fn process_gateway_request_inner(
                                     &downstream.id,
                                     client_family,
                                     normalized_model,
-                                    &upstream.id,
+                                    &selected_upstream_id,
                                 );
                             }
                             if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
-                                state.mark_upstream_success(&upstream.id).await.ok();
+                                state
+                                    .mark_upstream_success(&selected_upstream_id)
+                                    .await
+                                    .ok();
                             }
                             if use_routing_affinity {
                                 state.set_affinity_upstream(
                                     &downstream.id,
                                     normalized_model,
-                                    &upstream.id,
+                                    &selected_upstream_id,
                                 );
                             }
                             tracing::info!(
@@ -4153,8 +4268,8 @@ async fn process_gateway_request_inner(
                                 path = %request_path,
                                 original_model = %model,
                                 normalized_model = %normalized_model,
-                                selected_upstream_id = %upstream.id,
-                                selected_upstream_protocol = ?protocol,
+                                selected_upstream_id = %selected_upstream_id,
+                                selected_upstream_protocol = ?selected_upstream_protocol,
                                 status = result.status.as_u16(),
                                 latency_ms = started.elapsed().as_millis() as u64,
                                 upstream_attempt_mode = attempt_mode.as_str(),
@@ -4167,8 +4282,8 @@ async fn process_gateway_request_inner(
                                     request_id: request_id.clone(),
                                     downstream_id: downstream.id.clone(),
                                     downstream_name: downstream.name.clone(),
-                                    upstream_id: upstream.id.clone(),
-                                    upstream_name: Some(upstream.name.clone()),
+                                    upstream_id: selected_upstream_id,
+                                    upstream_name: Some(selected_upstream_name),
                                     endpoint: request_path.to_string(),
                                     model: model.to_string(),
                                     inference_strength: inference_strength.clone(),

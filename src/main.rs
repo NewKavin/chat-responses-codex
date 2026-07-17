@@ -299,17 +299,6 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::normalize_hedge_delay_ms;
-
-    #[test]
-    fn hedge_delay_and_interval_are_at_least_one_millisecond() {
-        assert_eq!(normalize_hedge_delay_ms(0), 1);
-        assert_eq!(normalize_hedge_delay_ms(7), 7);
-    }
-}
-
 fn init_tracing(log_path: &str) {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn"));
@@ -386,5 +375,16 @@ impl Write for TeeWriter {
             .lock()
             .map_err(|_| io::Error::other("log file lock poisoned"))?;
         file.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_hedge_delay_ms;
+
+    #[test]
+    fn hedge_delay_and_interval_are_at_least_one_millisecond() {
+        assert_eq!(normalize_hedge_delay_ms(0), 1);
+        assert_eq!(normalize_hedge_delay_ms(7), 7);
     }
 }
