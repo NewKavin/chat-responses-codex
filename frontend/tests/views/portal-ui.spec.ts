@@ -52,4 +52,14 @@ describe('portal ui structure', () => {
     expect(playground).toContain('<PlaygroundSettings')
     expect(playground).not.toContain("sidebarCollapsed ? '▶' : '◀'")
   })
+
+  it('keeps message content and composer actions in stable bounded regions', () => {
+    const playground = source('Playground')
+
+    expect(playground).toContain('playground-message-stream')
+    expect(playground).toContain('message-reasoning')
+    expect(playground).toContain('playground-composer')
+    expect(playground).toContain('composer-actions')
+    expect(playground).toContain('overflow-wrap: anywhere')
+  })
 })

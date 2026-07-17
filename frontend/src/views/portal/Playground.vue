@@ -55,10 +55,10 @@
         </el-button>
       </div>
 
-      <div class="chat-messages" ref="messagesContainerRef">
+      <div class="playground-message-stream" ref="messagesContainerRef">
         <div v-if="!messages.length" class="chat-empty">
           <div class="chat-empty-icon">
-            <el-icon :size="48" color="#c0c4cc"><ChatDotRound /></el-icon>
+            <el-icon :size="42"><ChatDotRound /></el-icon>
           </div>
           <p>选择模型后开始对话</p>
         </div>
@@ -78,12 +78,12 @@
             <el-icon v-else :size="20"><MagicStick /></el-icon>
           </div>
           <div class="chat-message-body">
-            <details v-if="message.reasoning" class="chat-reasoning" open>
-              <summary class="chat-reasoning-summary">
+            <details v-if="message.reasoning" class="message-reasoning" open>
+              <summary class="message-reasoning__summary">
                 <el-icon :size="14"><MagicStick /></el-icon>
                 <span>思考过程</span>
               </summary>
-              <div class="chat-reasoning-content markdown-body" v-html="renderMarkdown(message.reasoning)"></div>
+              <div class="message-reasoning__content markdown-body" v-html="renderMarkdown(message.reasoning)"></div>
             </details>
             <div v-if="message.role === 'assistant' && !message.isError" class="chat-message-content markdown-body" v-html="renderMarkdown(message.content)"></div>
             <pre v-else class="chat-message-content chat-message-content--plain">{{ message.content }}</pre>
@@ -104,12 +104,12 @@
             <div v-if="streamStatusText" class="chat-stream-status">
               {{ streamStatusText }}
             </div>
-            <details v-if="streamingReasoning" class="chat-reasoning" open>
-              <summary class="chat-reasoning-summary">
+            <details v-if="streamingReasoning" class="message-reasoning" open>
+              <summary class="message-reasoning__summary">
                 <el-icon :size="14"><MagicStick /></el-icon>
                 <span>思考中…</span>
               </summary>
-              <div class="chat-reasoning-content markdown-body" v-html="renderMarkdown(streamingReasoning)"></div>
+              <div class="message-reasoning__content markdown-body" v-html="renderMarkdown(streamingReasoning)"></div>
             </details>
             <div v-if="streamingContent" class="chat-message-content markdown-body" v-html="renderMarkdown(streamingContent)"></div>
             <span class="typing-cursor"></span>
@@ -117,9 +117,16 @@
         </div>
       </div>
 
-      <div class="chat-input-area">
-        <div class="chat-input-wrapper">
-          <div class="chat-input-inner">
+      <section class="playground-composer">
+        <div class="composer-shell">
+          <div v-if="uploadedFiles.length" class="upload-inline-list">
+            <span v-for="file in uploadedFiles" :key="file.uid" class="upload-inline-tag">
+              {{ file.name }}
+              <el-icon :size="12" class="upload-inline-remove" @click="removeUploadedFile(file.uid)"><Close /></el-icon>
+            </span>
+          </div>
+
+          <div class="composer-input-row">
             <el-input
               v-model="question"
               type="textarea"
@@ -129,23 +136,30 @@
               :disabled="isBusy"
               @keydown="handleInputKeydown"
             />
-            <el-button
-              type="primary"
-              circle
-              :loading="isSending"
-              :disabled="sendDisabled"
-              @click="sendQuestion"
-              class="send-button"
-            >
-              <el-icon v-if="!isSending" :size="18"><Promotion /></el-icon>
-            </el-button>
-          </div>
-          <div class="chat-input-footer">
-            <div class="chat-upload-area">
-              <el-button size="small" text :disabled="isBusy" @click="openFileDialog">
-                <el-icon :size="16" style="margin-right: 4px"><Link /></el-icon>
-                添加附件
-              </el-button>
+            <div class="composer-actions">
+              <el-tooltip content="添加附件" placement="top">
+                <el-button
+                  aria-label="添加附件"
+                  circle
+                  :disabled="isBusy"
+                  @click="openFileDialog"
+                >
+                  <el-icon :size="16"><Link /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="发送消息" placement="top">
+                <el-button
+                  aria-label="发送消息"
+                  type="primary"
+                  circle
+                  :loading="isSending"
+                  :disabled="sendDisabled"
+                  @click="sendQuestion"
+                  class="send-button"
+                >
+                  <el-icon v-if="!isSending" :size="18"><Promotion /></el-icon>
+                </el-button>
+              </el-tooltip>
               <input
                 ref="fileInputRef"
                 type="file"
@@ -153,16 +167,10 @@
                 class="hidden-file-input"
                 @change="onFileInputChange"
               />
-              <div class="upload-inline-list" v-if="uploadedFiles.length">
-                <span v-for="file in uploadedFiles" :key="file.uid" class="upload-inline-tag">
-                  {{ file.name }}
-                  <el-icon :size="12" class="upload-inline-remove" @click="removeUploadedFile(file.uid)"><Close /></el-icon>
-                </span>
-              </div>
             </div>
           </div>
         </div>
-      </div>
+      </section>
     </div>
 
     <el-drawer
@@ -860,14 +868,15 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.chat-messages {
+.playground-message-stream {
   flex: 1;
-  overflow-y: auto;
-  padding: 20px 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   min-height: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+  background: var(--crc-canvas);
 }
 
 .chat-empty {
@@ -876,8 +885,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #c0c4cc;
+  color: var(--crc-text-muted);
   gap: 12px;
+}
+
+.chat-empty-icon {
+  color: var(--crc-text-subtle);
 }
 
 .chat-empty p {
@@ -888,7 +901,8 @@ onBeforeUnmount(() => {
 .chat-message {
   display: flex;
   gap: 12px;
-  max-width: 85%;
+  max-width: min(85%, 920px);
+  min-width: 0;
 }
 
 .chat-message--user {
@@ -912,71 +926,77 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #e8eaed;
-  color: #606266;
+  color: var(--crc-text-muted);
+  background: var(--crc-surface-muted);
   margin-top: 2px;
 }
 
 .chat-message--user .chat-message-avatar {
-  background: #409eff;
-  color: #fff;
+  color: var(--crc-accent);
+  background: var(--crc-accent-soft);
 }
 
 .chat-message--assistant .chat-message-avatar {
-  background: #67c23a;
-  color: #fff;
+  color: var(--crc-success);
+  background: var(--crc-success-soft);
 }
 
 .chat-message-body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
 .chat-stream-status {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  color: #606266;
+  color: var(--crc-text-muted);
   font-size: 12px;
   line-height: 1.5;
-  background: #f4f6f8;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
   padding: 4px 8px;
   width: fit-content;
   max-width: 100%;
 }
 
 
-.chat-reasoning {
+.message-reasoning {
   margin: 0 0 10px;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
-  background: #f8f9fb;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
   overflow: hidden;
 }
-.chat-reasoning-summary {
+
+.message-reasoning__summary {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 8px 12px;
   cursor: pointer;
+  color: var(--crc-text);
   font-size: 13px;
-  color: #606266;
   user-select: none;
 }
-.chat-reasoning-content {
+
+.message-reasoning__content {
   padding: 4px 12px 12px;
+  border-top: 1px dashed var(--crc-border);
+  color: var(--crc-text-muted);
   font-size: 13px;
-  color: #909399;
   line-height: 1.7;
-  border-top: 1px dashed #e4e7ed;
 }
+
 .chat-message-content {
+  min-width: 0;
   margin: 0;
+  color: var(--crc-text);
+  overflow-wrap: anywhere;
   line-height: 1.7;
-  color: #303133;
   font-size: 14px;
 }
 
@@ -986,33 +1006,34 @@ onBeforeUnmount(() => {
 }
 
 .chat-message--user .chat-message-content {
-  background: #409eff;
-  color: #fff;
   padding: 10px 14px;
-  border-radius: 12px 12px 2px 12px;
+  border: 1px solid var(--crc-accent);
+  border-radius: var(--crc-radius) var(--crc-radius) 2px var(--crc-radius);
+  color: var(--crc-text-strong);
+  background: var(--crc-accent-soft);
   white-space: pre-wrap;
 }
 
 .chat-message--assistant .chat-message-content {
-  background: #fff;
   padding: 10px 14px;
-  border-radius: 12px 12px 12px 2px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius) var(--crc-radius) var(--crc-radius) 2px;
+  background: var(--crc-surface);
 }
 
 .chat-message--error .chat-message-content {
-  background: #fef0f0;
-  color: #f56c6c;
   padding: 10px 14px;
-  border-radius: 12px 12px 12px 2px;
-  border: 1px solid #fde2e2;
+  border: 1px solid var(--crc-danger);
+  border-radius: var(--crc-radius) var(--crc-radius) var(--crc-radius) 2px;
+  color: var(--crc-danger);
+  background: var(--crc-danger-soft);
   white-space: pre-wrap;
 }
 
 .chat-message--empty-response .chat-message-content {
-  border-color: #f3d19e;
-  background: #fdf6ec;
-  color: #b88230;
+  border-color: var(--crc-warning);
+  color: var(--crc-warning);
+  background: var(--crc-warning-soft);
 }
 
 .chat-message-file {
@@ -1022,15 +1043,15 @@ onBeforeUnmount(() => {
 }
 
 .file-tag {
-  font-size: 11px;
-  background: #ecf5ff;
-  color: #409eff;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-info);
+  background: var(--crc-info-soft);
+  font-size: 11px;
 }
 
 .chat-message-meta {
-  color: #909399;
+  color: var(--crc-text-muted);
   font-size: 11px;
 }
 
@@ -1038,7 +1059,7 @@ onBeforeUnmount(() => {
   display: inline-block;
   width: 6px;
   height: 16px;
-  background: #409eff;
+  background: var(--crc-accent);
   margin-left: 2px;
   animation: blink 0.8s infinite;
   vertical-align: text-bottom;
@@ -1049,37 +1070,40 @@ onBeforeUnmount(() => {
   51%, 100% { opacity: 0; }
 }
 
-.chat-input-area {
+.playground-composer {
   padding: 12px 24px 16px;
-  background: #fff;
-  border-top: 1px solid #e4e7ed;
+  border-top: 1px solid var(--crc-border);
+  background: var(--crc-surface);
   z-index: 5;
 }
 
-.chat-input-wrapper {
+.composer-shell {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  width: 100%;
   max-width: 800px;
   margin: 0 auto;
 }
 
-.chat-input-inner {
+.composer-input-row {
   display: flex;
   align-items: flex-end;
   gap: 8px;
+  min-width: 0;
 }
 
-.chat-input-inner :deep(.el-textarea__inner) {
-  border-radius: 12px;
+.composer-input-row :deep(.el-textarea__inner) {
+  border-radius: var(--crc-radius);
   padding: 10px 14px;
   resize: none;
   font-size: 14px;
   line-height: 1.5;
 }
 
-.chat-input-inner :deep(.el-textarea) {
+.composer-input-row :deep(.el-textarea) {
   flex: 1;
+  min-width: 0;
 }
 
 .send-button {
@@ -1090,17 +1114,17 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 
-.chat-input-footer {
+.composer-actions {
   display: flex;
   align-items: center;
-  padding: 0 4px;
+  gap: 8px;
+  flex: 0 0 80px;
+  justify-content: flex-end;
 }
 
-.chat-upload-area {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+.composer-actions .el-button {
+  width: 36px;
+  height: 36px;
 }
 
 .upload-inline-list {
@@ -1114,9 +1138,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  background: #ecf5ff;
-  color: #409eff;
-  border-radius: 4px;
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-info);
+  background: var(--crc-info-soft);
   font-size: 12px;
   max-width: 200px;
   overflow: hidden;
@@ -1126,20 +1150,27 @@ onBeforeUnmount(() => {
 
 .upload-inline-remove {
   cursor: pointer;
-  color: #909399;
+  color: var(--crc-text-muted);
   flex-shrink: 0;
 }
 
 .upload-inline-remove:hover {
-  color: #f56c6c;
+  color: var(--crc-danger);
+}
+
+.markdown-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .markdown-body :deep(pre) {
-  background: #1e1e2e;
-  border-radius: 8px;
+  max-width: 100%;
+  margin: 8px 0;
   padding: 12px;
   overflow-x: auto;
-  margin: 8px 0;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
 }
 
 .markdown-body :deep(code) {
@@ -1150,14 +1181,15 @@ onBeforeUnmount(() => {
 .markdown-body :deep(pre code) {
   background: none;
   padding: 0;
-  color: #cdd6f4;
+  color: var(--crc-text);
 }
 
 .markdown-body :deep(:not(pre) > code) {
-  background: #f0f2f5;
   padding: 2px 6px;
-  border-radius: 4px;
-  color: #c7254e;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-accent);
+  background: var(--crc-surface-muted);
   font-size: 0.9em;
 }
 
@@ -1178,11 +1210,14 @@ onBeforeUnmount(() => {
 .markdown-body :deep(blockquote) {
   margin: 8px 0;
   padding: 4px 12px;
-  border-left: 3px solid #dcdfe6;
-  color: #606266;
+  border-left: 3px solid var(--crc-border-strong);
+  color: var(--crc-text-muted);
 }
 
 .markdown-body :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   margin: 8px 0;
   width: 100%;
@@ -1190,13 +1225,13 @@ onBeforeUnmount(() => {
 
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--crc-border);
   padding: 6px 10px;
   text-align: left;
 }
 
 .markdown-body :deep(th) {
-  background: #f5f7fa;
+  background: var(--crc-surface-muted);
 }
 
 @media (max-width: 767px) {
@@ -1222,16 +1257,31 @@ onBeforeUnmount(() => {
     display: inline-flex;
   }
 
-  .chat-messages {
+  .playground-message-stream {
     padding: 12px;
   }
 
-  .chat-input-area {
+  .playground-composer {
     padding: 8px 12px 12px;
   }
 
   .chat-message {
     max-width: 95%;
+  }
+
+  .chat-message-avatar {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+  }
+
+  .composer-input-row {
+    gap: 6px;
+  }
+
+  .composer-actions {
+    flex-basis: 76px;
+    gap: 4px;
   }
 }
 </style>
