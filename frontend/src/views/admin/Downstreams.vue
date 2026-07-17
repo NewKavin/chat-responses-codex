@@ -1,34 +1,34 @@
 <template>
-  <div class="downstreams-container">
-    <el-card>
-      <template #header>
-        <div class="header">
-          <h2>下游管理</h2>
-          <el-button type="primary" @click="handleCreate">创建下游</el-button>
-        </div>
-      </template>
+  <div class="crc-page downstreams-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">下游管理</h1>
+        <p class="crc-page-description">管理门户身份、可用模型、调用限额、生命周期和访问密钥。</p>
+      </div>
+      <el-button type="primary" @click="handleCreate">创建下游</el-button>
+    </header>
+
+    <el-form :inline="true" class="crc-toolbar downstream-filters">
+      <el-form-item label="状态">
+        <el-select v-model="filters.status" @change="loadData" placeholder="全部">
+          <el-option label="全部" value="all" />
+          <el-option label="启用" value="active" />
+          <el-option label="禁用" value="inactive" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="生命周期">
+        <el-select v-model="filters.lifecycle" @change="loadData" placeholder="全部">
+          <el-option label="全部" value="all" />
+          <el-option label="试用" value="trial" />
+          <el-option label="永久" value="permanent" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="搜索">
+        <el-input v-model="filters.search" @input="loadData" placeholder="名称或ID" clearable />
+      </el-form-item>
+    </el-form>
       
-      <!-- 筛选栏 -->
-      <el-form :inline="true" class="filter-form">
-        <el-form-item label="状态">
-          <el-select v-model="filters.status" @change="loadData" placeholder="全部">
-            <el-option label="全部" value="all" />
-            <el-option label="启用" value="active" />
-            <el-option label="禁用" value="inactive" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="生命周期">
-          <el-select v-model="filters.lifecycle" @change="loadData" placeholder="全部">
-            <el-option label="全部" value="all" />
-            <el-option label="试用" value="trial" />
-            <el-option label="永久" value="permanent" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="搜索">
-          <el-input v-model="filters.search" @input="loadData" placeholder="名称或ID" clearable />
-        </el-form-item>
-      </el-form>
-      
+    <div class="crc-table-shell">
       <el-table :data="downstreams" v-loading="loading" stripe>
         <el-table-column prop="id" label="ID" width="150" />
         <el-table-column prop="name" label="名称" width="200" />
@@ -86,27 +86,27 @@
           </template>
         </el-table-column>
       </el-table>
+    </div>
 
-      <el-alert
-        title="重要提示"
-        type="warning"
-        :closable="false"
-        class="helper-text"
-      >
-        仅可复制真实可用秘钥。若某行显示“未存储真实秘钥”，请先执行“轮换密钥”生成新秘钥后再复制。
-      </el-alert>
-    </el-card>
+    <el-alert
+      title="重要提示"
+      type="warning"
+      :closable="false"
+      class="helper-text"
+    >
+      仅可复制真实可用秘钥。若某行显示“未存储真实秘钥”，请先执行“轮换密钥”生成新秘钥后再复制。
+    </el-alert>
     
     <!-- Create/Edit Drawer -->
     <el-drawer
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建下游' : '编辑下游'"
       direction="rtl"
-      size="70%"
+      size="min(680px, 100vw)"
       :destroy-on-close="false"
       class="form-drawer"
     >
-      <el-form :model="form" :rules="rules" ref="formRef" label-width="150px" class="drawer-form">
+      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="drawer-form">
         <el-form-item label="ID" prop="id">
           <el-input 
             v-model="form.id" 
@@ -139,7 +139,7 @@
         </el-form-item>
 
         <template v-if="form.rate_limit_enabled">
-          <el-divider>限额配置</el-divider>
+          <el-divider class="drawer-section">限额配置</el-divider>
           <el-form-item label="每分钟限制" prop="per_minute_limit">
             <el-input-number v-model="form.per_minute_limit" :min="1" :max="10000" />
           </el-form-item>
@@ -192,18 +192,32 @@
     </el-drawer>
     
     <!-- Rotate Key Dialog -->
-    <el-dialog v-model="rotateDialogVisible" title="密钥轮换成功" width="500px">
+    <el-dialog
+      v-model="rotateDialogVisible"
+      class="rotate-key-dialog"
+      title="密钥轮换成功"
+      width="min(500px, calc(100vw - 32px))"
+    >
       <el-alert type="success" :closable="false" show-icon>
         <template #title>
           新密钥已生成，请妥善保存！此密钥只显示一次。
         </template>
       </el-alert>
-      <div class="new-key-container">
-        <el-input v-model="newPlaintextKey" readonly>
-          <template #append>
-            <el-button type="primary" @click="copyKey(newPlaintextKey)">复制秘钥</el-button>
-          </template>
-        </el-input>
+      <div class="key-result-surface">
+        <div class="key-result-heading">
+          <span>新访问密钥</span>
+          <el-tooltip content="复制新密钥" placement="top">
+            <el-button
+              aria-label="复制新密钥"
+              circle
+              type="primary"
+              @click="copyKey(newPlaintextKey)"
+            >
+              <el-icon><CopyDocument /></el-icon>
+            </el-button>
+          </el-tooltip>
+        </div>
+        <code class="new-key-value">{{ newPlaintextKey }}</code>
       </div>
       <el-alert
         title="重要提示"
@@ -223,6 +237,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CopyDocument } from '@element-plus/icons-vue'
 import { adminApi } from '@/api/admin'
 import type { DownstreamConfig } from '@/types'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
@@ -477,31 +492,49 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.downstreams-container {
-  padding: 20px;
+.downstreams-page {
+  min-height: 100%;
 }
 
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.downstream-filters {
+  align-items: flex-end;
 }
 
-.header h2 {
-  margin: 0;
+.downstream-filters :deep(.el-form-item) {
+  margin-right: 0;
+  margin-bottom: 0;
 }
 
-.filter-form {
-  margin-bottom: 20px;
-}
-
-.new-key-container {
+.key-result-surface {
   margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface-muted);
+}
+
+.key-result-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--crc-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.new-key-value {
+  display: block;
+  width: 100%;
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 
 .key-cell {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -511,46 +544,61 @@ onMounted(() => {
 }
 
 code {
-  font-family: 'Courier New', monospace;
-  background: #f5f5f5;
   padding: 2px 6px;
-  border-radius: 3px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text-strong);
+  background: var(--crc-surface-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .legacy-key-hint {
-  color: #909399;
+  color: var(--crc-text-muted);
 }
 
 .helper-text {
   margin-top: 8px;
 }
 
-/* Drawer-based create/edit form */
-.form-drawer :deep(.el-drawer__header) {
+:global(.form-drawer .el-drawer__header) {
   margin-bottom: 0;
   padding: 16px 24px;
-  border-bottom: 1px solid var(--el-border-color-light);
+  border-bottom: 1px solid var(--crc-border);
 }
-.form-drawer :deep(.el-drawer__body) {
+
+:global(.form-drawer .el-drawer__body) {
   padding: 24px 32px;
   overflow-y: auto;
 }
-.form-drawer :deep(.el-drawer__footer) {
-  border-top: 1px solid var(--el-border-color-light);
+
+:global(.form-drawer .el-drawer__footer) {
+  border-top: 1px solid var(--crc-border);
   padding: 12px 24px;
+  background: var(--crc-surface);
 }
+
 .drawer-form {
   width: 100%;
-  padding: 0 40px;
 }
+
+.drawer-section {
+  margin: 26px 0 20px;
+}
+
 .drawer-footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
 }
-@media (max-width: 1024px) {
-  .form-drawer :deep(.el-drawer.rtl) {
-    width: 100% !important;
+
+@media (max-width: 767px) {
+  .downstream-filters {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  :global(.form-drawer .el-drawer__body) {
+    padding: 18px 16px;
   }
 }
 </style>

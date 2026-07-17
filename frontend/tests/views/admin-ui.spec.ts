@@ -33,4 +33,16 @@ describe('admin ui structure', () => {
     expect(page).toContain('drawer-section')
     expect(page).toContain('drawer-footer')
   })
+
+  it('uses the responsive downstream management workbench', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('crc-page downstreams-page')
+    expect(page).toContain('crc-toolbar downstream-filters')
+    expect(page).toContain('crc-table-shell')
+    expect(page).toContain('drawer-footer')
+    expect(page).toContain('rotate-key-dialog')
+    expect(page).toContain('key-result-surface')
+    expect(page).toContain('aria-label="复制新密钥"')
+  })
 })
