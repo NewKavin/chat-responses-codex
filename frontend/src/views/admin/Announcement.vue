@@ -1,16 +1,14 @@
 <template>
-  <div class="announcement-page">
-    <el-card shadow="hover" class="announcement-card" v-loading="loading">
-      <template #header>
-        <div class="page-header">
-          <div>
-            <h2>公告管理</h2>
-            <p>管理员每次保存都会生成新的公告版本，门户用户在下一次登录或刷新时会重新确认。</p>
-          </div>
-          <el-button :loading="loading" @click="loadAnnouncement">重新加载</el-button>
-        </div>
-      </template>
+  <div class="crc-page announcement-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">公告管理</h1>
+        <p class="crc-page-description">每次保存都会生成新版本，门户用户在下次登录或刷新时重新确认。</p>
+      </div>
+      <el-button :loading="loading" @click="loadAnnouncement">重新加载</el-button>
+    </header>
 
+    <section v-loading="loading" class="announcement-form-surface">
       <el-alert
         title="公告默认以纯文本展示。启用后会在门户登录后弹出；关闭后会作为草稿保留，不再弹出。"
         type="info"
@@ -19,7 +17,7 @@
         class="announcement-note"
       />
 
-      <el-form :model="form" label-width="120px" class="announcement-form">
+      <el-form :model="form" label-position="top" class="announcement-form">
         <el-form-item label="标题">
           <el-input
             v-model="form.title"
@@ -73,7 +71,7 @@
         <el-button type="primary" :loading="saving" @click="handleSubmit">保存并发布</el-button>
         <el-button :disabled="saving" @click="loadAnnouncement">重置为服务端内容</el-button>
       </div>
-    </el-card>
+    </section>
   </div>
 </template>
 
@@ -230,28 +228,15 @@ onMounted(() => {
 
 <style scoped>
 .announcement-page {
-  padding: 20px;
+  min-height: 100%;
 }
 
-.announcement-card {
-  max-width: 960px;
-}
-
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.page-header h2 {
-  margin: 0;
-}
-
-.page-header p {
-  margin: 8px 0 0;
-  color: #6b7280;
-  font-size: 14px;
+.announcement-form-surface {
+  width: 100%;
+  max-width: 760px;
+  padding: 20px 0;
+  border-top: 1px solid var(--crc-border);
+  border-bottom: 1px solid var(--crc-border);
 }
 
 .announcement-note {
@@ -267,10 +252,9 @@ onMounted(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 20px;
-  padding: 16px;
-  border-radius: 12px;
-  background: #f8fafc;
-  border: 1px solid #e5e7eb;
+  padding: 16px 0;
+  border-top: 1px solid var(--crc-border);
+  border-bottom: 1px solid var(--crc-border);
 }
 
 .meta-item {
@@ -280,13 +264,13 @@ onMounted(() => {
 }
 
 .meta-item span {
+  color: var(--crc-text-muted);
   font-size: 12px;
-  color: #6b7280;
 }
 
 .meta-item strong {
+  color: var(--crc-text-strong);
   font-size: 14px;
-  color: #111827;
   word-break: break-all;
 }
 
@@ -296,14 +280,18 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-@media (max-width: 768px) {
-  .page-header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
+@media (max-width: 767px) {
   .announcement-meta {
     grid-template-columns: 1fr;
+  }
+
+  .announcement-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .announcement-actions .el-button {
+    margin-left: 0;
   }
 }
 </style>

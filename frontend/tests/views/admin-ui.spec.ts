@@ -72,4 +72,12 @@ describe('admin ui structure', () => {
     expect(center).not.toContain('<el-card')
     expect(matrix).not.toContain('<el-card')
   })
+
+  it('uses a focused unframed announcement form', () => {
+    const page = source('views/admin/Announcement.vue')
+
+    expect(page).toContain('crc-page announcement-page')
+    expect(page).toContain('announcement-form-surface')
+    expect(page).not.toContain('<el-card')
+  })
 })
