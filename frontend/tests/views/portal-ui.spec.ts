@@ -40,4 +40,16 @@ describe('portal ui structure', () => {
     expect(page).toContain('aria-label="复制代码"')
     expect(page).not.toContain('integration-hero')
   })
+
+  it('uses icon controls and a mobile settings drawer', () => {
+    const playground = source('Playground')
+
+    expect(playground).toContain('playground-workspace')
+    expect(playground).toContain('settings-panel')
+    expect(playground).toContain('settingsDrawerOpen')
+    expect(playground).toContain('<el-drawer')
+    expect(playground).toContain('aria-label="打开模型设置"')
+    expect(playground).toContain('<PlaygroundSettings')
+    expect(playground).not.toContain("sidebarCollapsed ? '▶' : '◀'")
+  })
 })

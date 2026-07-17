@@ -1,125 +1,60 @@
 <template>
-  <div class="playground-layout">
-    <div :class="['sidebar', { 'sidebar--collapsed': sidebarCollapsed }]">
-      <div class="sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed">
-        <span v-if="sidebarCollapsed">▶</span>
-        <span v-else>◀</span>
-      </div>
-
-      <div v-show="!sidebarCollapsed" class="sidebar-content">
-        <h3 class="sidebar-title">模型操练场</h3>
-
-        <el-alert
-          v-if="statusMessage"
-          :type="statusType"
-          :closable="false"
-          show-icon
-          class="status-alert"
-        >
-          {{ statusMessage }}
-        </el-alert>
-
-        <div class="sidebar-section">
-          <label class="sidebar-label">模型</label>
-          <el-select
-            v-model="selectedModel"
-            placeholder="选择模型"
-            filterable
-            clearable
-            style="width: 100%"
-            :disabled="isBusy || !modelOptions.length"
-            size="default"
+  <div class="playground-workspace">
+    <aside :class="['settings-panel', { 'settings-panel--collapsed': sidebarCollapsed }]">
+      <div class="settings-panel__toggle">
+        <el-tooltip :content="sidebarCollapsed ? '展开模型设置' : '收起模型设置'" placement="right">
+          <el-button
+            :aria-label="sidebarCollapsed ? '展开模型设置' : '收起模型设置'"
+            circle
+            @click="sidebarCollapsed = !sidebarCollapsed"
           >
-            <el-option
-              v-for="model in modelOptions"
-              :key="model"
-              :label="model"
-              :value="model"
-            />
-          </el-select>
-        </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-label-row">
-            <label class="sidebar-label">温度 {{ temperature.toFixed(1) }}</label>
-            <el-switch
-              v-model="temperatureEnabled"
-              inline-prompt
-              active-text="自定义"
-              inactive-text="自动"
-              :disabled="isBusy"
-            />
-          </div>
-          <el-slider
-            v-model="temperature"
-            :min="0"
-            :max="2"
-            :step="0.1"
-            :disabled="isBusy || !temperatureEnabled"
-            :show-tooltip="false"
-          />
-        </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-label-row">
-            <label class="sidebar-label">max_tokens</label>
-            <el-switch
-              v-model="maxTokensEnabled"
-              inline-prompt
-              active-text="自定义"
-              inactive-text="自动"
-              :disabled="isBusy"
-            />
-          </div>
-          <el-input-number
-            v-model="maxTokens"
-            :min="1"
-            :max="999999"
-            :step="1024"
-            :disabled="isBusy || !maxTokensEnabled"
-            controls-position="right"
-            style="width: 100%"
-            size="default"
-          />
-        </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-label-row">
-            <label class="sidebar-label">推理强度</label>
-            <el-switch
-              v-model="inferenceStrengthEnabled"
-              inline-prompt
-              active-text="自定义"
-              inactive-text="自动"
-              :disabled="isBusy"
-            />
-          </div>
-          <el-select
-            v-model="inferenceStrength"
-            style="width: 100%"
-            :disabled="isBusy || !inferenceStrengthEnabled"
-          >
-            <el-option
-              v-for="level in inferenceStrengthOptions"
-              :key="level"
-              :label="level"
-              :value="level"
-            />
-          </el-select>
-        </div>
-
-
-
-        <div class="sidebar-section sidebar-actions">
-          <el-button size="small" :disabled="isBusy" @click="clearConversation">
-            <el-icon :size="14" style="margin-right: 4px"><Delete /></el-icon>
-            清空对话
+            <el-icon><Expand v-if="sidebarCollapsed" /><Fold v-else /></el-icon>
           </el-button>
-        </div>
+        </el-tooltip>
       </div>
-    </div>
+
+      <div v-show="!sidebarCollapsed" class="settings-panel__body">
+        <PlaygroundSettings
+          :model-options="modelOptions"
+          :selected-model="selectedModel"
+          :busy="isBusy"
+          :status-message="statusMessage"
+          :status-type="statusType"
+          :temperature="temperature"
+          :temperature-enabled="temperatureEnabled"
+          :max-tokens="maxTokens"
+          :max-tokens-enabled="maxTokensEnabled"
+          :inference-strength="inferenceStrength"
+          :inference-strength-options="inferenceStrengthOptions"
+          :inference-strength-enabled="inferenceStrengthEnabled"
+          @clear="clearConversation"
+          @update:selected-model="selectedModel = $event"
+          @update:temperature="temperature = $event"
+          @update:temperature-enabled="temperatureEnabled = $event"
+          @update:max-tokens="maxTokens = $event"
+          @update:max-tokens-enabled="maxTokensEnabled = $event"
+          @update:inference-strength="inferenceStrength = $event as (typeof inferenceStrengthOptions)[number]"
+          @update:inference-strength-enabled="inferenceStrengthEnabled = $event"
+        />
+      </div>
+    </aside>
 
     <div class="chat-area">
+      <div class="chat-toolbar">
+        <div>
+          <h1 class="chat-toolbar__title">模型操练场</h1>
+          <p class="chat-toolbar__subtitle">选择模型、上传附件并观察流式响应。</p>
+        </div>
+        <el-button
+          class="chat-toolbar__settings-trigger"
+          aria-label="打开模型设置"
+          circle
+          @click="settingsDrawerOpen = true"
+        >
+          <el-icon><Setting /></el-icon>
+        </el-button>
+      </div>
+
       <div class="chat-messages" ref="messagesContainerRef">
         <div v-if="!messages.length" class="chat-empty">
           <div class="chat-empty-icon">
@@ -229,14 +164,55 @@
         </div>
       </div>
     </div>
+
+    <el-drawer
+      v-model="settingsDrawerOpen"
+      title="模型设置"
+      size="min(360px, 100vw)"
+      class="playground-settings-drawer"
+    >
+      <PlaygroundSettings
+        :model-options="modelOptions"
+        :selected-model="selectedModel"
+        :busy="isBusy"
+        :status-message="statusMessage"
+        :status-type="statusType"
+        :temperature="temperature"
+        :temperature-enabled="temperatureEnabled"
+        :max-tokens="maxTokens"
+        :max-tokens-enabled="maxTokensEnabled"
+        :inference-strength="inferenceStrength"
+        :inference-strength-options="inferenceStrengthOptions"
+        :inference-strength-enabled="inferenceStrengthEnabled"
+        @clear="clearConversation(); settingsDrawerOpen = false"
+        @update:selected-model="selectedModel = $event; settingsDrawerOpen = false"
+        @update:temperature="temperature = $event"
+        @update:temperature-enabled="temperatureEnabled = $event"
+        @update:max-tokens="maxTokens = $event"
+        @update:max-tokens-enabled="maxTokensEnabled = $event"
+        @update:inference-strength="inferenceStrength = $event as (typeof inferenceStrengthOptions)[number]"
+        @update:inference-strength-enabled="inferenceStrengthEnabled = $event"
+      />
+    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ChatDotRound, Close, Delete, Link, MagicStick, Promotion, User } from '@element-plus/icons-vue'
+import {
+  ChatDotRound,
+  Close,
+  Expand,
+  Fold,
+  Link,
+  MagicStick,
+  Promotion,
+  Setting,
+  User
+} from '@element-plus/icons-vue'
 import { Marked } from 'marked'
 import { portalApi } from '@/api/portal'
+import PlaygroundSettings from '@/components/PlaygroundSettings.vue'
 import { buildGatewayModelsEndpoint } from '@/utils/integration'
 import { createHighlightedCodeRenderer } from '@/utils/highlight'
 import { extractReadableErrorMessage } from '@/utils/errorDisplay'
@@ -300,6 +276,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const uploadedFiles = ref<UploadedFile[]>([])
 const messagesContainerRef = ref<HTMLElement | null>(null)
 const sidebarCollapsed = ref(false)
+const settingsDrawerOpen = ref(false)
 const streamingContent = ref('')
 const streamingReasoning = ref('')
 const firstOutputSeconds = ref<number | undefined>(undefined)
@@ -784,92 +761,87 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.playground-layout {
+.playground-workspace {
   display: flex;
-  height: 100%;
-  background: #f5f7fa;
+  width: 100%;
+  height: calc(100dvh - var(--crc-topbar-height) - 48px);
+  min-height: 560px;
   overflow: hidden;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
-.sidebar {
+.settings-panel {
+  position: relative;
+  display: flex;
+  flex: 0 0 280px;
   width: 280px;
   min-width: 280px;
-  background: #fff;
-  border-right: 1px solid #e4e7ed;
-  display: flex;
   flex-direction: column;
-  transition: width 0.2s, min-width 0.2s;
-  position: relative;
+  border-right: 1px solid var(--crc-border);
+  background: var(--crc-surface-muted);
+  transition: width 160ms ease, min-width 160ms ease, flex-basis 160ms ease;
 }
 
-.sidebar--collapsed {
-  width: 40px;
-  min-width: 40px;
+.settings-panel--collapsed {
+  flex-basis: 48px;
+  width: 48px;
+  min-width: 48px;
 }
 
-.sidebar-toggle {
-  position: absolute;
-  top: 12px;
-  right: -14px;
-  width: 28px;
-  height: 28px;
-  background: #fff;
-  border: 1px solid #dcdfe6;
-  border-radius: 50%;
+.settings-panel__toggle {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  z-index: 10;
-  transition: background 0.15s;
+  justify-content: flex-end;
+  padding: 10px;
 }
 
-.sidebar-toggle:hover {
-  background: #ecf5ff;
+.settings-panel__toggle .el-button {
+  width: 36px;
+  height: 36px;
 }
 
-.sidebar-content {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.settings-panel__body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 16px 16px;
   overflow-y: auto;
-  height: 100%;
 }
 
-.sidebar-title {
-  margin: 0 0 4px 0;
-  font-size: 16px;
-  color: #1f2d3d;
-}
-
-.status-alert {
-  margin-bottom: 0;
-}
-
-.sidebar-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sidebar-label {
-  font-size: 12px;
-  color: #909399;
-  font-weight: 500;
-}
-
-.sidebar-label-row {
+.chat-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 16px;
+  min-height: 64px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--crc-border);
+  background: var(--crc-surface);
 }
 
-.sidebar-actions {
-  margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid #f0f0f0;
+.chat-toolbar__title {
+  margin: 0;
+  color: var(--crc-text-strong);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.chat-toolbar__subtitle {
+  margin: 3px 0 0;
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
+.chat-toolbar__settings-trigger {
+  display: none;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+}
+
+:global(.playground-settings-drawer .el-drawer__body) {
+  padding: 16px;
+  background: var(--crc-surface-muted);
 }
 
 .hidden-file-input {
@@ -1227,15 +1199,27 @@ onBeforeUnmount(() => {
   background: #f5f7fa;
 }
 
-@media (max-width: 768px) {
-  .sidebar {
-    width: 40px;
-    min-width: 40px;
+@media (max-width: 767px) {
+  .playground-workspace {
+    height: calc(100dvh - var(--crc-topbar-height) - 32px);
+    min-height: 520px;
   }
 
-  .sidebar--collapsed {
-    width: 0;
-    min-width: 0;
+  .settings-panel {
+    display: none;
+  }
+
+  .chat-toolbar {
+    min-height: 58px;
+    padding: 8px 12px;
+  }
+
+  .chat-toolbar__subtitle {
+    display: none;
+  }
+
+  .chat-toolbar__settings-trigger {
+    display: inline-flex;
   }
 
   .chat-messages {
