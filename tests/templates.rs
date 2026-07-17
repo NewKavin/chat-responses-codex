@@ -96,6 +96,16 @@ fn app_config_defaults_concurrency_retry_policy() {
 }
 
 #[test]
+fn app_config_defaults_upstream_hedge_policy() {
+    let config = AppConfig::default();
+
+    assert!(config.upstream_hedge_enabled);
+    assert_eq!(config.upstream_hedge_delay_ms, 12_000);
+    assert_eq!(config.upstream_hedge_interval_ms, 12_000);
+    assert_eq!(config.upstream_hedge_max_extra_attempts, 1);
+}
+
+#[test]
 fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_settings() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();
@@ -107,6 +117,10 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
         "UPSTREAM_STREAM_MAX_DURATION_SECONDS",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS",
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
+        "UPSTREAM_HEDGE_ENABLED",
+        "UPSTREAM_HEDGE_DELAY_MS",
+        "UPSTREAM_HEDGE_INTERVAL_MS",
+        "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS",
     ] {
         assert!(
             env_example.contains(marker),
@@ -151,6 +165,38 @@ fn codex_docs_mention_the_copy_ready_relative_catalog_path() {
     assert!(!readme.contains("Gitee"));
     assert!(!deployment.contains("Gitee"));
     assert!(!contributing.contains("Gitee"));
+}
+
+#[test]
+fn codex_integration_examples_document_multi_agent_validation() {
+    let codex = fs::read_to_string("templates/codex/config.toml.example").unwrap();
+    let readme = fs::read_to_string("README.md").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+    let guide = fs::read_to_string("docs/codex-integration-guide.md").unwrap();
+
+    for marker in [
+        "client_version=0.144.4",
+        "cli_auth_credentials_store = \"file\"",
+        "multi_agent = true",
+        "[agents]",
+        "max_threads = 8",
+        "max_depth = 3",
+    ] {
+        assert!(
+            codex.contains(marker),
+            "Codex template should contain {marker}"
+        );
+        assert!(
+            guide.contains(marker),
+            "Codex guide should contain {marker}"
+        );
+    }
+
+    for documentation in [readme, deployment, guide] {
+        assert!(documentation.contains("codex --strict-config doctor --summary"));
+        assert!(documentation.contains("max_threads"));
+        assert!(documentation.contains("max_depth"));
+    }
 }
 
 #[test]

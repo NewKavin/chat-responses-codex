@@ -1,7 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   buildClaudeCodeSettingsJson,
   buildCodexAuthLoginCommand,
+  buildCodexDoctorCommand,
   buildCodexConfigToml,
   buildCodexModelCatalogJson,
   buildGatewayBaseUrl,
@@ -16,6 +18,9 @@ import {
   rankModelSlugsByUsage,
   sortPortalModelStats
 } from '../../src/utils/integration'
+
+const codexTemplate = readFileSync(new URL('../../../templates/codex/config.toml.example', import.meta.url), 'utf8')
+const codexGuide = readFileSync(new URL('../../../docs/codex-integration-guide.md', import.meta.url), 'utf8')
 
 describe('integration config generators', () => {
   it('builds a gateway base url from an origin and trims trailing slash', () => {
@@ -203,6 +208,9 @@ describe('integration config generators', () => {
     expect(toml).toContain('review_model = "MiniMax/MiniMax-M2.7"')
     expect(toml).toContain('model_catalog_json = "model-catalog.json"')
     expect(toml).toContain('cli_auth_credentials_store = "file"')
+    expect(toml).toContain('multi_agent = true')
+    expect(toml).toContain('max_threads = 8')
+    expect(toml).toContain('max_depth = 3')
     expect(toml).toContain('base_url = "https://portal.example.com/v1"')
     expect(toml).not.toContain('OPENAI_API_KEY')
     expect(toml).not.toContain('sk-downstream-123')
@@ -290,6 +298,10 @@ describe('integration config generators', () => {
     )
   })
 
+  it('builds the strict-config doctor command for Codex', () => {
+    expect(buildCodexDoctorCommand()).toBe('codex --strict-config doctor --summary')
+  })
+
   it('builds an opencode config that is ready to copy', () => {
     const config = JSON.parse(
       buildOpenCodeConfig({
@@ -301,18 +313,46 @@ describe('integration config generators', () => {
     )
 
     expect(config.$schema).toBe('https://opencode.ai/config.json')
+    expect(config.permission).toEqual({ '*': 'deny', read: 'allow' })
     expect(config.model).toBe('gateway/MiniMax/MiniMax-M2.7')
     expect(config.small_model).toBe('gateway/DeepSeek/DeepSeek-V3')
     expect(config.provider.gateway.npm).toBe('@ai-sdk/openai-compatible')
     expect(config.provider.gateway.name).toBe('Chat Responses Gateway')
     expect(config.provider.gateway.options.baseURL).toBe('https://portal.example.com/v1')
     expect(config.provider.gateway.options.apiKey).toBe('sk-downstream-123')
+    expect(config).not.toHaveProperty('multi_agent')
+    expect(config).not.toHaveProperty('max_threads')
+    expect(config).not.toHaveProperty('max_depth')
     expect(config.provider.gateway.models['MiniMax/MiniMax-M2.7']).toEqual({
       name: 'MiniMax/MiniMax-M2.7'
     })
     expect(config.provider.gateway.models['DeepSeek/DeepSeek-V3']).toEqual({
       name: 'DeepSeek/DeepSeek-V3'
     })
+  })
+
+  it('keeps Codex template and guide auth storage and provider naming aligned', () => {
+    for (const content of [codexTemplate, codexGuide]) {
+      expect(content).toContain('cli_auth_credentials_store = "file"')
+      expect(content).toContain('name = "Chat Responses Gateway"')
+    }
+
+    expect(codexGuide).not.toContain('client_version=0.144.0')
+    expect(codexGuide).toContain('client_version=0.144.4')
+
+    const guideConfigExamples = [...codexGuide.matchAll(/```toml\n([\s\S]*?)```/g)]
+      .map(match => match[1])
+      .filter(example => example.includes('model_provider = "gateway"'))
+
+    expect(guideConfigExamples).toHaveLength(2)
+    for (const example of guideConfigExamples) {
+      expect(example).toContain('cli_auth_credentials_store = "file"')
+      expect(example).toContain('multi_agent = true')
+      expect(example).toContain('[agents]')
+      expect(example).toContain('max_threads = 8')
+      expect(example).toContain('max_depth = 3')
+      expect(example).toContain('web_search = "disabled"')
+    }
   })
 
   it('builds claude code settings that are ready to copy', () => {

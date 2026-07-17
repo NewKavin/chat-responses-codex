@@ -19,4 +19,14 @@ describe('portal integration live catalog wiring', () => {
       /<(section|div) v-else data-testid="integration-config-tabs" class="code-surface">/
     )
   })
+
+  it('uses the Codex compatibility version and exposes strict doctor guidance', () => {
+    expect(integrationView).toContain('client_version=0.144.4')
+    expect(integrationView).toContain('codex --strict-config doctor --summary')
+    expect(integrationView).toContain('max_threads')
+    expect(integrationView).toContain('并发代理线程')
+    expect(integrationView).toContain('max_depth')
+    expect(integrationView).toContain('嵌套委派深度')
+    expect(integrationView).toContain('不覆盖网关 quota')
+  })
 })

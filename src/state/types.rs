@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const ADMIN_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
+pub const DEFAULT_UPSTREAM_HEDGE_ENABLED: bool = true;
+pub const DEFAULT_UPSTREAM_HEDGE_DELAY_MS: u64 = 12_000;
+pub const DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS: u64 = 12_000;
+pub const DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -46,6 +50,10 @@ pub struct AppConfig {
     pub upstream_stream_keepalive_interval_seconds: u64,
     pub upstream_stream_idle_timeout_seconds: u64,
     pub upstream_stream_max_duration_seconds: u64,
+    pub upstream_hedge_enabled: bool,
+    pub upstream_hedge_delay_ms: u64,
+    pub upstream_hedge_interval_ms: u64,
+    pub upstream_hedge_max_extra_attempts: u32,
 }
 
 impl Default for AppConfig {
@@ -89,6 +97,10 @@ impl Default for AppConfig {
             upstream_stream_keepalive_interval_seconds: 3,
             upstream_stream_idle_timeout_seconds: 1_800,
             upstream_stream_max_duration_seconds: 86_400,
+            upstream_hedge_enabled: DEFAULT_UPSTREAM_HEDGE_ENABLED,
+            upstream_hedge_delay_ms: DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+            upstream_hedge_interval_ms: DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
+            upstream_hedge_max_extra_attempts: DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
         }
     }
 }

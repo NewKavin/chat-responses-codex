@@ -58,7 +58,7 @@ Codex catalog 必须从已配置的网关读取。下面的流程不会把下游
   trap 'rm -f "$catalog_tmp"; unset CHAT2RESPONSES_DOWNSTREAM_KEY' EXIT
   read -rsp 'Gateway downstream key: ' CHAT2RESPONSES_DOWNSTREAM_KEY
   printf '\n'
-  curl -fsS '<gateway_origin>/v1/models?client_version=0.144.0' \
+  curl -fsS '<gateway_origin>/v1/models?client_version=0.144.4' \
     -H "Authorization: Bearer ${CHAT2RESPONSES_DOWNSTREAM_KEY}" \
     > "$catalog_tmp"
   jq -e '(.models | type == "array") and (.models | length > 0)' \
@@ -91,18 +91,28 @@ review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
+cli_auth_credentials_store = "file"
 
 [features]
 skill_mcp_dependency_install = true
 tool_suggest = true
+multi_agent = true
+
+[agents]
+max_threads = 8
+max_depth = 3
+# max_threads controls concurrent agent threads; max_depth controls nested delegation depth.
+# These local limits do not override gateway quota.
 
 [model_providers.gateway]
-name = "chat-responses-codex"
+name = "Chat Responses Gateway"
 base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
 web_search = "disabled"
 ```
+
+完成配置后可运行 `codex --strict-config doctor --summary` 检查配置是否符合当前 Codex 版本。
 
 把 `<gateway_origin>` 换成你的网关根地址，本机就填你本机监听的网关地址，远程就填你反向代理或公网域名对应的根地址。
 
@@ -324,12 +334,21 @@ review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
+cli_auth_credentials_store = "file"
+
+[features]
+multi_agent = true
+
+[agents]
+max_threads = 8
+max_depth = 3
 
 [model_providers.gateway]
-name = "chat-responses-codex"
+name = "Chat Responses Gateway"
 base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
+web_search = "disabled"
 ```
 
 ### 4.3 每个字段是什么意思
@@ -392,7 +411,7 @@ jq -r '.models[].slug' ~/.codex/model-catalog.json
 3. 配好上游模型
 4. 配好下游 key
 5. 把 `templates/codex/config.toml.example` 复制到 `~/.codex/config.toml`
-6. 使用下游 key 从 live `/v1/models?client_version=0.144.0` 获取目录，验证 `.models` 非空后写入 `~/.codex/model-catalog.json`
+6. 使用下游 key 从 live `/v1/models?client_version=0.144.4` 获取目录，验证 `.models` 非空后写入 `~/.codex/model-catalog.json`
 7. 确认 `base_url` 是网关地址
 8. 确认 `model` 和 `review_model` 都是目录里真实存在的 slug
 

@@ -172,6 +172,10 @@ flowchart LR
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`：模型探测页自动刷新间隔，单位秒。
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：已废弃（后台自动同步循环已移除，模型映射仅在"获取模型"时刷新）。保留该字段仅为向后兼容。
 - `DASHBOARD_CACHE_TTL_SECONDS`：后端复用模型探测快照的缓存时间，单位秒。
+- `UPSTREAM_HEDGE_ENABLED`：是否为长时间没有首个可用输出的流式请求启用竞争尝试。
+- `UPSTREAM_HEDGE_DELAY_MS`：发起第一个额外竞争尝试前的等待时间，默认 `12000` 毫秒。
+- `UPSTREAM_HEDGE_INTERVAL_MS`：后续额外竞争尝试之间的最小间隔，默认 `12000` 毫秒。
+- `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS`：每个逻辑请求允许的额外尝试数，默认 `1`；设为 `0` 可禁用。
 - `USAGE_LOG_ROTATION_MAX_BYTES`：文件模式日志轮转阈值。
 - `USAGE_LOG_ARCHIVE_MAX_FILES`：文件模式日志归档上限。
 - `RUST_LOG`：可选，控制日志级别。
@@ -254,6 +258,8 @@ flowchart LR
 - [docs/PROTOCOL_COMPATIBILITY.md](docs/PROTOCOL_COMPATIBILITY.md)
 
 那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>` 和 `<model_slug>`，按步骤替换即可。Codex 的 `model_catalog_json` 示例也已经做成了同目录相对路径，复制到 `~/.codex/` 后不需要再手工改路径。
+
+当前示例按 Codex CLI `0.144.4` 验证，并默认启用 `multi_agent`。调整 `[agents]` 下的 `max_threads` 可以增加并发代理线程数，`max_depth` 用于限制嵌套委派深度；这些客户端设置不会覆盖网关配额。复制配置后运行 `codex --strict-config doctor --summary` 检查配置是否实际生效。
 
 ### 开发
 
@@ -470,6 +476,8 @@ The full integration guide lives here:
 - [docs/codex-integration-guide.md](docs/codex-integration-guide.md)
 
 That guide uses one placeholder set: `<gateway_origin>`, `<downstream_key>`, and `<model_slug>`. Replace those values and follow the steps.
+
+The sample is validated against Codex CLI `0.144.4`. Tune `[agents].max_threads` for concurrent agent threads and `[agents].max_depth` for nested delegation, then run `codex --strict-config doctor --summary` to validate the loaded configuration.
 
 ### Development
 

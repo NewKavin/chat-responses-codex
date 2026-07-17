@@ -1,5 +1,8 @@
 use chat_responses_codex::server::build_router;
-use chat_responses_codex::state::{AppConfig, AppState};
+use chat_responses_codex::state::{
+    AppConfig, AppState, DEFAULT_UPSTREAM_HEDGE_DELAY_MS, DEFAULT_UPSTREAM_HEDGE_ENABLED,
+    DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS, DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+};
 use chrono::{FixedOffset, Utc};
 use std::env;
 use std::error::Error;
@@ -139,6 +142,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .max(1),
         admin_upstream_timeout_seconds: env_u64("ADMIN_UPSTREAM_TIMEOUT_SECONDS", 30).max(1),
+        upstream_hedge_enabled: env_bool("UPSTREAM_HEDGE_ENABLED", DEFAULT_UPSTREAM_HEDGE_ENABLED),
+        upstream_hedge_delay_ms: normalize_hedge_delay_ms(env_u64(
+            "UPSTREAM_HEDGE_DELAY_MS",
+            DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+        )),
+        upstream_hedge_interval_ms: normalize_hedge_delay_ms(env_u64(
+            "UPSTREAM_HEDGE_INTERVAL_MS",
+            DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
+        )),
+        upstream_hedge_max_extra_attempts: env_u32(
+            "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS",
+            DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+        ),
     };
 
     init_tracing(&log_path);
@@ -152,6 +168,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state_path = %state_path.display(),
         log_path = %log_path,
         app_name = %config.app_name,
+        hedge_enabled = config.upstream_hedge_enabled,
+        hedge_delay_ms = config.upstream_hedge_delay_ms,
+        hedge_interval_ms = config.upstream_hedge_interval_ms,
+        hedge_max_extra_attempts = config.upstream_hedge_max_extra_attempts,
         backend = if env::var("DATABASE_URL")
             .ok()
             .map(|value| !value.trim().is_empty())
@@ -250,6 +270,10 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn normalize_hedge_delay_ms(value: u64) -> u64 {
+    value.max(1)
+}
+
 fn env_u32(key: &str, default: u32) -> u32 {
     env::var(key)
         .ok()
@@ -273,6 +297,17 @@ fn env_bool(key: &str, default: bool) -> bool {
                 || (!matches!(normalized.as_str(), "0" | "false" | "no" | "off") && default)
         })
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_hedge_delay_ms;
+
+    #[test]
+    fn hedge_delay_and_interval_are_at_least_one_millisecond() {
+        assert_eq!(normalize_hedge_delay_ms(0), 1);
+        assert_eq!(normalize_hedge_delay_ms(7), 7);
+    }
 }
 
 fn init_tracing(log_path: &str) {

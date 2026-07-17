@@ -160,6 +160,9 @@
               show-icon
               title="Codex 需要 3 个内容：`config.toml`、`model-catalog.json`，以及通过 `codex login --with-api-key` 写入的 `auth.json`。"
             />
+            <p class="codex-agent-limits">
+              <code>max_threads</code> 表示并发代理线程，<code>max_depth</code> 表示嵌套委派深度；这些本地限制不覆盖网关 quota。
+            </p>
 
             <div class="step-card">
               <div class="step-head">
@@ -224,7 +227,7 @@
               type="success"
               :closable="false"
               show-icon
-              title="完成后直接启动 Codex。默认模型已经按门户统计排好顺序，Codex 会优先使用最常用的模型。"
+              title="完成后直接启动 Codex。默认模型已经按门户统计排好顺序，Codex 会优先使用最常用的模型。运行 codex --strict-config doctor --summary 可检查配置。"
             />
           </div>
         </el-tab-pane>
@@ -613,7 +616,7 @@ const openAiCompatibleConfig = computed(() =>
 )
 
 const fetchGatewayCodexCatalog = async (key: string) => {
-  const response = await fetch(`${buildGatewayModelsEndpoint(gatewayBaseUrl.value)}?client_version=0.144.0`, {
+  const response = await fetch(`${buildGatewayModelsEndpoint(gatewayBaseUrl.value)}?client_version=0.144.4`, {
     headers: {
       Authorization: `Bearer ${key}`
     }

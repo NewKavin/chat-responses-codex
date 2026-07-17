@@ -1,20 +1,26 @@
 # Point Codex at the gateway, not at the upstream vendors directly.
 # `model` and `review_model` must match the selected exposed slug exactly.
 # Keep model-catalog.json next to this file; Codex resolves the path relative to ~/.codex/config.toml.
-# Render the live catalog from `/v1/models?client_version=0.144.0` before use.
+# Render the live catalog from `/v1/models?client_version=0.144.4` before use.
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
 model_reasoning_effort = "high"
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
+cli_auth_credentials_store = "file"
 
 [features]
 skill_mcp_dependency_install = true
 tool_suggest = true
+multi_agent = true
+
+[agents]
+max_threads = 8
+max_depth = 3
 
 [model_providers.gateway]
-name = "chat-responses-codex"
+name = "Chat Responses Gateway"
 base_url = "<gateway_url>/v1"
 wire_api = "responses"
 requires_openai_auth = true

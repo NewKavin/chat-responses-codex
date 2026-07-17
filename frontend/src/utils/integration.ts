@@ -253,6 +253,11 @@ cli_auth_credentials_store = "file"
 [features]
 skill_mcp_dependency_install = true
 tool_suggest = true
+multi_agent = true
+
+[agents]
+max_threads = 8
+max_depth = 3
 
 [model_providers.gateway]
 name = "Chat Responses Gateway"
@@ -262,6 +267,8 @@ requires_openai_auth = true
 web_search = "disabled"
 `
 }
+
+export const buildCodexDoctorCommand = () => 'codex --strict-config doctor --summary'
 
 export const buildCodexAuthLoginCommand = (portalKey: string) =>
   `printf '%s' ${shellSingleQuote(portalKey)} | codex login --with-api-key`
@@ -300,6 +307,7 @@ export const buildOpenCodeConfig = (input: IntegrationConfigInput) => {
 
   const config = {
     $schema: 'https://opencode.ai/config.json',
+    permission: { '*': 'deny', read: 'allow' },
     model: primaryModelSlug ? `${gatewayProviderId}/${primaryModelSlug}` : '',
     small_model: secondaryModelSlug ? `${gatewayProviderId}/${secondaryModelSlug}` : '',
     provider: {

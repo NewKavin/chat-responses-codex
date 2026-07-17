@@ -78,7 +78,9 @@ pub use types::{
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
     ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
-    UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
+    UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+    DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
 };
 pub use usage::{
     portal_model_is_allowed, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage, TokenQuota,

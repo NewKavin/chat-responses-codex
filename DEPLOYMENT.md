@@ -37,6 +37,10 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50`
 - `UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=10`
 - `UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=2`
+- `UPSTREAM_HEDGE_ENABLED=true`
+- `UPSTREAM_HEDGE_DELAY_MS=12000`
+- `UPSTREAM_HEDGE_INTERVAL_MS=12000`
+- `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=1`
 
 `CAPABILITY_PROBE_QUEUE_CAPACITY` limits pending atomic probe submission batches,
 not the number of routes inside a batch. Accepted batches are expanded immediately
@@ -55,6 +59,11 @@ controls the initial wait, which then grows exponentially with deterministic jit
 `UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS` caps the total per-request wait.
 `UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER` stretches that budget
 when only one active upstream supports the requested model.
+
+`UPSTREAM_HEDGE_DELAY_MS` controls when a slow-first-output request launches its
+first extra attempt. `UPSTREAM_HEDGE_INTERVAL_MS` spaces later extra attempts,
+and `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS` bounds their number. Set the maximum to
+`0` to disable extra attempts without rebuilding the service.
 
 Optional for file-backed compatibility mode:
 
@@ -115,6 +124,10 @@ docker run -d \
   -e UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50 \
   -e UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=10 \
   -e UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=2 \
+  -e UPSTREAM_HEDGE_ENABLED=true \
+  -e UPSTREAM_HEDGE_DELAY_MS=12000 \
+  -e UPSTREAM_HEDGE_INTERVAL_MS=12000 \
+  -e UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=1 \
   -e UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10 \
   -e UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800 \
   -e UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400 \
@@ -187,7 +200,7 @@ volumes:
 
 If you use a `.env` file, copy [`.env.example`](.env.example) to `.env`, keep the recommended defaults, and rotate the secrets before first launch.
 
-For Codex client setup, copy [templates/codex/config.toml.example](templates/codex/config.toml.example) and [templates/codex/model-catalog.json](templates/codex/model-catalog.json) into `~/.codex/`. The config template uses `model_catalog_json = "model-catalog.json"`, so the two files must live side by side.
+For Codex client setup, copy [templates/codex/config.toml.example](templates/codex/config.toml.example) and [templates/codex/model-catalog.json](templates/codex/model-catalog.json) into `~/.codex/`. The config template targets Codex CLI `0.144.4`, uses `model_catalog_json = "model-catalog.json"`, and includes `[agents].max_threads` plus `[agents].max_depth`; the two files must live side by side. Run `codex --strict-config doctor --summary` after copying them to validate the loaded configuration.
 
 Generate a secure JWT_SECRET with: `openssl rand -base64 32`
 
