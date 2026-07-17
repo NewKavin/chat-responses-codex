@@ -1,14 +1,27 @@
 <template>
-  <div class="logs-container">
-    <el-card>
-      <template #header>
-        <div class="header">
-          <h2>日志管理</h2>
-          <el-button :icon="Refresh" circle :loading="loading" @click="loadData" />
-        </div>
-      </template>
+  <div class="crc-page logs-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">日志管理</h1>
+        <p class="crc-page-description">按请求、模型和错误类别检索网关调用证据。</p>
+      </div>
+      <el-tooltip content="刷新日志" placement="bottom">
+        <el-button
+          :icon="Refresh"
+          aria-label="刷新日志"
+          circle
+          :loading="loading"
+          @click="loadData"
+        />
+      </el-tooltip>
+    </header>
 
-      <el-form :inline="true" class="filter-form">
+    <el-collapse v-model="filterPanels" class="logs-filter-disclosure">
+      <el-collapse-item name="filters">
+        <template #title>
+          <span class="filter-disclosure-title">筛选条件</span>
+        </template>
+        <el-form :inline="true" class="crc-toolbar logs-filters">
         <el-form-item label="状态码">
           <el-select
             v-model="filters.status_codes"
@@ -80,6 +93,7 @@
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleFilterChange">筛选</el-button>
+          <el-button @click="resetFilters">重置</el-button>
         </el-form-item>
       </el-form>
 
@@ -95,17 +109,19 @@
           {{ group.label }}
         </el-button>
       </div>
+      </el-collapse-item>
+    </el-collapse>
 
-      <el-alert
-        title="提示"
-        type="info"
-        :closable="false"
-        class="helper-text"
-      >
-        日志按时间倒序展示。可以通过状态码、错误分类、模型和时间范围快速定位问题；推理强度按下游请求原值显示，下游调用/上游请求名称、计费模式与 User-Agent 均支持原始透传字段优先展示。
-      </el-alert>
+    <el-alert
+      title="提示"
+      type="info"
+      :closable="false"
+      class="helper-text"
+    >
+      日志按时间倒序展示。可以通过状态码、错误分类、模型和时间范围快速定位问题；推理强度按下游请求原值显示，下游调用/上游请求名称、计费模式与 User-Agent 均支持原始透传字段优先展示。
+    </el-alert>
 
-      <div class="log-summary-strip">
+    <div class="log-summary-strip">
         <div class="summary-item">
           <span class="summary-label">当前页日志</span>
           <strong>{{ visibleSummary.total }}</strong>
@@ -126,8 +142,18 @@
           <span class="summary-label">流式中断</span>
           <strong>{{ visibleSummary.streaming }}</strong>
         </div>
-      </div>
+    </div>
 
+    <el-alert
+      v-if="loadError"
+      class="load-error-alert"
+      :title="loadError"
+      type="error"
+      :closable="false"
+      show-icon
+    />
+
+    <div class="crc-table-shell logs-table-region">
       <el-table :data="tableRows" v-loading="loading" stripe empty-text="当前筛选条件下暂无日志">
         <el-table-column label="时间" width="180">
           <template #default="{ row }">
@@ -234,18 +260,18 @@
           </template>
         </el-table-column>
       </el-table>
+    </div>
 
-      <el-pagination
-        v-model:current-page="pagination.page"
-        v-model:page-size="pagination.page_size"
-        :total="pagination.total"
-        :page-sizes="[10, 20, 50, 100]"
-        layout="total, sizes, prev, pager, next, jumper"
-        @current-change="loadData"
-        @size-change="loadData"
-        class="pagination"
-      />
-    </el-card>
+    <el-pagination
+      v-model:current-page="pagination.page"
+      v-model:page-size="pagination.page_size"
+      :total="pagination.total"
+      :page-sizes="[10, 20, 50, 100]"
+      layout="total, sizes, prev, pager, next, jumper"
+      @current-change="loadData"
+      @size-change="loadData"
+      class="pagination"
+    />
   </div>
 </template>
 
@@ -276,6 +302,8 @@ import { summarizeErrorText } from '@/utils/errorDisplay'
 
 const loading = ref(false)
 const logs = ref<UsageLog[]>([])
+const loadError = ref('')
+const filterPanels = ref(['filters'])
 
 const statusCodeOptions = [
   { value: 200, label: '成功' },
@@ -416,6 +444,17 @@ const clearErrorCategories = () => {
   handleFilterChange()
 }
 
+const resetFilters = () => {
+  filters.value = {
+    status_codes: [],
+    error_categories: [],
+    model: '',
+    time_range: '7d',
+    custom_range: []
+  }
+  handleFilterChange()
+}
+
 const isCategoryGroupActive = (group: typeof errorCategoryGroups[number]) => {
   const current = new Set(filters.value.error_categories)
   return group.options.length > 0 && group.options.every(option => current.has(option.value))
@@ -424,6 +463,7 @@ const isCategoryGroupActive = (group: typeof errorCategoryGroups[number]) => {
 const loadData = async () => {
   try {
     loading.value = true
+    loadError.value = ''
     const params: {
       page: number
       page_size: number
@@ -468,6 +508,7 @@ const loadData = async () => {
       (error as any)?.response?.data?.message ||
       (error instanceof Error && error.message) ||
       '加载日志失败'
+    loadError.value = errorMsg
     ElMessage.error(errorMsg)
   } finally {
     loading.value = false
@@ -480,18 +521,34 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.logs-container {
-  padding: 20px;
+.logs-page {
+  min-height: 100%;
 }
 
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.logs-filter-disclosure {
+  margin-bottom: 16px;
+  border: 0;
 }
 
-.filter-form {
-  margin-bottom: 20px;
+.filter-disclosure-title {
+  color: var(--crc-text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.logs-filters {
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.logs-filters :deep(.el-form-item) {
+  margin-right: 0;
+  margin-bottom: 0;
+}
+
+.logs-filters :deep(.el-select),
+.logs-filters :deep(.el-input) {
+  width: 210px;
 }
 
 .category-quick-filters {
@@ -512,7 +569,7 @@ onMounted(() => {
 }
 
 .api-icon {
-  color: #409eff;
+  color: var(--crc-accent);
 }
 
 .token-cell {
@@ -535,29 +592,30 @@ onMounted(() => {
 }
 
 .token-line--prompt {
-  color: #409eff;
+  color: var(--crc-info);
 }
 
 .token-line--completion {
-  color: #67c23a;
+  color: var(--crc-success);
 }
 
-.token-line--total {
-  color: #303133;
-}
-
+.token-line--total,
 .token-line--total strong {
-  color: #303133;
+  color: var(--crc-text-strong);
 }
 
 .pagination {
-  margin-top: 20px;
   display: flex;
   justify-content: flex-end;
+  margin-top: 18px;
 }
 
 .helper-text {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
+}
+
+.load-error-alert {
+  margin-bottom: 12px;
 }
 
 .log-summary-strip {
@@ -574,10 +632,10 @@ onMounted(() => {
   gap: 8px;
   min-height: 40px;
   padding: 8px 12px;
-  border: 1px solid #dcdfe6;
-  border-radius: 4px;
-  background: #f8f9fb;
-  color: #303133;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text-strong);
+  background: var(--crc-surface);
 }
 
 .summary-item strong {
@@ -586,13 +644,21 @@ onMounted(() => {
 }
 
 .summary-item--failed strong {
-  color: #f56c6c;
+  color: var(--crc-danger);
 }
 
 .summary-label {
-  color: #606266;
+  color: var(--crc-text-muted);
   font-size: 13px;
   white-space: nowrap;
+}
+
+.logs-table-region {
+  min-height: 360px;
+}
+
+.logs-table-region :deep(.el-table) {
+  min-width: 2240px;
 }
 
 .error-summary {
@@ -610,5 +676,71 @@ onMounted(() => {
   overflow-wrap: anywhere;
   word-break: break-word;
   line-height: 1.5;
+}
+
+@media (min-width: 768px) {
+  .logs-filter-disclosure :deep(.el-collapse-item__header) {
+    display: none;
+  }
+
+  .logs-filter-disclosure :deep(.el-collapse-item__wrap) {
+    display: block !important;
+    height: auto !important;
+    border: 0;
+  }
+
+  .logs-filter-disclosure :deep(.el-collapse-item__content) {
+    padding-bottom: 0;
+  }
+}
+
+@media (max-width: 767px) {
+  .logs-filter-disclosure :deep(.el-collapse-item__header) {
+    height: 44px;
+    padding: 0 12px;
+    border: 1px solid var(--crc-border);
+    border-radius: var(--crc-radius-sm);
+    background: var(--crc-surface);
+  }
+
+  .logs-filter-disclosure :deep(.el-collapse-item__wrap) {
+    border: 0;
+    background: transparent;
+  }
+
+  .logs-filter-disclosure :deep(.el-collapse-item__content) {
+    padding: 12px 0 0;
+  }
+
+  .logs-filters {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .logs-filters :deep(.el-select),
+  .logs-filters :deep(.el-input),
+  .logs-filters :deep(.el-date-editor) {
+    width: 100%;
+  }
+
+  .category-quick-filters {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+  }
+
+  .category-quick-filters .el-button {
+    flex: 0 0 auto;
+  }
+
+  .log-summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pagination {
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
 }
 </style>

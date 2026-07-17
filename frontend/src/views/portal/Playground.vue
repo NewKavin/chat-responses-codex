@@ -1,129 +1,64 @@
 <template>
-  <div class="playground-layout">
-    <div :class="['sidebar', { 'sidebar--collapsed': sidebarCollapsed }]">
-      <div class="sidebar-toggle" @click="sidebarCollapsed = !sidebarCollapsed">
-        <span v-if="sidebarCollapsed">▶</span>
-        <span v-else>◀</span>
-      </div>
-
-      <div v-show="!sidebarCollapsed" class="sidebar-content">
-        <h3 class="sidebar-title">模型操练场</h3>
-
-        <el-alert
-          v-if="statusMessage"
-          :type="statusType"
-          :closable="false"
-          show-icon
-          class="status-alert"
-        >
-          {{ statusMessage }}
-        </el-alert>
-
-        <div class="sidebar-section">
-          <label class="sidebar-label">模型</label>
-          <el-select
-            v-model="selectedModel"
-            placeholder="选择模型"
-            filterable
-            clearable
-            style="width: 100%"
-            :disabled="isBusy || !modelOptions.length"
-            size="default"
+  <div class="playground-workspace">
+    <aside :class="['settings-panel', { 'settings-panel--collapsed': sidebarCollapsed }]">
+      <div class="settings-panel__toggle">
+        <el-tooltip :content="sidebarCollapsed ? '展开模型设置' : '收起模型设置'" placement="right">
+          <el-button
+            :aria-label="sidebarCollapsed ? '展开模型设置' : '收起模型设置'"
+            circle
+            @click="sidebarCollapsed = !sidebarCollapsed"
           >
-            <el-option
-              v-for="model in modelOptions"
-              :key="model"
-              :label="model"
-              :value="model"
-            />
-          </el-select>
-        </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-label-row">
-            <label class="sidebar-label">温度 {{ temperature.toFixed(1) }}</label>
-            <el-switch
-              v-model="temperatureEnabled"
-              inline-prompt
-              active-text="自定义"
-              inactive-text="自动"
-              :disabled="isBusy"
-            />
-          </div>
-          <el-slider
-            v-model="temperature"
-            :min="0"
-            :max="2"
-            :step="0.1"
-            :disabled="isBusy || !temperatureEnabled"
-            :show-tooltip="false"
-          />
-        </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-label-row">
-            <label class="sidebar-label">max_tokens</label>
-            <el-switch
-              v-model="maxTokensEnabled"
-              inline-prompt
-              active-text="自定义"
-              inactive-text="自动"
-              :disabled="isBusy"
-            />
-          </div>
-          <el-input-number
-            v-model="maxTokens"
-            :min="1"
-            :max="999999"
-            :step="1024"
-            :disabled="isBusy || !maxTokensEnabled"
-            controls-position="right"
-            style="width: 100%"
-            size="default"
-          />
-        </div>
-
-        <div class="sidebar-section">
-          <div class="sidebar-label-row">
-            <label class="sidebar-label">推理强度</label>
-            <el-switch
-              v-model="inferenceStrengthEnabled"
-              inline-prompt
-              active-text="自定义"
-              inactive-text="自动"
-              :disabled="isBusy"
-            />
-          </div>
-          <el-select
-            v-model="inferenceStrength"
-            style="width: 100%"
-            :disabled="isBusy || !inferenceStrengthEnabled"
-          >
-            <el-option
-              v-for="level in inferenceStrengthOptions"
-              :key="level"
-              :label="level"
-              :value="level"
-            />
-          </el-select>
-        </div>
-
-
-
-        <div class="sidebar-section sidebar-actions">
-          <el-button size="small" :disabled="isBusy" @click="clearConversation">
-            <el-icon :size="14" style="margin-right: 4px"><Delete /></el-icon>
-            清空对话
+            <el-icon><Expand v-if="sidebarCollapsed" /><Fold v-else /></el-icon>
           </el-button>
-        </div>
+        </el-tooltip>
       </div>
-    </div>
+
+      <div v-show="!sidebarCollapsed" class="settings-panel__body">
+        <PlaygroundSettings
+          :model-options="modelOptions"
+          :selected-model="selectedModel"
+          :busy="isBusy"
+          :status-message="statusMessage"
+          :status-type="statusType"
+          :temperature="temperature"
+          :temperature-enabled="temperatureEnabled"
+          :max-tokens="maxTokens"
+          :max-tokens-enabled="maxTokensEnabled"
+          :inference-strength="inferenceStrength"
+          :inference-strength-options="inferenceStrengthOptions"
+          :inference-strength-enabled="inferenceStrengthEnabled"
+          @clear="clearConversation"
+          @update:selected-model="selectedModel = $event"
+          @update:temperature="temperature = $event"
+          @update:temperature-enabled="temperatureEnabled = $event"
+          @update:max-tokens="maxTokens = $event"
+          @update:max-tokens-enabled="maxTokensEnabled = $event"
+          @update:inference-strength="inferenceStrength = $event as (typeof inferenceStrengthOptions)[number]"
+          @update:inference-strength-enabled="inferenceStrengthEnabled = $event"
+        />
+      </div>
+    </aside>
 
     <div class="chat-area">
-      <div class="chat-messages" ref="messagesContainerRef">
+      <div class="chat-toolbar">
+        <div>
+          <h1 class="chat-toolbar__title">模型操练场</h1>
+          <p class="chat-toolbar__subtitle">选择模型、上传附件并观察流式响应。</p>
+        </div>
+        <el-button
+          class="chat-toolbar__settings-trigger"
+          aria-label="打开模型设置"
+          circle
+          @click="settingsDrawerOpen = true"
+        >
+          <el-icon><Setting /></el-icon>
+        </el-button>
+      </div>
+
+      <div class="playground-message-stream" ref="messagesContainerRef">
         <div v-if="!messages.length" class="chat-empty">
           <div class="chat-empty-icon">
-            <el-icon :size="48" color="#c0c4cc"><ChatDotRound /></el-icon>
+            <el-icon :size="42"><ChatDotRound /></el-icon>
           </div>
           <p>选择模型后开始对话</p>
         </div>
@@ -143,12 +78,12 @@
             <el-icon v-else :size="20"><MagicStick /></el-icon>
           </div>
           <div class="chat-message-body">
-            <details v-if="message.reasoning" class="chat-reasoning" open>
-              <summary class="chat-reasoning-summary">
+            <details v-if="message.reasoning" class="message-reasoning" open>
+              <summary class="message-reasoning__summary">
                 <el-icon :size="14"><MagicStick /></el-icon>
                 <span>思考过程</span>
               </summary>
-              <div class="chat-reasoning-content markdown-body" v-html="renderMarkdown(message.reasoning)"></div>
+              <div class="message-reasoning__content markdown-body" v-html="renderMarkdown(message.reasoning)"></div>
             </details>
             <div v-if="message.role === 'assistant' && !message.isError" class="chat-message-content markdown-body" v-html="renderMarkdown(message.content)"></div>
             <pre v-else class="chat-message-content chat-message-content--plain">{{ message.content }}</pre>
@@ -169,12 +104,12 @@
             <div v-if="streamStatusText" class="chat-stream-status">
               {{ streamStatusText }}
             </div>
-            <details v-if="streamingReasoning" class="chat-reasoning" open>
-              <summary class="chat-reasoning-summary">
+            <details v-if="streamingReasoning" class="message-reasoning" open>
+              <summary class="message-reasoning__summary">
                 <el-icon :size="14"><MagicStick /></el-icon>
                 <span>思考中…</span>
               </summary>
-              <div class="chat-reasoning-content markdown-body" v-html="renderMarkdown(streamingReasoning)"></div>
+              <div class="message-reasoning__content markdown-body" v-html="renderMarkdown(streamingReasoning)"></div>
             </details>
             <div v-if="streamingContent" class="chat-message-content markdown-body" v-html="renderMarkdown(streamingContent)"></div>
             <span class="typing-cursor"></span>
@@ -182,9 +117,16 @@
         </div>
       </div>
 
-      <div class="chat-input-area">
-        <div class="chat-input-wrapper">
-          <div class="chat-input-inner">
+      <section class="playground-composer">
+        <div class="composer-shell">
+          <div v-if="uploadedFiles.length" class="upload-inline-list">
+            <span v-for="file in uploadedFiles" :key="file.uid" class="upload-inline-tag">
+              {{ file.name }}
+              <el-icon :size="12" class="upload-inline-remove" @click="removeUploadedFile(file.uid)"><Close /></el-icon>
+            </span>
+          </div>
+
+          <div class="composer-input-row">
             <el-input
               v-model="question"
               type="textarea"
@@ -194,23 +136,30 @@
               :disabled="isBusy"
               @keydown="handleInputKeydown"
             />
-            <el-button
-              type="primary"
-              circle
-              :loading="isSending"
-              :disabled="sendDisabled"
-              @click="sendQuestion"
-              class="send-button"
-            >
-              <el-icon v-if="!isSending" :size="18"><Promotion /></el-icon>
-            </el-button>
-          </div>
-          <div class="chat-input-footer">
-            <div class="chat-upload-area">
-              <el-button size="small" text :disabled="isBusy" @click="openFileDialog">
-                <el-icon :size="16" style="margin-right: 4px"><Link /></el-icon>
-                添加附件
-              </el-button>
+            <div class="composer-actions">
+              <el-tooltip content="添加附件" placement="top">
+                <el-button
+                  aria-label="添加附件"
+                  circle
+                  :disabled="isBusy"
+                  @click="openFileDialog"
+                >
+                  <el-icon :size="16"><Link /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="发送消息" placement="top">
+                <el-button
+                  aria-label="发送消息"
+                  type="primary"
+                  circle
+                  :loading="isSending"
+                  :disabled="sendDisabled"
+                  @click="sendQuestion"
+                  class="send-button"
+                >
+                  <el-icon v-if="!isSending" :size="18"><Promotion /></el-icon>
+                </el-button>
+              </el-tooltip>
               <input
                 ref="fileInputRef"
                 type="file"
@@ -218,25 +167,60 @@
                 class="hidden-file-input"
                 @change="onFileInputChange"
               />
-              <div class="upload-inline-list" v-if="uploadedFiles.length">
-                <span v-for="file in uploadedFiles" :key="file.uid" class="upload-inline-tag">
-                  {{ file.name }}
-                  <el-icon :size="12" class="upload-inline-remove" @click="removeUploadedFile(file.uid)"><Close /></el-icon>
-                </span>
-              </div>
             </div>
           </div>
         </div>
-      </div>
+      </section>
     </div>
+
+    <el-drawer
+      v-model="settingsDrawerOpen"
+      title="模型设置"
+      size="min(360px, 100vw)"
+      class="playground-settings-drawer"
+    >
+      <PlaygroundSettings
+        :model-options="modelOptions"
+        :selected-model="selectedModel"
+        :busy="isBusy"
+        :status-message="statusMessage"
+        :status-type="statusType"
+        :temperature="temperature"
+        :temperature-enabled="temperatureEnabled"
+        :max-tokens="maxTokens"
+        :max-tokens-enabled="maxTokensEnabled"
+        :inference-strength="inferenceStrength"
+        :inference-strength-options="inferenceStrengthOptions"
+        :inference-strength-enabled="inferenceStrengthEnabled"
+        @clear="clearConversation(); settingsDrawerOpen = false"
+        @update:selected-model="selectedModel = $event; settingsDrawerOpen = false"
+        @update:temperature="temperature = $event"
+        @update:temperature-enabled="temperatureEnabled = $event"
+        @update:max-tokens="maxTokens = $event"
+        @update:max-tokens-enabled="maxTokensEnabled = $event"
+        @update:inference-strength="inferenceStrength = $event as (typeof inferenceStrengthOptions)[number]"
+        @update:inference-strength-enabled="inferenceStrengthEnabled = $event"
+      />
+    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ChatDotRound, Close, Delete, Link, MagicStick, Promotion, User } from '@element-plus/icons-vue'
+import {
+  ChatDotRound,
+  Close,
+  Expand,
+  Fold,
+  Link,
+  MagicStick,
+  Promotion,
+  Setting,
+  User
+} from '@element-plus/icons-vue'
 import { Marked } from 'marked'
 import { portalApi } from '@/api/portal'
+import PlaygroundSettings from '@/components/PlaygroundSettings.vue'
 import { buildGatewayModelsEndpoint } from '@/utils/integration'
 import { createHighlightedCodeRenderer } from '@/utils/highlight'
 import { extractReadableErrorMessage } from '@/utils/errorDisplay'
@@ -300,6 +284,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const uploadedFiles = ref<UploadedFile[]>([])
 const messagesContainerRef = ref<HTMLElement | null>(null)
 const sidebarCollapsed = ref(false)
+const settingsDrawerOpen = ref(false)
 const streamingContent = ref('')
 const streamingReasoning = ref('')
 const firstOutputSeconds = ref<number | undefined>(undefined)
@@ -784,92 +769,87 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.playground-layout {
+.playground-workspace {
   display: flex;
-  height: 100%;
-  background: #f5f7fa;
+  width: 100%;
+  height: calc(100dvh - var(--crc-topbar-height) - 48px);
+  min-height: 560px;
   overflow: hidden;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
-.sidebar {
+.settings-panel {
+  position: relative;
+  display: flex;
+  flex: 0 0 280px;
   width: 280px;
   min-width: 280px;
-  background: #fff;
-  border-right: 1px solid #e4e7ed;
-  display: flex;
   flex-direction: column;
-  transition: width 0.2s, min-width 0.2s;
-  position: relative;
+  border-right: 1px solid var(--crc-border);
+  background: var(--crc-surface-muted);
+  transition: width 160ms ease, min-width 160ms ease, flex-basis 160ms ease;
 }
 
-.sidebar--collapsed {
-  width: 40px;
-  min-width: 40px;
+.settings-panel--collapsed {
+  flex-basis: 48px;
+  width: 48px;
+  min-width: 48px;
 }
 
-.sidebar-toggle {
-  position: absolute;
-  top: 12px;
-  right: -14px;
-  width: 28px;
-  height: 28px;
-  background: #fff;
-  border: 1px solid #dcdfe6;
-  border-radius: 50%;
+.settings-panel__toggle {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  z-index: 10;
-  transition: background 0.15s;
+  justify-content: flex-end;
+  padding: 10px;
 }
 
-.sidebar-toggle:hover {
-  background: #ecf5ff;
+.settings-panel__toggle .el-button {
+  width: 36px;
+  height: 36px;
 }
 
-.sidebar-content {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.settings-panel__body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 16px 16px;
   overflow-y: auto;
-  height: 100%;
 }
 
-.sidebar-title {
-  margin: 0 0 4px 0;
-  font-size: 16px;
-  color: #1f2d3d;
-}
-
-.status-alert {
-  margin-bottom: 0;
-}
-
-.sidebar-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sidebar-label {
-  font-size: 12px;
-  color: #909399;
-  font-weight: 500;
-}
-
-.sidebar-label-row {
+.chat-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 16px;
+  min-height: 64px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--crc-border);
+  background: var(--crc-surface);
 }
 
-.sidebar-actions {
-  margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid #f0f0f0;
+.chat-toolbar__title {
+  margin: 0;
+  color: var(--crc-text-strong);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.chat-toolbar__subtitle {
+  margin: 3px 0 0;
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
+.chat-toolbar__settings-trigger {
+  display: none;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+}
+
+:global(.playground-settings-drawer .el-drawer__body) {
+  padding: 16px;
+  background: var(--crc-surface-muted);
 }
 
 .hidden-file-input {
@@ -888,14 +868,15 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.chat-messages {
+.playground-message-stream {
   flex: 1;
-  overflow-y: auto;
-  padding: 20px 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   min-height: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+  background: var(--crc-canvas);
 }
 
 .chat-empty {
@@ -904,8 +885,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #c0c4cc;
+  color: var(--crc-text-muted);
   gap: 12px;
+}
+
+.chat-empty-icon {
+  color: var(--crc-text-subtle);
 }
 
 .chat-empty p {
@@ -916,7 +901,8 @@ onBeforeUnmount(() => {
 .chat-message {
   display: flex;
   gap: 12px;
-  max-width: 85%;
+  max-width: min(85%, 920px);
+  min-width: 0;
 }
 
 .chat-message--user {
@@ -940,71 +926,77 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #e8eaed;
-  color: #606266;
+  color: var(--crc-text-muted);
+  background: var(--crc-surface-muted);
   margin-top: 2px;
 }
 
 .chat-message--user .chat-message-avatar {
-  background: #409eff;
-  color: #fff;
+  color: var(--crc-accent);
+  background: var(--crc-accent-soft);
 }
 
 .chat-message--assistant .chat-message-avatar {
-  background: #67c23a;
-  color: #fff;
+  color: var(--crc-success);
+  background: var(--crc-success-soft);
 }
 
 .chat-message-body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
 .chat-stream-status {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  color: #606266;
+  color: var(--crc-text-muted);
   font-size: 12px;
   line-height: 1.5;
-  background: #f4f6f8;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
   padding: 4px 8px;
   width: fit-content;
   max-width: 100%;
 }
 
 
-.chat-reasoning {
+.message-reasoning {
   margin: 0 0 10px;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
-  background: #f8f9fb;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
   overflow: hidden;
 }
-.chat-reasoning-summary {
+
+.message-reasoning__summary {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 8px 12px;
   cursor: pointer;
+  color: var(--crc-text);
   font-size: 13px;
-  color: #606266;
   user-select: none;
 }
-.chat-reasoning-content {
+
+.message-reasoning__content {
   padding: 4px 12px 12px;
+  border-top: 1px dashed var(--crc-border);
+  color: var(--crc-text-muted);
   font-size: 13px;
-  color: #909399;
   line-height: 1.7;
-  border-top: 1px dashed #e4e7ed;
 }
+
 .chat-message-content {
+  min-width: 0;
   margin: 0;
+  color: var(--crc-text);
+  overflow-wrap: anywhere;
   line-height: 1.7;
-  color: #303133;
   font-size: 14px;
 }
 
@@ -1014,33 +1006,34 @@ onBeforeUnmount(() => {
 }
 
 .chat-message--user .chat-message-content {
-  background: #409eff;
-  color: #fff;
   padding: 10px 14px;
-  border-radius: 12px 12px 2px 12px;
+  border: 1px solid var(--crc-accent);
+  border-radius: var(--crc-radius) var(--crc-radius) 2px var(--crc-radius);
+  color: var(--crc-text-strong);
+  background: var(--crc-accent-soft);
   white-space: pre-wrap;
 }
 
 .chat-message--assistant .chat-message-content {
-  background: #fff;
   padding: 10px 14px;
-  border-radius: 12px 12px 12px 2px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius) var(--crc-radius) var(--crc-radius) 2px;
+  background: var(--crc-surface);
 }
 
 .chat-message--error .chat-message-content {
-  background: #fef0f0;
-  color: #f56c6c;
   padding: 10px 14px;
-  border-radius: 12px 12px 12px 2px;
-  border: 1px solid #fde2e2;
+  border: 1px solid var(--crc-danger);
+  border-radius: var(--crc-radius) var(--crc-radius) var(--crc-radius) 2px;
+  color: var(--crc-danger);
+  background: var(--crc-danger-soft);
   white-space: pre-wrap;
 }
 
 .chat-message--empty-response .chat-message-content {
-  border-color: #f3d19e;
-  background: #fdf6ec;
-  color: #b88230;
+  border-color: var(--crc-warning);
+  color: var(--crc-warning);
+  background: var(--crc-warning-soft);
 }
 
 .chat-message-file {
@@ -1050,15 +1043,15 @@ onBeforeUnmount(() => {
 }
 
 .file-tag {
-  font-size: 11px;
-  background: #ecf5ff;
-  color: #409eff;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-info);
+  background: var(--crc-info-soft);
+  font-size: 11px;
 }
 
 .chat-message-meta {
-  color: #909399;
+  color: var(--crc-text-muted);
   font-size: 11px;
 }
 
@@ -1066,7 +1059,7 @@ onBeforeUnmount(() => {
   display: inline-block;
   width: 6px;
   height: 16px;
-  background: #409eff;
+  background: var(--crc-accent);
   margin-left: 2px;
   animation: blink 0.8s infinite;
   vertical-align: text-bottom;
@@ -1077,37 +1070,40 @@ onBeforeUnmount(() => {
   51%, 100% { opacity: 0; }
 }
 
-.chat-input-area {
+.playground-composer {
   padding: 12px 24px 16px;
-  background: #fff;
-  border-top: 1px solid #e4e7ed;
+  border-top: 1px solid var(--crc-border);
+  background: var(--crc-surface);
   z-index: 5;
 }
 
-.chat-input-wrapper {
+.composer-shell {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  width: 100%;
   max-width: 800px;
   margin: 0 auto;
 }
 
-.chat-input-inner {
+.composer-input-row {
   display: flex;
   align-items: flex-end;
   gap: 8px;
+  min-width: 0;
 }
 
-.chat-input-inner :deep(.el-textarea__inner) {
-  border-radius: 12px;
+.composer-input-row :deep(.el-textarea__inner) {
+  border-radius: var(--crc-radius);
   padding: 10px 14px;
   resize: none;
   font-size: 14px;
   line-height: 1.5;
 }
 
-.chat-input-inner :deep(.el-textarea) {
+.composer-input-row :deep(.el-textarea) {
   flex: 1;
+  min-width: 0;
 }
 
 .send-button {
@@ -1118,17 +1114,17 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 
-.chat-input-footer {
+.composer-actions {
   display: flex;
   align-items: center;
-  padding: 0 4px;
+  gap: 8px;
+  flex: 0 0 80px;
+  justify-content: flex-end;
 }
 
-.chat-upload-area {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+.composer-actions .el-button {
+  width: 36px;
+  height: 36px;
 }
 
 .upload-inline-list {
@@ -1142,9 +1138,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  background: #ecf5ff;
-  color: #409eff;
-  border-radius: 4px;
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-info);
+  background: var(--crc-info-soft);
   font-size: 12px;
   max-width: 200px;
   overflow: hidden;
@@ -1154,20 +1150,27 @@ onBeforeUnmount(() => {
 
 .upload-inline-remove {
   cursor: pointer;
-  color: #909399;
+  color: var(--crc-text-muted);
   flex-shrink: 0;
 }
 
 .upload-inline-remove:hover {
-  color: #f56c6c;
+  color: var(--crc-danger);
+}
+
+.markdown-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .markdown-body :deep(pre) {
-  background: #1e1e2e;
-  border-radius: 8px;
+  max-width: 100%;
+  margin: 8px 0;
   padding: 12px;
   overflow-x: auto;
-  margin: 8px 0;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
 }
 
 .markdown-body :deep(code) {
@@ -1178,14 +1181,15 @@ onBeforeUnmount(() => {
 .markdown-body :deep(pre code) {
   background: none;
   padding: 0;
-  color: #cdd6f4;
+  color: var(--crc-text);
 }
 
 .markdown-body :deep(:not(pre) > code) {
-  background: #f0f2f5;
   padding: 2px 6px;
-  border-radius: 4px;
-  color: #c7254e;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-accent);
+  background: var(--crc-surface-muted);
   font-size: 0.9em;
 }
 
@@ -1206,11 +1210,14 @@ onBeforeUnmount(() => {
 .markdown-body :deep(blockquote) {
   margin: 8px 0;
   padding: 4px 12px;
-  border-left: 3px solid #dcdfe6;
-  color: #606266;
+  border-left: 3px solid var(--crc-border-strong);
+  color: var(--crc-text-muted);
 }
 
 .markdown-body :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   margin: 8px 0;
   width: 100%;
@@ -1218,36 +1225,63 @@ onBeforeUnmount(() => {
 
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--crc-border);
   padding: 6px 10px;
   text-align: left;
 }
 
 .markdown-body :deep(th) {
-  background: #f5f7fa;
+  background: var(--crc-surface-muted);
 }
 
-@media (max-width: 768px) {
-  .sidebar {
-    width: 40px;
-    min-width: 40px;
+@media (max-width: 767px) {
+  .playground-workspace {
+    height: calc(100dvh - var(--crc-topbar-height) - 32px);
+    min-height: 520px;
   }
 
-  .sidebar--collapsed {
-    width: 0;
-    min-width: 0;
+  .settings-panel {
+    display: none;
   }
 
-  .chat-messages {
+  .chat-toolbar {
+    min-height: 58px;
+    padding: 8px 12px;
+  }
+
+  .chat-toolbar__subtitle {
+    display: none;
+  }
+
+  .chat-toolbar__settings-trigger {
+    display: inline-flex;
+  }
+
+  .playground-message-stream {
     padding: 12px;
   }
 
-  .chat-input-area {
+  .playground-composer {
     padding: 8px 12px 12px;
   }
 
   .chat-message {
     max-width: 95%;
+  }
+
+  .chat-message-avatar {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+  }
+
+  .composer-input-row {
+    gap: 6px;
+  }
+
+  .composer-actions {
+    flex-basis: 76px;
+    gap: 4px;
   }
 }
 </style>

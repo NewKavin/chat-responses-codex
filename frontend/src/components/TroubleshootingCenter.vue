@@ -2,16 +2,18 @@
   <div class="troubleshooting-center">
     <div class="page-head">
       <div>
-        <h2>排障中心</h2>
-        <p>验证客户端、模型、协议、工具调用和流式响应。</p>
+        <h2>诊断与运行证据</h2>
+        <p>配置诊断项目，检查解析结果，并持续观察活跃长任务。</p>
       </div>
       <el-button :loading="loadingActive" @click="loadActiveRequests">刷新活跃请求</el-button>
     </div>
 
     <el-row :gutter="16">
       <el-col :xs="24" :lg="8">
-        <el-card shadow="never" class="panel">
-          <template #header>诊断配置</template>
+        <section class="evidence-section diagnostic-config-section">
+          <header class="evidence-section__header">
+            <h3>诊断配置</h3>
+          </header>
           <el-form label-position="top">
             <el-form-item v-if="admin" label="下游">
               <el-select v-model="form.downstream_id" class="full-width" filterable>
@@ -52,17 +54,20 @@
 
             <el-button type="primary" :loading="running" @click="runDiagnostics">开始诊断</el-button>
           </el-form>
-        </el-card>
+        </section>
 
-        <el-card v-if="admin && exportCapabilities && importCapabilities" shadow="never" class="panel capability-panel">
-          <template #header>Capability 策略</template>
+        <section v-if="admin && exportCapabilities && importCapabilities" class="evidence-section capability-panel">
+          <header class="evidence-section__header">
+            <h3>Capability 策略</h3>
+          </header>
           <div class="capability-actions">
             <el-button size="small" @click="handleExportCapabilities">导出 JSON</el-button>
             <el-button size="small" @click="openImportDialog">导入 JSON</el-button>
             <el-button size="small" :loading="loadingProfiles" @click="refreshDialectProfiles">刷新 Profiles</el-button>
           </div>
 
-          <el-table :data="dialectProfiles" size="small" empty-text="暂无 profile">
+          <div class="crc-table-shell evidence-table-shell">
+            <el-table :data="dialectProfiles" size="small" empty-text="暂无 profile">
             <el-table-column prop="upstream_id" label="Upstream" min-width="110" />
             <el-table-column prop="runtime_model_slug" label="Runtime Model" min-width="140" show-overflow-tooltip />
             <el-table-column prop="protocol" label="Protocol" width="120" />
@@ -100,7 +105,8 @@
                 </el-button>
               </template>
             </el-table-column>
-          </el-table>
+            </el-table>
+          </div>
 
           <el-alert
             v-if="resolvedError"
@@ -117,31 +123,37 @@
               <span>Token: {{ selectedResolved.token.field }} ({{ selectedResolved.token.source }})</span>
               <span>Reasoning: {{ selectedResolved.reasoning.carrier }}</span>
             </div>
-            <el-table :data="selectedResolvedCapabilityRows" size="small">
-              <el-table-column prop="capability" label="Capability" min-width="170" />
-              <el-table-column prop="state" label="State" width="120" />
-              <el-table-column prop="source" label="Source" width="120" />
-            </el-table>
-            <el-table :data="selectedResolved.conflicts" size="small" empty-text="No conflicts">
-              <el-table-column prop="subject" label="Conflict" min-width="180" />
-              <el-table-column label="Probe" min-width="160">
-                <template #default="{ row }">
-                  {{ row.probe.code }} ({{ row.probe.state }})
-                </template>
-              </el-table-column>
-              <el-table-column label="Policy" min-width="160">
-                <template #default="{ row }">
-                  {{ row.policy.code }} ({{ row.policy.state }})
-                </template>
-              </el-table-column>
-            </el-table>
+            <div class="crc-table-shell evidence-table-shell">
+              <el-table :data="selectedResolvedCapabilityRows" size="small">
+                <el-table-column prop="capability" label="Capability" min-width="170" />
+                <el-table-column prop="state" label="State" width="120" />
+                <el-table-column prop="source" label="Source" width="120" />
+              </el-table>
+            </div>
+            <div class="crc-table-shell evidence-table-shell">
+              <el-table :data="selectedResolved.conflicts" size="small" empty-text="No conflicts">
+                <el-table-column prop="subject" label="Conflict" min-width="180" />
+                <el-table-column label="Probe" min-width="160">
+                  <template #default="{ row }">
+                    {{ row.probe.code }} ({{ row.probe.state }})
+                  </template>
+                </el-table-column>
+                <el-table-column label="Policy" min-width="160">
+                  <template #default="{ row }">
+                    {{ row.policy.code }} ({{ row.policy.state }})
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
           </div>
-        </el-card>
+        </section>
       </el-col>
 
       <el-col :xs="24" :lg="16">
-        <el-card shadow="never" class="panel">
-          <template #header>诊断结果</template>
+        <section class="evidence-section diagnostic-results-section">
+          <header class="evidence-section__header">
+            <h3>诊断结果</h3>
+          </header>
           <el-empty v-if="!lastRun" description="还没有运行诊断" />
           <div v-else>
             <div class="result-toolbar">
@@ -180,31 +192,39 @@
               </el-timeline-item>
             </el-timeline>
           </div>
-        </el-card>
+        </section>
 
-        <el-card shadow="never" class="panel active-panel">
-          <template #header>活跃长任务</template>
-          <el-table :data="activeRequests" size="small">
-            <el-table-column prop="model" label="模型" min-width="140" />
-            <el-table-column prop="endpoint" label="接口" min-width="160" />
-            <el-table-column prop="upstream_name" label="上游" min-width="120" />
-            <el-table-column prop="user_agent" label="客户端" min-width="160" show-overflow-tooltip />
-            <el-table-column label="状态" width="100">
-              <template #default="{ row }">
-                <el-tag :type="getActiveRequestHealth(row).type" size="small">
-                  {{ getActiveRequestHealth(row).label }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="elapsed_seconds" label="运行秒数" width="100" />
-            <el-table-column prop="idle_seconds" label="无增量秒数" width="110" />
-          </el-table>
-        </el-card>
+        <section class="evidence-section active-panel">
+          <header class="evidence-section__header">
+            <h3>活跃长任务</h3>
+          </header>
+          <div class="crc-table-shell evidence-table-shell">
+            <el-table :data="activeRequests" size="small">
+              <el-table-column prop="model" label="模型" min-width="140" />
+              <el-table-column prop="endpoint" label="接口" min-width="160" />
+              <el-table-column prop="upstream_name" label="上游" min-width="120" />
+              <el-table-column prop="user_agent" label="客户端" min-width="160" show-overflow-tooltip />
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag :type="getActiveRequestHealth(row).type" size="small">
+                    {{ getActiveRequestHealth(row).label }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="elapsed_seconds" label="运行秒数" width="100" />
+              <el-table-column prop="idle_seconds" label="无增量秒数" width="110" />
+            </el-table>
+          </div>
+        </section>
       </el-col>
     </el-row>
   </div>
 
-  <el-dialog v-model="importDialogVisible" title="导入 Capability JSON" width="720px">
+  <el-dialog
+    v-model="importDialogVisible"
+    title="导入 Capability JSON"
+    width="min(720px, calc(100vw - 32px))"
+  >
     <el-input v-model="capabilityJson" type="textarea" :rows="18" spellcheck="false" />
     <el-alert
       v-if="importError"
@@ -484,7 +504,6 @@ onMounted(() => {
 <style scoped>
 .troubleshooting-center {
   min-height: 100%;
-  padding: 20px;
 }
 
 .page-head {
@@ -497,27 +516,36 @@ onMounted(() => {
 
 .page-head h2 {
   margin: 0 0 6px;
-  font-size: 22px;
+  color: var(--crc-text-strong);
+  font-size: 18px;
 }
 
 .page-head p,
 .hint {
   margin: 0;
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 13px;
   line-height: 1.6;
 }
 
-.panel {
-  border-radius: 8px;
+.evidence-section {
+  padding: 18px 0;
+  border-top: 1px solid var(--crc-border);
 }
 
-.active-panel {
-  margin-top: 16px;
+.evidence-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
-.capability-panel {
-  margin-top: 16px;
+.evidence-section__header h3 {
+  margin: 0;
+  color: var(--crc-text-strong);
+  font-size: 15px;
+  line-height: 1.4;
 }
 
 .full-width {
@@ -553,9 +581,17 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  color: #475569;
+  color: var(--crc-text-muted);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.evidence-table-shell + .evidence-table-shell {
+  margin-top: 10px;
+}
+
+.evidence-table-shell :deep(.el-table) {
+  min-width: 680px;
 }
 
 .result-toolbar,
@@ -568,7 +604,7 @@ onMounted(() => {
 
 .result-toolbar {
   margin-bottom: 16px;
-  color: #475569;
+  color: var(--crc-text-muted);
   font-size: 13px;
 }
 
@@ -577,14 +613,36 @@ onMounted(() => {
 }
 
 .category {
-  color: #b45309;
+  color: var(--crc-warning);
   font-size: 13px;
 }
 
 .details {
-  color: #334155;
+  color: var(--crc-text);
   font-size: 13px;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  .page-head,
+  .result-toolbar,
+  .result-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .check-group {
+    width: 100%;
+  }
+
+  .capability-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .capability-actions .el-button {
+    margin-left: 0;
+  }
 }
 </style>

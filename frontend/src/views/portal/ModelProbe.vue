@@ -1,5 +1,5 @@
 <template>
-  <div class="model-probe-page">
+  <div class="crc-page portal-model-probe-page">
     <ModelProbeBoard
       tone="portal"
       scope-label="门户视图"
@@ -87,7 +87,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.model-probe-page {
+.portal-model-probe-page {
   min-height: 100%;
 }
 </style>

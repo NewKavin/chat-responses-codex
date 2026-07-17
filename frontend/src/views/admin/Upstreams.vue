@@ -1,13 +1,14 @@
 <template>
-  <div class="upstreams-container">
-    <el-card>
-      <template #header>
-        <div class="header">
-          <h2>上游管理</h2>
-          <el-button type="primary" @click="handleCreate">创建上游</el-button>
-        </div>
-      </template>
-      
+  <div class="crc-page upstreams-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">上游管理</h1>
+        <p class="crc-page-description">配置模型供应方、协议、密钥、上下文限制和智能路由策略。</p>
+      </div>
+      <el-button type="primary" @click="handleCreate">创建上游</el-button>
+    </header>
+
+    <div class="crc-table-shell">
       <el-table :data="upstreams" v-loading="loading" stripe style="width: 100%">
         <el-table-column prop="id" label="ID" width="150" />
         <el-table-column prop="name" label="名称" min-width="200" />
@@ -74,18 +75,18 @@
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </div>
     
     <!-- Create/Edit Drawer -->
     <el-drawer
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建上游' : '编辑上游'"
       direction="rtl"
-      size="70%"
+      size="min(760px, 100vw)"
       :destroy-on-close="false"
       class="form-drawer"
     >
-      <el-form :model="form" :rules="rules" ref="formRef" label-width="140px" class="drawer-form">
+      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="drawer-form">
         <el-form-item v-if="dialogMode === 'edit'" label="ID">
           <el-input v-model="form.id" disabled />
         </el-form-item>
@@ -116,7 +117,7 @@
         </el-form-item>
 
         <!-- 模型配置 -->
-        <el-divider>模型配置</el-divider>
+        <el-divider class="drawer-section">模型配置</el-divider>
         <el-form-item label="支持的模型">
           <div class="model-input-group">
             <el-select v-model="form.supported_models" multiple filterable allow-create placeholder="手动输入或点击获取模型">
@@ -155,7 +156,7 @@
           <el-button @click="addModelCost" size="small">添加模型成本</el-button>
         </el-form-item>
 
-        <el-divider>模型上下文</el-divider>
+        <el-divider class="drawer-section">模型上下文</el-divider>
         <el-tabs v-model="contextConfigTab">
           <el-tab-pane label="默认上下文" name="default">
             <el-form-item label="上下文上限">
@@ -217,7 +218,7 @@
         </el-tabs>
 
         <!-- 路由权重配置 -->
-        <el-divider>智能路由配置</el-divider>
+        <el-divider class="drawer-section">智能路由配置</el-divider>
         <el-form-item label="优先级权重">
           <el-input-number v-model="form.priority" :min="0" :max="1000" placeholder="数字越大优先级越高" />
           <el-alert
@@ -775,18 +776,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.upstreams-container {
-  padding: 20px;
-}
-
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.header h2 {
-  margin: 0;
+.upstreams-page {
+  min-height: 100%;
 }
 
 .protocol-cell {
@@ -816,37 +807,55 @@ onUnmounted(() => {
 }
 
 .form-hint {
-  margin-left: 10px;
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  color: var(--crc-text-muted);
   font-size: 12px;
-  color: #909399;
 }
 
-/* Drawer-based create/edit form */
-.form-drawer :deep(.el-drawer__header) {
+:global(.form-drawer .el-drawer__header) {
   margin-bottom: 0;
   padding: 16px 24px;
-  border-bottom: 1px solid var(--el-border-color-light);
+  border-bottom: 1px solid var(--crc-border);
 }
-.form-drawer :deep(.el-drawer__body) {
+
+:global(.form-drawer .el-drawer__body) {
   padding: 24px 32px;
   overflow-y: auto;
 }
-.form-drawer :deep(.el-drawer__footer) {
-  border-top: 1px solid var(--el-border-color-light);
+
+:global(.form-drawer .el-drawer__footer) {
+  border-top: 1px solid var(--crc-border);
   padding: 12px 24px;
+  background: var(--crc-surface);
 }
+
 .drawer-form {
   width: 100%;
-  padding: 0 40px;
 }
+
+.drawer-section {
+  margin: 28px 0 20px;
+}
+
 .drawer-footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
 }
-@media (max-width: 1024px) {
-  .form-drawer :deep(.el-drawer.rtl) {
-    width: 100% !important;
+
+@media (max-width: 767px) {
+  :global(.form-drawer .el-drawer__body) {
+    padding: 18px 16px;
+  }
+
+  .model-input-group {
+    flex-direction: column;
+  }
+
+  .fetch-btn {
+    width: 100%;
   }
 }
 </style>
