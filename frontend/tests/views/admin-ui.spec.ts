@@ -13,4 +13,14 @@ describe('admin ui structure', () => {
     expect(dashboard).toContain('crc-page dashboard-page')
     expect(dashboard).not.toContain('hero-panel')
   })
+
+  it('keeps model qualification and probe evidence in compact sections', () => {
+    const adminProbe = source('views/admin/ModelProbe.vue')
+    const board = source('components/ModelProbeBoard.vue')
+
+    expect(adminProbe).toContain('crc-page model-probe-page')
+    expect(adminProbe).toContain('crc-table-shell')
+    expect(board).toContain('probe-page-header')
+    expect(board).not.toContain('summary-card')
+  })
 })

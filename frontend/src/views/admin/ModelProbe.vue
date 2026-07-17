@@ -1,7 +1,10 @@
 <template>
-  <div class="model-probe-page">
-    <div class="qualification-command-bar">
-      <span class="qualification-command-title">模型资格验证</span>
+  <div class="crc-page model-probe-page">
+    <div class="crc-toolbar qualification-command-bar">
+      <div>
+        <span class="qualification-command-title">模型资格验证</span>
+        <p>向活动上游发起真实请求，并按验证结果更新 test 下游模型列表。</p>
+      </div>
       <el-button
         type="primary"
         :loading="qualifying"
@@ -54,24 +57,26 @@
         </div>
       </div>
 
-      <el-table :data="qualificationRows" size="small" empty-text="无资格证据">
-        <el-table-column prop="upstreamId" label="上游" min-width="150" />
-        <el-table-column prop="model" label="模型" min-width="190" show-overflow-tooltip />
-        <el-table-column label="协议" width="130">
-          <template #default="{ row }">{{ protocolLabel(row.protocol) }}</template>
-        </el-table-column>
-        <el-table-column label="级别" width="110">
-          <template #default="{ row }">
-            <el-tag :type="levelTagType(row.level)" effect="plain" size="small">
-              {{ levelLabel(row.level) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="类别" min-width="150">
-          <template #default="{ row }">{{ categoryLabel(row.category) }}</template>
-        </el-table-column>
-        <el-table-column prop="latencyMs" label="耗时 (ms)" width="110" align="right" />
-      </el-table>
+      <div class="crc-table-shell">
+        <el-table :data="qualificationRows" size="small" empty-text="无资格证据">
+          <el-table-column prop="upstreamId" label="上游" min-width="150" />
+          <el-table-column prop="model" label="模型" min-width="190" show-overflow-tooltip />
+          <el-table-column label="协议" width="130">
+            <template #default="{ row }">{{ protocolLabel(row.protocol) }}</template>
+          </el-table-column>
+          <el-table-column label="级别" width="110">
+            <template #default="{ row }">
+              <el-tag :type="levelTagType(row.level)" effect="plain" size="small">
+                {{ levelLabel(row.level) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="类别" min-width="150">
+            <template #default="{ row }">{{ categoryLabel(row.category) }}</template>
+          </el-table-column>
+          <el-table-column prop="latencyMs" label="耗时 (ms)" width="110" align="right" />
+        </el-table>
+      </div>
     </section>
   </div>
 </template>
@@ -240,10 +245,8 @@ onUnmounted(() => {
 
 <style scoped>
 .model-probe-page {
-  min-height: 100%;
-  padding: 20px;
-  background: #f5f7fa;
   display: flex;
+  min-height: 100%;
   flex-direction: column;
   gap: 16px;
 }
@@ -253,21 +256,31 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #dcdfe6;
+  margin-bottom: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
 .qualification-command-title {
-  color: #303133;
+  color: var(--crc-text-strong);
   font-size: 15px;
   font-weight: 600;
 }
 
+.qualification-command-bar p {
+  margin: 4px 0 0;
+  color: var(--crc-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .qualification-result {
-  background: #fff;
-  border-top: 1px solid #dcdfe6;
-  border-bottom: 1px solid #dcdfe6;
-  padding: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
 .qualification-result-header {
@@ -275,21 +288,23 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 16px 12px;
+  padding-bottom: 12px;
 }
 
 .qualification-result-header h2 {
   margin: 0;
-  color: #303133;
+  color: var(--crc-text-strong);
   font-size: 15px;
 }
 
 .qualification-metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(96px, 1fr));
-  border-top: 1px solid #ebeef5;
-  border-bottom: 1px solid #ebeef5;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
+  overflow: hidden;
 }
 
 .qualification-metric {
@@ -301,25 +316,21 @@ onUnmounted(() => {
 }
 
 .qualification-metric + .qualification-metric {
-  border-left: 1px solid #ebeef5;
+  border-left: 1px solid var(--crc-border);
 }
 
 .qualification-metric strong {
-  color: #303133;
+  color: var(--crc-text-strong);
   font-size: 20px;
   line-height: 1;
 }
 
 .qualification-metric span {
-  color: #606266;
+  color: var(--crc-text-muted);
   font-size: 12px;
 }
 
 @media (max-width: 768px) {
-  .model-probe-page {
-    padding: 12px;
-  }
-
   .qualification-command-bar {
     align-items: flex-start;
     flex-direction: column;

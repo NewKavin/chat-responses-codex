@@ -1,18 +1,18 @@
 <template>
   <div class="probe-board" :class="`probe-board--${tone}`">
-    <section class="probe-hero">
-      <div class="probe-hero__copy">
-        <p class="eyebrow">{{ scopeLabel }}</p>
+    <section class="probe-page-header">
+      <div class="probe-page-header__copy">
+        <p class="probe-context">{{ scopeLabel }}</p>
         <h2>{{ title }}</h2>
-        <p class="hero-copy">{{ subtitle }}</p>
+        <p class="probe-description">{{ subtitle }}</p>
       </div>
-      <div class="probe-hero__meta">
+      <div class="probe-page-header__meta">
         <el-tag :type="loading ? 'warning' : 'success'" effect="light">
           {{ loading ? '刷新中' : '自动刷新' }}
         </el-tag>
         <el-tag effect="plain">轮询 {{ refreshIntervalLabel }}</el-tag>
         <span class="refresh-label">最近刷新 {{ refreshedLabel }}</span>
-        <div class="probe-hero__status">
+        <div class="probe-page-header__status">
           <el-tag type="success" effect="light">{{ summary.healthy_channels }} 健康</el-tag>
           <el-tag type="warning" effect="light">{{ summary.degraded_channels }} 降级</el-tag>
           <el-tag type="danger" effect="light">{{ summary.offline_channels }} 离线</el-tag>
@@ -42,37 +42,37 @@
 
     <el-row :gutter="16" class="summary-grid">
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
-        <div class="summary-card">
+        <div class="probe-metric">
           <div class="summary-value">{{ summary.total_channels }}</div>
           <div class="summary-label">通道总数</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
-        <div class="summary-card">
+        <div class="probe-metric">
           <div class="summary-value">{{ summary.healthy_channels }}</div>
           <div class="summary-label">健康通道</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
-        <div class="summary-card">
+        <div class="probe-metric">
           <div class="summary-value">{{ summary.degraded_channels }}</div>
           <div class="summary-label">降级通道</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
-        <div class="summary-card">
+        <div class="probe-metric">
           <div class="summary-value">{{ summary.offline_channels }}</div>
           <div class="summary-label">离线通道</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
-        <div class="summary-card">
+        <div class="probe-metric">
           <div class="summary-value">{{ summary.total_models }}</div>
           <div class="summary-label">可见模型</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
-        <div class="summary-card">
+        <div class="probe-metric">
           <div class="summary-value">{{ summary.average_latency_ms }}ms</div>
           <div class="summary-label">平均探测耗时</div>
         </div>
@@ -81,7 +81,7 @@
 
     <el-row :gutter="16" class="chart-grid">
       <el-col :xs="24" :lg="9">
-        <el-card shadow="hover" class="probe-card">
+        <el-card shadow="never" class="probe-card">
           <template #header>
             <div class="card-header">
               <div>
@@ -95,7 +95,7 @@
         </el-card>
       </el-col>
       <el-col :xs="24" :lg="15">
-        <el-card shadow="hover" class="probe-card">
+        <el-card shadow="never" class="probe-card">
           <template #header>
             <div class="card-header">
               <div>
@@ -110,7 +110,7 @@
       </el-col>
     </el-row>
 
-    <el-card shadow="hover" class="probe-card">
+    <el-card shadow="never" class="probe-card">
       <template #header>
         <div class="card-header">
           <div>
@@ -220,6 +220,8 @@ import {
   type ProbeStatusFilter
 } from '@/utils/modelProbeCharts'
 import { normalizeModelProbeRefreshIntervalSeconds } from '@/utils/modelProbePolling'
+import { useTheme } from '@/composables/useTheme'
+import { buildChartTheme } from '@/utils/chartTheme'
 
 const props = defineProps<{
   tone: 'admin' | 'portal'
@@ -230,6 +232,9 @@ const props = defineProps<{
   loading?: boolean
   errorMessage?: string
 }>()
+
+const { resolvedTheme } = useTheme()
+const chartTheme = computed(() => buildChartTheme(resolvedTheme.value))
 
 const statusChartRef = ref<HTMLElement>()
 const coverageChartRef = ref<HTMLElement>()
@@ -312,6 +317,7 @@ const buildCoverageSeries = () => {
 
 const renderCharts = async () => {
   const echarts = await loadEcharts()
+  const theme = chartTheme.value
 
   if (statusChartRef.value) {
     if (!statusChart) {
@@ -320,12 +326,18 @@ const renderCharts = async () => {
     const series = buildStatusSeries()
     const hasData = series.length > 0
     statusChart.setOption({
-      color: ['#18c29c', '#f59e0b', '#ef4444'],
-      tooltip: { trigger: 'item' },
+      color: [theme.series[0], theme.series[3], theme.series[4]],
+      tooltip: {
+        trigger: 'item',
+        backgroundColor: theme.tooltipBackground,
+        borderColor: theme.tooltipBorder,
+        textStyle: { color: theme.text }
+      },
       legend: {
         bottom: 0,
         left: 'center',
-        icon: 'circle'
+        icon: 'circle',
+        textStyle: { color: theme.muted }
       },
       series: [
         {
@@ -335,7 +347,7 @@ const renderCharts = async () => {
           avoidLabelOverlap: true,
           label: {
             formatter: '{b}\n{c}',
-            color: '#334155'
+            color: theme.text
           },
           data: series
         }
@@ -349,7 +361,7 @@ const renderCharts = async () => {
               top: 'middle',
               style: {
                 text: '暂无通道健康数据',
-                fill: '#94a3b8',
+                fill: theme.muted,
                 fontSize: 14
               }
             }
@@ -365,18 +377,24 @@ const renderCharts = async () => {
     const hasData = series.length > 0
     coverageChart.setOption({
       grid: { left: 24, right: 20, top: 12, bottom: 24, containLabel: true },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: theme.tooltipBackground,
+        borderColor: theme.tooltipBorder,
+        textStyle: { color: theme.text },
+        axisPointer: { type: 'shadow' }
+      },
       xAxis: {
         type: 'value',
         name: '通道数',
-        axisLabel: { color: '#64748b' },
-        splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.18)' } }
+        axisLabel: { color: theme.muted },
+        splitLine: { lineStyle: { color: theme.splitLine } }
       },
       yAxis: {
         type: 'category',
         inverse: true,
         data: series.map(item => item.name),
-        axisLabel: { color: '#334155' }
+        axisLabel: { color: theme.text }
       },
       series: [
         {
@@ -385,7 +403,7 @@ const renderCharts = async () => {
           barWidth: 16,
           itemStyle: {
             borderRadius: [0, 10, 10, 0],
-            color: '#2563eb'
+            color: theme.series[0]
           }
         }
       ],
@@ -398,7 +416,7 @@ const renderCharts = async () => {
               top: 'middle',
               style: {
                 text: '暂无模型覆盖数据',
-                fill: '#94a3b8',
+                fill: theme.muted,
                 fontSize: 14
               }
             }
@@ -410,6 +428,13 @@ const renderCharts = async () => {
 const resizeCharts = () => {
   statusChart?.resize()
   coverageChart?.resize()
+}
+
+const disposeCharts = () => {
+  statusChart?.dispose()
+  coverageChart?.dispose()
+  statusChart = null
+  coverageChart = null
 }
 
 onMounted(async () => {
@@ -427,12 +452,15 @@ watch(
   { deep: true }
 )
 
+watch(resolvedTheme, async () => {
+  disposeCharts()
+  await nextTick()
+  await renderCharts()
+})
+
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resizeCharts)
-  statusChart?.dispose()
-  coverageChart?.dispose()
-  statusChart = null
-  coverageChart = null
+  disposeCharts()
 })
 </script>
 
@@ -446,79 +474,68 @@ onBeforeUnmount(() => {
 .probe-error-alert,
 .probe-empty-alert {
   margin: 0;
-  border-radius: 12px;
+  border-radius: var(--crc-radius);
 }
 
 .probe-error-alert {
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  border: 1px solid var(--crc-danger);
+  background: var(--crc-danger-soft);
 }
 
 .probe-empty-alert {
-  background: rgba(148, 163, 184, 0.08);
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid var(--crc-border);
+  background: var(--crc-surface-muted);
 }
 
-.probe-hero {
+.probe-page-header {
   display: flex;
   justify-content: space-between;
-  gap: 24px;
-  padding: 24px 28px;
-  border-radius: 24px;
-  color: #f8fafc;
-  background:
-    radial-gradient(circle at top left, rgba(56, 189, 248, 0.22), transparent 32%),
-    radial-gradient(circle at top right, rgba(168, 85, 247, 0.18), transparent 28%),
-    linear-gradient(135deg, #0f172a 0%, #111827 48%, #1f2937 100%);
-  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.18);
+  align-items: flex-start;
+  gap: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--crc-border);
 }
 
-.probe-board--portal .probe-hero {
-  background:
-    radial-gradient(circle at top left, rgba(16, 185, 129, 0.18), transparent 32%),
-    radial-gradient(circle at top right, rgba(14, 165, 233, 0.18), transparent 28%),
-    linear-gradient(135deg, #052e2b 0%, #083344 48%, #0f172a 100%);
-}
-
-.probe-hero__copy h2 {
+.probe-page-header__copy h2 {
   margin: 0;
-  font-size: 28px;
-  line-height: 1.1;
+  color: var(--crc-text-strong);
+  font-size: 20px;
+  line-height: 1.3;
 }
 
-.probe-hero__copy .hero-copy {
-  margin: 10px 0 0;
-  color: rgba(226, 232, 240, 0.84);
+.probe-description {
   max-width: 64ch;
+  margin: 6px 0 0;
+  color: var(--crc-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.eyebrow {
-  margin: 0 0 10px;
-  font-size: 12px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: rgba(191, 219, 254, 0.88);
+.probe-context {
+  margin: 0 0 5px;
+  color: var(--crc-accent);
+  font-size: 11px;
+  font-weight: 650;
 }
 
-.probe-hero__meta {
+.probe-page-header__meta {
   display: flex;
   flex-direction: column;
-  justify-content: center;
   align-items: flex-end;
-  gap: 10px;
+  gap: 8px;
   white-space: nowrap;
 }
 
-.probe-hero__status {
+.probe-page-header__status {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
 }
 
 .refresh-label {
-  font-size: 13px;
-  color: rgba(226, 232, 240, 0.72);
+  color: var(--crc-text-muted);
+  font-size: 12px;
 }
 
 .summary-grid,
@@ -526,35 +543,35 @@ onBeforeUnmount(() => {
   margin-top: 0;
 }
 
-.summary-card {
-  min-height: 122px;
-  padding: 18px 20px;
-  border-radius: 20px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.06);
+.probe-metric {
   display: flex;
+  min-height: 104px;
+  padding: 16px;
   flex-direction: column;
   justify-content: space-between;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
 .summary-value {
-  font-size: 30px;
-  font-weight: 700;
-  color: #0f172a;
+  color: var(--crc-text-strong);
+  font-size: 26px;
+  font-weight: 680;
 }
 
 .summary-label {
   margin-top: 8px;
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 13px;
 }
 
 .probe-card {
-  border: none;
-  border-radius: 20px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
   overflow: hidden;
-  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.06);
+  background: var(--crc-surface);
+  box-shadow: none;
 }
 
 .card-header {
@@ -566,12 +583,13 @@ onBeforeUnmount(() => {
 
 .card-header h3 {
   margin: 0;
-  font-size: 17px;
+  color: var(--crc-text-strong);
+  font-size: 16px;
 }
 
 .card-header p {
   margin: 6px 0 0;
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 13px;
 }
 
@@ -606,10 +624,10 @@ onBeforeUnmount(() => {
   gap: 8px;
   min-height: 32px;
   padding: 0 10px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 8px;
-  background: #f8fafc;
-  color: #475569;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text);
+  background: var(--crc-surface-muted);
   font-size: 13px;
 }
 
@@ -622,20 +640,19 @@ onBeforeUnmount(() => {
 .channel-empty {
   grid-column: 1 / -1;
   padding: 28px;
-  border: 1px dashed rgba(148, 163, 184, 0.35);
-  border-radius: 14px;
-  background: rgba(248, 250, 252, 0.72);
-  color: #64748b;
+  border: 1px dashed var(--crc-border-strong);
+  border-radius: var(--crc-radius);
+  color: var(--crc-text-muted);
+  background: var(--crc-surface-muted);
   text-align: center;
   font-size: 14px;
 }
 
 .channel-card {
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 18px;
-  padding: 18px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
 .channel-card__top {
@@ -647,8 +664,8 @@ onBeforeUnmount(() => {
 
 .channel-card__top h4 {
   margin: 0;
-  font-size: 16px;
-  color: #0f172a;
+  color: var(--crc-text-strong);
+  font-size: 15px;
 }
 
 .channel-card__metrics {
@@ -664,9 +681,9 @@ onBeforeUnmount(() => {
 
 .channel-card__models-label {
   display: block;
-  font-size: 12px;
-  color: #94a3b8;
   margin-bottom: 8px;
+  color: var(--crc-text-muted);
+  font-size: 12px;
 }
 
 .channel-card__models-list {
@@ -679,33 +696,34 @@ onBeforeUnmount(() => {
 }
 
 .channel-card__model-tag {
-  border-radius: 999px;
+  border-radius: var(--crc-radius-sm);
 }
 
 .channel-card__models-empty {
+  color: var(--crc-text-muted);
   font-size: 13px;
-  color: #64748b;
 }
 
 .channel-card__metrics span {
   display: block;
+  color: var(--crc-text-muted);
   font-size: 12px;
-  color: #94a3b8;
 }
 
 .channel-card__metrics strong {
   display: block;
   margin-top: 4px;
+  color: var(--crc-text-strong);
   font-size: 15px;
-  color: #0f172a;
 }
 
 .channel-card__error {
   margin-top: 14px;
   padding: 10px 12px;
-  border-radius: 12px;
-  background: rgba(239, 68, 68, 0.08);
-  color: #b91c1c;
+  border: 1px solid var(--crc-danger);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-danger);
+  background: var(--crc-danger-soft);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -717,15 +735,16 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 768px) {
-  .probe-hero {
+  .probe-page-header {
     flex-direction: column;
   }
 
-  .probe-hero__meta {
+  .probe-page-header__meta {
     align-items: flex-start;
+    white-space: normal;
   }
 
-  .probe-hero__status {
+  .probe-page-header__status {
     justify-content: flex-start;
   }
 
