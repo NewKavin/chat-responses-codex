@@ -81,6 +81,9 @@ describe('admin ui structure', () => {
     expect(center).not.toContain('<el-col')
     expect(matrix).toContain('compatibility-matrix-panel crc-surface')
     expect(matrix).toContain('matrix-table-shell')
+    expect(matrix).toContain('container-name: compatibility-matrix;')
+    expect(matrix).toContain('@container compatibility-matrix (max-width: 860px)')
+    expect(matrix).toContain('max-width: 100%;')
     expect(center).not.toContain('<el-card')
     expect(matrix).not.toContain('<el-card')
 

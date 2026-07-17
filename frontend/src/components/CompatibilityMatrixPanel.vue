@@ -216,11 +216,16 @@ const copySummary = async () => {
 
 <style scoped>
 .compatibility-matrix-panel {
+  container-name: compatibility-matrix;
+  container-type: inline-size;
+  min-width: 0;
+  max-width: 100%;
   padding: 20px;
 }
 
 .panel-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
@@ -257,6 +262,10 @@ const copySummary = async () => {
   margin-bottom: 16px;
 }
 
+.summary-tags {
+  flex: 0 0 auto;
+}
+
 .cell-details {
   display: flex;
   flex-direction: column;
@@ -287,15 +296,8 @@ const copySummary = async () => {
   max-width: 100%;
 }
 
-@media (max-width: 767px) {
-  .compatibility-matrix-panel {
-    padding: 16px;
-  }
-
-  .panel-head {
-    flex-direction: column;
-  }
-
+@container compatibility-matrix (max-width: 860px) {
+  .panel-head,
   .matrix-toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -307,6 +309,12 @@ const copySummary = async () => {
 
   .downstream-select {
     width: 100%;
+  }
+}
+
+@media (max-width: 767px) {
+  .compatibility-matrix-panel {
+    padding: 16px;
   }
 }
 </style>
