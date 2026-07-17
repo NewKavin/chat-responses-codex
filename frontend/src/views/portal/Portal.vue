@@ -53,6 +53,7 @@ import {
 import AppShell from '@/components/AppShell.vue'
 import { portalApi } from '@/api/portal'
 import { buildAnnouncementSeenKey, shouldShowAnnouncement } from '@/utils/announcement'
+import { resolveActiveNavigationPath } from '@/utils/navigation'
 import type { Announcement } from '@/types'
 import type { AppNavItem } from '@/types/navigation'
 
@@ -96,13 +97,9 @@ const titleMap: Record<string, string> = {
   '/portal/key': '密钥管理'
 }
 
-const activeMenu = computed(() => {
-  const path = route.path
-  for (const key of Object.keys(titleMap)) {
-    if (path === key || path.startsWith(`${key}/`)) return key
-  }
-  return '/portal'
-})
+const activeMenu = computed(() =>
+  resolveActiveNavigationPath(route.path, Object.keys(titleMap), '/portal')
+)
 
 const currentTitle = computed(() =>
   typeof route.meta.title === 'string'
