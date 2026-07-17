@@ -45,4 +45,17 @@ describe('admin ui structure', () => {
     expect(page).toContain('key-result-surface')
     expect(page).toContain('aria-label="复制新密钥"')
   })
+
+  it('keeps log filters and evidence dense and responsive', () => {
+    const page = source('views/admin/Logs.vue')
+
+    expect(page).toContain('crc-page logs-page')
+    expect(page).toContain('crc-toolbar logs-filters')
+    expect(page).toContain('logs-filter-disclosure')
+    expect(page).toContain('crc-table-shell')
+    expect(page).toContain('log-summary-strip')
+    expect(page).toContain('logs-table-region')
+    expect(page).toContain('load-error-alert')
+    expect(page).toContain('resetFilters')
+  })
 })
