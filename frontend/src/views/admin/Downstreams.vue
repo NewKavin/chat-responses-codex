@@ -102,9 +102,9 @@
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建下游' : '编辑下游'"
       direction="rtl"
-      size="min(680px, 100vw)"
+      size="var(--account-drawer-width)"
       :destroy-on-close="false"
-      class="form-drawer"
+      class="form-drawer downstream-account-drawer"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="drawer-form">
         <el-form-item label="ID" prop="id">

@@ -61,8 +61,7 @@ a {
 
 .crc-page {
   width: 100%;
-  max-width: 1600px;
-  margin: 0 auto;
+  min-width: 0;
 }
 
 .crc-page-header {
@@ -106,6 +105,8 @@ a {
 
 .crc-table-shell {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
@@ -114,6 +115,14 @@ a {
 
 .crc-table-shell > .el-table {
   min-width: 760px;
+}
+
+.upstream-account-drawer {
+  --account-drawer-width: 72vw;
+}
+
+.downstream-account-drawer {
+  --account-drawer-width: 64vw;
 }
 
 .auth-form .el-form-item {
@@ -152,7 +161,19 @@ a {
   --el-box-shadow-light: var(--crc-shadow-elevated);
 }
 
+@media (max-width: 1199px) {
+  .upstream-account-drawer,
+  .downstream-account-drawer {
+    --account-drawer-width: 86vw;
+  }
+}
+
 @media (max-width: 767px) {
+  .upstream-account-drawer,
+  .downstream-account-drawer {
+    --account-drawer-width: 100vw;
+  }
+
   .crc-page-header {
     flex-direction: column;
   }

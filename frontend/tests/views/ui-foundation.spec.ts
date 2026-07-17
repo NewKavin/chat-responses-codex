@@ -99,4 +99,17 @@ describe('ui foundation composition', () => {
 
     expect(darkTokens).toContain('--el-color-primary: var(--crc-accent);')
   })
+
+  it('lets business pages fill the shell while account drawers follow viewport proportions', () => {
+    const base = readSource('../../src/styles/base.css')
+    const pageRule = base.match(/\.crc-page\s*\{([\s\S]*?)\n\}/)?.[1]
+
+    expect(pageRule).toContain('width: 100%;')
+    expect(pageRule).toContain('min-width: 0;')
+    expect(pageRule).not.toContain('max-width')
+    expect(base).toContain('--account-drawer-width: 72vw;')
+    expect(base).toContain('--account-drawer-width: 64vw;')
+    expect(base).toContain('--account-drawer-width: 86vw;')
+    expect(base).toContain('--account-drawer-width: 100vw;')
+  })
 })

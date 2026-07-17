@@ -82,9 +82,9 @@
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '创建上游' : '编辑上游'"
       direction="rtl"
-      size="min(760px, 100vw)"
+      size="var(--account-drawer-width)"
       :destroy-on-close="false"
-      class="form-drawer"
+      class="form-drawer upstream-account-drawer"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="drawer-form">
         <el-form-item v-if="dialogMode === 'edit'" label="ID">

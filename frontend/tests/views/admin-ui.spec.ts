@@ -32,6 +32,8 @@ describe('admin ui structure', () => {
     expect(page).toContain('crc-table-shell')
     expect(page).toContain('drawer-section')
     expect(page).toContain('drawer-footer')
+    expect(page).toContain('size="var(--account-drawer-width)"')
+    expect(page).toContain('upstream-account-drawer')
   })
 
   it('uses the responsive downstream management workbench', () => {
@@ -44,6 +46,8 @@ describe('admin ui structure', () => {
     expect(page).toContain('rotate-key-dialog')
     expect(page).toContain('key-result-surface')
     expect(page).toContain('aria-label="复制新密钥"')
+    expect(page).toContain('size="var(--account-drawer-width)"')
+    expect(page).toContain('downstream-account-drawer')
   })
 
   it('keeps log filters and evidence dense and responsive', () => {
