@@ -49,4 +49,17 @@ describe('ui foundation composition', () => {
     expect(portal).toContain("localStorage.removeItem('portal_token')")
     expect(portal).not.toContain('linear-gradient')
   })
+
+  it('uses one neutral authentication surface for both account types', () => {
+    const authShell = readSource('../../src/components/AuthShell.vue')
+    const adminLogin = readSource('../../src/views/admin/Login.vue')
+    const portalLogin = readSource('../../src/views/portal/PortalLogin.vue')
+
+    expect(authShell).toContain('<ThemeSwitcher')
+    expect(authShell).toContain('<slot />')
+    expect(adminLogin).toContain('<AuthShell')
+    expect(portalLogin).toContain('<AuthShell')
+    expect(adminLogin).not.toContain('linear-gradient')
+    expect(portalLogin).not.toContain('linear-gradient')
+  })
 })

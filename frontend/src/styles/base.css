@@ -116,6 +116,29 @@ a {
   min-width: 760px;
 }
 
+.auth-form .el-form-item {
+  margin-bottom: 18px;
+}
+
+.auth-form .el-form-item__label {
+  height: auto;
+  padding-bottom: 7px;
+  color: var(--crc-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.auth-form .auth-form__action {
+  margin-top: 24px;
+  margin-bottom: 0;
+}
+
+.auth-form .auth-form__action .el-form-item__content,
+.auth-submit {
+  width: 100%;
+}
+
 .el-button,
 .el-input__wrapper,
 .el-select__wrapper,
