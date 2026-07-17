@@ -328,17 +328,16 @@ pub(super) fn dispatch_success(result: DispatchResult) -> Response {
 }
 
 pub(super) async fn aggregate_upstream_sse_response(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     protocol: UpstreamProtocol,
     stream_timeouts: StreamTimeouts,
 ) -> Result<Value, GatewayError> {
     let mut aggregator = StreamResponseAggregator::new(protocol);
-    let mut watchdog = StreamWatchdog::new(stream_timeouts);
+    let mut reader = UpstreamStreamReader::new(response, stream_timeouts);
 
     loop {
-        match wait_for_upstream_chunk(&mut response, &watchdog).await {
+        match reader.next_chunk().await {
             StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
-                watchdog.record_upstream_activity(TokioInstant::now());
                 match aggregator.push(&chunk).map_err(protocol_error_to_gateway)? {
                     StreamAggregateResult::Pending => {}
                     StreamAggregateResult::Complete(response) => return Ok(response),
@@ -353,15 +352,13 @@ pub(super) async fn aggregate_upstream_sse_response(
                     classify_upstream_stream_error(&message, error.is_timeout(), error.is_decode());
                 return Err(stream_gateway_error(status, message, category));
             }
-            StreamReadOutcome::Heartbeat => {
-                watchdog.record_heartbeat(TokioInstant::now());
-            }
+            StreamReadOutcome::Heartbeat => {}
             StreamReadOutcome::IdleTimeout => {
                 return Err(stream_gateway_error(
                     StatusCode::GATEWAY_TIMEOUT,
                     format!(
                         "idle timeout waiting for SSE ({})",
-                        watchdog.debug_state(TokioInstant::now())
+                        reader.debug_state(TokioInstant::now())
                     ),
                     "stream_idle_timeout",
                 ));
@@ -371,7 +368,57 @@ pub(super) async fn aggregate_upstream_sse_response(
                     StatusCode::GATEWAY_TIMEOUT,
                     format!(
                         "stream max duration exceeded before completion ({})",
-                        watchdog.debug_state(TokioInstant::now())
+                        reader.debug_state(TokioInstant::now())
+                    ),
+                    "stream_max_duration",
+                ));
+            }
+        }
+    }
+}
+
+pub(super) async fn prefetch_first_semantic_event(
+    mut reader: UpstreamStreamReader,
+    protocol: UpstreamProtocol,
+) -> Result<UpstreamStreamReader, GatewayError> {
+    let mut classifier = FirstSemanticEventClassifier::new(protocol);
+
+    loop {
+        match reader.next_network_chunk().await {
+            StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
+                reader.replay_later(chunk.clone());
+                match classifier.push(&chunk).map_err(protocol_error_to_gateway)? {
+                    FirstSemanticEventResult::Pending => {}
+                    FirstSemanticEventResult::Ready => return Ok(reader),
+                }
+            }
+            StreamReadOutcome::Chunk(Ok(None)) => {
+                classifier.finish().map_err(protocol_error_to_gateway)?;
+                return Ok(reader);
+            }
+            StreamReadOutcome::Chunk(Err(error)) => {
+                let message = error.to_string();
+                let (status, category) =
+                    classify_upstream_stream_error(&message, error.is_timeout(), error.is_decode());
+                return Err(stream_gateway_error(status, message, category));
+            }
+            StreamReadOutcome::Heartbeat => {}
+            StreamReadOutcome::IdleTimeout => {
+                return Err(stream_gateway_error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "idle timeout waiting for SSE ({})",
+                        reader.debug_state(TokioInstant::now())
+                    ),
+                    "stream_idle_timeout",
+                ));
+            }
+            StreamReadOutcome::MaxDurationExceeded => {
+                return Err(stream_gateway_error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "stream max duration exceeded before completion ({})",
+                        reader.debug_state(TokioInstant::now())
                     ),
                     "stream_max_duration",
                 ));
@@ -381,12 +428,11 @@ pub(super) async fn aggregate_upstream_sse_response(
 }
 
 pub(super) fn proxied_stream_body(
-    response: reqwest::Response,
+    reader: UpstreamStreamReader,
     endpoint: EndpointKind,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
-    stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
     let canonicalizer = (endpoint == EndpointKind::ChatCompletions).then(|| {
         ChatStreamCanonicalizer::new(
@@ -396,7 +442,7 @@ pub(super) fn proxied_stream_body(
         )
     });
     let state = ProxiedStreamState {
-        response,
+        reader,
         buffer: Vec::new(),
         pending: VecDeque::new(),
         canonicalizer,
@@ -410,7 +456,6 @@ pub(super) fn proxied_stream_body(
         semantic_completion_emitted: false,
         usable_output_seen: false,
         usage_log_flushed: false,
-        watchdog: StreamWatchdog::new(stream_timeouts),
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
         loop {
@@ -425,9 +470,8 @@ pub(super) fn proxied_stream_body(
                 return Ok(None);
             }
 
-            match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
+            match state.reader.next_chunk().await {
                 StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
-                    state.watchdog.record_upstream_activity(TokioInstant::now());
                     if let Some(log_context) = state.log_context.as_ref() {
                         log_context.touch_active_request();
                     }
@@ -496,12 +540,11 @@ pub(super) fn proxied_stream_body(
                     return Ok(Some((frame, state)));
                 }
                 StreamReadOutcome::Heartbeat => {
-                    state.watchdog.record_heartbeat(TokioInstant::now());
                     return Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)));
                 }
                 StreamReadOutcome::IdleTimeout => {
                     let now = TokioInstant::now();
-                    let debug_info = state.watchdog.debug_state(now);
+                    let debug_info = state.reader.debug_state(now);
                     let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
                     tracing::warn!("stream idle timeout: {}", debug_info);
                     state.mark_stream_interrupted(error_message.clone()).await;
@@ -516,7 +559,7 @@ pub(super) fn proxied_stream_body(
                 }
                 StreamReadOutcome::MaxDurationExceeded => {
                     let now = TokioInstant::now();
-                    let debug_info = state.watchdog.debug_state(now);
+                    let debug_info = state.reader.debug_state(now);
                     let error_message = format!(
                         "stream max duration exceeded before completion ({})",
                         debug_info
@@ -540,7 +583,7 @@ pub(super) fn proxied_stream_body(
 }
 
 struct ProxiedStreamState {
-    response: reqwest::Response,
+    reader: UpstreamStreamReader,
     buffer: Vec<u8>,
     pending: VecDeque<Bytes>,
     canonicalizer: Option<ChatStreamCanonicalizer>,
@@ -554,7 +597,6 @@ struct ProxiedStreamState {
     semantic_completion_emitted: bool,
     usable_output_seen: bool,
     usage_log_flushed: bool,
-    watchdog: StreamWatchdog,
 }
 
 impl ProxiedStreamState {
@@ -821,14 +863,13 @@ fn chat_stream_event_is_semantically_complete(event: &Value) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn translated_stream_body(
-    response: reqwest::Response,
+    reader: UpstreamStreamReader,
     source_protocol: UpstreamProtocol,
     target_protocol: UpstreamProtocol,
     endpoint: EndpointKind,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
-    stream_timeouts: StreamTimeouts,
 ) -> Result<Body, GatewayError> {
     let tool_registry = response_history_context
         .as_ref()
@@ -850,7 +891,7 @@ pub(super) fn translated_stream_body(
     });
 
     let state = TranslatedStreamState {
-        response,
+        reader,
         translator,
         canonicalizer,
         buffer: Vec::new(),
@@ -865,7 +906,6 @@ pub(super) fn translated_stream_body(
         usable_output_observed: false,
         usable_output_delivered: false,
         usage_log_flushed: false,
-        watchdog: StreamWatchdog::new(stream_timeouts),
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
         loop {
@@ -892,9 +932,8 @@ pub(super) fn translated_stream_body(
                 return Ok(None);
             }
 
-            match wait_for_upstream_chunk(&mut state.response, &state.watchdog).await {
+            match state.reader.next_chunk().await {
                 StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
-                    state.watchdog.record_upstream_activity(TokioInstant::now());
                     if let Some(log_context) = state.log_context.as_ref() {
                         log_context.touch_active_request();
                     }
@@ -943,12 +982,11 @@ pub(super) fn translated_stream_body(
                     return Ok(Some((frame, state)));
                 }
                 StreamReadOutcome::Heartbeat => {
-                    state.watchdog.record_heartbeat(TokioInstant::now());
                     return Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)));
                 }
                 StreamReadOutcome::IdleTimeout => {
                     let now = TokioInstant::now();
-                    let debug_info = state.watchdog.debug_state(now);
+                    let debug_info = state.reader.debug_state(now);
                     let error_message = format!("idle timeout waiting for SSE ({})", debug_info);
                     tracing::warn!("stream idle timeout: {}", debug_info);
                     state.mark_stream_interrupted(error_message.clone()).await;
@@ -963,7 +1001,7 @@ pub(super) fn translated_stream_body(
                 }
                 StreamReadOutcome::MaxDurationExceeded => {
                     let now = TokioInstant::now();
-                    let debug_info = state.watchdog.debug_state(now);
+                    let debug_info = state.reader.debug_state(now);
                     let error_message = format!(
                         "stream max duration exceeded before completion ({})",
                         debug_info
@@ -992,7 +1030,7 @@ struct TranslatedPendingFrame {
 }
 
 struct TranslatedStreamState {
-    response: reqwest::Response,
+    reader: UpstreamStreamReader,
     translator: StreamTranslator,
     canonicalizer: Option<ChatStreamCanonicalizer>,
     buffer: Vec<u8>,
@@ -1007,7 +1045,6 @@ struct TranslatedStreamState {
     usable_output_observed: bool,
     usable_output_delivered: bool,
     usage_log_flushed: bool,
-    watchdog: StreamWatchdog,
 }
 
 impl TranslatedStreamState {

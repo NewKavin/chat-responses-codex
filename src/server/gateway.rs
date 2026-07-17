@@ -9,8 +9,9 @@ use crate::protocol::{
     chat_request_to_responses_payload_with_context,
     chat_response_to_responses_payload_with_tool_registry, responses_response_to_chat_payload,
     tool_adapter::{ToolAdapterRegistry, ToolTarget},
-    ChatStreamCanonicalizer, ConversionContext, ProtocolError, StreamAggregateResult,
-    StreamResponseAggregator, StreamTranslator,
+    ChatStreamCanonicalizer, ConversionContext, FirstSemanticEventClassifier,
+    FirstSemanticEventResult, ProtocolError, StreamAggregateResult, StreamResponseAggregator,
+    StreamTranslator,
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
@@ -2542,6 +2543,51 @@ struct StreamWatchdog {
     max_heartbeat_extensions: u32,
 }
 
+struct UpstreamStreamReader {
+    response: reqwest::Response,
+    replay: VecDeque<Bytes>,
+    watchdog: StreamWatchdog,
+}
+
+impl UpstreamStreamReader {
+    fn new(response: reqwest::Response, timeouts: StreamTimeouts) -> Self {
+        Self {
+            response,
+            replay: VecDeque::new(),
+            watchdog: StreamWatchdog::new(timeouts),
+        }
+    }
+
+    fn replay_later(&mut self, chunk: Bytes) {
+        self.replay.push_back(chunk);
+    }
+
+    async fn next_chunk(&mut self) -> StreamReadOutcome {
+        if let Some(chunk) = self.replay.pop_front() {
+            return StreamReadOutcome::Chunk(Ok(Some(chunk)));
+        }
+        self.next_network_chunk().await
+    }
+
+    async fn next_network_chunk(&mut self) -> StreamReadOutcome {
+        let outcome = wait_for_upstream_chunk(&mut self.response, &self.watchdog).await;
+        match &outcome {
+            StreamReadOutcome::Chunk(Ok(Some(_))) => {
+                self.watchdog.record_upstream_activity(TokioInstant::now());
+            }
+            StreamReadOutcome::Heartbeat => {
+                self.watchdog.record_heartbeat(TokioInstant::now());
+            }
+            _ => {}
+        }
+        outcome
+    }
+
+    fn debug_state(&self, now: TokioInstant) -> String {
+        self.watchdog.debug_state(now)
+    }
+}
+
 impl StreamWatchdog {
     fn new(timeouts: StreamTimeouts) -> Self {
         let now = TokioInstant::now();
@@ -4431,6 +4477,8 @@ async fn process_gateway_request_inner(
                                 selected_upstream_key_prefix = %key_prefix(api_key),
                                 upstream_attempt_mode = attempt_mode.as_str(),
                                 error = %error,
+                                error_category = %error.error_category(),
+                                stream_to_json_recovery = true,
                                 "streaming upstream attempt failed; retrying without stream"
                             );
                             attempt_mode = UpstreamAttemptMode::Json;
