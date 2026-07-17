@@ -175,6 +175,7 @@
 
     <el-drawer
       v-model="settingsDrawerOpen"
+      append-to-body
       title="模型设置"
       size="min(360px, 100vw)"
       class="playground-settings-drawer"

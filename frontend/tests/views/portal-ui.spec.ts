@@ -70,6 +70,7 @@ describe('portal ui structure', () => {
     expect(playground).toContain('settings-panel')
     expect(playground).toContain('settingsDrawerOpen')
     expect(playground).toContain('<el-drawer')
+    expect(playground).toContain('append-to-body')
     expect(playground).toContain('aria-label="打开模型设置"')
     expect(playground).toContain('<PlaygroundSettings')
     expect(playground).not.toContain("sidebarCollapsed ? '▶' : '◀'")
