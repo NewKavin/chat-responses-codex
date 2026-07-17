@@ -37,4 +37,16 @@ describe('ui foundation composition', () => {
     expect(app).toContain("router.push('/admin/login')")
     expect(app).not.toContain('linear-gradient')
   })
+
+  it('uses shared chrome while retaining portal-owned behavior', () => {
+    const portal = readSource('../../src/views/portal/Portal.vue')
+
+    expect(portal).toContain('<AppShell')
+    expect(portal).toContain('portalNavItems')
+    expect(portal).toContain('portal-sidebar-collapsed')
+    expect(portal).toContain('loadAnnouncement')
+    expect(portal).toContain("provide('portalToken'")
+    expect(portal).toContain("localStorage.removeItem('portal_token')")
+    expect(portal).not.toContain('linear-gradient')
+  })
 })
