@@ -1,28 +1,35 @@
 <template>
-  <div class="dashboard-page">
-    <section class="hero-panel">
-      <div class="hero-panel__body">
-        <p class="eyebrow">ENTERPRISE DASHBOARD</p>
-        <h1>控制台总览</h1>
-        <p class="hero-copy">全部统计来自本地聚合数据，适合内网巡检、容量判断和异常回溯。</p>
+  <div class="crc-page dashboard-page">
+    <header class="crc-page-header dashboard-header">
+      <div class="dashboard-header__body">
+        <h1 class="crc-page-title">控制台总览</h1>
+        <p class="crc-page-description">查看网关资源、请求趋势、模型健康和客户端使用情况。</p>
       </div>
-      <div class="hero-panel__meta">
-        <div class="hero-panel__chips">
+      <div class="dashboard-header__meta">
+        <div class="dashboard-header__chips">
           <el-tag effect="light" type="success">自动聚合</el-tag>
           <el-tag effect="plain">{{ rangeLabel }}</el-tag>
           <el-tag effect="plain">Responses 上游 {{ dashboard.responses_upstreams }}</el-tag>
         </div>
-        <div class="hero-panel__controls">
+        <div class="dashboard-header__controls">
           <el-radio-group v-model="chartRange" size="small" @change="handleRangeChange">
             <el-radio-button label="1d" value="1d">1 天</el-radio-button>
             <el-radio-button label="7d" value="7d">7 天</el-radio-button>
             <el-radio-button label="30d" value="30d">30 天</el-radio-button>
           </el-radio-group>
-          <el-button :icon="Refresh" :loading="loading" size="small" circle @click="loadDashboard" />
+          <el-button
+            :icon="Refresh"
+            :loading="loading"
+            size="small"
+            circle
+            aria-label="刷新控制台数据"
+            title="刷新控制台数据"
+            @click="loadDashboard"
+          />
         </div>
         <div class="refresh-label">最近刷新 {{ refreshedLabel }}</div>
       </div>
-    </section>
+    </header>
 
     <div v-loading="loading" class="kpi-wrap">
       <el-row :gutter="20" class="kpi-grid">
@@ -293,7 +300,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, View } from '@element-plus/icons-vue'
@@ -305,11 +312,14 @@ import { formatCompactNumber } from '@/utils/numberFormat'
 import { formatPercentageLabel } from '@/utils/percentage'
 import { groupTopBreakdownItems } from '@/utils/dashboardCharts'
 import { DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS } from '@/utils/modelProbePolling'
+import { useTheme } from '@/composables/useTheme'
+import { buildChartTheme } from '@/utils/chartTheme'
 import type { EChartsType } from 'echarts/core'
 
 type ChartRange = '1d' | '7d' | '30d'
 
 const router = useRouter()
+const { resolvedTheme } = useTheme()
 const loading = ref(false)
 const modelProbeLoading = ref(false)
 const modelProbeError = ref('')
@@ -378,7 +388,7 @@ const rangeLabelMap: Record<ChartRange, string> = {
   '30d': '30 天'
 }
 
-const compactColorPalette = ['#2563eb', '#0f766e', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#ef4444', '#64748b']
+const chartTheme = computed(() => buildChartTheme(resolvedTheme.value))
 
 const rangeLabel = computed(() => rangeLabelMap[chartRange.value])
 
@@ -444,6 +454,7 @@ const safeBreakdownSeries = (items: DashboardBreakdownItem[]) => (items.length >
 const renderTrendChart = () => {
   if (!trendChart) return
 
+  const theme = chartTheme.value
   const series = analytics.value.daily_series
   const hasData = series.length > 0
   const labels = series.map(item => toShortDate(item.date))
@@ -452,9 +463,12 @@ const renderTrendChart = () => {
   const latencySeries = series.map(item => item.avg_latency_ms)
 
   trendChart.setOption({
-    color: ['#2563eb', '#14b8a6', '#f59e0b'],
+    color: theme.series.slice(0, 3),
     tooltip: {
       trigger: 'axis',
+      backgroundColor: theme.tooltipBackground,
+      borderColor: theme.tooltipBorder,
+      textStyle: { color: theme.text },
       axisPointer: {
         type: 'line'
       },
@@ -484,7 +498,7 @@ const renderTrendChart = () => {
       itemWidth: 10,
       itemHeight: 10,
       textStyle: {
-        color: '#475569'
+        color: theme.muted
       }
     },
     grid: {
@@ -500,11 +514,11 @@ const renderTrendChart = () => {
       data: labels,
       axisLine: {
         lineStyle: {
-          color: 'rgba(148, 163, 184, 0.38)'
+          color: theme.border
         }
       },
       axisLabel: {
-        color: '#64748b'
+        color: theme.muted
       }
     },
     yAxis: [
@@ -512,12 +526,12 @@ const renderTrendChart = () => {
         type: 'value',
         name: '请求次数',
         axisLabel: {
-          color: '#64748b',
+          color: theme.muted,
           formatter: (value: number) => value.toLocaleString('zh-CN')
         },
         splitLine: {
           lineStyle: {
-            color: 'rgba(148, 163, 184, 0.16)'
+            color: theme.splitLine
           }
         }
       },
@@ -526,7 +540,7 @@ const renderTrendChart = () => {
         name: '耗时(ms)',
         position: 'right',
         axisLabel: {
-          color: '#64748b',
+          color: theme.muted,
           formatter: (value: number) => value.toLocaleString('zh-CN')
         },
         splitLine: {
@@ -539,7 +553,7 @@ const renderTrendChart = () => {
         position: 'right',
         offset: 56,
         axisLabel: {
-          color: '#64748b',
+          color: theme.muted,
           formatter: (value: number) => formatCompactNumber(value)
         },
         splitLine: {
@@ -555,10 +569,10 @@ const renderTrendChart = () => {
         showSymbol: false,
         data: requestSeries,
         itemStyle: {
-          color: '#2563eb'
+          color: theme.series[0]
         },
         areaStyle: {
-          color: 'rgba(37, 99, 235, 0.12)'
+          color: `${theme.series[0]}20`
         }
       },
       {
@@ -568,7 +582,7 @@ const renderTrendChart = () => {
         data: tokenSeries,
         barWidth: 12,
         itemStyle: {
-          color: '#14b8a6',
+          color: theme.series[1],
           borderRadius: [8, 8, 0, 0]
         }
       },
@@ -580,7 +594,7 @@ const renderTrendChart = () => {
         yAxisIndex: 1,
         data: latencySeries,
         itemStyle: {
-          color: '#f59e0b'
+          color: theme.series[2]
         }
       }
     ],
@@ -593,7 +607,7 @@ const renderTrendChart = () => {
             top: 'middle',
             style: {
               text: '暂无趋势数据',
-              fill: '#94a3b8',
+              fill: theme.muted,
               fontSize: 14
             }
           }
@@ -609,12 +623,16 @@ const renderDonutChart = (
 ) => {
   if (!chart) return
 
+  const theme = chartTheme.value
   const hasData = items.length > 0
 
   chart.setOption({
     color: colors,
     tooltip: {
-      trigger: 'item'
+      trigger: 'item',
+      backgroundColor: theme.tooltipBackground,
+      borderColor: theme.tooltipBorder,
+      textStyle: { color: theme.text }
     },
     legend: {
       type: 'scroll',
@@ -624,7 +642,7 @@ const renderDonutChart = (
       itemWidth: 10,
       itemHeight: 10,
       textStyle: {
-        color: '#475569'
+        color: theme.muted
       }
     },
     series: [
@@ -634,11 +652,11 @@ const renderDonutChart = (
         center: ['50%', '42%'],
         avoidLabelOverlap: true,
         itemStyle: {
-          borderColor: '#fff',
+          borderColor: theme.tooltipBackground,
           borderWidth: 2
         },
         label: {
-          color: '#334155',
+          color: theme.text,
           formatter: '{b}\n{c}'
         },
         labelLine: {
@@ -657,7 +675,7 @@ const renderDonutChart = (
             top: 'middle',
             style: {
               text: emptyLabel,
-              fill: '#94a3b8',
+              fill: theme.muted,
               fontSize: 14
             }
           }
@@ -673,6 +691,7 @@ const renderRankChart = (
 ) => {
   if (!chart) return
 
+  const theme = chartTheme.value
   const hasData = items.length > 0
   const names = items.map(item => item.name)
   const values = items.map(item => item.value)
@@ -680,6 +699,9 @@ const renderRankChart = (
   chart.setOption({
     tooltip: {
       trigger: 'axis',
+      backgroundColor: theme.tooltipBackground,
+      borderColor: theme.tooltipBorder,
+      textStyle: { color: theme.text },
       axisPointer: {
         type: 'shadow'
       }
@@ -694,11 +716,11 @@ const renderRankChart = (
     xAxis: {
       type: 'value',
       axisLabel: {
-        color: '#64748b'
+        color: theme.muted
       },
       splitLine: {
         lineStyle: {
-          color: 'rgba(148, 163, 184, 0.16)'
+          color: theme.splitLine
         }
       }
     },
@@ -707,7 +729,7 @@ const renderRankChart = (
       inverse: true,
       data: names,
       axisLabel: {
-        color: '#334155',
+        color: theme.text,
         width: 110,
         overflow: 'truncate'
       }
@@ -724,7 +746,7 @@ const renderRankChart = (
         label: {
           show: true,
           position: 'right',
-          color: '#0f172a'
+          color: theme.text
         }
       }
     ],
@@ -737,7 +759,7 @@ const renderRankChart = (
             top: 'middle',
             style: {
               text: emptyLabel,
-              fill: '#94a3b8',
+              fill: theme.muted,
               fontSize: 14
             }
           }
@@ -750,25 +772,25 @@ const renderCharts = () => {
   renderDonutChart(
     modelUsageChart,
     safeBreakdownSeries(modelUsage.value.items),
-    compactColorPalette,
+    chartTheme.value.series,
     '暂无模型使用数据'
   )
   renderRankChart(
     downstreamUsageChart,
     safeBreakdownSeries(downstreamUsage.value.items),
-    '#2563eb',
+    chartTheme.value.series[0],
     '暂无客户端数据'
   )
   renderDonutChart(
     failureChart,
     safeBreakdownSeries(failureUsage.value.items),
-    ['#ef4444', '#f59e0b', '#8b5cf6', '#14b8a6', '#2563eb', '#64748b'],
+    chartTheme.value.series.slice(2, 8),
     '暂无失败数据'
   )
   renderRankChart(
     userAgentChart,
     safeBreakdownSeries(userAgentUsage.value.items),
-    '#7c3aed',
+    chartTheme.value.series[5],
     '暂无 User-Agent 数据'
   )
 }
@@ -842,15 +864,7 @@ const handleResize = () => {
   userAgentChart?.resize()
 }
 
-onMounted(async () => {
-  await nextTick()
-  await initCharts()
-  await loadDashboard()
-  window.addEventListener('resize', handleResize)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', handleResize)
+const disposeCharts = () => {
   trendChart?.dispose()
   modelUsageChart?.dispose()
   downstreamUsageChart?.dispose()
@@ -861,84 +875,67 @@ onUnmounted(() => {
   downstreamUsageChart = null
   failureChart = null
   userAgentChart = null
+}
+
+watch(resolvedTheme, async () => {
+  disposeCharts()
+  await nextTick()
+  await initCharts()
+  renderCharts()
+})
+
+onMounted(async () => {
+  await nextTick()
+  await initCharts()
+  await loadDashboard()
+  window.addEventListener('resize', handleResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  disposeCharts()
 })
 </script>
 
 <style scoped>
 .dashboard-page {
   min-height: 100%;
-  padding: 20px;
-  background:
-    radial-gradient(circle at top left, rgba(37, 99, 235, 0.08), transparent 26%),
-    radial-gradient(circle at top right, rgba(14, 165, 233, 0.08), transparent 24%),
-    linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
 }
 
-.hero-panel {
+.dashboard-header {
   display: flex;
   justify-content: space-between;
-  gap: 24px;
-  padding: 26px 28px;
-  border-radius: 24px;
-  color: #f8fafc;
-  background:
-    radial-gradient(circle at top left, rgba(56, 189, 248, 0.24), transparent 34%),
-    radial-gradient(circle at top right, rgba(129, 140, 248, 0.22), transparent 28%),
-    linear-gradient(135deg, #0f172a 0%, #111827 44%, #1f2937 100%);
-  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.18);
+  align-items: flex-start;
 }
 
-.hero-panel__body h1 {
-  margin: 0;
-  font-size: 32px;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
-}
-
-.hero-copy {
-  margin: 12px 0 0;
-  max-width: 64ch;
-  color: rgba(226, 232, 240, 0.84);
-  line-height: 1.7;
-}
-
-.eyebrow {
-  margin: 0 0 10px;
-  color: rgba(191, 219, 254, 0.88);
-  font-size: 12px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.hero-panel__meta {
+.dashboard-header__meta {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  justify-content: center;
-  gap: 10px;
+  gap: 8px;
   white-space: nowrap;
 }
 
-.hero-panel__chips {
+.dashboard-header__chips {
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 6px;
 }
 
-.hero-panel__controls {
+.dashboard-header__controls {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .refresh-label {
-  font-size: 13px;
-  color: rgba(226, 232, 240, 0.72);
+  color: var(--crc-text-muted);
+  font-size: 12px;
 }
 
 .kpi-wrap {
-  margin-top: 18px;
+  margin-top: 4px;
 }
 
 .kpi-grid {
@@ -947,13 +944,12 @@ onUnmounted(() => {
 
 .metric-card {
   position: relative;
-  min-height: 128px;
-  padding: 18px 20px;
-  border-radius: 20px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.06);
+  min-height: 118px;
+  padding: 18px;
   overflow: hidden;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
 .metric-card::before {
@@ -961,49 +957,49 @@ onUnmounted(() => {
   position: absolute;
   inset: 0 auto auto 0;
   width: 100%;
-  height: 4px;
-  background: var(--metric-accent, #2563eb);
+  height: 3px;
+  background: var(--metric-accent, var(--crc-accent));
 }
 
 .metric-card--blue {
-  --metric-accent: #2563eb;
+  --metric-accent: var(--crc-info);
 }
 
 .metric-card--teal {
-  --metric-accent: #14b8a6;
+  --metric-accent: var(--crc-accent);
 }
 
 .metric-card--amber {
-  --metric-accent: #f59e0b;
+  --metric-accent: var(--crc-warning);
 }
 
 .metric-card--violet {
-  --metric-accent: #8b5cf6;
+  --metric-accent: var(--crc-text-muted);
 }
 
 .metric-card__value {
-  font-size: 30px;
-  font-weight: 700;
-  color: #0f172a;
+  color: var(--crc-text-strong);
+  font-size: 28px;
+  font-weight: 680;
 }
 
 .metric-card__label {
   margin-top: 8px;
   font-size: 14px;
-  color: #475569;
+  color: var(--crc-text);
 }
 
 .metric-card__detail {
   margin-top: 10px;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--crc-text-muted);
 }
 
 .status-strip {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 18px;
+  gap: 12px;
+  margin-top: 14px;
 }
 
 .status-pill {
@@ -1011,27 +1007,25 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 18px;
-  border-radius: 18px;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.05);
+  padding: 12px 14px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
 .status-pill span {
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 13px;
 }
 
 .status-pill strong {
-  color: #0f172a;
+  color: var(--crc-text-strong);
   font-size: 14px;
   font-weight: 600;
 }
 
 .charts-grid {
-  margin-top: 18px;
+  margin-top: 16px;
 }
 
 .model-health-actions {
@@ -1053,15 +1047,15 @@ onUnmounted(() => {
 }
 
 .summary-chip--success {
-  border-color: rgba(20, 184, 166, 0.24);
+  border-color: var(--crc-success);
 }
 
 .summary-chip--warning {
-  border-color: rgba(245, 158, 11, 0.26);
+  border-color: var(--crc-warning);
 }
 
 .summary-chip--danger {
-  border-color: rgba(239, 68, 68, 0.24);
+  border-color: var(--crc-danger);
 }
 
 .summary-chip--wide {
@@ -1070,18 +1064,19 @@ onUnmounted(() => {
 
 .model-health-alert {
   margin-top: 14px;
-  border-radius: 12px;
+  border-radius: var(--crc-radius);
 }
 
 .chart-card {
-  border: none;
-  border-radius: 22px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
   overflow: hidden;
-  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.06);
+  background: var(--crc-surface);
+  box-shadow: none;
 }
 
 .chart-card--trend {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
+  background: var(--crc-surface);
 }
 
 .card-header {
@@ -1097,13 +1092,13 @@ onUnmounted(() => {
 
 .card-header h2 {
   margin: 0;
-  font-size: 18px;
-  color: #0f172a;
+  color: var(--crc-text-strong);
+  font-size: 16px;
 }
 
 .card-header p {
   margin: 6px 0 0;
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 13px;
 }
 
@@ -1123,19 +1118,19 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 4px;
   padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface-muted);
 }
 
 .summary-chip strong {
-  color: #0f172a;
+  color: var(--crc-text-strong);
   font-size: 18px;
   line-height: 1.2;
 }
 
 .summary-chip span {
-  color: #64748b;
+  color: var(--crc-text-muted);
   font-size: 12px;
 }
 
@@ -1157,7 +1152,7 @@ onUnmounted(() => {
 
 :deep(.el-card__header) {
   padding: 18px 20px 14px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  border-bottom: 1px solid var(--crc-border);
 }
 
 :deep(.el-card__body) {
@@ -1171,22 +1166,19 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .dashboard-page {
-    padding: 14px;
-  }
-
-  .hero-panel {
+  .dashboard-header {
     flex-direction: column;
     align-items: flex-start;
-    padding: 22px 20px;
   }
 
-  .hero-panel__meta {
+  .dashboard-header__meta {
+    width: 100%;
     align-items: flex-start;
+    white-space: normal;
   }
 
-  .hero-panel__chips,
-  .hero-panel__controls {
+  .dashboard-header__chips,
+  .dashboard-header__controls {
     justify-content: flex-start;
   }
 
