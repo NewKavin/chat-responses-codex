@@ -6,8 +6,8 @@ set +x
 : "${DOWNSTREAM_KEY:?DOWNSTREAM_KEY is required}"
 : "${MODEL_SLUG:?MODEL_SLUG is required}"
 
-readonly DEFAULT_CODEX_VERSION="0.144.0"
-readonly DEFAULT_OPENCODE_VERSION="1.17.9"
+readonly DEFAULT_CODEX_VERSION="0.144.4"
+readonly DEFAULT_OPENCODE_VERSION="1.17.18"
 readonly DEFAULT_CLAUDE_CODE_VERSION="2.1.195"
 readonly DEFAULT_HERMES_VERSION="0.14.0"
 CLIENTS_JSON="${CLIENTS_JSON:-[\"codex\",\"opencode\",\"claude_code\",\"hermes\"]}"
