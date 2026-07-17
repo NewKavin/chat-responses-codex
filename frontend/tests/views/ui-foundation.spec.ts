@@ -80,4 +80,16 @@ describe('ui foundation composition', () => {
     expect(adminLogin).not.toContain('linear-gradient')
     expect(portalLogin).not.toContain('linear-gradient')
   })
+
+  it('keeps typography letter spacing neutral across shared chrome', () => {
+    const typographySources = [
+      readSource('../../src/styles/base.css'),
+      readSource('../../src/components/AppShell.vue'),
+      readSource('../../src/components/AuthShell.vue')
+    ].join('\n')
+    const values = [...typographySources.matchAll(/letter-spacing:\s*([^;]+);/g)]
+      .map(match => match[1].trim())
+
+    expect(new Set(values)).toEqual(new Set(['0']))
+  })
 })

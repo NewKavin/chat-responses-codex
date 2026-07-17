@@ -229,7 +229,7 @@ const handleAccountCommand = (command: string) => {
   background: var(--crc-accent);
   font-size: 17px;
   font-weight: 750;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
 }
 
 html.dark .console-shell__brand-mark {
@@ -307,7 +307,7 @@ html.dark .console-shell__brand-mark {
   color: var(--crc-text-subtle);
   font-size: 10px;
   font-weight: 650;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 

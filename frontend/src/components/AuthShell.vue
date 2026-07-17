@@ -82,7 +82,7 @@ defineProps<{
   background: var(--crc-accent);
   font-size: 18px;
   font-weight: 750;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
 }
 
 html.dark .auth-shell__brand-mark {
@@ -106,7 +106,7 @@ html.dark .auth-shell__brand-mark {
   color: var(--crc-text-muted);
   font-size: 10px;
   font-weight: 550;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -119,7 +119,7 @@ html.dark .auth-shell__brand-mark {
   color: var(--crc-text-strong);
   font-size: 24px;
   font-weight: 680;
-  letter-spacing: -0.025em;
+  letter-spacing: 0;
   line-height: 1.3;
 }
 
