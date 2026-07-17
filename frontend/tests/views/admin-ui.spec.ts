@@ -23,4 +23,14 @@ describe('admin ui structure', () => {
     expect(board).toContain('probe-page-header')
     expect(board).not.toContain('summary-card')
   })
+
+  it('uses the responsive upstream management workbench', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('crc-page upstreams-page')
+    expect(page).toContain('crc-page-header')
+    expect(page).toContain('crc-table-shell')
+    expect(page).toContain('drawer-section')
+    expect(page).toContain('drawer-footer')
+  })
 })
