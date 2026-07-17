@@ -29,4 +29,15 @@ describe('portal ui structure', () => {
     expect(history).toContain('watch(resolvedTheme')
     expect(history).not.toContain('history-card')
   })
+
+  it('uses flat integration sections and bounded code examples', () => {
+    const page = source('Integration')
+
+    expect(page).toContain('crc-page integration-page')
+    expect(page).toContain('integration-summary')
+    expect(page).toContain('integration-section')
+    expect(page).toContain('code-surface')
+    expect(page).toContain('aria-label="复制代码"')
+    expect(page).not.toContain('integration-hero')
+  })
 })

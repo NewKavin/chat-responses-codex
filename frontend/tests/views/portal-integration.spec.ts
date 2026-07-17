@@ -16,7 +16,7 @@ describe('portal integration live catalog wiring', () => {
       /<el-empty\s+v-if="!hasConfigContent"\s+data-testid="integration-empty"/
     )
     expect(integrationView).toMatch(
-      /<el-card v-else data-testid="integration-config-tabs" class="tabs-card">/
+      /<(section|div) v-else data-testid="integration-config-tabs" class="code-surface">/
     )
   })
 })

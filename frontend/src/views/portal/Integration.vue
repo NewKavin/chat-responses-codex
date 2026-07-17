@@ -1,19 +1,18 @@
 <template>
-  <div class="integration-page">
-    <el-card class="integration-hero">
-      <div class="hero-top">
-        <div>
-          <p class="eyebrow">复制即用</p>
-          <h2>门户集成配置</h2>
-          <p class="hero-copy">
-            本页会自动读取当前下游的 key、当前网关 URL 和 live
-            `/v1/models`，生成可以直接复制到本地的配置文件。
-          </p>
-        </div>
+  <div class="crc-page integration-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">集成配置</h1>
+        <p class="crc-page-description">自动读取当前下游 key、网关地址与实时模型目录，生成可直接使用的客户端配置。</p>
+      </div>
+      <div>
         <el-tag type="success" effect="light">
           {{ primaryModelSlug || '未发现模型' }}
         </el-tag>
       </div>
+    </header>
+
+    <section v-loading="loading" class="integration-summary">
 
       <el-descriptions class="summary-grid" :column="2" border>
         <el-descriptions-item label="网关地址">
@@ -64,18 +63,15 @@
         show-icon
         :title="fatalError"
       />
-    </el-card>
+    </section>
 
-
-    <el-card class="compat-matrix-card">
-      <template #header>
-        <div class="section-head">
-          <div>
-            <h3>客户端兼容矩阵</h3>
-            <p>按协议族分组，每个客户端只需要一个配置即可连接网关。</p>
-          </div>
+    <section class="integration-section">
+      <div class="section-head">
+        <div>
+          <h2>客户端兼容矩阵</h2>
+          <p>按协议族分组，每个客户端只需要一个配置即可连接网关。</p>
         </div>
-      </template>
+      </div>
 
       <div class="compat-grid">
         <div class="compat-family">
@@ -120,18 +116,16 @@
         show-icon
         title="网关同时暴露 `/v1/chat/completions`、`/v1/responses`、`/v1/models`、`/v1/messages` 和 `/v1/messages/count_tokens`。上游只支持 Chat Completions 和 Responses 两种协议；`/v1/messages` 是网关的适配层，收到 Anthropic 格式请求后内部转成 Chat Completions 再发给上游。客户端只需要根据自己支持的协议族选对应的 endpoint 和 preset。"
       />
-    </el-card>
+    </section>
 
-    <el-card v-if="sortedModelStats.length" class="model-card">
-      <template #header>
-        <div class="section-head">
-          <div>
-            <h3>模型排序</h3>
-            <p>按月使用量优先，月使用量相同再看今日使用量。</p>
-          </div>
-          <el-tag effect="plain">{{ sortedModelStats.length }} 个统计项</el-tag>
+    <section v-if="sortedModelStats.length" class="integration-section">
+      <div class="section-head">
+        <div>
+          <h2>模型排序</h2>
+          <p>按月使用量优先，月使用量相同再看今日使用量。</p>
         </div>
-      </template>
+        <el-tag effect="plain">{{ sortedModelStats.length }} 个统计项</el-tag>
+      </div>
 
       <div class="model-grid">
         <div v-for="stat in sortedModelStats" :key="stat.model" class="model-chip">
@@ -142,7 +136,7 @@
           </span>
         </div>
       </div>
-    </el-card>
+    </section>
 
     <el-empty
       v-if="!hasConfigContent"
@@ -155,7 +149,7 @@
       </p>
     </el-empty>
 
-    <el-card v-else data-testid="integration-config-tabs" class="tabs-card">
+    <section v-else data-testid="integration-config-tabs" class="code-surface">
       <el-tabs v-model="activeTab" class="integration-tabs">
         <el-tab-pane label="Codex" name="codex">
           <div class="tab-body">
@@ -176,7 +170,11 @@
                     <code>~/.codex/config.toml</code>。
                   </p>
                 </div>
-                <el-button size="small" @click="copyCode(codexConfigToml)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(codexConfigToml)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ codexConfigToml }}</pre>
             </div>
@@ -193,7 +191,11 @@
                     再设全局阈值；切换模型时压缩点会跟着模型的实际窗口变。
                   </p>
                 </div>
-                <el-button size="small" @click="copyCode(codexModelCatalogJson)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(codexModelCatalogJson)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ codexModelCatalogJson }}</pre>
             </div>
@@ -208,7 +210,11 @@
                     key 写进 <code>auth.json</code>。
                   </p>
                 </div>
-                <el-button size="small" @click="copyCode(codexAuthLoginCommand)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(codexAuthLoginCommand)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ codexAuthLoginCommand }}</pre>
             </div>
@@ -241,7 +247,11 @@
                     这个 JSON 文件已经填好当前 key、网关 URL 和模型列表，复制后可直接使用。
                   </p>
                 </div>
-                <el-button size="small" @click="copyCode(opencodeConfig)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(opencodeConfig)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ opencodeConfig }}</pre>
             </div>
@@ -275,7 +285,11 @@
                     <code>/v1/models</code> 实时获取。
                   </p>
                 </div>
-                <el-button size="small" @click="copyCode(openAiCompatibleConfig)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(openAiCompatibleConfig)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ openAiCompatibleConfig }}</pre>
             </div>
@@ -312,7 +326,11 @@
                     <code>/v1/models</code> 实时获取。
                   </p>
                 </div>
-                <el-button size="small" @click="copyCode(anthropicCompatibleConfig)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(anthropicCompatibleConfig)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ anthropicCompatibleConfig }}</pre>
             </div>
@@ -345,7 +363,11 @@
                     不要再手工加 `/v1`。
                   </p>
                 </div>
-                <el-button size="small" @click="copyCode(claudeCodeSettingsJson)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(claudeCodeSettingsJson)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ claudeCodeSettingsJson }}</pre>
             </div>
@@ -376,7 +398,11 @@
                   <h4>步骤 1: 安装 npm 桥接器</h4>
                   <p>在项目根目录用 bun 安装 <code>hermes-agent</code> 桥接包。</p>
                 </div>
-                <el-button size="small" @click="copyCode(hermesInstallNpm)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesInstallNpm)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ hermesInstallNpm }}</pre>
             </div>
@@ -387,7 +413,11 @@
                   <h4>步骤 2: 安装 Python 运行时</h4>
                   <p>hermes-agent 是 Python 包的桥接器,需 Python 3.11+。受 PEP 668 限制,用 venv 安装。</p>
                 </div>
-                <el-button size="small" @click="copyCode(hermesInstallPython)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesInstallPython)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ hermesInstallPython }}</pre>
             </div>
@@ -398,7 +428,11 @@
                   <h4>步骤 3: 写入 ~/.hermes/config.yaml</h4>
                   <p>把下游 key 填入项目根目录 <code>.hermes.env</code> 的 <code>CHAT2RESPONSES_KEY</code>,然后保存新的 <code>model</code> 配置。</p>
                 </div>
-                <el-button size="small" @click="copyCode(hermesConfigYaml)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesConfigYaml)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ hermesConfigYaml }}</pre>
             </div>
@@ -409,7 +443,11 @@
                   <h4>步骤 4: 启动</h4>
                   <p>项目提供了启动脚本,自动加载 <code>.hermes.env</code> 和 venv。</p>
                 </div>
-                <el-button size="small" @click="copyCode(hermesLaunch)">复制</el-button>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesLaunch)">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </div>
               <pre class="code-block">{{ hermesLaunch }}</pre>
             </div>
@@ -424,13 +462,14 @@
           </div>
         </el-tab-pane>
       </el-tabs>
-    </el-card>
+    </section>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { CopyDocument } from '@element-plus/icons-vue'
 import { portalApi } from '@/api/portal'
 import type { ModelContextEntry, PortalModelStat } from '@/types'
 import {
@@ -697,57 +736,24 @@ onMounted(() => {
 
 <style scoped>
 .integration-page {
-  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  background:
-    radial-gradient(circle at top right, rgba(64, 158, 255, 0.12), transparent 30%),
-    linear-gradient(180deg, #f8fbff 0%, #f4f7fb 100%);
+  gap: 24px;
   min-height: 100%;
 }
 
-.integration-hero,
-.model-card,
-.tabs-card,
-.integration-empty {
-  border-radius: 16px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
-}
-
-.hero-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.eyebrow {
-  margin: 0 0 8px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: #409eff;
-}
-
-h2,
-h3,
 h4,
 p {
   margin: 0;
 }
 
-.hero-copy {
-  margin-top: 8px;
-  color: #606266;
-  line-height: 1.8;
-  max-width: 760px;
+.integration-summary {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--crc-border);
 }
 
 .summary-grid {
-  margin-top: 20px;
+  margin-bottom: 12px;
 }
 
 .status-alert {
@@ -761,13 +767,19 @@ p {
   gap: 12px;
 }
 
-.section-head h3 {
+.integration-section {
+  padding-top: 20px;
+  border-top: 1px solid var(--crc-border);
+}
+
+.section-head h2 {
+  margin: 0 0 4px;
+  color: var(--crc-text-strong);
   font-size: 16px;
-  margin-bottom: 4px;
 }
 
 .section-head p {
-  color: #8a8f98;
+  color: var(--crc-text-muted);
   font-size: 13px;
 }
 
@@ -778,23 +790,24 @@ p {
 }
 
 .model-chip {
-  padding: 14px 16px;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-  border: 1px solid #e6eef9;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface);
 }
 
 .model-chip strong {
+  color: var(--crc-text-strong);
   font-size: 13px;
   line-height: 1.5;
   word-break: break-word;
 }
 
 .model-chip span {
-  color: #606266;
+  color: var(--crc-text-muted);
   font-size: 12px;
 }
 
@@ -805,12 +818,15 @@ p {
 
 .empty-copy {
   margin-top: 12px;
-  color: #606266;
+  color: var(--crc-text-muted);
   line-height: 1.7;
 }
 
-.tabs-card {
-  padding-top: 4px;
+.code-surface {
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
 }
 
 .tab-body {
@@ -820,14 +836,12 @@ p {
 }
 
 .section-alert {
-  border-radius: 12px;
+  border-radius: var(--crc-radius-sm);
 }
 
 .step-card {
-  border: 1px solid #e6eef9;
-  background: #fff;
-  border-radius: 14px;
-  padding: 16px;
+  padding: 18px 0;
+  border-top: 1px solid var(--crc-border);
 }
 
 .step-head {
@@ -839,33 +853,36 @@ p {
 
 .step-head h4 {
   margin-bottom: 8px;
+  color: var(--crc-text-strong);
   font-size: 15px;
-  color: #1f2d3d;
 }
 
 .step-head p {
-  color: #606266;
+  color: var(--crc-text);
   line-height: 1.8;
 }
 
 .step-head code,
 .summary-grid code {
-  background: #f3f6fa;
-  border: 1px solid #e3eaf3;
   padding: 2px 6px;
-  border-radius: 6px;
-  color: #1f2d3d;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text-strong);
+  background: var(--crc-surface-muted);
+  overflow-wrap: anywhere;
 }
 
 .code-block {
+  max-width: 100%;
+  max-height: 420px;
   margin: 14px 0 0;
   padding: 16px;
-  border-radius: 12px;
-  background: #111827;
-  color: #e5e7eb;
   overflow-x: auto;
   overflow-y: auto;
-  max-height: 420px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text);
+  background: var(--crc-surface-muted);
   white-space: pre;
   line-height: 1.7;
   font-size: 13px;
@@ -890,12 +907,6 @@ p {
 }
 
 @media (max-width: 768px) {
-  .integration-page {
-    padding: 12px;
-    gap: 12px;
-  }
-
-  .hero-top,
   .step-head,
   .section-head {
     flex-direction: column;
@@ -907,11 +918,6 @@ p {
   }
 }
 
-.compat-matrix-card {
-  border-radius: 16px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
-}
-
 .compat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -919,40 +925,42 @@ p {
 }
 
 .compat-family {
-  padding: 16px;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-  border: 1px solid #e6eef9;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-surface);
 }
 
 .compat-family h4 {
-  font-size: 15px;
-  color: #1f2d3d;
   margin: 0;
+  color: var(--crc-text-strong);
+  font-size: 15px;
 }
 
 .compat-protocol {
+  color: var(--crc-accent);
   font-size: 12px;
-  color: #409eff;
   font-weight: 600;
 }
 
 .compat-family code {
-  background: #f3f6fa;
-  border: 1px solid #e3eaf3;
   padding: 2px 6px;
-  border-radius: 6px;
-  color: #1f2d3d;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text-strong);
+  background: var(--crc-surface-muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .compat-auth,
-.compat-models {
+.compat-models,
+.compat-adapter {
+  color: var(--crc-text-muted);
   font-size: 12px;
-  color: #606266;
 }
 
 .compat-clients {
@@ -960,5 +968,24 @@ p {
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 4px;
+}
+
+@media (max-width: 767px) {
+  .code-surface {
+    padding: 12px;
+  }
+
+  .step-head {
+    gap: 10px;
+  }
+
+  .step-head > .el-tooltip__trigger {
+    align-self: flex-end;
+  }
+
+  .compat-grid,
+  .model-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
