@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { compileStyle, parse } from '@vue/compiler-sfc'
 import { describe, expect, it } from 'vitest'
 
 const readSource = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
@@ -25,6 +26,23 @@ describe('ui foundation composition', () => {
     expect(switcher).toContain("setThemeMode('dark')")
     expect(switcher).toContain("setThemeMode('auto')")
     expect(switcher).toContain('跟随系统')
+  })
+
+  it('emits drawer body styles that survive Element Plus teleport', () => {
+    const filename = '../../src/components/AppShell.vue'
+    const shell = readSource(filename)
+    const style = parse(shell, { filename }).descriptor.styles[0]
+    if (!style) throw new Error('AppShell style block is missing')
+
+    const compiled = compileStyle({
+      id: 'data-v-shell-test',
+      filename,
+      source: style.content,
+      scoped: style.scoped
+    }).code
+
+    expect(compiled).toContain('.console-shell__drawer .el-drawer__body')
+    expect(compiled).not.toContain('[data-v-shell-test] .console-shell__drawer')
   })
 
   it('composes admin navigation through the shared shell', () => {

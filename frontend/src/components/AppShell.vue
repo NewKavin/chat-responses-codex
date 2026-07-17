@@ -469,7 +469,7 @@ html.dark .console-shell__brand-mark {
   padding: 8px;
 }
 
-:deep(.console-shell__drawer .el-drawer__body) {
+:global(.console-shell__drawer .el-drawer__body) {
   display: flex;
   padding: 0;
   flex-direction: column;
