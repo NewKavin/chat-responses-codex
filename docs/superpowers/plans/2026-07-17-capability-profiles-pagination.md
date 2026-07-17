@@ -34,7 +34,7 @@ Extend the troubleshooting test in `frontend/tests/views/admin-ui.spec.ts` with:
     expect(center).toContain('class="capability-pagination"')
 ```
 
-Keep these existing assertions unchanged so the detail tables remain unpaginated:
+Add these assertions so the detail tables remain unpaginated:
 
 ```ts
     expect(center).toContain(':data="selectedResolvedCapabilityRows"')
