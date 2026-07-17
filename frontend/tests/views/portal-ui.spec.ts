@@ -62,4 +62,16 @@ describe('portal ui structure', () => {
     expect(playground).toContain('composer-actions')
     expect(playground).toContain('overflow-wrap: anywhere')
   })
+
+  it('uses focused key security and portal probe surfaces', () => {
+    const keys = source('KeyManagement')
+    const probe = source('ModelProbe')
+
+    expect(keys).toContain('crc-page key-management-page')
+    expect(keys).toContain('key-security-surface')
+    expect(keys).toContain('rotate-key-dialog')
+    expect(keys).toContain('aria-label="复制密钥"')
+    expect(probe).toContain('crc-page portal-model-probe-page')
+    expect(probe).toContain('tone="portal"')
+  })
 })

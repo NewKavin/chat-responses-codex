@@ -1,11 +1,13 @@
 <template>
-  <div class="key-management-container">
-    <el-card>
-      <template #header>
-        <h2>秘钥管理</h2>
-      </template>
+  <div class="crc-page key-management-page">
+    <header class="crc-page-header">
+      <div>
+        <h1 class="crc-page-title">密钥管理</h1>
+        <p class="crc-page-description">查看当前下游密钥，或在需要时执行安全轮换。</p>
+      </div>
+    </header>
 
-      <div v-loading="loading" class="key-section">
+    <section v-loading="loading" class="key-security-surface crc-surface">
         <el-alert
           type="info"
           :closable="false"
@@ -15,22 +17,22 @@
         </el-alert>
 
         <div class="key-display">
-          <el-descriptions :column="1" border>
-            <el-descriptions-item label="秘钥">
-              <div class="key-cell">
-                <code v-if="keyPlaintext">{{ keyPlaintext }}</code>
-                <span v-else class="no-key">未设置秘钥</span>
-                <el-button-group>
-                  <el-button size="small" @click="copyKey(keyPlaintext)" :disabled="!keyPlaintext">
-                    复制秘钥
-                  </el-button>
-                  <el-button size="small" type="warning" @click="handleRotate">
-                    轮换秘钥
-                  </el-button>
-                </el-button-group>
-              </div>
-            </el-descriptions-item>
-          </el-descriptions>
+          <span class="key-display__label">当前访问密钥</span>
+          <code v-if="keyPlaintext">{{ keyPlaintext }}</code>
+          <span v-else class="no-key">未设置密钥</span>
+          <div class="key-actions">
+            <el-tooltip content="复制密钥" placement="top">
+              <el-button
+                aria-label="复制密钥"
+                circle
+                :disabled="!keyPlaintext"
+                @click="copyKey(keyPlaintext)"
+              >
+                <el-icon><CopyDocument /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-button type="warning" @click="handleRotate">轮换密钥</el-button>
+          </div>
         </div>
 
         <el-alert
@@ -40,21 +42,31 @@
         >
           轮换秘钥后，旧秘钥将立即失效。新秘钥只会显示一次，请务必妥善保存。
         </el-alert>
-      </div>
-    </el-card>
+    </section>
 
-    <el-dialog v-model="rotateDialogVisible" title="秘钥轮换成功" width="500px">
+    <el-dialog
+      v-model="rotateDialogVisible"
+      class="rotate-key-dialog"
+      title="密钥轮换成功"
+      width="min(500px, calc(100vw - 32px))"
+    >
       <el-alert type="success" :closable="false" show-icon>
         <template #title>
           新秘钥已生成，请立即保存！此秘钥只显示一次。
         </template>
       </el-alert>
       <div class="new-key-container">
-        <el-input v-model="newKey" readonly>
-          <template #append>
-            <el-button type="primary" @click="copyFullKey(newKey)">复制秘钥</el-button>
-          </template>
-        </el-input>
+        <code>{{ newKey }}</code>
+        <el-tooltip content="复制密钥" placement="top">
+          <el-button
+            aria-label="复制密钥"
+            circle
+            type="primary"
+            @click="copyFullKey(newKey)"
+          >
+            <el-icon><CopyDocument /></el-icon>
+          </el-button>
+        </el-tooltip>
       </div>
       <el-alert
         type="warning"
@@ -73,6 +85,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CopyDocument } from '@element-plus/icons-vue'
 import { portalApi } from '@/api/portal'
 import { getCopyableKey } from '@/utils/keyUtils'
 
@@ -162,44 +175,88 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.key-management-container {
+.key-management-page {
+  min-height: 100%;
+}
+
+.key-security-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 880px;
   padding: 20px;
 }
 
-.key-section {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
 .key-display {
-  margin-top: 10px;
-}
-
-.key-cell {
-  display: flex;
+  display: grid;
   align-items: center;
   gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 16px 0;
+  border-top: 1px solid var(--crc-border);
+  border-bottom: 1px solid var(--crc-border);
 }
 
-.key-cell code {
-  font-family: 'Courier New', monospace;
-  background: #f5f5f5;
-  padding: 4px 8px;
-  border-radius: 4px;
+.key-display__label {
+  grid-column: 1 / -1;
+  color: var(--crc-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.key-display code,
+.new-key-container code {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text-strong);
+  background: var(--crc-surface-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 14px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.key-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .no-key {
-  color: #909399;
+  color: var(--crc-text-muted);
   font-style: italic;
 }
 
 .new-key-container {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
   margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface-muted);
 }
 
 .helper-text {
-  margin-top: 10px;
+  margin: 0;
+}
+
+@media (max-width: 767px) {
+  .key-security-surface {
+    padding: 16px;
+  }
+
+  .key-display,
+  .new-key-container {
+    grid-template-columns: 1fr;
+  }
+
+  .key-actions {
+    justify-content: flex-start;
+  }
 }
 </style>
