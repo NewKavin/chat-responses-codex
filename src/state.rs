@@ -51,6 +51,7 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::fs;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
@@ -105,8 +106,6 @@ pub use crate::util::{
 const RESPONSE_HISTORY_MAX_ENTRIES: usize = 2048;
 const RESPONSE_HISTORY_TTL_SECONDS: u64 = 12 * 60 * 60;
 const ACTIVE_REQUEST_USER_AGENT_MAX_BYTES: usize = 256;
-const CAPABILITY_PROBE_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(5);
-
 fn fallback_stage_failure_key(
     downstream_id: &str,
     client_family: &str,
@@ -2533,32 +2532,32 @@ impl AppState {
         if prepared_jobs.is_empty() {
             return Ok(());
         }
-        let sender = {
+        let Some(sender) = ({
             self.capability_probe_sender
                 .lock()
                 .expect("probe sender lock poisoned")
                 .clone()
-        }
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotConnected,
-                "capability probe worker is not configured",
-            )
-        })?;
+        }) else {
+            tracing::warn!(
+                jobs = prepared_jobs.len(),
+                "capability probe worker is not configured; reconcile will retry"
+            );
+            return Ok(());
+        };
         let batch = ProbeJobBatch::new(prepared_jobs);
-        match tokio::time::timeout(CAPABILITY_PROBE_ENQUEUE_TIMEOUT, sender.send(batch)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "capability probe queue is closed",
-                ))
+        match sender.try_send(batch) {
+            Ok(()) => {}
+            Err(TrySendError::Full(batch)) => {
+                tracing::warn!(
+                    jobs = batch.jobs().len(),
+                    "capability probe queue is full; reconcile will retry"
+                );
             }
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "timed out waiting for capability probe queue capacity",
-                ))
+            Err(TrySendError::Closed(batch)) => {
+                tracing::warn!(
+                    jobs = batch.jobs().len(),
+                    "capability probe queue is closed; reconcile will retry"
+                );
             }
         }
         Ok(())

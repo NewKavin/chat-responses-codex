@@ -1448,7 +1448,7 @@ async fn freekey_sync_does_not_wait_for_full_probe_queue() {
 }
 
 #[tokio::test]
-async fn freekey_multi_upstream_retry_is_one_atomic_submission_batch() {
+async fn freekey_multi_upstream_persists_when_probe_queue_is_full() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -1479,11 +1479,11 @@ async fn freekey_multi_upstream_retry_is_one_atomic_submission_batch() {
     sender.try_send(blocker_probe_batch()).unwrap();
     state.set_capability_probe_sender(sender);
 
-    let error = state
+    let summary = state
         .sync_freekey_upstreams("fixture-source".into(), sync_items.clone(), 1_700_000_000)
         .await
-        .unwrap_err();
-    assert!(error.contains("timed out waiting for capability probe queue capacity"));
+        .unwrap();
+    assert_eq!(summary.created, 2);
     let blocker = receiver
         .try_recv()
         .expect("blocker batch should remain queued");
@@ -1496,38 +1496,13 @@ async fn freekey_multi_upstream_retry_is_one_atomic_submission_batch() {
         "a failed multi-upstream sync must not expose a partial route batch"
     );
 
-    let summary = state
-        .sync_freekey_upstreams("fixture-source".into(), sync_items, 1_700_000_001)
-        .await
-        .unwrap();
-    assert_eq!(summary.updated, 2);
-    let retry_jobs = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
-        .await
-        .expect("retry should submit all touched upstreams in one batch")
-        .unwrap()
-        .into_jobs();
-    let mut models = std::collections::BTreeMap::<String, usize>::new();
-    let mut upstream_ids = std::collections::BTreeSet::new();
-    for job in retry_jobs {
-        *models.entry(job.key.runtime_model_slug).or_default() += 1;
-        upstream_ids.insert(job.key.upstream_id);
-        assert_eq!(job.reason, ProbeReason::ConfigurationChanged);
-        assert_eq!(job.key.protocol, WireProtocol::ChatCompletions);
-    }
-    assert_eq!(
-        models,
-        std::collections::BTreeMap::from([
-            ("Lab/Multi-One".into(), 1),
-            ("Lab/Multi-Two".into(), 1),
-        ])
-    );
-    assert_eq!(upstream_ids.len(), 2);
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
             .await
             .is_err(),
-        "retry must not enqueue any extra batch"
+        "a full queue must not receive a partial route batch"
     );
+    assert_eq!(state.snapshot().await.upstreams.len(), 2);
 }
 
 #[tokio::test]
