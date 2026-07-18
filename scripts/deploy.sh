@@ -130,7 +130,10 @@ fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   log "Building docker image ${IMAGE_NAME}:${IMAGE_TAG}"
-  docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" "$REPO_ROOT"
+  "$SCRIPT_DIR/build-package-image.sh" \
+    --image "$IMAGE_NAME" \
+    --tag "$IMAGE_TAG" \
+    --skip-export
 else
   log "Skip docker image build"
 fi

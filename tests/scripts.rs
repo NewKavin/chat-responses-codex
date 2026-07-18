@@ -331,33 +331,95 @@ fn deployment_scripts_disable_xtrace_before_reading_secrets() {
 }
 
 #[test]
-fn deploy_clears_proxy_environment_without_changing_build_command() {
+fn deploy_builds_local_artifacts_before_packaging_runtime_image() {
     let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path().join("repo");
+    let scripts_dir = repo_root.join("scripts");
+    let frontend_dir = repo_root.join("frontend");
     let fake_bin = temp.path().join("bin");
     let deploy_dir = temp.path().join("deploy");
-    let proxy_capture = temp.path().join("proxy-capture.txt");
-    let args_capture = temp.path().join("args-capture.txt");
+    let tool_trace = temp.path().join("tool-trace.txt");
+    let runtime_dockerfile = temp.path().join("runtime.Dockerfile");
+    fs::create_dir_all(&scripts_dir).unwrap();
+    fs::create_dir_all(&frontend_dir).unwrap();
     fs::create_dir(&fake_bin).unwrap();
 
+    for script in ["deploy.sh", "build-package-image.sh"] {
+        write_executable(
+            &scripts_dir.join(script),
+            &fs::read_to_string(format!("scripts/{script}")).unwrap(),
+        );
+    }
+    fs::copy("docker-compose.yml", repo_root.join("docker-compose.yml")).unwrap();
+    fs::copy(".env.example", repo_root.join(".env.example")).unwrap();
+    fs::copy(
+        "frontend/package-lock.json",
+        frontend_dir.join("package-lock.json"),
+    )
+    .unwrap();
+
+    write_executable(
+        &fake_bin.join("npm"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+  if [[ -v "$name" ]]; then
+    printf 'npm inherited %s\n' "$name" >&2
+    exit 90
+  fi
+done
+printf 'npm' >>"$TOOL_TRACE"
+printf '\t%s' "$@" >>"$TOOL_TRACE"
+printf '\n' >>"$TOOL_TRACE"
+"#,
+    );
+    write_executable(
+        &fake_bin.join("cargo"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+  if [[ -v "$name" ]]; then
+    printf 'cargo inherited %s\n' "$name" >&2
+    exit 90
+  fi
+done
+printf 'cargo' >>"$TOOL_TRACE"
+printf '\t%s' "$@" >>"$TOOL_TRACE"
+printf '\n' >>"$TOOL_TRACE"
+mkdir -p target/release
+printf '#!/usr/bin/env bash\nexit 0\n' >target/release/chat-responses-codex
+chmod +x target/release/chat-responses-codex
+"#,
+    );
     write_executable(
         &fake_bin.join("docker"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
+for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+  if [[ -v "$name" ]]; then
+    printf 'docker inherited %s\n' "$name" >&2
+    exit 90
+  fi
+done
 if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "build" ]]; then
-  for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
-    if [[ -v "$name" ]]; then
-      printf '%s=set\n' "$name"
-    else
-      printf '%s=unset\n' "$name"
-    fi
-  done >"$DOCKER_PROXY_CAPTURE"
-  printf '%s\n' "$@" >"$DOCKER_ARGS_CAPTURE"
+  context="${@: -1}"
+  if [[ ! -x "$context/chat-responses-codex" ]]; then
+    printf 'runtime context missing local binary: %s\n' "$context" >&2
+    exit 91
+  fi
+  cp "$context/Dockerfile" "$RUNTIME_DOCKERFILE_CAPTURE"
+  printf 'docker' >>"$TOOL_TRACE"
+  printf '\t%s' "$@" >>"$TOOL_TRACE"
+  printf '\n' >>"$TOOL_TRACE"
   exit 0
 fi
-exit 0
+printf 'unexpected docker invocation:' >&2
+printf ' %s' "$@" >&2
+printf '\n' >&2
+exit 92
 "#,
     );
 
@@ -371,9 +433,10 @@ exit 0
         .arg("--tag")
         .arg("proxy-test-tag")
         .arg("--skip-start")
+        .current_dir(&repo_root)
         .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
-        .env("DOCKER_PROXY_CAPTURE", &proxy_capture)
-        .env("DOCKER_ARGS_CAPTURE", &args_capture)
+        .env("TOOL_TRACE", &tool_trace)
+        .env("RUNTIME_DOCKERFILE_CAPTURE", &runtime_dockerfile)
         .env("HTTP_PROXY", "http://proxy.invalid:8080")
         .env("HTTPS_PROXY", "http://proxy.invalid:8080")
         .env("ALL_PROXY", "socks5://proxy.invalid:1080")
@@ -389,33 +452,28 @@ exit 0
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let repo_root = std::env::current_dir()
-        .unwrap()
-        .canonicalize()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let captured_args = fs::read_to_string(&args_capture).unwrap();
-    assert_eq!(
-        captured_args.lines().collect::<Vec<_>>(),
-        vec![
-            "build",
-            "-t",
-            "proxy-test-image:proxy-test-tag",
-            repo_root.as_str(),
-        ]
-    );
-    assert_eq!(
-        fs::read_to_string(&proxy_capture).unwrap(),
-        concat!(
-            "HTTP_PROXY=unset\n",
-            "HTTPS_PROXY=unset\n",
-            "ALL_PROXY=unset\n",
-            "http_proxy=unset\n",
-            "https_proxy=unset\n",
-            "all_proxy=unset\n",
-        )
-    );
+    let trace = fs::read_to_string(&tool_trace).unwrap();
+    let npm_ci = trace
+        .find("npm\t--prefix\tfrontend\tci\n")
+        .expect("local npm ci invocation");
+    let npm_build = trace
+        .find("npm\t--prefix\tfrontend\trun\tbuild\n")
+        .expect("local frontend build invocation");
+    let cargo_build = trace
+        .find("cargo\tbuild\t--release\n")
+        .expect("local Cargo release build invocation");
+    let docker_build = trace
+        .find("docker\tbuild\t-t\tproxy-test-image:proxy-test-tag\t")
+        .expect("runtime image build invocation");
+    assert!(npm_ci < npm_build && npm_build < cargo_build && cargo_build < docker_build);
+
+    let runtime = fs::read_to_string(&runtime_dockerfile).unwrap();
+    assert!(runtime.starts_with("FROM debian:bookworm-slim\n"));
+    assert!(!runtime.contains("FROM node:"));
+    assert!(!runtime.contains("FROM rust:"));
+    assert!(runtime.contains("useradd --system --uid 10001"));
+    assert!(runtime.contains("HEALTHCHECK --interval=30s"));
+    assert!(runtime.contains("USER app"));
 }
 
 #[test]
