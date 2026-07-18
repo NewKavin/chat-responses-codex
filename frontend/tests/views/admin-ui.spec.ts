@@ -45,6 +45,13 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('onUnmounted')
   })
 
+  it('labels indexed model discovery results without key prefixes', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('Key #${item.key_index + 1}')
+    expect(page).not.toContain('item.key_prefix')
+  })
+
   it('uses the responsive downstream management workbench', () => {
     const page = source('views/admin/Downstreams.vue')
 

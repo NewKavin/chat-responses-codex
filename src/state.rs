@@ -61,6 +61,7 @@ use postgres::PostgresStateStore;
 pub use store::{StateStore, StoreFuture};
 
 pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
+pub use model_discovery::model_discovery_key_prefix;
 #[allow(unused_imports)]
 pub use model_discovery::{
     fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently,
@@ -2759,11 +2760,13 @@ impl AppState {
             .await;
             let discovered_by_key = discovery_results
                 .into_iter()
-                .map(|result| {
-                    (
-                        result.key,
-                        result.models.into_iter().collect::<BTreeSet<_>>(),
-                    )
+                .filter_map(|result| {
+                    keys.get(result.key_index).map(|api_key| {
+                        (
+                            api_key.clone(),
+                            result.models.into_iter().collect::<BTreeSet<_>>(),
+                        )
+                    })
                 })
                 .collect::<HashMap<_, _>>();
             let aggregate_models = upstream.route_models().into_iter().collect::<BTreeSet<_>>();

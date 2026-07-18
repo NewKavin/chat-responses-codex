@@ -66,6 +66,13 @@ export interface ApiKeyModelConfig {
   supported_models: string[]
 }
 
+export interface KeyModelDiscoveryResult {
+  key_index: number
+  models?: number
+  model_list?: string[]
+  error?: string
+}
+
 export interface UpstreamConfig {
   id: string
   name: string

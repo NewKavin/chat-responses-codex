@@ -1,10 +1,11 @@
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    fetch_models_from_upstream_keys_concurrently, portal_model_is_allowed, unix_seconds,
-    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState, DefaultModelContextConfig,
-    DownstreamConfig, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
-    ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
-    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    fetch_models_from_upstream_keys_concurrently, model_discovery_key_prefix,
+    portal_model_is_allowed, unix_seconds, AnnouncementConfig, AnnouncementLevel,
+    ApiKeyModelConfig, AppState, DefaultModelContextConfig, DownstreamConfig, FreekeySyncItem,
+    GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
+    ModelQualificationEvidence, ModelQualificationLevel, UpstreamConfig, UpstreamMutationError,
+    UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
@@ -966,12 +967,16 @@ pub(super) async fn build_model_probe_response(
 
         for result in discovery_results {
             let KeyModelDiscoveryResult {
-                key_prefix,
+                key_index,
                 mut models,
                 latency_ms,
                 error,
                 ..
             } = result;
+            let key_prefix = keys
+                .get(key_index)
+                .map(|key| model_discovery_key_prefix(key))
+                .unwrap_or_else(|| format!("key-{}", key_index + 1));
             let channel_id = format!("{}:{}", upstream.id, key_prefix);
             if let Some(allowlist) = allowlist {
                 models.retain(|model| portal_model_is_allowed(allowlist, model));
@@ -1116,9 +1121,15 @@ pub(super) async fn admin_create_upstreams_batch(
     };
 
     let now = unix_seconds();
-    let mut valid_keys: Vec<String> = Vec::new();
-    let mut all_models: Vec<String> = Vec::new();
-    let mut api_key_models: Vec<ApiKeyModelConfig> = Vec::new();
+    let mut current_keys: Vec<String> = Vec::new();
+    let mut seen_keys = HashSet::new();
+    for key in &payload.keys {
+        let key = key.trim().to_string();
+        if !key.is_empty() && seen_keys.insert(key.clone()) {
+            current_keys.push(key);
+        }
+    }
+    let mut models_by_key: HashMap<String, Vec<String>> = HashMap::new();
     let mut key_results: Vec<Value> = Vec::new();
     let mut failed = 0usize;
 
@@ -1131,48 +1142,51 @@ pub(super) async fn admin_create_upstreams_batch(
     )
     .await;
     for result in discovery_results {
+        let key = payload
+            .keys
+            .get(result.key_index)
+            .map(|key| key.trim().to_string())
+            .unwrap_or_default();
         if let Some(error) = result.error {
             failed = failed.saturating_add(1);
             key_results.push(json!({
-                "key_prefix": result.key_prefix,
+                "key_index": result.key_index,
                 "error": error
             }));
             continue;
         }
 
-        valid_keys.push(result.key.clone());
-        all_models.extend(result.models.iter().cloned());
-        api_key_models.push(ApiKeyModelConfig {
-            api_key: result.key.clone(),
-            supported_models: result.models.clone(),
-        });
+        models_by_key
+            .entry(key)
+            .or_default()
+            .extend(result.models.iter().cloned());
         key_results.push(json!({
-            "key_prefix": result.key_prefix,
+            "key_index": result.key_index,
             "models": result.models.len(),
             "model_list": result.models,
         }));
     }
 
-    // 合并并去重模型列表
+    for models in models_by_key.values_mut() {
+        models.sort();
+        models.dedup();
+    }
+    let mut all_models: Vec<String> = models_by_key
+        .values()
+        .flat_map(|models| models.iter().cloned())
+        .collect();
     all_models.sort();
     all_models.dedup();
 
-    // Even if no key could be verified, save all non-empty keys.
-    // The upstream might not support /v1/models or be temporarily unavailable.
-    // Keys will be validated at runtime when requests are actually made.
-    if valid_keys.is_empty() && !payload.keys.is_empty() {
-        let fallback_keys: Vec<String> = payload
-            .keys
-            .iter()
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .collect();
-        if !fallback_keys.is_empty() {
-            valid_keys = fallback_keys;
-        }
-    }
+    let api_key_models = current_keys
+        .iter()
+        .map(|api_key| ApiKeyModelConfig {
+            api_key: api_key.clone(),
+            supported_models: models_by_key.get(api_key).cloned().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
 
-    if valid_keys.is_empty() {
+    if current_keys.is_empty() {
         return (
             StatusCode::OK,
             Json(json!({
@@ -1187,13 +1201,13 @@ pub(super) async fn admin_create_upstreams_batch(
     }
 
     // 创建单个上游记录，包含多个 key
-    let primary_key = valid_keys.first().cloned().unwrap_or_default();
+    let primary_key = current_keys.first().cloned().unwrap_or_default();
     let mut upstream = UpstreamConfig {
         id: Uuid::new_v4().to_string(),
         name: payload.name.trim().to_string(),
         base_url: payload.base_url.trim().to_string(),
         api_key: primary_key.clone(),
-        api_keys: valid_keys.clone(),
+        api_keys: current_keys.clone(),
         api_key_models,
         protocol,
         protocols: protocols.clone(),
@@ -1226,7 +1240,7 @@ pub(super) async fn admin_create_upstreams_batch(
                 "total": payload.keys.len(),
                 "id": upstream.id,
                 "name": upstream.name,
-                "keys_count": valid_keys.len(),
+                "keys_count": current_keys.len(),
                 "models_count": all_models.len(),
                 "results": key_results,
             })),
@@ -1277,7 +1291,7 @@ pub(super) async fn admin_discover_upstream_models(
         if let Some(error) = result.error {
             failed = failed.saturating_add(1);
             key_results.push(json!({
-                "key_prefix": result.key_prefix,
+                "key_index": result.key_index,
                 "error": error
             }));
             continue;
@@ -1285,7 +1299,7 @@ pub(super) async fn admin_discover_upstream_models(
 
         all_models.extend(result.models.iter().cloned());
         key_results.push(json!({
-            "key_prefix": result.key_prefix,
+            "key_index": result.key_index,
             "models": result.models.len(),
             "model_list": result.models,
         }));

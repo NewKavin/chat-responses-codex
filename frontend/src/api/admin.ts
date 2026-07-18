@@ -20,6 +20,8 @@ import type {
   ResolvedCapabilitiesResponse,
   TroubleshootingRunRequest,
   TroubleshootingRunResponse,
+  ApiKeyModelConfig,
+  KeyModelDiscoveryResult,
   UpstreamConfig
 } from '@/types'
 
@@ -39,13 +41,9 @@ export interface BatchCreateUpstreamResult {
   created: number
   failed: number
   total: number
-  results: Array<{
+  results: Array<KeyModelDiscoveryResult & {
     id?: string
     name?: string
-    key_prefix?: string
-    models?: number
-    model_list?: string[]
-    error?: string
   }>
 }
 
@@ -58,13 +56,53 @@ export interface DiscoverUpstreamModelsResult {
   models: string[]
   failed: number
   total: number
-  results: Array<{
-    key_prefix?: string
-    models?: number
-    model_list?: string[]
-    error?: string
-  }>
+  results: KeyModelDiscoveryResult[]
   message?: string
+}
+
+export function reconcileKeyModelMappings(
+  keys: string[],
+  previous: ApiKeyModelConfig[] = [],
+  results: KeyModelDiscoveryResult[] = []
+): ApiKeyModelConfig[] {
+  const previousByKey = new Map<string, string[]>()
+  for (const mapping of previous) {
+    const key = String(mapping.api_key || '').trim()
+    if (!key) continue
+    const models = previousByKey.get(key) || []
+    for (const model of mapping.supported_models || []) {
+      const normalized = String(model || '').trim()
+      if (normalized && !models.includes(normalized)) models.push(normalized)
+    }
+    previousByKey.set(key, models)
+  }
+
+  const discoveredByKey = new Map<string, string[]>()
+  for (const result of results) {
+    const key = keys[result.key_index]?.trim()
+    if (!key || result.error || !Array.isArray(result.model_list) || result.model_list.length === 0) {
+      continue
+    }
+    const models = discoveredByKey.get(key) || []
+    for (const model of result.model_list) {
+      const normalized = String(model || '').trim()
+      if (normalized && !models.includes(normalized)) models.push(normalized)
+    }
+    discoveredByKey.set(key, models)
+  }
+
+  const seen = new Set<string>()
+  const mappings: ApiKeyModelConfig[] = []
+  for (const rawKey of keys) {
+    const key = rawKey.trim()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    mappings.push({
+      api_key: key,
+      supported_models: discoveredByKey.get(key) || previousByKey.get(key) || []
+    })
+  }
+  return mappings
 }
 export interface DashboardViewResponse {
   dashboard: DashboardData

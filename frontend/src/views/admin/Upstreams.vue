@@ -274,7 +274,11 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { adminApi, type BatchCreateUpstreamPayload } from '@/api/admin'
+import {
+  adminApi,
+  reconcileKeyModelMappings,
+  type BatchCreateUpstreamPayload
+} from '@/api/admin'
 import type { ApiKeyModelConfig, UpstreamConfig } from '@/types'
 
 const loading = ref(false)
@@ -418,8 +422,7 @@ const isAutoChatCompatibility = (value: UpstreamConfig) => {
 const displayKeyCount = (value: UpstreamConfig) => {
   const keys = [
     value.api_key,
-    ...(value.api_keys || []),
-    ...(value.api_key_models || []).map(item => item.api_key)
+    ...(value.api_keys || [])
   ]
     .map(key => String(key || '').trim())
     .filter(Boolean)
@@ -494,8 +497,7 @@ const handleEdit = (row: UpstreamConfig) => {
   const protocols = resolveProtocols(row)
   const allKeys = [
     row.api_key,
-    ...(row.api_keys || []),
-    ...(row.api_key_models || []).map(item => item.api_key)
+    ...(row.api_keys || [])
   ]
     .map(key => String(key || '').trim())
     .filter((v, i, a) => a.indexOf(v) === i)
@@ -615,9 +617,9 @@ const handleSubmit = async () => {
         const failedKeys = result.failed || 0
 
         if (failedKeys > 0 && keysCount > 0) {
-          ElMessage.success(`保存了 ${keysCount} 个有效 Key，${failedKeys} 个无效 Key 已剔除`)
+          ElMessage.success(`保存了 ${keysCount} 个 Key，${failedKeys} 个 Key 的模型映射暂为空`)
         } else if (keysCount > 0) {
-          ElMessage.success(`保存了 ${keysCount} 个有效 Key`)
+          ElMessage.success(`保存了 ${keysCount} 个 Key`)
         } else {
           const errors = result.results.filter(r => r.error).map(r => r.error).join("；")
           ElMessage.error(`所有 Key 均无效：${errors || "无法验证"}`)
@@ -719,17 +721,24 @@ const fetchModels = async () => {
       keys: apiKeys
     })
     const result = response.data
+    form.value.api_key_models = reconcileKeyModelMappings(
+      apiKeys,
+      form.value.api_key_models || [],
+      result.results || []
+    )
+    const mappedModels = Array.from(new Set(
+      form.value.api_key_models.flatMap(item => item.supported_models)
+    )).sort()
+    form.value.supported_models = mappedModels
 
     if (!result.models || result.models.length === 0) {
       const errorDetails = (result.results || [])
         .filter(item => item.error)
-        .map(item => item.error)
+        .map(item => `Key #${item.key_index + 1}: ${item.error}`)
         .join('；')
       ElMessage.error(result.message || `所有 Key 获取模型均失败${errorDetails ? `：${errorDetails}` : ''}`)
       return
     }
-
-    form.value.supported_models = [...result.models].sort()
 
     const successCount = (result.total || 0) - (result.failed || 0)
     const parts: string[] = ['成功获取 ' + result.models.length + ' 个模型']
@@ -737,7 +746,11 @@ const fetchModels = async () => {
       parts.push('用了 ' + successCount + ' 个 Key')
     }
     if (result.failed > 0) {
-      parts.push(result.failed + ' 个 Key 获取失败')
+      const failedKeys = (result.results || [])
+        .filter(item => item.error)
+        .map(item => `Key #${item.key_index + 1}`)
+        .join('、')
+      parts.push(result.failed + ' 个 Key 获取失败' + (failedKeys ? `（${failedKeys}）` : ''))
     }
     ElMessage.success(parts.join('，'))
   } catch (error: any) {

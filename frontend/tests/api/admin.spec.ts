@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
-import { adminApi, adminHttp, createAdminApiClient, hasUsableAdminToken, splitDashboardResponse } from '../../src/api/admin'
+import {
+  adminApi,
+  adminHttp,
+  createAdminApiClient,
+  hasUsableAdminToken,
+  reconcileKeyModelMappings,
+  splitDashboardResponse,
+  type DiscoverUpstreamModelsResult
+} from '../../src/api/admin'
 import type {
+  ApiKeyModelConfig,
   CompatibilityMatrixRunResponse,
   DashboardSummaryResponse,
   DialectProfileSummary
@@ -89,6 +98,52 @@ describe('admin api auth behavior', () => {
     await adminApi.getModelProbe()
 
     expect(spy).toHaveBeenCalledWith('/admin/model-probe')
+  })
+
+  it('addresses model discovery results by stable key index', async () => {
+    const discovery: DiscoverUpstreamModelsResult = {
+      models: ['glm-5.2'],
+      failed: 1,
+      total: 2,
+      results: [
+        { key_index: 0, models: 1, model_list: ['glm-5.2'] },
+        { key_index: 1, error: 'upstream returned 503' }
+      ]
+    }
+    const spy = vi.spyOn(adminHttp, 'post').mockResolvedValue({ data: discovery } as never)
+
+    await adminApi.discoverUpstreamModels({
+      base_url: 'https://upstream.example/v1',
+      keys: ['first-local-key', 'second-local-key']
+    })
+
+    expect(spy).toHaveBeenCalledWith('/admin/upstreams/discover-models', {
+      base_url: 'https://upstream.example/v1',
+      keys: ['first-local-key', 'second-local-key']
+    })
+    expect(discovery.results.map(result => result.key_index)).toEqual([0, 1])
+  })
+
+  it('reconciles indexed discovery without reviving removed or failed new keys', () => {
+    const previous: ApiKeyModelConfig[] = [
+      { api_key: 'key-a', supported_models: ['old-a'] },
+      { api_key: 'key-b', supported_models: ['old-b'] },
+      { api_key: 'removed-key', supported_models: ['removed-model'] }
+    ]
+
+    expect(reconcileKeyModelMappings(
+      ['key-a', 'key-b', 'key-new'],
+      previous,
+      [
+        { key_index: 0, models: 1, model_list: ['glm-5.2'] },
+        { key_index: 1, error: 'upstream returned 503' },
+        { key_index: 2, error: 'upstream returned 503' }
+      ]
+    )).toEqual([
+      { api_key: 'key-a', supported_models: ['glm-5.2'] },
+      { api_key: 'key-b', supported_models: ['old-b'] },
+      { api_key: 'key-new', supported_models: [] }
+    ])
   })
 
   it('qualifies live upstream models with explicit apply intent', async () => {

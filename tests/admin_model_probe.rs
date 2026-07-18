@@ -4,7 +4,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
-use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
+use chat_responses_codex::state::{
+    fetch_models_from_upstream_keys_concurrently, AppConfig, AppState, PersistedState,
+    UpstreamConfig,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tower::ServiceExt;
@@ -87,6 +90,35 @@ async fn get_admin_token(app: &axum::Router) -> String {
     let json: Value = serde_json::from_slice(&body).unwrap();
 
     json["token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn admin_model_probe_discovery_results_expand_duplicate_indices() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(|| async { (StatusCode::OK, Json(json!({"data": [{"id": "glm-5.2"}]}))) }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let keys = vec!["probe-key".to_string(), " probe-key ".to_string()];
+    let results = fetch_models_from_upstream_keys_concurrently(
+        &client,
+        &format!("http://{}", address),
+        &keys,
+        2,
+    )
+    .await;
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].key_index, 0);
+    assert_eq!(results[1].key_index, 1);
+    assert_eq!(results[0].models, vec!["glm-5.2"]);
+    assert_eq!(results[1].models, vec!["glm-5.2"]);
 }
 
 #[tokio::test]
