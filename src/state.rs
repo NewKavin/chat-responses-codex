@@ -3082,25 +3082,21 @@ impl AppState {
         M: Fn(io::Error) -> E,
     {
         let _persist_guard = self.config_persist_lock.lock().await;
-        let (candidate_state, result) = {
-            let state = self.inner.lock().await;
-            let mut candidate_state = state.clone();
-            let result = mutator(&mut candidate_state)?;
-            if !downstream_plaintext_pairs_unchanged(
-                &state.downstreams,
-                &candidate_state.downstreams,
-            ) {
-                validate_downstream_plaintext_pairs(&mut candidate_state);
-            }
-            (candidate_state, result)
-        };
+        let mut state = self.inner.lock().await;
+        let mut candidate_state = state.clone();
+        let result = mutator(&mut candidate_state)?;
+        if !downstream_plaintext_pairs_unchanged(
+            &state.downstreams,
+            &candidate_state.downstreams,
+        ) {
+            validate_downstream_plaintext_pairs(&mut candidate_state);
+        }
 
         self.config_store
             .persist_config(&candidate_state)
             .await
             .map_err(map_io)?;
 
-        let mut state = self.inner.lock().await;
         state.upstreams = candidate_state.upstreams;
         state.downstreams = candidate_state.downstreams;
         state.announcement = candidate_state.announcement;

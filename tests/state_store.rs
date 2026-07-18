@@ -513,7 +513,7 @@ impl StateStore for QueryStore {
 }
 
 #[tokio::test]
-async fn routing_snapshot_does_not_block_behind_slow_config_persist() {
+async fn routing_snapshot_does_not_publish_before_slow_config_persist_commits() {
     let slow_store = SlowStore::new();
     let state = AppState::new_with_store(
         PersistedState {
@@ -547,12 +547,13 @@ async fn routing_snapshot_does_not_block_behind_slow_config_persist() {
     )
     .await;
     assert!(
-        snapshot.is_ok(),
-        "routing snapshot should not wait for slow persist"
+        snapshot.is_err(),
+        "routing snapshot must not publish a candidate before persistence commits"
     );
 
     release_persist.notify_one();
-    let _ = updater.await;
+    updater.await.unwrap().unwrap();
+    assert!(!state.routing_snapshot().await.upstreams[0].active);
 }
 
 #[tokio::test]

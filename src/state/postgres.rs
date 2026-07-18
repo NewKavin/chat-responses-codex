@@ -303,7 +303,6 @@ impl PostgresStateStore {
         let mut conn = self.pool.get().await.map_err(io_other)?;
         let tx = conn.transaction().await.map_err(io_other)?;
         sync_config_tables(&tx, state).await?;
-        insert_usage_logs(&tx, &state.usage_logs).await?;
         tx.commit().await.map_err(io_other)
     }
 
