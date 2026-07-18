@@ -36,6 +36,15 @@ describe('admin ui structure', () => {
     expect(page).toContain('upstream-account-drawer')
   })
 
+  it('loads upstreams asynchronously without polling the whole workbench', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('onMounted(() =>')
+    expect(page).not.toContain('setInterval')
+    expect(page).not.toContain('startAutoRefresh')
+    expect(page).not.toContain('onUnmounted')
+  })
+
   it('uses the responsive downstream management workbench', () => {
     const page = source('views/admin/Downstreams.vue')
 

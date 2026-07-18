@@ -272,7 +272,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, onUnmounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi, type BatchCreateUpstreamPayload } from '@/api/admin'
 import type { ApiKeyModelConfig, UpstreamConfig } from '@/types'
@@ -286,9 +286,6 @@ const fetchingModels = ref(false)
 const formRef = ref()
 const contextConfigTab = ref<'default' | 'overrides'>('overrides')
 const clearDefaultContext = ref(false)
-
-// Auto-refresh timer
-let refreshTimer: number | null = null
 
 const form = ref<Partial<UpstreamConfig>>({
   id: '',
@@ -394,20 +391,6 @@ const loadData = async () => {
     ElMessage.error('加载数据失败')
   } finally {
     loading.value = false
-  }
-}
-
-const startAutoRefresh = () => {
-  // Refresh every 5 seconds
-  refreshTimer = window.setInterval(() => {
-    loadData()
-  }, 5000)
-}
-
-const stopAutoRefresh = () => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
   }
 }
 
@@ -767,11 +750,6 @@ const fetchModels = async () => {
 
 onMounted(() => {
   loadData()
-  startAutoRefresh()
-})
-
-onUnmounted(() => {
-  stopAutoRefresh()
 })
 </script>
 
