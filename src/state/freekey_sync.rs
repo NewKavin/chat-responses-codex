@@ -91,14 +91,6 @@ pub(super) fn derive_supported_models(key_models: &[ApiKeyModelConfig]) -> Vec<S
     models
 }
 
-fn normalize_model_set(models: &[String]) -> HashSet<String> {
-    models
-        .iter()
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .collect()
-}
-
 impl AppState {
     pub async fn sync_freekey_upstreams(
         &self,
@@ -442,7 +434,7 @@ impl AppState {
                         upstream.api_key_models = api_key_models
                             .iter()
                             .filter_map(|value| {
-                                let api_key = value.get("api_key").and_then(|v| v.as_str())?;
+                                let api_key = value.get("api_key").and_then(|v| v.as_str())?.trim();
                                 let supported_models = value
                                     .get("supported_models")
                                     .and_then(|v| v.as_array())?
@@ -509,26 +501,16 @@ impl AppState {
                     }
                 }
                 if replace_api_keys {
-                    if let Some(supported_models) =
-                        updates.get("supported_models").and_then(|v| v.as_array())
-                    {
-                        let supported_models = supported_models
-                            .iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect::<Vec<_>>();
-                        if normalize_model_set(&derive_supported_models(&upstream.api_key_models))
-                            != normalize_model_set(&supported_models)
-                        {
-                            // Discovery can refresh aggregate supported_models without also
-                            // refreshing per-key mappings. Keeping stale api_key_models would
-                            // make newly discovered models appear routable in the UI while the
-                            // gateway skips the upstream for lack of a mapped key.
-                            upstream.api_key_models.clear();
-                        }
-                        upstream.supported_models = supported_models;
-                    } else if replace_api_key_models {
+                    if replace_api_key_models || !upstream.api_key_models.is_empty() {
                         upstream.supported_models =
                             derive_supported_models(&upstream.api_key_models);
+                    } else if let Some(supported_models) =
+                        updates.get("supported_models").and_then(|v| v.as_array())
+                    {
+                        upstream.supported_models = supported_models
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
                     }
                 } else if updates.get("api_key_models").is_none() {
                     if let Some(supported_models) =

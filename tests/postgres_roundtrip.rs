@@ -76,7 +76,7 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
 }
 
 #[tokio::test]
-async fn postgres_roundtrip_preserves_normalized_state() {
+async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_mapping() {
     let _guard = env_lock().lock().await;
     let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
         eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
@@ -101,6 +101,17 @@ async fn postgres_roundtrip_preserves_normalized_state() {
         name: "primary".into(),
         base_url: "https://upstream.example".into(),
         api_key: "upstream-secret".into(),
+        api_keys: vec!["upstream-empty-secret".into()],
+        api_key_models: vec![
+            chat_responses_codex::state::ApiKeyModelConfig {
+                api_key: "upstream-secret".into(),
+                supported_models: vec!["GLM-4.1-mini".into()],
+            },
+            chat_responses_codex::state::ApiKeyModelConfig {
+                api_key: "upstream-empty-secret".into(),
+                supported_models: vec![],
+            },
+        ],
         protocol: UpstreamProtocol::Responses,
         protocols: vec![UpstreamProtocol::Responses],
         supported_models: vec!["GLM-4.1-mini".into()],

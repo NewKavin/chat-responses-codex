@@ -2495,7 +2495,16 @@ async fn test_upstreams_update_merges_api_keys() {
 
 #[tokio::test]
 async fn test_upstreams_update_merges_api_key_models() {
-    let state = create_test_state();
+    let state = create_test_state_with_upstreams(vec![UpstreamConfig {
+        id: "upstream-1".to_string(),
+        name: "Test Upstream".to_string(),
+        base_url: "https://api.example.com".to_string(),
+        api_key: "sk-key-a".to_string(),
+        api_keys: vec!["sk-key-b".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        active: true,
+        ..Default::default()
+    }]);
     let app = chat_responses_codex::server::build_router(state.clone());
     let token = get_admin_token(&app, "admin", "admin").await;
 
@@ -2880,8 +2889,9 @@ async fn test_update_replace_mode_syncs_legacy_api_key_field() {
 }
 
 /// Reproduces the admin UI flow where an editor removes one key from the
-/// multiline field, clicks "获取模型", and then saves. The fetch call refreshes
-/// only `supported_models`; `api_key_models` stays stale until save.
+/// multiline field, clicks "获取模型", and then saves. A replacement aggregate
+/// must not erase the exact current-key mapping when discovery did not return a
+/// matching per-key result.
 #[tokio::test]
 async fn test_update_replace_mode_prunes_stale_api_key_models_after_model_discovery() {
     let existing = vec![UpstreamConfig {
@@ -2963,17 +2973,20 @@ async fn test_update_replace_mode_prunes_stale_api_key_models_after_model_discov
         "stale key-c mapping should be pruned, got {:?}",
         upstream.api_key_models
     );
+    assert_eq!(upstream.supported_models, vec!["gpt-4".to_string()]);
+    assert!(upstream.keys_for_model("gpt-4.1-mini").is_empty());
     assert_eq!(
-        upstream.supported_models,
-        vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
-        "supported_models should keep the freshly discovered list even when api_key_models is stale"
-    );
-    let mut keys_for_new_model = upstream.keys_for_model("gpt-4.1-mini");
-    keys_for_new_model.sort();
-    assert_eq!(
-        keys_for_new_model,
-        vec!["key-a".to_string(), "key-b".to_string()],
-        "freshly discovered models must stay routable after replace-mode save"
+        upstream.api_key_models,
+        vec![
+            ApiKeyModelConfig {
+                api_key: "key-a".to_string(),
+                supported_models: vec!["gpt-4".to_string()],
+            },
+            ApiKeyModelConfig {
+                api_key: "key-b".to_string(),
+                supported_models: vec!["gpt-4".to_string()],
+            },
+        ]
     );
 }
 
