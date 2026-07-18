@@ -552,6 +552,16 @@ onBeforeUnmount(() => {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    box-shadow var(--crc-duration) var(--crc-ease-out),
+    border-color var(--crc-duration) var(--crc-ease-out);
+}
+
+.probe-metric:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-md);
+  transform: translateY(-2px);
 }
 
 .summary-value {
@@ -571,7 +581,7 @@ onBeforeUnmount(() => {
   border-radius: var(--crc-radius);
   overflow: hidden;
   background: var(--crc-surface);
-  box-shadow: none;
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .card-header {

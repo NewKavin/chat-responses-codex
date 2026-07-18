@@ -817,7 +817,9 @@ p {
   margin-top: 12px;
   overflow: hidden;
   border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius-sm);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .model-ranking__item {
@@ -828,6 +830,11 @@ p {
   min-height: 44px;
   padding: 9px 12px;
   border-bottom: 1px solid var(--crc-border);
+  transition: background-color var(--crc-duration-fast) var(--crc-ease);
+}
+
+.model-ranking__item:hover {
+  background: var(--crc-surface-hover);
 }
 
 .model-ranking__item:last-child {
@@ -874,6 +881,7 @@ p {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .config-section-head {

@@ -950,6 +950,16 @@ onUnmounted(() => {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    box-shadow var(--crc-duration) var(--crc-ease-out),
+    border-color var(--crc-duration) var(--crc-ease-out);
+}
+
+.metric-card:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-md);
+  transform: translateY(-2px);
 }
 
 .metric-card::before {
@@ -958,7 +968,11 @@ onUnmounted(() => {
   inset: 0 auto auto 0;
   width: 100%;
   height: 3px;
-  background: var(--metric-accent, var(--crc-accent));
+  background: linear-gradient(
+    90deg,
+    var(--metric-accent, var(--crc-accent)),
+    transparent 160%
+  );
 }
 
 .metric-card--blue {
@@ -974,13 +988,15 @@ onUnmounted(() => {
 }
 
 .metric-card--violet {
-  --metric-accent: var(--crc-text-muted);
+  --metric-accent: var(--crc-violet);
 }
 
 .metric-card__value {
   color: var(--crc-text-strong);
   font-size: 28px;
   font-weight: 680;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
 }
 
 .metric-card__label {
@@ -1011,6 +1027,7 @@ onUnmounted(() => {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .status-pill span {
@@ -1072,7 +1089,7 @@ onUnmounted(() => {
   border-radius: var(--crc-radius);
   overflow: hidden;
   background: var(--crc-surface);
-  box-shadow: none;
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .chart-card--trend {
@@ -1119,7 +1136,7 @@ onUnmounted(() => {
   gap: 4px;
   padding: 12px 14px;
   border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius-sm);
+  border-radius: var(--crc-radius);
   background: var(--crc-surface-muted);
 }
 

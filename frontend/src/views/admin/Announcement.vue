@@ -234,9 +234,11 @@ onMounted(() => {
 .announcement-form-surface {
   width: 100%;
   max-width: 760px;
-  padding: 20px 0;
-  border-top: 1px solid var(--crc-border);
-  border-bottom: 1px solid var(--crc-border);
+  padding: 24px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .announcement-note {
@@ -252,9 +254,10 @@ onMounted(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 20px;
-  padding: 16px 0;
-  border-top: 1px solid var(--crc-border);
-  border-bottom: 1px solid var(--crc-border);
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface-muted);
 }
 
 .meta-item {

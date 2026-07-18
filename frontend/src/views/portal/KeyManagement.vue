@@ -192,9 +192,10 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
   grid-template-columns: minmax(0, 1fr) auto;
-  padding: 16px 0;
-  border-top: 1px solid var(--crc-border);
-  border-bottom: 1px solid var(--crc-border);
+  padding: 16px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius);
+  background: var(--crc-surface-muted);
 }
 
 .key-display__label {

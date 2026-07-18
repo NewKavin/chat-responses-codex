@@ -2,7 +2,7 @@
   <div class="console-shell" :class="{ 'console-shell--collapsed': collapsed }">
     <aside class="console-shell__sidebar" :aria-label="`${contextLabel}导航`">
       <div class="console-shell__brand">
-        <div class="console-shell__brand-mark" aria-hidden="true">C</div>
+        <BrandLogo :size="34" class="console-shell__brand-mark" />
         <div v-show="!collapsed" class="console-shell__brand-copy">
           <strong>Chat Responses</strong>
           <span>{{ contextLabel }}</span>
@@ -93,7 +93,7 @@
       :with-header="false"
     >
       <div class="console-shell__mobile-brand">
-        <div class="console-shell__brand-mark" aria-hidden="true">C</div>
+        <BrandLogo :size="34" class="console-shell__brand-mark" />
         <div class="console-shell__brand-copy">
           <strong>Chat Responses</strong>
           <span>{{ contextLabel }}</span>
@@ -134,6 +134,7 @@ import {
   User
 } from '@element-plus/icons-vue'
 import ThemeSwitcher from '@/components/ThemeSwitcher.vue'
+import BrandLogo from '@/components/BrandLogo.vue'
 import type { AppNavItem } from '@/types/navigation'
 
 const props = defineProps<{
@@ -199,7 +200,10 @@ const handleAccountCommand = (command: string) => {
   flex-direction: column;
   border-right: 1px solid var(--crc-border);
   background: var(--crc-surface);
-  transition: width 180ms ease, min-width 180ms ease;
+  transition: width var(--crc-duration) var(--crc-ease),
+    min-width var(--crc-duration) var(--crc-ease),
+    background-color var(--crc-duration) var(--crc-ease),
+    border-color var(--crc-duration) var(--crc-ease);
 }
 
 .console-shell--collapsed .console-shell__sidebar {
@@ -219,21 +223,10 @@ const handleAccountCommand = (command: string) => {
 }
 
 .console-shell__brand-mark {
-  display: grid;
   width: 34px;
   height: 34px;
   flex: 0 0 34px;
-  place-items: center;
   border-radius: var(--crc-radius);
-  color: var(--crc-surface);
-  background: var(--crc-accent);
-  font-size: 17px;
-  font-weight: 750;
-  letter-spacing: 0;
-}
-
-html.dark .console-shell__brand-mark {
-  color: var(--crc-canvas);
 }
 
 .console-shell__brand-copy {
@@ -282,11 +275,14 @@ html.dark .console-shell__brand-mark {
 
 .console-shell__menu :deep(.el-menu-item),
 .console-shell__mobile-nav :deep(.el-menu-item) {
+  position: relative;
   height: 40px;
   margin: 3px 0;
   border-radius: var(--crc-radius-sm);
   color: var(--crc-text-muted);
   line-height: 40px;
+  transition: color var(--crc-duration-fast) var(--crc-ease),
+    background-color var(--crc-duration-fast) var(--crc-ease);
 }
 
 .console-shell__menu :deep(.el-menu-item:hover),
@@ -302,12 +298,26 @@ html.dark .console-shell__brand-mark {
   font-weight: 600;
 }
 
+.console-shell__menu:not(.el-menu--collapse)
+  :deep(.el-menu-item.is-active)::before,
+.console-shell__mobile-nav :deep(.el-menu-item.is-active)::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 3px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--crc-accent);
+  transform: translateY(-50%);
+}
+
 .console-shell__group-label {
   padding: 14px 12px 5px;
   color: var(--crc-text-subtle);
   font-size: 10px;
   font-weight: 650;
-  letter-spacing: 0;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -325,6 +335,8 @@ html.dark .console-shell__brand-mark {
   color: var(--crc-text-muted);
   background: transparent;
   cursor: pointer;
+  transition: color var(--crc-duration-fast) var(--crc-ease),
+    background-color var(--crc-duration-fast) var(--crc-ease);
 }
 
 .console-shell__collapse:hover {
@@ -349,7 +361,11 @@ html.dark .console-shell__brand-mark {
   justify-content: space-between;
   gap: 16px;
   border-bottom: 1px solid var(--crc-border);
-  background: var(--crc-surface);
+  background: var(--crc-topbar-bg);
+  backdrop-filter: saturate(1.4) blur(10px);
+  -webkit-backdrop-filter: saturate(1.4) blur(10px);
+  transition: background-color var(--crc-duration) var(--crc-ease),
+    border-color var(--crc-duration) var(--crc-ease);
 }
 
 .console-shell__heading,
@@ -397,6 +413,8 @@ html.dark .console-shell__brand-mark {
   color: var(--crc-text);
   background: var(--crc-surface);
   cursor: pointer;
+  transition: border-color var(--crc-duration-fast) var(--crc-ease),
+    background-color var(--crc-duration-fast) var(--crc-ease);
 }
 
 .console-shell__account:hover {
@@ -436,6 +454,14 @@ html.dark .console-shell__brand-mark {
   overflow: auto;
   padding: 22px 24px 28px;
   background: var(--crc-canvas);
+  transition: background-color var(--crc-duration) var(--crc-ease);
+}
+
+.console-shell__content > * {
+  width: 100%;
+  max-width: var(--crc-content-max);
+  margin-right: auto;
+  margin-left: auto;
 }
 
 .console-shell__icon-button {
@@ -450,6 +476,9 @@ html.dark .console-shell__brand-mark {
   color: var(--crc-text-muted);
   background: var(--crc-surface);
   cursor: pointer;
+  transition: color var(--crc-duration-fast) var(--crc-ease),
+    border-color var(--crc-duration-fast) var(--crc-ease),
+    background-color var(--crc-duration-fast) var(--crc-ease);
 }
 
 .console-shell__icon-button:hover {

@@ -6,7 +6,7 @@
 
     <section class="auth-shell__panel" aria-labelledby="auth-shell-title">
       <div class="auth-shell__brand" aria-label="Chat Responses Codex">
-        <div class="auth-shell__brand-mark" aria-hidden="true">C</div>
+        <BrandLogo :size="40" class="auth-shell__brand-mark" />
         <div class="auth-shell__brand-copy">
           <strong>Chat Responses Codex</strong>
           <span>Gateway Console</span>
@@ -31,6 +31,7 @@
 
 <script setup lang="ts">
 import ThemeSwitcher from '@/components/ThemeSwitcher.vue'
+import BrandLogo from '@/components/BrandLogo.vue'
 
 defineProps<{
   title: string
@@ -48,21 +49,72 @@ defineProps<{
   place-items: center;
   color: var(--crc-text);
   background: var(--crc-canvas);
+  overflow: hidden;
+  transition: background-color var(--crc-duration) var(--crc-ease);
+}
+
+.auth-shell::before,
+.auth-shell::after {
+  content: '';
+  position: absolute;
+  width: 520px;
+  height: 520px;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.16;
+  pointer-events: none;
+}
+
+.auth-shell::before {
+  top: -180px;
+  right: -120px;
+  background: var(--crc-accent);
+}
+
+.auth-shell::after {
+  bottom: -200px;
+  left: -140px;
+  background: var(--crc-info);
+}
+
+@keyframes auth-shell-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .auth-shell__utility {
   position: absolute;
   top: 20px;
   right: 20px;
+  z-index: 2;
 }
 
 .auth-shell__panel {
+  position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 420px;
   padding: 30px 32px 28px;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius-lg);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-md);
+  animation: auth-shell-rise var(--crc-duration-slow) var(--crc-ease-out) both;
+}
+
+.auth-shell__panel::before {
+  content: '';
+  position: absolute;
+  inset: -1px -1px auto;
+  height: 4px;
+  border-radius: var(--crc-radius-lg) var(--crc-radius-lg) 0 0;
+  background: var(--crc-brand-gradient);
 }
 
 .auth-shell__brand {
@@ -72,21 +124,10 @@ defineProps<{
 }
 
 .auth-shell__brand-mark {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  flex: 0 0 38px;
-  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
   border-radius: var(--crc-radius);
-  color: var(--crc-surface);
-  background: var(--crc-accent);
-  font-size: 18px;
-  font-weight: 750;
-  letter-spacing: 0;
-}
-
-html.dark .auth-shell__brand-mark {
-  color: var(--crc-canvas);
 }
 
 .auth-shell__brand-copy {

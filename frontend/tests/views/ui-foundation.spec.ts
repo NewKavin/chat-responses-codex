@@ -11,9 +11,10 @@ describe('ui foundation composition', () => {
 
     expect(index).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />')
     expect(favicon).toContain('viewBox="0 0 64 64"')
-    expect(favicon).toContain('fill="#0f8f76"')
+    expect(favicon).toContain('aria-label="Chat Responses Codex"')
+    expect(favicon).toContain('<rect')
     expect(favicon).toContain('<path')
-    expect(favicon).not.toMatch(/linearGradient|<text|font-family|<script|(?:href|src)="https?:/)
+    expect(favicon).not.toMatch(/<text|font-family|<script|(?:href|src)="https?:/)
   })
 
   it('initializes theme before mounting and imports global token layers', () => {
@@ -101,7 +102,8 @@ describe('ui foundation composition', () => {
     const values = [...typographySources.matchAll(/letter-spacing:\s*([^;]+);/g)]
       .map(match => match[1].trim())
 
-    expect(new Set(values)).toEqual(new Set(['0']))
+    // 正文保持 0；仅允许侧边栏分组大写标签使用轻微字距
+    expect(new Set(values)).toEqual(new Set(['0', '0.06em']))
   })
 
   it('keeps Element Plus primary controls on the dark theme accent', () => {
