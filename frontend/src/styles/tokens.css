@@ -38,7 +38,6 @@
   --crc-duration-slow: 340ms;
   --crc-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --crc-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --crc-content-max: 1600px;
   --crc-sidebar-expanded: 216px;
   --crc-sidebar-collapsed: 64px;
   --crc-topbar-height: 56px;

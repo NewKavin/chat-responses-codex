@@ -476,13 +476,6 @@ const handleAccountCommand = (command: string) => {
   transition: background-color var(--crc-duration) var(--crc-ease);
 }
 
-.console-shell__content > * {
-  width: 100%;
-  max-width: var(--crc-content-max);
-  margin-right: auto;
-  margin-left: auto;
-}
-
 .console-shell__icon-button {
   display: inline-flex;
   width: 36px;
