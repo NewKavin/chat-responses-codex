@@ -222,7 +222,7 @@ import {
 } from '@/utils/modelProbeCharts'
 import { normalizeModelProbeRefreshIntervalSeconds } from '@/utils/modelProbePolling'
 import { useTheme } from '@/composables/useTheme'
-import { buildChartTheme } from '@/utils/chartTheme'
+import { buildChartTheme, chartEnterAnimation } from '@/utils/chartTheme'
 
 const props = defineProps<{
   tone: 'admin' | 'portal'
@@ -327,6 +327,7 @@ const renderCharts = async () => {
     const series = buildStatusSeries()
     const hasData = series.length > 0
     statusChart.setOption({
+    ...chartEnterAnimation,
       color: [theme.series[0], theme.series[3], theme.series[4]],
       tooltip: {
         trigger: 'item',
@@ -377,6 +378,7 @@ const renderCharts = async () => {
     const series = buildCoverageSeries()
     const hasData = series.length > 0
     coverageChart.setOption({
+    ...chartEnterAnimation,
       grid: { left: 24, right: 20, top: 12, bottom: 24, containLabel: true },
       tooltip: {
         trigger: 'axis',

@@ -9,6 +9,23 @@
     </header>
 
     <section class="quota-summary-grid" aria-label="配额总览">
+      <template v-if="showSummarySkeleton">
+        <article
+          v-for="index in 3"
+          :key="index"
+          class="quota-summary-item crc-surface quota-summary-item--skeleton"
+          aria-hidden="true"
+        >
+          <el-skeleton animated>
+            <template #template>
+              <el-skeleton-item variant="text" style="width: 44%" />
+              <el-skeleton-item variant="h1" style="width: 64%; margin-top: 14px" />
+              <el-skeleton-item variant="text" style="width: 100%; margin-top: 16px" />
+            </template>
+          </el-skeleton>
+        </article>
+      </template>
+
       <article v-if="data.quota_summary.request_quota" class="quota-summary-item crc-surface">
         <div class="quota-summary-head">
           <span class="quota-summary-label">请求配额</span>
@@ -246,6 +263,17 @@ const quotaLoading = ref(false)
 const availableModelSlugs = ref<string[]>([])
 const modelLoadError = ref('')
 const activeDetail = ref(['request', 'daily', 'monthly', 'models', 'ips'])
+const overviewLoaded = ref(false)
+
+const hasQuotaSummary = computed(() =>
+  Boolean(
+    data.value.quota_summary.request_quota ||
+      data.value.quota_summary.token_daily ||
+      data.value.quota_summary.token_monthly
+  )
+)
+
+const showSummarySkeleton = computed(() => !hasQuotaSummary.value && !overviewLoaded.value)
 
 const displayModelSlugs = computed(() =>
   resolvePortalQuotaModelSlugs(quotaData.value.model_allowlist, availableModelSlugs.value)
@@ -280,6 +308,8 @@ const loadOverview = async () => {
     data.value = response.data
   } catch {
     ElMessage.error('加载概览失败')
+  } finally {
+    overviewLoaded.value = true
   }
 }
 
@@ -400,6 +430,11 @@ onUnmounted(() => {
 
 .quota-summary-grid .quota-summary-item:nth-child(3) {
   animation-delay: 160ms;
+}
+
+.quota-summary-item--skeleton {
+  pointer-events: none;
+  animation: none;
 }
 
 .quota-summary-item :deep(.el-progress-bar__inner) {

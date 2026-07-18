@@ -28,7 +28,7 @@ export const buildChartTheme = (mode: ResolvedTheme): ChartTheme => mode === 'da
         '#67c7d4',
         '#d6b46c'
       ]
-    }
+  }
   : {
       text: '#34413d',
       muted: '#66716d',
@@ -47,3 +47,10 @@ export const buildChartTheme = (mode: ResolvedTheme): ChartTheme => mode === 'da
         '#98732e'
       ]
     }
+
+/** 图表入场动效:本地计算,无外部依赖 */
+export const chartEnterAnimation = {
+  animationDuration: 700,
+  animationEasing: 'cubicOut',
+  animationDelay: (index: number) => Math.min(index * 45, 450)
+} as const

@@ -130,7 +130,7 @@ import type { EChartsType } from 'echarts/core'
 import { formatCompactNumber } from '@/utils/numberFormat'
 import { formatInferenceStrength } from '@/utils/logDisplay'
 import { useTheme } from '@/composables/useTheme'
-import { buildChartTheme } from '@/utils/chartTheme'
+import { buildChartTheme, chartEnterAnimation } from '@/utils/chartTheme'
 
 type ChartRange = '1d' | '7d' | '30d'
 
@@ -229,6 +229,7 @@ const updateDailyChart = () => {
   dailyChart.clear()
   dailyChart.resize()
   dailyChart.setOption({
+    ...chartEnterAnimation,
     color: theme.series,
     textStyle: { color: theme.text },
     tooltip: {
@@ -274,6 +275,7 @@ const updateTokenChart = () => {
   tokenChart.clear()
   tokenChart.resize()
   tokenChart.setOption({
+    ...chartEnterAnimation,
     tooltip: {
       trigger: 'axis',
       backgroundColor: theme.tooltipBackground,
