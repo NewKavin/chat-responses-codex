@@ -331,6 +331,94 @@ fn deployment_scripts_disable_xtrace_before_reading_secrets() {
 }
 
 #[test]
+fn deploy_clears_proxy_environment_without_changing_build_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let deploy_dir = temp.path().join("deploy");
+    let proxy_capture = temp.path().join("proxy-capture.txt");
+    let args_capture = temp.path().join("args-capture.txt");
+    fs::create_dir(&fake_bin).unwrap();
+
+    write_executable(
+        &fake_bin.join("docker"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == "build" ]]; then
+  for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do
+    if [[ -v "$name" ]]; then
+      printf '%s=set\n' "$name"
+    else
+      printf '%s=unset\n' "$name"
+    fi
+  done >"$DOCKER_PROXY_CAPTURE"
+  printf '%s\n' "$@" >"$DOCKER_ARGS_CAPTURE"
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let output = Command::new("bash")
+        .arg("scripts/deploy.sh")
+        .arg("--deploy-dir")
+        .arg(&deploy_dir)
+        .arg("--image")
+        .arg("proxy-test-image")
+        .arg("--tag")
+        .arg("proxy-test-tag")
+        .arg("--skip-start")
+        .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+        .env("DOCKER_PROXY_CAPTURE", &proxy_capture)
+        .env("DOCKER_ARGS_CAPTURE", &args_capture)
+        .env("HTTP_PROXY", "http://proxy.invalid:8080")
+        .env("HTTPS_PROXY", "http://proxy.invalid:8080")
+        .env("ALL_PROXY", "socks5://proxy.invalid:1080")
+        .env("http_proxy", "http://proxy.invalid:8080")
+        .env("https_proxy", "http://proxy.invalid:8080")
+        .env("all_proxy", "socks5://proxy.invalid:1080")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "deploy fixture failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let repo_root = std::env::current_dir()
+        .unwrap()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let captured_args = fs::read_to_string(&args_capture).unwrap();
+    assert_eq!(
+        captured_args.lines().collect::<Vec<_>>(),
+        vec![
+            "build",
+            "-t",
+            "proxy-test-image:proxy-test-tag",
+            repo_root.as_str(),
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(&proxy_capture).unwrap(),
+        concat!(
+            "HTTP_PROXY=unset\n",
+            "HTTPS_PROXY=unset\n",
+            "ALL_PROXY=unset\n",
+            "http_proxy=unset\n",
+            "https_proxy=unset\n",
+            "all_proxy=unset\n",
+        )
+    );
+}
+
+#[test]
 fn compatibility_matrix_xtrace_does_not_leak_admin_password() {
     let secret = "matrix-xtrace-secret-sentinel";
     let response = json!({
