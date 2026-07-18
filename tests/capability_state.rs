@@ -900,7 +900,7 @@ async fn updating_upstream_queues_capability_probe_jobs_for_active_routes() {
 }
 
 #[tokio::test]
-async fn inserting_upstream_waits_for_every_probe_job_when_queue_is_full() {
+async fn inserting_upstream_does_not_wait_for_full_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -908,11 +908,10 @@ async fn inserting_upstream_waits_for_every_probe_job_when_queue_is_full() {
         AppConfig::default(),
     );
     let (sender, mut receiver) = mpsc::channel(1);
-    let queue_observer = sender.clone();
     sender.try_send(blocker_probe_batch()).unwrap();
     state.set_capability_probe_sender(sender);
     let insert_state = state.clone();
-    let insert = tokio::spawn(async move {
+    let mut insert = tokio::spawn(async move {
         insert_state
             .insert_upstream(chat_responses_codex::state::UpstreamConfig {
                 id: "up-insert".into(),
@@ -928,65 +927,32 @@ async fn inserting_upstream_waits_for_every_probe_job_when_queue_is_full() {
             .await
     });
 
-    tokio::time::timeout(std::time::Duration::from_millis(250), async {
-        while queue_observer.capacity() != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the first probe job should fill the bounded queue");
-    tokio::time::timeout(
-        std::time::Duration::from_millis(250),
-        state.update_announcement(None),
-    )
-    .await
-    .expect("probe backpressure must not retain the persistence lock")
-    .unwrap();
-
-    let blocker = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
+    tokio::time::timeout(std::time::Duration::from_millis(250), &mut insert)
         .await
-        .expect("the blocker batch should be queued")
+        .expect("configuration persistence must not wait for probe queue capacity")
+        .unwrap()
         .unwrap();
+    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"
     );
-    let mut jobs = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
-        .await
-        .expect("insert must submit its atomic route batch")
-        .unwrap()
-        .into_jobs();
-    tokio::time::timeout(std::time::Duration::from_millis(250), insert)
-        .await
-        .expect("insert should finish after queue capacity is released")
-        .unwrap()
-        .unwrap();
-    jobs.sort_by(|left, right| {
-        left.key
-            .runtime_model_slug
-            .cmp(&right.key.runtime_model_slug)
-    });
-    assert_eq!(jobs[0].key.runtime_model_slug, "Lab/Insert-One");
-    assert_eq!(jobs[1].key.runtime_model_slug, "Lab/Insert-Two");
-    for job in jobs {
-        assert_eq!(job.key.upstream_id, "up-insert");
-        assert_eq!(job.key.protocol, WireProtocol::ChatCompletions);
-        assert_eq!(
-            job.exposed_model_slugs,
-            std::collections::BTreeSet::from([job.key.runtime_model_slug])
-        );
-        assert_eq!(job.reason, ProbeReason::ConfigurationChanged);
-    }
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
             .await
             .is_err(),
-        "insert must not submit duplicate probe jobs"
+        "a full queue must not receive a partial probe batch"
     );
+    assert!(state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .any(|upstream| upstream.id == "up-insert"));
 }
 
 #[tokio::test]
-async fn updating_upstream_waits_for_every_probe_job_when_queue_is_full() {
+async fn updating_upstream_does_not_wait_for_full_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
@@ -1007,7 +973,7 @@ async fn updating_upstream_waits_for_every_probe_job_when_queue_is_full() {
     sender.try_send(blocker_probe_batch()).unwrap();
     state.set_capability_probe_sender(sender);
     let update_state = state.clone();
-    let update = tokio::spawn(async move {
+    let mut update = tokio::spawn(async move {
         update_state
             .update_upstream(
                 "up-update",
@@ -1028,52 +994,37 @@ async fn updating_upstream_waits_for_every_probe_job_when_queue_is_full() {
             .await
     });
 
-    let blocker = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
+    tokio::time::timeout(std::time::Duration::from_millis(250), &mut update)
         .await
-        .expect("the blocker batch should be queued")
+        .expect("configuration persistence must not wait for probe queue capacity")
+        .unwrap()
         .unwrap();
+    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"
     );
-    let mut jobs = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
-        .await
-        .expect("update must submit its atomic route batch")
-        .unwrap()
-        .into_jobs();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(250), update)
-            .await
-            .expect("update should finish after queue capacity is released")
-            .unwrap()
-            .unwrap()
-    );
-    jobs.sort_by(|left, right| {
-        left.key
-            .runtime_model_slug
-            .cmp(&right.key.runtime_model_slug)
-    });
-    assert_eq!(jobs[0].key.runtime_model_slug, "Lab/Update-One");
-    assert_eq!(jobs[1].key.runtime_model_slug, "Lab/Update-Two");
-    for job in jobs {
-        assert_eq!(job.key.upstream_id, "up-update");
-        assert_eq!(job.key.protocol, WireProtocol::ChatCompletions);
-        assert_eq!(
-            job.exposed_model_slugs,
-            std::collections::BTreeSet::from([job.key.runtime_model_slug])
-        );
-        assert_eq!(job.reason, ProbeReason::ConfigurationChanged);
-    }
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
             .await
             .is_err(),
-        "update must not submit duplicate probe jobs"
+        "a full queue must not receive a partial probe batch"
+    );
+    assert_eq!(
+        state
+            .snapshot()
+            .await
+            .upstreams
+            .into_iter()
+            .find(|upstream| upstream.id == "up-update")
+            .unwrap()
+            .name,
+        "after update"
     );
 }
 
 #[tokio::test]
-async fn inserting_upstream_reports_missing_probe_worker_after_persisting() {
+async fn inserting_upstream_succeeds_without_probe_worker() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -1081,7 +1032,7 @@ async fn inserting_upstream_reports_missing_probe_worker_after_persisting() {
         AppConfig::default(),
     );
 
-    let error = state
+    state
         .insert_upstream(chat_responses_codex::state::UpstreamConfig {
             id: "up-no-worker".into(),
             name: "no worker fixture".into(),
@@ -1092,12 +1043,7 @@ async fn inserting_upstream_reports_missing_probe_worker_after_persisting() {
             ..Default::default()
         })
         .await
-        .unwrap_err();
-
-    assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
-    assert!(error
-        .to_string()
-        .contains("capability probe worker is not configured"));
+        .unwrap();
     assert!(state
         .snapshot()
         .await
@@ -1107,7 +1053,7 @@ async fn inserting_upstream_reports_missing_probe_worker_after_persisting() {
 }
 
 #[tokio::test]
-async fn updating_upstream_reports_closed_probe_queue_after_persisting() {
+async fn updating_upstream_succeeds_with_closed_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
@@ -1128,7 +1074,7 @@ async fn updating_upstream_reports_closed_probe_queue_after_persisting() {
     drop(receiver);
     state.set_capability_probe_sender(sender);
 
-    let error = state
+    state
         .update_upstream(
             "up-closed",
             chat_responses_codex::state::UpstreamConfig {
@@ -1142,12 +1088,7 @@ async fn updating_upstream_reports_closed_probe_queue_after_persisting() {
             },
         )
         .await
-        .unwrap_err();
-
-    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-    assert!(error
-        .to_string()
-        .contains("capability probe queue is closed"));
+        .unwrap();
     let upstream = state
         .snapshot()
         .await
@@ -1159,7 +1100,7 @@ async fn updating_upstream_reports_closed_probe_queue_after_persisting() {
 }
 
 #[tokio::test]
-async fn inserting_upstream_times_out_instead_of_blocking_forever_on_full_probe_queue() {
+async fn inserting_upstream_succeeds_without_waiting_on_full_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -1170,8 +1111,8 @@ async fn inserting_upstream_times_out_instead_of_blocking_forever_on_full_probe_
     sender.try_send(blocker_probe_batch()).unwrap();
     state.set_capability_probe_sender(sender);
 
-    let error = tokio::time::timeout(
-        std::time::Duration::from_secs(6),
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
         state.insert_upstream(chat_responses_codex::state::UpstreamConfig {
             id: "up-timeout".into(),
             name: "timeout fixture".into(),
@@ -1184,17 +1125,18 @@ async fn inserting_upstream_times_out_instead_of_blocking_forever_on_full_probe_
         }),
     )
     .await
-    .expect("probe queue submission must have a finite timeout")
-    .unwrap_err();
-
-    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-    assert!(error
-        .to_string()
-        .contains("timed out waiting for capability probe queue capacity"));
+    .expect("configuration persistence must not wait for probe queue capacity")
+    .unwrap();
+    assert!(state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .any(|upstream| upstream.id == "up-timeout"));
 }
 
 #[tokio::test]
-async fn inserting_upstream_retry_after_partial_timeout_is_atomic_and_idempotent() {
+async fn inserting_upstream_drops_full_probe_batch_without_partial_delivery() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -1215,8 +1157,7 @@ async fn inserting_upstream_retry_after_partial_timeout_is_atomic_and_idempotent
     sender.try_send(blocker_probe_batch()).unwrap();
     state.set_capability_probe_sender(sender);
 
-    let error = state.insert_upstream(upstream.clone()).await.unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    state.insert_upstream(upstream.clone()).await.unwrap();
     let blocker = receiver
         .try_recv()
         .expect("blocker batch should remain queued");
@@ -1228,25 +1169,6 @@ async fn inserting_upstream_retry_after_partial_timeout_is_atomic_and_idempotent
         receiver.try_recv().is_err(),
         "a failed submission must not expose a partial route batch"
     );
-    state.mark_upstream_failure(&upstream.id).await.unwrap();
-
-    state.insert_upstream(upstream.clone()).await.unwrap();
-    let retry_jobs = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
-        .await
-        .expect("retry should submit every route in one batch")
-        .unwrap()
-        .into_jobs();
-    let mut delivered = std::collections::BTreeMap::<String, usize>::new();
-    for job in retry_jobs {
-        *delivered.entry(job.key.runtime_model_slug).or_default() += 1;
-    }
-    assert_eq!(
-        delivered,
-        std::collections::BTreeMap::from([
-            ("Lab/Atomic-One".into(), 1),
-            ("Lab/Atomic-Two".into(), 1),
-        ])
-    );
     let snapshot = state.snapshot().await;
     assert_eq!(
         snapshot
@@ -1255,7 +1177,7 @@ async fn inserting_upstream_retry_after_partial_timeout_is_atomic_and_idempotent
             .filter(|candidate| candidate.id == upstream.id)
             .count(),
         1,
-        "retrying the same normalized upstream id must not duplicate persistence"
+        "the full-queue insert must persist exactly one upstream"
     );
     assert_eq!(
         snapshot
@@ -1264,8 +1186,8 @@ async fn inserting_upstream_retry_after_partial_timeout_is_atomic_and_idempotent
             .find(|candidate| candidate.id == upstream.id)
             .unwrap()
             .failure_count,
-        1,
-        "idempotent insert retry must preserve runtime health fields"
+        0,
+        "the insert must not mutate runtime health fields"
     );
 }
 
@@ -1311,7 +1233,7 @@ async fn inserting_same_upstream_id_with_different_configuration_is_rejected() {
 }
 
 #[tokio::test]
-async fn updating_upstream_retry_after_partial_close_does_not_repeat_routes() {
+async fn updating_upstream_succeeds_after_probe_queue_closes() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
@@ -1341,45 +1263,21 @@ async fn updating_upstream_retry_after_partial_close_does_not_repeat_routes() {
     let (sender, receiver) = mpsc::channel(1);
     sender.try_send(blocker_probe_batch()).unwrap();
     state.set_capability_probe_sender(sender);
-    let first_state = state.clone();
-    let first_updated = updated.clone();
-    let first = tokio::spawn(async move {
-        first_state
-            .update_upstream("up-atomic-close", first_updated)
-            .await
-    });
-    tokio::task::yield_now().await;
     drop(receiver);
-    let error = first.await.unwrap().unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-
-    let (retry_sender, mut retry_receiver) = mpsc::channel(1);
-    state.set_capability_probe_sender(retry_sender);
-    let retry_state = state.clone();
-    let retry = tokio::spawn(async move {
-        retry_state
-            .update_upstream("up-atomic-close", updated)
-            .await
-    });
-    let delivered =
-        tokio::time::timeout(std::time::Duration::from_millis(250), retry_receiver.recv())
-            .await
-            .expect("retry should submit every route in one batch")
-            .unwrap()
-            .into_jobs();
-    assert!(retry.await.unwrap().unwrap());
-
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
-    for job in delivered {
-        *counts.entry(job.key.runtime_model_slug).or_default() += 1;
-    }
+    assert!(state
+        .update_upstream("up-atomic-close", updated)
+        .await
+        .unwrap());
     assert_eq!(
-        counts,
-        std::collections::BTreeMap::from([
-            ("Lab/Close-One".into(), 1),
-            ("Lab/Close-Two".into(), 1),
-        ]),
-        "a failed update batch must not partially repeat routes on retry"
+        state
+            .snapshot()
+            .await
+            .upstreams
+            .into_iter()
+            .find(|upstream| upstream.id == "up-atomic-close")
+            .unwrap()
+            .name,
+        "after update"
     );
 }
 
@@ -1498,7 +1396,7 @@ async fn freekey_sync_does_not_requeue_current_route_profile() {
 }
 
 #[tokio::test]
-async fn freekey_sync_waits_for_every_probe_job_when_queue_is_full() {
+async fn freekey_sync_does_not_wait_for_full_probe_queue() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
     let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
@@ -1509,73 +1407,43 @@ async fn freekey_sync_waits_for_every_probe_job_when_queue_is_full() {
     let (sender, mut receiver) = mpsc::channel(1);
     sender.try_send(blocker_probe_batch()).unwrap();
     state.set_capability_probe_sender(sender);
-    let sync_state = state.clone();
-    let sync = tokio::spawn(async move {
-        sync_state
-            .sync_freekey_upstreams(
-                "fixture-source".into(),
-                vec![
-                    FreekeySyncItem {
-                        name: Some("managed fixture".into()),
-                        base_url: "https://managed.example/v1".into(),
-                        api_key: "fixture-secret".into(),
-                        model: "Lab/Exact-One".into(),
-                        valid: true,
-                    },
-                    FreekeySyncItem {
-                        name: Some("managed fixture".into()),
-                        base_url: "https://managed.example/v1".into(),
-                        api_key: "fixture-secret".into(),
-                        model: "Lab/Exact-Two".into(),
-                        valid: true,
-                    },
-                ],
-                1_700_000_000,
-            )
-            .await
-    });
-
-    let blocker = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
-        .await
-        .expect("the blocker batch should be queued")
-        .unwrap();
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        state.sync_freekey_upstreams(
+            "fixture-source".into(),
+            vec![
+                FreekeySyncItem {
+                    name: Some("managed fixture".into()),
+                    base_url: "https://managed.example/v1".into(),
+                    api_key: "fixture-secret".into(),
+                    model: "Lab/Exact-One".into(),
+                    valid: true,
+                },
+                FreekeySyncItem {
+                    name: Some("managed fixture".into()),
+                    base_url: "https://managed.example/v1".into(),
+                    api_key: "fixture-secret".into(),
+                    model: "Lab/Exact-Two".into(),
+                    valid: true,
+                },
+            ],
+            1_700_000_000,
+        ),
+    )
+    .await
+    .expect("configuration persistence must not wait for probe queue capacity")
+    .unwrap();
+    assert_eq!(summary.created, 2);
+    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"
     );
-    let mut jobs = tokio::time::timeout(std::time::Duration::from_millis(250), receiver.recv())
-        .await
-        .expect("every exact route must arrive in one batch")
-        .unwrap()
-        .into_jobs();
-    let summary = tokio::time::timeout(std::time::Duration::from_millis(250), sync)
-        .await
-        .expect("sync should finish after queue capacity is released")
-        .unwrap()
-        .unwrap();
-    assert_eq!(summary.created, 2);
-    jobs.sort_by(|left, right| {
-        left.key
-            .runtime_model_slug
-            .cmp(&right.key.runtime_model_slug)
-    });
-    assert_eq!(jobs[0].key.upstream_id, jobs[1].key.upstream_id);
-    assert_eq!(jobs[0].key.protocol, WireProtocol::ChatCompletions);
-    assert_eq!(jobs[1].key.protocol, WireProtocol::ChatCompletions);
-    assert_eq!(jobs[0].key.runtime_model_slug, "Lab/Exact-One");
-    assert_eq!(jobs[1].key.runtime_model_slug, "Lab/Exact-Two");
-    for job in jobs {
-        assert_eq!(
-            job.exposed_model_slugs,
-            std::collections::BTreeSet::from([job.key.runtime_model_slug])
-        );
-        assert_eq!(job.reason, ProbeReason::ConfigurationChanged);
-    }
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
             .await
             .is_err(),
-        "the sync must not enqueue duplicate jobs"
+        "a full queue must not receive a partial route batch"
     );
 }
 
@@ -1663,7 +1531,7 @@ async fn freekey_multi_upstream_retry_is_one_atomic_submission_batch() {
 }
 
 #[tokio::test]
-async fn freekey_sync_reports_missing_probe_worker() {
+async fn freekey_sync_succeeds_without_probe_worker() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -1671,7 +1539,7 @@ async fn freekey_sync_reports_missing_probe_worker() {
         AppConfig::default(),
     );
 
-    let error = state
+    let summary = state
         .sync_freekey_upstreams(
             "fixture-source".into(),
             vec![FreekeySyncItem {
@@ -1684,13 +1552,13 @@ async fn freekey_sync_reports_missing_probe_worker() {
             1_700_000_000,
         )
         .await
-        .unwrap_err();
-
-    assert!(error.contains("capability probe worker is not configured"));
+        .unwrap();
+    assert_eq!(summary.created, 1);
+    assert_eq!(state.snapshot().await.upstreams.len(), 1);
 }
 
 #[tokio::test]
-async fn freekey_sync_reports_closed_probe_queue() {
+async fn freekey_sync_succeeds_with_closed_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -1701,7 +1569,7 @@ async fn freekey_sync_reports_closed_probe_queue() {
     drop(receiver);
     state.set_capability_probe_sender(sender);
 
-    let error = state
+    let summary = state
         .sync_freekey_upstreams(
             "fixture-source".into(),
             vec![FreekeySyncItem {
@@ -1714,9 +1582,9 @@ async fn freekey_sync_reports_closed_probe_queue() {
             1_700_000_000,
         )
         .await
-        .unwrap_err();
-
-    assert!(error.contains("capability probe queue is closed"));
+        .unwrap();
+    assert_eq!(summary.created, 1);
+    assert_eq!(state.snapshot().await.upstreams.len(), 1);
 }
 
 #[tokio::test]
