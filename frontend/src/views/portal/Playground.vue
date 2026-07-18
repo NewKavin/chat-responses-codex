@@ -899,6 +899,17 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   color: var(--crc-accent);
   background: var(--crc-accent-soft);
+  animation: chat-empty-float 3.2s ease-in-out infinite;
+}
+
+@keyframes chat-empty-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
 }
 
 .chat-empty p {

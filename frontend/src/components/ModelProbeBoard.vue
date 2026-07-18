@@ -43,37 +43,37 @@
     <el-row :gutter="16" class="summary-grid">
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
         <div class="probe-metric">
-          <div class="summary-value">{{ summary.total_channels }}</div>
+          <div class="summary-value"><CountUpValue :value="summary.total_channels" /></div>
           <div class="summary-label">通道总数</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
         <div class="probe-metric">
-          <div class="summary-value">{{ summary.healthy_channels }}</div>
+          <div class="summary-value"><CountUpValue :value="summary.healthy_channels" /></div>
           <div class="summary-label">健康通道</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
         <div class="probe-metric">
-          <div class="summary-value">{{ summary.degraded_channels }}</div>
+          <div class="summary-value"><CountUpValue :value="summary.degraded_channels" /></div>
           <div class="summary-label">降级通道</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
         <div class="probe-metric">
-          <div class="summary-value">{{ summary.offline_channels }}</div>
+          <div class="summary-value"><CountUpValue :value="summary.offline_channels" /></div>
           <div class="summary-label">离线通道</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
         <div class="probe-metric">
-          <div class="summary-value">{{ summary.total_models }}</div>
+          <div class="summary-value"><CountUpValue :value="summary.total_models" /></div>
           <div class="summary-label">可见模型</div>
         </div>
       </el-col>
       <el-col :xs="24" :sm="12" :md="8" :lg="4">
         <div class="probe-metric">
-          <div class="summary-value">{{ summary.average_latency_ms }}ms</div>
+          <div class="summary-value"><CountUpValue :value="summary.average_latency_ms" />ms</div>
           <div class="summary-label">平均探测耗时</div>
         </div>
       </el-col>
@@ -207,6 +207,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import CountUpValue from '@/components/CountUpValue.vue'
 import { loadEcharts } from '@/utils/echartsLoader'
 import type { ModelProbeResponse } from '@/types'
 import type { EChartsType } from 'echarts/core'

@@ -227,6 +227,13 @@ const handleAccountCommand = (command: string) => {
   height: 34px;
   flex: 0 0 34px;
   border-radius: var(--crc-radius);
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    box-shadow var(--crc-duration) var(--crc-ease-out);
+}
+
+.console-shell__brand:hover .console-shell__brand-mark,
+.console-shell__mobile-brand:hover .console-shell__brand-mark {
+  transform: translateY(-1px);
 }
 
 .console-shell__brand-copy {
@@ -310,6 +317,18 @@ const handleAccountCommand = (command: string) => {
   border-radius: 999px;
   background: var(--crc-accent);
   transform: translateY(-50%);
+  animation: menu-indicator-in var(--crc-duration) var(--crc-ease-out) backwards;
+}
+
+@keyframes menu-indicator-in {
+  from {
+    transform: translateY(-50%) scaleY(0.3);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(-50%) scaleY(1);
+    opacity: 1;
+  }
 }
 
 .console-shell__group-label {

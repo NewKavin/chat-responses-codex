@@ -379,6 +379,55 @@ onUnmounted(() => {
   transform: translateY(-2px);
 }
 
+@keyframes quota-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.quota-summary-grid .quota-summary-item {
+  animation: quota-card-in var(--crc-duration-slow) var(--crc-ease-out) backwards;
+}
+
+.quota-summary-grid .quota-summary-item:nth-child(2) {
+  animation-delay: 80ms;
+}
+
+.quota-summary-grid .quota-summary-item:nth-child(3) {
+  animation-delay: 160ms;
+}
+
+.quota-summary-item :deep(.el-progress-bar__inner) {
+  position: relative;
+  overflow: hidden;
+}
+
+.quota-summary-item :deep(.el-progress-bar__inner)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgb(255 255 255 / 38%) 50%,
+    transparent 70%
+  );
+  animation: quota-progress-sheen 2.8s var(--crc-ease) infinite;
+  transform: translateX(-100%);
+}
+
+@keyframes quota-progress-sheen {
+  55%,
+  100% {
+    transform: translateX(100%);
+  }
+}
+
 .quota-summary-head,
 .quota-summary-value-row,
 .quota-detail-title-row,
