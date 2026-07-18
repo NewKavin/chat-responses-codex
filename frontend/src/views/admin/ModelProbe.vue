@@ -261,6 +261,7 @@ onUnmounted(() => {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .qualification-command-title {

@@ -777,8 +777,9 @@ onBeforeUnmount(() => {
   min-height: 560px;
   overflow: hidden;
   border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius);
+  border-radius: var(--crc-radius-lg);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .settings-panel {
@@ -891,7 +892,13 @@ onBeforeUnmount(() => {
 }
 
 .chat-empty-icon {
-  color: var(--crc-text-subtle);
+  display: grid;
+  width: 76px;
+  height: 76px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--crc-accent);
+  background: var(--crc-accent-soft);
 }
 
 .chat-empty p {
@@ -904,6 +911,18 @@ onBeforeUnmount(() => {
   gap: 12px;
   max-width: min(85%, 920px);
   min-width: 0;
+  animation: chat-message-in var(--crc-duration) var(--crc-ease-out) both;
+}
+
+@keyframes chat-message-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .chat-message--user {
@@ -1008,11 +1027,15 @@ onBeforeUnmount(() => {
 
 .chat-message--user .chat-message-content {
   padding: 10px 14px;
-  border: 1px solid var(--crc-accent);
+  border: 1px solid transparent;
   border-radius: var(--crc-radius) var(--crc-radius) 2px var(--crc-radius);
-  color: var(--crc-text-strong);
-  background: var(--crc-accent-soft);
+  color: #ffffff;
+  background: var(--crc-accent);
   white-space: pre-wrap;
+}
+
+html.dark .chat-message--user .chat-message-content {
+  color: #07211b;
 }
 
 .chat-message--assistant .chat-message-content {
@@ -1020,6 +1043,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius) var(--crc-radius) var(--crc-radius) 2px;
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .chat-message--error .chat-message-content {
@@ -1060,6 +1084,7 @@ onBeforeUnmount(() => {
   display: inline-block;
   width: 6px;
   height: 16px;
+  border-radius: 2px;
   background: var(--crc-accent);
   margin-left: 2px;
   animation: blink 0.8s infinite;
@@ -1100,6 +1125,12 @@ onBeforeUnmount(() => {
   resize: none;
   font-size: 14px;
   line-height: 1.5;
+  transition: border-color var(--crc-duration-fast) var(--crc-ease),
+    box-shadow var(--crc-duration-fast) var(--crc-ease);
+}
+
+.composer-input-row :deep(.el-textarea__inner:focus) {
+  box-shadow: 0 0 0 3px var(--crc-accent-soft);
 }
 
 .composer-input-row :deep(.el-textarea) {

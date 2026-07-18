@@ -16,9 +16,12 @@ body {
   background: var(--crc-canvas);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  transition: background-color var(--crc-duration) var(--crc-ease),
+    color var(--crc-duration) var(--crc-ease);
 }
 
 button,
@@ -101,6 +104,7 @@ a {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .crc-table-shell {
@@ -111,6 +115,7 @@ a {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
 }
 
 .crc-table-shell > .el-table {
@@ -152,13 +157,78 @@ a {
 .el-input__wrapper,
 .el-select__wrapper,
 .el-textarea__inner {
-  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+  transition: border-color var(--crc-duration-fast) var(--crc-ease),
+    box-shadow var(--crc-duration-fast) var(--crc-ease),
+    background-color var(--crc-duration-fast) var(--crc-ease),
+    color var(--crc-duration-fast) var(--crc-ease);
 }
 
 .el-dialog,
 .el-drawer,
 .el-popper {
   --el-box-shadow-light: var(--crc-shadow-elevated);
+}
+
+.el-card {
+  --el-card-border-color: var(--crc-border);
+  --el-card-border-radius: var(--crc-radius);
+  --el-card-padding: 18px;
+  box-shadow: var(--crc-shadow-xs);
+  transition: box-shadow var(--crc-duration) var(--crc-ease),
+    border-color var(--crc-duration) var(--crc-ease);
+}
+
+.el-card.is-hover-shadow:hover {
+  box-shadow: var(--crc-shadow-md);
+}
+
+.el-card__header {
+  border-bottom-color: var(--crc-border);
+}
+
+.el-button {
+  --el-button-border-radius: var(--crc-radius-sm);
+  font-weight: 500;
+}
+
+.el-tag {
+  --el-tag-border-radius: var(--crc-radius-sm);
+}
+
+.el-dialog {
+  --el-dialog-border-radius: var(--crc-radius-lg);
+}
+
+.el-drawer {
+  --el-drawer-padding-primary: 20px;
+}
+
+.el-table {
+  --el-table-border-color: var(--crc-border);
+  --el-table-header-bg-color: var(--crc-surface-muted);
+  --el-table-row-hover-bg-color: var(--crc-surface-hover);
+}
+
+.el-table th.el-table__cell {
+  color: var(--crc-text-muted);
+  font-weight: 600;
+}
+
+/* Route page transition (used by App.vue router-view) */
+.page-enter-active,
+.page-leave-active {
+  transition: opacity var(--crc-duration) var(--crc-ease),
+    transform var(--crc-duration) var(--crc-ease);
+}
+
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 @media (max-width: 1199px) {

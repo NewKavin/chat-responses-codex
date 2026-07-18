@@ -246,6 +246,15 @@ onMounted(() => {
   flex-direction: column;
   gap: 8px;
   padding: 18px;
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    box-shadow var(--crc-duration) var(--crc-ease-out),
+    border-color var(--crc-duration) var(--crc-ease-out);
+}
+
+.quota-summary-item:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-md);
+  transform: translateY(-2px);
 }
 
 .quota-summary-item span,

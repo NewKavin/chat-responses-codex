@@ -108,7 +108,11 @@ router.beforeEach((to, _from, next) => {
 router.afterEach(to => {
   if (typeof document === 'undefined') return
   const title = typeof to.meta.title === 'string' ? to.meta.title : ''
-  document.title = title ? `${title} - CRC Console` : 'CRC Console'
+  document.title = title ? `${title} · Chat Responses Codex` : 'Chat Responses Codex'
+  // 路由切换后将工作区滚动位置复位，避免新页面停在旧滚动位置
+  document
+    .querySelector('.console-shell__content')
+    ?.scrollTo({ top: 0, left: 0, behavior: 'auto' })
 })
 
 export default router

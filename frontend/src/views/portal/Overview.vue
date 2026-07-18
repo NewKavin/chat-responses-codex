@@ -368,6 +368,15 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 12px;
   padding: 18px;
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    box-shadow var(--crc-duration) var(--crc-ease-out),
+    border-color var(--crc-duration) var(--crc-ease-out);
+}
+
+.quota-summary-item:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-md);
+  transform: translateY(-2px);
 }
 
 .quota-summary-head,
@@ -426,6 +435,13 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 8px;
   padding: 16px 18px;
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    box-shadow var(--crc-duration) var(--crc-ease-out);
+}
+
+.overview-meta-item:hover {
+  box-shadow: var(--crc-shadow-sm);
+  transform: translateY(-1px);
 }
 
 .overview-meta-label {

@@ -585,6 +585,12 @@ code {
   margin: 26px 0 20px;
 }
 
+.drawer-section :deep(.el-divider__text) {
+  color: var(--crc-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .drawer-footer {
   display: flex;
   justify-content: flex-end;

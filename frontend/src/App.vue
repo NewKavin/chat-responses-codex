@@ -14,9 +14,17 @@
       @toggle-collapse="toggleCollapsed"
       @update:mobile-open="mobileOpen = $event"
     >
-      <router-view />
+      <router-view v-slot="{ Component }">
+        <transition name="page" mode="out-in">
+          <component :is="Component" />
+        </transition>
+      </router-view>
     </AppShell>
-    <router-view v-else />
+    <router-view v-else v-slot="{ Component }">
+      <transition name="page" mode="out-in">
+        <component :is="Component" />
+      </transition>
+    </router-view>
   </div>
 </template>
 

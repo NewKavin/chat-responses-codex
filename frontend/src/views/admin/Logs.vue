@@ -636,6 +636,14 @@ onMounted(() => {
   border-radius: var(--crc-radius-sm);
   color: var(--crc-text-strong);
   background: var(--crc-surface);
+  box-shadow: var(--crc-shadow-xs);
+  transition: border-color var(--crc-duration-fast) var(--crc-ease),
+    box-shadow var(--crc-duration-fast) var(--crc-ease);
+}
+
+.summary-item:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-sm);
 }
 
 .summary-item strong {
