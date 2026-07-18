@@ -35,12 +35,12 @@
       <el-form-item class="auth-form__action">
         <el-button
           native-type="submit"
-          type="primary"
+          :type="succeeded ? 'success' : 'primary'"
           size="large"
           :loading="loading"
           class="auth-submit"
         >
-          登录
+          {{ succeeded ? '登录成功,正在进入…' : '登录' }}
         </el-button>
       </el-form-item>
     </el-form>
@@ -60,6 +60,7 @@ import { portalApi } from '@/api/portal'
 const router = useRouter()
 const loading = ref(false)
 const formRef = ref()
+const succeeded = ref(false)
 
 const form = ref({
   employee_id: '',
@@ -88,7 +89,9 @@ const handleLogin = async () => {
     localStorage.setItem('portal_token', data.token)
     localStorage.setItem('portal_employee_id', form.value.employee_id)
 
+    succeeded.value = true
     ElMessage.success('登录成功')
+    await new Promise(resolve => setTimeout(resolve, 550))
     router.push('/portal')
   } catch (error: any) {
     if (error.response?.status === 401) {

@@ -31,8 +31,21 @@
       </div>
     </header>
 
-    <div v-loading="loading" class="kpi-wrap">
-      <el-row :gutter="20" class="kpi-grid">
+    <div class="kpi-wrap">
+      <el-row v-if="showKpiSkeleton" :gutter="20" class="kpi-grid" aria-hidden="true">
+        <el-col v-for="index in 4" :key="index" :xs="24" :sm="12" :lg="6">
+          <div class="metric-card metric-card--skeleton">
+            <el-skeleton animated>
+              <template #template>
+                <el-skeleton-item variant="h1" style="width: 42%" />
+                <el-skeleton-item variant="text" style="width: 56%; margin-top: 16px" />
+                <el-skeleton-item variant="text" style="width: 72%; margin-top: 12px" />
+              </template>
+            </el-skeleton>
+          </div>
+        </el-col>
+      </el-row>
+      <el-row v-else v-loading="loading" :gutter="20" class="kpi-grid">
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--blue">
             <div class="metric-card__value"><CountUpValue :value="dashboard.upstreams_count" /></div>
@@ -314,7 +327,7 @@ import { formatPercentageLabel } from '@/utils/percentage'
 import { groupTopBreakdownItems } from '@/utils/dashboardCharts'
 import { DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS } from '@/utils/modelProbePolling'
 import { useTheme } from '@/composables/useTheme'
-import { buildChartTheme } from '@/utils/chartTheme'
+import { buildChartTheme, chartEnterAnimation } from '@/utils/chartTheme'
 import type { EChartsType } from 'echarts/core'
 
 type ChartRange = '1d' | '7d' | '30d'
@@ -326,6 +339,8 @@ const modelProbeLoading = ref(false)
 const modelProbeError = ref('')
 const chartRange = ref<ChartRange>('7d')
 const lastRefreshedAt = ref(0)
+
+const showKpiSkeleton = computed(() => loading.value && lastRefreshedAt.value === 0)
 
 const dashboard = ref<DashboardData>({
   upstreams_count: 0,
@@ -464,6 +479,7 @@ const renderTrendChart = () => {
   const latencySeries = series.map(item => item.avg_latency_ms)
 
   trendChart.setOption({
+    ...chartEnterAnimation,
     color: theme.series.slice(0, 3),
     tooltip: {
       trigger: 'axis',
@@ -628,6 +644,7 @@ const renderDonutChart = (
   const hasData = items.length > 0
 
   chart.setOption({
+    ...chartEnterAnimation,
     color: colors,
     tooltip: {
       trigger: 'item',
@@ -698,6 +715,7 @@ const renderRankChart = (
   const values = items.map(item => item.value)
 
   chart.setOption({
+    ...chartEnterAnimation,
     tooltip: {
       trigger: 'axis',
       backgroundColor: theme.tooltipBackground,
@@ -988,6 +1006,14 @@ onUnmounted(() => {
   border-color: var(--crc-border-strong);
   box-shadow: var(--crc-shadow-md);
   transform: translateY(-2px);
+}
+
+.metric-card--skeleton {
+  pointer-events: none;
+}
+
+.metric-card--skeleton::before {
+  content: none;
 }
 
 .metric-card::before {

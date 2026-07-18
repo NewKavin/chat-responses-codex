@@ -214,6 +214,48 @@ a {
   font-weight: 600;
 }
 
+/* 表格行渲染时的轻微淡入(仅透明度,不影响布局) */
+@keyframes crc-row-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.el-table__body .el-table__row {
+  animation: crc-row-in var(--crc-duration) var(--crc-ease-out) backwards;
+}
+
+.el-table__body .el-table__row:nth-child(2) {
+  animation-delay: 25ms;
+}
+
+.el-table__body .el-table__row:nth-child(3) {
+  animation-delay: 50ms;
+}
+
+.el-table__body .el-table__row:nth-child(4) {
+  animation-delay: 75ms;
+}
+
+.el-table__body .el-table__row:nth-child(5) {
+  animation-delay: 100ms;
+}
+
+.el-table__body .el-table__row:nth-child(6) {
+  animation-delay: 125ms;
+}
+
+.el-table__body .el-table__row:nth-child(7) {
+  animation-delay: 150ms;
+}
+
+.el-table__body .el-table__row:nth-child(n + 8) {
+  animation-delay: 175ms;
+}
+
 /* Route page transition (used by App.vue router-view) */
 .page-enter-active,
 .page-leave-active {

@@ -33,12 +33,12 @@
       <el-form-item class="auth-form__action">
         <el-button
           native-type="submit"
-          type="primary"
+          :type="succeeded ? 'success' : 'primary'"
           size="large"
           :loading="loading"
           class="auth-submit"
         >
-          登录
+          {{ succeeded ? '登录成功,正在进入…' : '登录' }}
         </el-button>
       </el-form-item>
     </el-form>
@@ -60,6 +60,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const formRef = ref()
 const loading = ref(false)
+const succeeded = ref(false)
 
 const form = reactive({
   username: '',
@@ -84,7 +85,9 @@ const handleLogin = async () => {
     }
 
     authStore.setToken(data.token)
+    succeeded.value = true
     ElMessage.success('登录成功')
+    await new Promise(resolve => setTimeout(resolve, 550))
     router.push('/admin')
   } catch (error: any) {
     if (error.response?.status === 401) {
