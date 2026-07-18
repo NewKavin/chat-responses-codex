@@ -568,9 +568,20 @@ pub(super) fn is_compatible_catalog_superset(
     candidate_transition: ProtocolTransitionIdentity,
     witness_transition: ProtocolTransitionIdentity,
 ) -> bool {
+    let advertises_reasoning_efforts = witness.supports(Capability::ReasoningOutput)
+        && witness.reasoning_control_field.is_some()
+        && !witness.effort_map.is_empty();
+    let preserves_reasoning_efforts = !advertises_reasoning_efforts
+        || (candidate.reasoning_control_field.is_some()
+            && witness
+                .effort_map
+                .keys()
+                .all(|effort| candidate.effort_map.contains_key(effort)));
+
     candidate.profile_state == DialectProfileState::Verified
         && candidate_transition == witness_transition
         && candidate.reasoning_carrier == witness.reasoning_carrier
+        && preserves_reasoning_efforts
         && witness.values.iter().all(|(capability, resolved)| {
             resolved.state != crate::capabilities::EvidenceState::Supported
                 || candidate.supports(*capability)
@@ -1032,6 +1043,72 @@ mod tests {
             &witness,
             responses_to_responses,
             responses_to_chat,
+        ));
+    }
+
+    #[test]
+    fn catalog_superset_preserves_every_advertised_reasoning_effort() {
+        let transition =
+            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
+        let mut witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
+        witness.values.insert(
+            Capability::ReasoningOutput,
+            crate::capabilities::ResolvedCapability {
+                state: crate::capabilities::EvidenceState::Supported,
+                source: CapabilitySource::Probe,
+            },
+        );
+        witness.reasoning_control_field = Some("reasoning_effort".into());
+        witness.effort_map = std::collections::BTreeMap::from([
+            ("high".into(), "witness-high".into()),
+            ("medium".into(), "witness-medium".into()),
+        ]);
+
+        let mut compatible = witness.clone();
+        compatible.reasoning_control_field = Some("thinking_level".into());
+        compatible.effort_map = std::collections::BTreeMap::from([
+            ("high".into(), "candidate-maximum".into()),
+            ("medium".into(), "candidate-balanced".into()),
+        ]);
+        assert!(is_compatible_catalog_superset(
+            &compatible,
+            &witness,
+            transition,
+            transition,
+        ));
+
+        compatible.effort_map.remove("high");
+        assert!(!is_compatible_catalog_superset(
+            &compatible,
+            &witness,
+            transition,
+            transition,
+        ));
+
+        compatible.reasoning_control_field = None;
+        compatible.effort_map = witness.effort_map.clone();
+        assert!(!is_compatible_catalog_superset(
+            &compatible,
+            &witness,
+            transition,
+            transition,
+        ));
+    }
+
+    #[test]
+    fn catalog_superset_ignores_unadvertised_reasoning_efforts() {
+        let transition =
+            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
+        let mut witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
+        witness.reasoning_control_field = Some("reasoning_effort".into());
+        witness.effort_map =
+            std::collections::BTreeMap::from([("high".into(), "witness-high".into())]);
+
+        let mut candidate = witness.clone();
+        candidate.reasoning_control_field = None;
+        candidate.effort_map.clear();
+        assert!(is_compatible_catalog_superset(
+            &candidate, &witness, transition, transition,
         ));
     }
 

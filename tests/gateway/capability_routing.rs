@@ -1107,6 +1107,171 @@ async fn codex_capability_request_is_constrained_to_catalog_witness_over_priorit
 }
 
 #[tokio::test]
+async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallback() {
+    let witness_hits = Arc::new(AtomicUsize::new(0));
+    let incompatible_hits = Arc::new(AtomicUsize::new(0));
+    let model = "arbitrary/codex-effort-only-dispatch";
+
+    let witness_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let witness_address = witness_listener.local_addr().unwrap();
+    let witness_hits_clone = witness_hits.clone();
+    let witness_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_request: Request<Body>| {
+            let hits = witness_hits_clone.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(json!({
+                        "error": {"message": "catalog witness unavailable"}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(witness_listener, witness_app).await.unwrap();
+    });
+
+    let incompatible_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let incompatible_address = incompatible_listener.local_addr().unwrap();
+    let incompatible_hits_clone = incompatible_hits.clone();
+    let incompatible_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_request: Request<Body>| {
+            let hits = incompatible_hits_clone.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-incompatible-effort",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "arbitrary/codex-effort-only-dispatch",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "1517"},
+                            "finish_reason": "stop"
+                        }]
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(incompatible_listener, incompatible_app)
+            .await
+            .unwrap();
+    });
+
+    let mut witness = catalog_upstream("catalog-effort-witness", &[model]);
+    witness.base_url = format!("http://{witness_address}");
+    witness.priority = 50;
+    let mut incompatible = catalog_upstream("incompatible-effort-fallback", &[model]);
+    incompatible.base_url = format!("http://{incompatible_address}");
+    incompatible.priority = 1;
+    let (_tempdir, state, secret) = catalog_state(
+        vec![witness.clone(), incompatible.clone()],
+        vec![model.into()],
+    );
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            policies: vec![CapabilityPolicy {
+                id: "catalog-effort-witness-map".into(),
+                priority: 10,
+                selector: CapabilitySelector {
+                    exposed_model: Some(model.into()),
+                    runtime_model: Some(model.into()),
+                    upstream_id: Some(witness.id.clone()),
+                    protocol: Some(WireProtocol::ChatCompletions),
+                    ..Default::default()
+                },
+                semantic: SemanticPolicy {
+                    effort_map: std::collections::BTreeMap::from([(
+                        "medium".into(),
+                        "upstream-balanced".into(),
+                    )]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let route_capabilities = [
+        (Capability::TextInput, EvidenceState::Supported),
+        (Capability::NonStreamingResponse, EvidenceState::Supported),
+        (Capability::FunctionTools, EvidenceState::Supported),
+        (Capability::ToolContinuation, EvidenceState::Supported),
+        (Capability::ReasoningOutput, EvidenceState::Supported),
+    ];
+    let configuration_fingerprint = state
+        .route_configuration_fingerprint(&witness, model, model, UpstreamProtocol::ChatCompletions)
+        .unwrap();
+    let mut witness_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        upstream_id: witness.id.clone(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    witness_profile.configuration_fingerprint = configuration_fingerprint;
+    witness_profile.state = DialectProfileState::Verified;
+    for (capability, evidence) in route_capabilities {
+        witness_profile.capabilities.insert(capability, evidence);
+    }
+    witness_profile
+        .reasoning_controls
+        .insert("reasoning_effort".into(), vec!["upstream-balanced".into()]);
+    state.upsert_dialect_profile(witness_profile).await.unwrap();
+    put_catalog_profile(
+        &state,
+        &incompatible,
+        model,
+        DialectProfileState::Verified,
+        &route_capabilities,
+    )
+    .await;
+
+    let catalog = get_models(state.clone(), &secret, true).await;
+    assert_eq!(
+        catalog["models"][0]["gateway_catalog_witness"]["upstream_id"],
+        witness.id
+    );
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "medium");
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
+                )
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "codex_cli_rs/0.144.5")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "input": "Return the final numeric value of 37 * 41 with no prose.",
+                        "reasoning": {"effort": "medium"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(witness_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(incompatible_hits.load(Ordering::SeqCst), 0);
+    assert!(response.status().is_server_error());
+}
+
+#[tokio::test]
 async fn codex_catalog_deserializes_with_the_pinned_0_144_model_info_contract() {
     let model = "arbitrary/pinned-contract";
     let upstream = catalog_upstream("pinned-contract-route", &[model]);

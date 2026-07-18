@@ -3371,7 +3371,7 @@ async fn process_gateway_request_inner(
         && client_family == "codex"
         && exact_continuation.is_none()
         && legacy_continuation_upstream_id.is_none()
-        && !requested_features.required.is_empty())
+        && (!requested_features.required.is_empty() || inference_strength.is_some()))
     .then(|| {
         let witness = select_catalog_witness_entry(&state, &routing_snapshot.upstreams, model)?;
         let mut allowed = BTreeSet::from([witness.profile_key.clone()]);
