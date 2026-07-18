@@ -1358,7 +1358,10 @@ async fn portal_troubleshooting_routes_are_not_registered() {
     let (app, _, _) = app_with_model_state();
     for (method, uri) in [
         (Method::POST, "/api/portal/troubleshooting/run"),
-        (Method::GET, "/api/portal/troubleshooting/active-requests"),
+        (
+            Method::GET,
+            "/api/portal/troubleshooting/active-requests",
+        ),
     ] {
         let response = app
             .clone()

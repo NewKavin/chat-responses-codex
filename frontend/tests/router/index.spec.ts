@@ -7,7 +7,9 @@ describe('router', () => {
     expect(router.getRoutes().some(route => route.path === '/portal/model-probe')).toBe(true)
   })
 
-  it('registers only the admin troubleshooting route', () => {
+  it('keeps admin troubleshooting out of the portal', () => {
+    expect(router.getRoutes().some(route => route.path === '/portal/troubleshooting')).toBe(false)
+    expect(router.getRoutes().some(route => route.path === '/admin/troubleshooting')).toBe(true)
     expect(router.getRoutes().some(route => route.name === 'PortalTroubleshooting')).toBe(false)
     expect(router.getRoutes().some(route => route.name === 'AdminTroubleshooting')).toBe(true)
   })
