@@ -15,6 +15,7 @@ export interface CodexCatalogResponse {
 export type IntegrationCatalogViewState = {
   allModelSlugs: string[]
   primaryModelSlug: string
+  primaryModelReasoningEffort: string
   sortedModelStats: PortalModelStat[]
   canGenerateConfigurationContent: boolean
 }
@@ -36,6 +37,7 @@ export const isCodexCatalogResponse = (value: unknown): value is CodexCatalogRes
 type CodexConfigInput = {
   gatewayBaseUrl: string
   modelSlug: string
+  modelReasoningEffort: string
 }
 
 type HermesConfigInput = {
@@ -105,6 +107,15 @@ const choosePrimaryModelSlug = (modelSlugs: string[], preferredModelSlug?: strin
 
 const chooseSecondaryModelSlug = (modelSlugs: string[], primaryModelSlug: string) =>
   modelSlugs.find(slug => slug !== primaryModelSlug) ?? primaryModelSlug
+
+const chooseCodexReasoningEffort = (
+  catalog: CodexCatalogResponse,
+  modelSlug: string
+) => {
+  const model = catalog.models.find(item => normalizeSlug(item.slug) === modelSlug)
+  const effort = normalizeSlug(model?.default_reasoning_level)
+  return effort || 'none'
+}
 
 export const buildGatewayBaseUrl = (origin: string) => origin.replace(/\/+$/, '')
 
@@ -193,6 +204,7 @@ export const buildModelUsageStats = (modelSlugs: string[], stats: PortalModelSta
 const emptyIntegrationCatalogViewState = (): IntegrationCatalogViewState => ({
   allModelSlugs: [],
   primaryModelSlug: '',
+  primaryModelReasoningEffort: 'none',
   sortedModelStats: [],
   canGenerateConfigurationContent: false
 })
@@ -221,9 +233,11 @@ export const buildIntegrationCatalogViewState = ({
     return emptyIntegrationCatalogViewState()
   }
 
+  const primaryModelSlug = allModelSlugs[0]
   return {
     allModelSlugs,
-    primaryModelSlug: allModelSlugs[0],
+    primaryModelSlug,
+    primaryModelReasoningEffort: chooseCodexReasoningEffort(catalog, primaryModelSlug),
     sortedModelStats: buildModelUsageStats(allModelSlugs, portalModelStats),
     canGenerateConfigurationContent: true
   }
@@ -241,11 +255,12 @@ export const buildCodexModelCatalogJson = (catalog?: CodexCatalogResponse) => {
 
 export const buildCodexConfigToml = (input: CodexConfigInput) => {
   const gatewayApiBaseUrl = `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`
+  const modelReasoningEffort = normalizeSlug(input.modelReasoningEffort) || 'none'
 
   return `model_provider = "gateway"
 model = ${tomlString(input.modelSlug)}
 review_model = ${tomlString(input.modelSlug)}
-model_reasoning_effort = "high"
+model_reasoning_effort = ${tomlString(modelReasoningEffort)}
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"

@@ -88,7 +88,7 @@ cp templates/codex/config.toml.example ~/.codex/config.toml
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
-model_reasoning_effort = "high"
+model_reasoning_effort = "none"
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
@@ -331,7 +331,7 @@ Codex 请求网关时，实际发送的是：
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
-model_reasoning_effort = "high"
+model_reasoning_effort = "none"
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
@@ -356,7 +356,7 @@ web_search = "disabled"
 - `model_provider`：使用哪个 provider
 - `model`：日常对话主模型
 - `review_model`：审查/评审模型
-- `model_reasoning_effort`：推理强度
+- `model_reasoning_effort`：推理强度。门户会使用所选模型目录项的 `default_reasoning_level`；没有验证到可配置推理控制时使用 `none`
 - `disable_response_storage`：关闭响应存储
 - `model_catalog_json`：Codex 模型目录文件路径，按相对路径解析
 - `base_url`：网关根地址加 `/v1`

@@ -135,6 +135,7 @@ describe('integration config generators', () => {
       ).toEqual({
         allModelSlugs: [],
         primaryModelSlug: '',
+        primaryModelReasoningEffort: 'none',
         sortedModelStats: [],
         canGenerateConfigurationContent: false
       })
@@ -197,15 +198,47 @@ describe('integration config generators', () => {
     ])
   })
 
-  it('builds a codex config that keeps the key out of config.toml', () => {
-    const toml = buildCodexConfigToml({
-      gatewayBaseUrl: 'https://portal.example.com',
-      modelSlug: 'MiniMax/MiniMax-M2.7'
+  it('derives the primary Codex reasoning effort from the live catalog', () => {
+    const state = buildIntegrationCatalogViewState({
+      catalog: {
+        models: [
+          {
+            slug: 'verified/model',
+            default_reasoning_level: 'medium'
+          }
+        ]
+      },
+      modelAllowlist: [],
+      portalModelStats: []
     })
+
+    expect(state.primaryModelSlug).toBe('verified/model')
+    expect(state.primaryModelReasoningEffort).toBe('medium')
+  })
+
+  it('uses none when the catalog default reasoning effort is absent', () => {
+    const state = buildIntegrationCatalogViewState({
+      catalog: { models: [{ slug: 'unknown/model', default_reasoning_level: null }] },
+      modelAllowlist: [],
+      portalModelStats: []
+    })
+
+    expect(state.primaryModelReasoningEffort).toBe('none')
+  })
+
+  it('builds a codex config that keeps the key out of config.toml', () => {
+    const input = {
+      gatewayBaseUrl: 'https://portal.example.com',
+      modelSlug: 'MiniMax/MiniMax-M2.7',
+      modelReasoningEffort: 'medium'
+    }
+    const toml = buildCodexConfigToml(input)
 
     expect(toml).toContain('model_provider = "gateway"')
     expect(toml).toContain('model = "MiniMax/MiniMax-M2.7"')
     expect(toml).toContain('review_model = "MiniMax/MiniMax-M2.7"')
+    expect(toml).toContain('model_reasoning_effort = "medium"')
+    expect(toml).not.toContain('model_reasoning_effort = "high"')
     expect(toml).toContain('model_catalog_json = "model-catalog.json"')
     expect(toml).toContain('cli_auth_credentials_store = "file"')
     expect(toml).toContain('multi_agent = true')
@@ -270,7 +303,8 @@ describe('integration config generators', () => {
   it('generates a Codex provider with hosted web search disabled', () => {
     const config = buildCodexConfigToml({
       gatewayBaseUrl: 'https://gw.example',
-      modelSlug: 'opaque'
+      modelSlug: 'opaque',
+      modelReasoningEffort: 'none'
     })
 
     expect(config).toContain('web_search = "disabled"')

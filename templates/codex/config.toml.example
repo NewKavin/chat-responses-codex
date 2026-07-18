@@ -5,7 +5,7 @@
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
-model_reasoning_effort = "high"
+model_reasoning_effort = "none"
 disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"

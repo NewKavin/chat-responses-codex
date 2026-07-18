@@ -539,6 +539,9 @@ const catalogViewState = computed(() =>
 
 const allModelSlugs = computed(() => catalogViewState.value.allModelSlugs)
 const primaryModelSlug = computed(() => catalogViewState.value.primaryModelSlug)
+const primaryModelReasoningEffort = computed(
+  () => catalogViewState.value.primaryModelReasoningEffort
+)
 
 const hermesInstallNpm = computed(() => `# 在项目根目录
 bun install`)
@@ -580,7 +583,8 @@ const codexConfigToml = computed(() =>
   canGenerateConfigContent.value
     ? buildCodexConfigToml({
         gatewayBaseUrl: gatewayBaseUrl.value,
-        modelSlug: primaryModelSlug.value
+        modelSlug: primaryModelSlug.value,
+        modelReasoningEffort: primaryModelReasoningEffort.value
       })
     : ''
 )
