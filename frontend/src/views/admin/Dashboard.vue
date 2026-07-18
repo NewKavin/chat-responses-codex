@@ -35,28 +35,28 @@
       <el-row :gutter="20" class="kpi-grid">
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--blue">
-            <div class="metric-card__value">{{ dashboard.upstreams_count }}</div>
+            <div class="metric-card__value"><CountUpValue :value="dashboard.upstreams_count" /></div>
             <div class="metric-card__label">上游密钥</div>
             <div class="metric-card__detail">启用 {{ dashboard.upstreams_active }} / 共 {{ dashboard.upstreams_count }}</div>
           </div>
         </el-col>
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--teal">
-            <div class="metric-card__value">{{ dashboard.downstreams_count }}</div>
+            <div class="metric-card__value"><CountUpValue :value="dashboard.downstreams_count" /></div>
             <div class="metric-card__label">下游密钥</div>
             <div class="metric-card__detail">启用 {{ dashboard.downstreams_active }} / 共 {{ dashboard.downstreams_count }}</div>
           </div>
         </el-col>
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--amber">
-            <div class="metric-card__value">{{ dashboard.logs_count }}</div>
+            <div class="metric-card__value"><CountUpValue :value="dashboard.logs_count" /></div>
             <div class="metric-card__label">运行日志</div>
             <div class="metric-card__detail">最近记录 {{ dashboard.logs_count }} 条</div>
           </div>
         </el-col>
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--violet">
-            <div class="metric-card__value">{{ dashboard.active_models }}</div>
+            <div class="metric-card__value"><CountUpValue :value="dashboard.active_models" /></div>
             <div class="metric-card__label">可见模型</div>
             <div class="metric-card__detail">{{ dashboard.responses_upstreams }} 个 Responses 上游在线</div>
           </div>
@@ -304,6 +304,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, View } from '@element-plus/icons-vue'
+import CountUpValue from '@/components/CountUpValue.vue'
 import { adminApi } from '@/api/admin'
 import type { DashboardAnalyticsRange, DashboardBreakdownItem, DashboardData, ModelProbeResponse } from '@/types'
 import { loadEcharts } from '@/utils/echartsLoader'
@@ -940,6 +941,33 @@ onUnmounted(() => {
 
 .kpi-grid {
   margin: 0;
+}
+
+@keyframes kpi-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.kpi-grid .el-col {
+  animation: kpi-card-in var(--crc-duration-slow) var(--crc-ease-out) backwards;
+}
+
+.kpi-grid .el-col:nth-child(2) {
+  animation-delay: 70ms;
+}
+
+.kpi-grid .el-col:nth-child(3) {
+  animation-delay: 140ms;
+}
+
+.kpi-grid .el-col:nth-child(4) {
+  animation-delay: 210ms;
 }
 
 .metric-card {

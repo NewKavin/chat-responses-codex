@@ -7,7 +7,9 @@
       :title="currentLabel"
     >
       <el-icon :size="17">
-        <component :is="currentIcon" />
+        <transition name="theme-icon" mode="out-in">
+          <component :is="currentIcon" />
+        </transition>
       </el-icon>
     </button>
 
@@ -95,5 +97,21 @@ const handleCommand = (command: ThemeMode) => {
 
 .theme-switcher__check {
   margin-left: auto;
+}
+
+.theme-icon-enter-active,
+.theme-icon-leave-active {
+  transition: opacity var(--crc-duration-fast) var(--crc-ease),
+    transform var(--crc-duration-fast) var(--crc-ease);
+}
+
+.theme-icon-enter-from {
+  opacity: 0;
+  transform: rotate(-90deg) scale(0.6);
+}
+
+.theme-icon-leave-to {
+  opacity: 0;
+  transform: rotate(90deg) scale(0.6);
 }
 </style>
