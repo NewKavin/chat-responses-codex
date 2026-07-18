@@ -223,11 +223,14 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["visibility"], "list");
     assert!(model["apply_patch_tool_type"].is_null());
     assert_eq!(model["supports_reasoning_summaries"], false);
-    assert!(model["default_reasoning_level"].is_null());
-    let levels = model["supported_reasoning_levels"]
-        .as_array()
-        .expect("supported_reasoning_levels array");
-    assert!(levels.is_empty());
+    assert_eq!(model["default_reasoning_level"], "none");
+    assert_eq!(
+        model["supported_reasoning_levels"],
+        json!([{
+            "effort": "none",
+            "description": "Do not request a configurable reasoning effort"
+        }])
+    );
     assert_eq!(model["default_reasoning_summary"], "auto");
     assert_eq!(model["support_verbosity"], false);
     assert_eq!(model["supports_parallel_tool_calls"], true);
