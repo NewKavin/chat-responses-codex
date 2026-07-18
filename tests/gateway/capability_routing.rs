@@ -557,7 +557,38 @@ async fn codex_catalog_requires_both_image_transports_and_does_not_invent_origin
 }
 
 #[tokio::test]
-async fn codex_catalog_suppresses_reasoning_levels_when_summaries_are_not_supported() {
+async fn codex_catalog_uses_explicit_none_when_reasoning_control_is_unverified() {
+    let model = "arbitrary/reasoning-unknown";
+    let upstream = catalog_upstream("reasoning-unknown-route", &[model]);
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    put_catalog_profile(
+        &state,
+        &upstream,
+        model,
+        DialectProfileState::Verified,
+        &[
+            (Capability::FunctionTools, EvidenceState::Supported),
+            (Capability::ToolContinuation, EvidenceState::Supported),
+            (Capability::ReasoningOutput, EvidenceState::Supported),
+        ],
+    )
+    .await;
+
+    let catalog = get_models(state, &secret, true).await;
+    let model = &catalog["models"][0];
+    assert_eq!(
+        model["supported_reasoning_levels"],
+        json!([{
+            "effort": "none",
+            "description": "Do not request a configurable reasoning effort"
+        }])
+    );
+    assert_eq!(model["default_reasoning_level"], "none");
+    assert_eq!(model["supports_reasoning_summaries"], false);
+}
+
+#[tokio::test]
+async fn codex_catalog_advertises_only_verified_reasoning_levels() {
     let model = "arbitrary/reasoning-output";
     let upstream = catalog_upstream("reasoning-route", &[model]);
     let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
@@ -574,10 +605,11 @@ async fn codex_catalog_suppresses_reasoning_levels_when_summaries_are_not_suppor
                     ..Default::default()
                 },
                 semantic: SemanticPolicy {
-                    effort_map: std::collections::BTreeMap::from([(
-                        "high".into(),
-                        "upstream-high".into(),
-                    )]),
+                    effort_map: std::collections::BTreeMap::from([
+                        ("high".into(), "upstream-high".into()),
+                        ("low".into(), "upstream-low".into()),
+                        ("medium".into(), "upstream-medium".into()),
+                    ]),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -605,16 +637,28 @@ async fn codex_catalog_suppresses_reasoning_levels_when_summaries_are_not_suppor
             .capabilities
             .insert(capability, EvidenceState::Supported);
     }
-    profile
-        .reasoning_controls
-        .insert("reasoning_effort".into(), vec!["upstream-high".into()]);
+    profile.reasoning_controls.insert(
+        "reasoning_effort".into(),
+        vec![
+            "upstream-high".into(),
+            "upstream-low".into(),
+            "upstream-medium".into(),
+        ],
+    );
     state.upsert_dialect_profile(profile).await.unwrap();
 
     let catalog = get_models(state, &secret, true).await;
     let model = &catalog["models"][0];
-    assert_eq!(model["supports_reasoning_summaries"], false);
-    assert_eq!(model["supported_reasoning_levels"], json!([]));
-    assert_eq!(model["default_reasoning_level"], Value::Null);
+    assert_eq!(model["supports_reasoning_summaries"], true);
+    assert_eq!(
+        model["supported_reasoning_levels"],
+        json!([
+            {"effort": "low", "description": "Use low reasoning effort"},
+            {"effort": "medium", "description": "Use medium reasoning effort"},
+            {"effort": "high", "description": "Use high reasoning effort"}
+        ])
+    );
+    assert_eq!(model["default_reasoning_level"], "medium");
 }
 
 #[tokio::test]

@@ -1385,6 +1385,87 @@ struct ModelsQuery {
     client_version: Option<String>,
 }
 
+struct CodexReasoningMetadata {
+    supported_levels: Vec<Value>,
+    default_level: Value,
+    supports_summaries: bool,
+}
+
+const CODEX_REASONING_EFFORT_ORDER: [&str; 6] =
+    ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn codex_reasoning_effort_rank(effort: &str) -> usize {
+    CODEX_REASONING_EFFORT_ORDER
+        .iter()
+        .position(|candidate| *candidate == effort)
+        .unwrap_or(CODEX_REASONING_EFFORT_ORDER.len())
+}
+
+fn codex_reasoning_description(effort: &str) -> String {
+    format!("Use {effort} reasoning effort")
+}
+
+fn codex_reasoning_metadata(resolved: &ResolvedCapabilities) -> CodexReasoningMetadata {
+    let verified_control = resolved.supports(Capability::ReasoningOutput)
+        && resolved.reasoning_control_field.is_some()
+        && !resolved.effort_map.is_empty();
+
+    if !verified_control {
+        return CodexReasoningMetadata {
+            supported_levels: vec![json!({
+                "effort": "none",
+                "description": "Do not request a configurable reasoning effort"
+            })],
+            default_level: Value::String("none".into()),
+            supports_summaries: false,
+        };
+    }
+
+    let mut efforts = resolved
+        .effort_map
+        .keys()
+        .filter(|effort| !effort.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    efforts.sort_by(|left, right| {
+        codex_reasoning_effort_rank(left)
+            .cmp(&codex_reasoning_effort_rank(right))
+            .then_with(|| left.cmp(right))
+    });
+
+    if efforts.is_empty() {
+        return CodexReasoningMetadata {
+            supported_levels: vec![json!({
+                "effort": "none",
+                "description": "Do not request a configurable reasoning effort"
+            })],
+            default_level: Value::String("none".into()),
+            supports_summaries: false,
+        };
+    }
+
+    let default_effort = efforts
+        .iter()
+        .find(|effort| effort.as_str() == "medium")
+        .cloned()
+        .unwrap_or_else(|| efforts[0].clone());
+    let supported_levels = efforts
+        .into_iter()
+        .map(|effort| {
+            json!({
+                "description": codex_reasoning_description(&effort),
+                "effort": effort,
+            })
+        })
+        .collect();
+
+    CodexReasoningMetadata {
+        supported_levels,
+        default_level: Value::String(default_effort),
+        supports_summaries: true,
+    }
+}
+
 /// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
 ///
 /// Each model entry includes `context_window` (from the upstream's
@@ -1421,13 +1502,13 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 .capabilities
                 .context_window
                 .and_then(|limit| i64::try_from(limit).ok());
-            let supported_reasoning_levels: Vec<Value> = Vec::new();
+            let reasoning = codex_reasoning_metadata(&witness.capabilities);
             Some(json!({
                 "slug": slug,
                 "display_name": slug,
                 "description": null,
-                "supported_reasoning_levels": supported_reasoning_levels,
-                "default_reasoning_level": null,
+                "supported_reasoning_levels": reasoning.supported_levels,
+                "default_reasoning_level": reasoning.default_level,
                 "shell_type": "shell_command",
                 "visibility": "list",
                 "supported_in_api": true,
@@ -1438,7 +1519,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                     "mode": "bytes",
                     "limit": 10_000
                 },
-                "supports_reasoning_summaries": false,
+                "supports_reasoning_summaries": reasoning.supports_summaries,
                 "default_reasoning_summary": "auto",
                 "support_verbosity": false,
                 "apply_patch_tool_type": witness.capabilities.supports(Capability::CustomTools).then_some("freeform"),
