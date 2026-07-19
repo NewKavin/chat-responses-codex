@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 #[derive(Debug, Deserialize)]
 pub(super) struct CapabilityResolvedQuery {
     upstream_id: String,
+    #[serde(default)]
+    key_fingerprint: Option<String>,
     model: String,
     protocol: String,
 }
@@ -18,6 +20,8 @@ pub(super) struct CapabilityResolvedQuery {
 #[derive(Debug, Deserialize)]
 pub(super) struct ManualProbeRequest {
     upstream_id: String,
+    #[serde(default)]
+    key_fingerprint: Option<String>,
     #[serde(default)]
     exposed_model_slug: Option<String>,
     runtime_model_slug: String,
@@ -111,11 +115,24 @@ pub(super) async fn admin_capabilities_resolved(
     };
 
     let capability_snapshot = state.capability_snapshot();
-    let key_fingerprint = upstream
-        .keys_for_model(&query.model)
-        .first()
-        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-        .unwrap_or_default();
+    let key_fingerprints = upstream
+        .keys_for_model(&runtime_model_slug)
+        .into_iter()
+        .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
+        .collect::<Vec<_>>();
+    let key_fingerprint = match query.key_fingerprint {
+        Some(fingerprint) if key_fingerprints.contains(&fingerprint) => Some(fingerprint),
+        Some(_) => None,
+        None if key_fingerprints.len() == 1 => Some(key_fingerprints[0].clone()),
+        None => None,
+    };
+    let Some(key_fingerprint) = key_fingerprint else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "key route is missing or ambiguous"}})),
+        )
+            .into_response();
+    };
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
         key_fingerprint: key_fingerprint.clone(),
@@ -201,6 +218,13 @@ pub(super) async fn admin_capabilities_resolved(
     Json(json!({
         "configuration_revision": capability_snapshot.configuration.source().revision,
         "configuration_fingerprint": safe_fingerprint(capability_snapshot.configuration.digest()),
+        "route": {
+            "upstream_id": upstream.id,
+            "key_fingerprint": key_fingerprint,
+            "exposed_model_slug": query.model,
+            "runtime_model_slug": runtime_model_slug,
+            "protocol": enum_string(WireProtocol::from(protocol)),
+        },
         "capabilities": capabilities,
         "profile_age_seconds": profile_age_seconds,
         "profile_currentness": profile_currentness,
@@ -255,9 +279,25 @@ pub(super) async fn admin_capability_probe(
             )
         }
     };
+    let routing = state.routing_snapshot().await;
+    let key_fingerprint = body.key_fingerprint.or_else(|| {
+        let keys = routing
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == body.upstream_id)
+            .map(|upstream| upstream.keys_for_model(&body.runtime_model_slug))?;
+        (keys.len() == 1).then(|| upstream_key_fingerprint(&body.upstream_id, &keys[0]))
+    });
+    let Some(key_fingerprint) = key_fingerprint else {
+        return capability_probe_error(
+            StatusCode::BAD_REQUEST,
+            "gateway_capability_probe_invalid_route",
+        );
+    };
     let job = match state
         .build_capability_probe_job(
             &body.upstream_id,
+            &key_fingerprint,
             &exposed_model_slug,
             &body.runtime_model_slug,
             upstream_protocol,
@@ -526,6 +566,7 @@ fn capability_profile_summary(
     json!({
         "key": {
             "upstream_id": profile.key.upstream_id,
+            "key_fingerprint": profile.key.key_fingerprint,
             "runtime_model_slug": profile.key.runtime_model_slug,
             "protocol": enum_string(profile.key.protocol),
         },

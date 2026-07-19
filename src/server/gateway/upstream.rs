@@ -1316,6 +1316,7 @@ pub(super) async fn send_to_upstream(
         resolved_capabilities = resolve_route_capabilities_with_snapshot(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,
@@ -1394,6 +1395,7 @@ pub(super) async fn send_to_upstream(
                 resolved_capabilities = resolve_route_capabilities_with_snapshot(
                     &active_capability_snapshot,
                     upstream,
+                    &key_fingerprint,
                     request_model,
                     &final_upstream_model,
                     upstream_protocol,
@@ -1787,6 +1789,7 @@ pub(super) async fn send_to_upstream(
             let _ = maybe_queue_dialect_error_probe(
                 state,
                 &upstream.id,
+                &key_fingerprint,
                 normalized_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -2024,6 +2027,7 @@ pub(super) async fn send_to_upstream(
             usage_log_context: None,
             selected_upstream_id: upstream.id.clone(),
             selected_upstream_name: upstream.name.clone(),
+            selected_upstream_key_fingerprint: key_fingerprint.clone(),
             selected_upstream_protocol: upstream_protocol,
         });
     }
@@ -2221,6 +2225,7 @@ pub(super) async fn send_to_upstream(
             usage_log_context: None,
             selected_upstream_id: upstream.id.clone(),
             selected_upstream_name: upstream.name.clone(),
+            selected_upstream_key_fingerprint: key_fingerprint.clone(),
             selected_upstream_protocol: upstream_protocol,
         });
     }
@@ -2310,6 +2315,7 @@ pub(super) async fn send_to_upstream(
         usage_log_context: None,
         selected_upstream_id: upstream.id.clone(),
         selected_upstream_name: upstream.name.clone(),
+        selected_upstream_key_fingerprint: key_fingerprint,
         selected_upstream_protocol: upstream_protocol,
     })
 }

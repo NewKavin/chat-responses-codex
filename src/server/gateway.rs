@@ -118,52 +118,70 @@ fn build_request_route_capability_cache(
     model: &str,
     endpoint: EndpointKind,
     requested: &RequestedFeatures,
-) -> BTreeMap<(WireProtocol, String), RouteCapabilityEvaluation> {
-    upstreams
+) -> BTreeMap<(WireProtocol, String, String), RouteCapabilityEvaluation> {
+    let mut cache = BTreeMap::new();
+    for upstream in upstreams
         .iter()
-        .flat_map(|upstream| {
-            upstream
-                .supported_protocols()
-                .into_iter()
-                .map(move |protocol| (upstream, protocol))
-        })
-        .map(|(upstream, protocol)| {
-            let resolved = upstream
-                .resolved_model_name(model)
-                .filter(|_| upstream.active && upstream.supports_model(model))
-                .and_then(|runtime_model_slug| {
-                    resolve_route_capabilities_with_snapshot(
-                        snapshot,
-                        upstream,
-                        model,
-                        &runtime_model_slug,
-                        protocol,
-                        requested,
-                    )
-                });
-            let native_file_route_is_valid =
-                !requested.required.contains(&Capability::NativeFileId)
-                    || protocol == endpoint.native_protocol();
-            let eligible = native_file_route_is_valid && resolved.is_some();
-            let optional_misses = resolved
-                .as_ref()
-                .map_or(requested.optional.len(), |resolved| {
-                    requested
-                        .optional
-                        .iter()
-                        .filter(|capability| !resolved.supports(**capability))
-                        .count()
-                });
-            (
-                (WireProtocol::from(protocol), upstream.id.clone()),
-                RouteCapabilityEvaluation {
-                    eligible,
-                    optional_misses,
-                    resolved,
-                },
-            )
-        })
-        .collect()
+        .filter(|upstream| upstream.active && upstream.supports_model(model))
+    {
+        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            continue;
+        };
+        for api_key in route_api_keys(upstream, &runtime_model_slug) {
+            let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+            for protocol in upstream.supported_protocols() {
+                let resolved = resolve_route_capabilities_with_snapshot(
+                    snapshot,
+                    upstream,
+                    &key_fingerprint,
+                    model,
+                    &runtime_model_slug,
+                    protocol,
+                    requested,
+                );
+                let native_file_route_is_valid =
+                    !requested.required.contains(&Capability::NativeFileId)
+                        || protocol == endpoint.native_protocol();
+                let eligible = native_file_route_is_valid && resolved.is_some();
+                let optional_misses =
+                    resolved
+                        .as_ref()
+                        .map_or(requested.optional.len(), |resolved| {
+                            requested
+                                .optional
+                                .iter()
+                                .filter(|capability| !resolved.supports(**capability))
+                                .count()
+                        });
+                cache.insert(
+                    (
+                        WireProtocol::from(protocol),
+                        upstream.id.clone(),
+                        key_fingerprint.clone(),
+                    ),
+                    RouteCapabilityEvaluation {
+                        eligible,
+                        optional_misses,
+                        resolved,
+                    },
+                );
+            }
+        }
+    }
+    cache
+}
+
+fn route_api_keys(upstream: &UpstreamConfig, model: &str) -> Vec<String> {
+    let keys = upstream.keys_for_model(model);
+    if keys.is_empty() && upstream.api_key_models.is_empty() {
+        vec![upstream.api_key.clone()]
+    } else {
+        keys
+    }
+}
+
+fn route_key_fingerprint(upstream: &UpstreamConfig, api_key: &str) -> String {
+    upstream_key_fingerprint(&upstream.id, api_key)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -540,6 +558,7 @@ struct DispatchResult {
     usage_log_context: Option<GatewayUsageLogContext>,
     selected_upstream_id: String,
     selected_upstream_name: String,
+    selected_upstream_key_fingerprint: String,
     selected_upstream_protocol: UpstreamProtocol,
 }
 
@@ -3329,54 +3348,48 @@ async fn process_gateway_request_inner(
         endpoint,
         &requested_features,
     );
-    let route_capability = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
-        route_capability_cache.get(&(WireProtocol::from(protocol), upstream.id.clone()))
-    };
-    let legacy_continuation_profile = if let Some(upstream_id) =
-        legacy_continuation_upstream_id.as_deref()
-    {
-        let eligible_profiles = routing_snapshot
-            .upstreams
-            .iter()
-            .filter(|upstream| {
+    let route_capability =
+        |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
+            route_capability_cache.get(&(
+                WireProtocol::from(protocol),
+                upstream.id.clone(),
+                key_fingerprint.to_string(),
+            ))
+        };
+    let legacy_continuation_profile =
+        if let Some(upstream_id) = legacy_continuation_upstream_id.as_deref() {
+            let mut eligible_profiles = Vec::new();
+            for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
                 upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
-            })
-            .flat_map(|upstream| {
-                upstream
-                    .supported_protocols()
-                    .into_iter()
-                    .filter(|protocol| {
-                        route_capability(upstream, *protocol).is_some_and(|route| route.eligible)
-                    })
-                    .filter_map(|protocol| {
-                        upstream
-                            .resolved_model_name(model)
-                            .map(|runtime_model_slug| {
-                                DialectProfileKey::for_key(
-                                    upstream.id.clone(),
-                                    upstream
-                                        .keys_for_model(model)
-                                        .first()
-                                        .map(|api_key| {
-                                            upstream_key_fingerprint(&upstream.id, api_key)
-                                        })
-                                        .unwrap_or_default(),
-                                    runtime_model_slug,
-                                    WireProtocol::from(protocol),
-                                )
-                            })
-                    })
-            })
-            .collect::<Vec<_>>();
-        if eligible_profiles.len() != 1 {
-            return Err(response_history_invalid(
+            }) {
+                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                    continue;
+                };
+                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    for protocol in upstream.supported_protocols() {
+                        if route_capability(upstream, &key_fingerprint, protocol)
+                            .is_some_and(|route| route.eligible)
+                        {
+                            eligible_profiles.push(DialectProfileKey::for_key(
+                                upstream.id.clone(),
+                                key_fingerprint.clone(),
+                                runtime_model_slug.clone(),
+                                WireProtocol::from(protocol),
+                            ));
+                        }
+                    }
+                }
+            }
+            if eligible_profiles.len() != 1 {
+                return Err(response_history_invalid(
                 "cached legacy gateway continuation does not identify exactly one eligible profile",
             ));
-        }
-        eligible_profiles.into_iter().next()
-    } else {
-        None
-    };
+            }
+            eligible_profiles.into_iter().next()
+        } else {
+            None
+        };
     let codex_catalog_allowed_profiles = (endpoint == EndpointKind::Responses
         && client_family == "codex"
         && exact_continuation.is_none()
@@ -3395,33 +3408,31 @@ async fn process_gateway_request_inner(
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 continue;
             };
-            let key_fingerprint = upstream
-                .keys_for_model(model)
-                .first()
-                .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-                .unwrap_or_default();
-            for protocol in upstream.supported_protocols() {
-                let Some(candidate) =
-                    route_capability(upstream, protocol).and_then(|route| route.resolved.as_ref())
-                else {
-                    continue;
-                };
-                let candidate_transition = ProtocolTransitionIdentity::new(
-                    WireProtocol::Responses,
-                    WireProtocol::from(protocol),
-                );
-                if is_compatible_catalog_superset(
-                    candidate,
-                    &witness.capabilities,
-                    candidate_transition,
-                    witness_transition,
-                ) {
-                    allowed.insert(DialectProfileKey::for_key(
-                        upstream.id.clone(),
-                        key_fingerprint.clone(),
-                        runtime_model_slug.clone(),
+            for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                for protocol in upstream.supported_protocols() {
+                    let Some(candidate) = route_capability(upstream, &key_fingerprint, protocol)
+                        .and_then(|route| route.resolved.as_ref())
+                    else {
+                        continue;
+                    };
+                    let candidate_transition = ProtocolTransitionIdentity::new(
+                        WireProtocol::Responses,
                         WireProtocol::from(protocol),
-                    ));
+                    );
+                    if is_compatible_catalog_superset(
+                        candidate,
+                        &witness.capabilities,
+                        candidate_transition,
+                        witness_transition,
+                    ) {
+                        allowed.insert(DialectProfileKey::for_key(
+                            upstream.id.clone(),
+                            key_fingerprint.clone(),
+                            runtime_model_slug.clone(),
+                            WireProtocol::from(protocol),
+                        ));
+                    }
                 }
             }
         }
@@ -3435,17 +3446,13 @@ async fn process_gateway_request_inner(
     let route_profile_constraint_active =
         continuation_profile_key.is_some() || codex_catalog_allowed_profiles.is_some();
     let route_matches_profile_constraint =
-        |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
+        |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 return false;
             };
             let candidate_key = DialectProfileKey::for_key(
                 upstream.id.clone(),
-                upstream
-                    .keys_for_model(model)
-                    .first()
-                    .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-                    .unwrap_or_default(),
+                key_fingerprint,
                 runtime_model_slug,
                 WireProtocol::from(protocol),
             );
@@ -3498,24 +3505,36 @@ async fn process_gateway_request_inner(
     }
     let required_route_available = if route_profile_constraint_active {
         routing_snapshot.upstreams.iter().any(|upstream| {
-            upstream.supported_protocols().into_iter().any(|protocol| {
-                upstream.active
-                    && upstream.supports_model(model)
-                    && route_matches_profile_constraint(upstream, protocol)
-                    && route_capability(upstream, protocol).is_some_and(|route| route.eligible)
-            })
+            if !upstream.active || !upstream.supports_model(model) {
+                return false;
+            }
+            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                return false;
+            };
+            route_api_keys(upstream, &runtime_model_slug)
+                .into_iter()
+                .any(|api_key| {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    upstream.supported_protocols().into_iter().any(|protocol| {
+                        route_matches_profile_constraint(upstream, &key_fingerprint, protocol)
+                            && route_capability(upstream, &key_fingerprint, protocol)
+                                .is_some_and(|route| route.eligible)
+                    })
+                })
         })
     } else {
         match &claude_replay_route {
             ClaudeThinkingReplayRoute::Pinned {
                 upstream_id,
+                key_fingerprint,
                 protocol,
             } => routing_snapshot.upstreams.iter().any(|upstream| {
                 upstream.active
                     && upstream.id == *upstream_id
                     && upstream.supports_model(model)
                     && upstream.supports_protocol(*protocol)
-                    && route_capability(upstream, *protocol).is_some_and(|route| route.eligible)
+                    && route_capability(upstream, key_fingerprint, *protocol)
+                        .is_some_and(|route| route.eligible)
             }),
             ClaudeThinkingReplayRoute::NoReplay => {
                 let has_configured_route = routing_snapshot
@@ -3524,11 +3543,20 @@ async fn process_gateway_request_inner(
                     .any(|upstream| upstream.active && upstream.supports_model(model));
                 !has_configured_route
                     || routing_snapshot.upstreams.iter().any(|upstream| {
-                        upstream.active
-                            && upstream.supports_model(model)
-                            && upstream.supported_protocols().into_iter().any(|protocol| {
-                                route_capability(upstream, protocol)
-                                    .is_some_and(|route| route.eligible)
+                        if !upstream.active || !upstream.supports_model(model) {
+                            return false;
+                        }
+                        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                            return false;
+                        };
+                        route_api_keys(upstream, &runtime_model_slug)
+                            .into_iter()
+                            .any(|api_key| {
+                                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                                upstream.supported_protocols().into_iter().any(|protocol| {
+                                    route_capability(upstream, &key_fingerprint, protocol)
+                                        .is_some_and(|route| route.eligible)
+                                })
                             })
                     })
             }
@@ -3609,20 +3637,36 @@ async fn process_gateway_request_inner(
             ClaudeThinkingReplayRoute::InvalidOrUnavailable => unreachable!(),
         }
     };
-    let route_is_candidate = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
-        upstream.active
-            && upstream.supports_protocol(protocol)
-            && upstream.supports_model(model)
-            && route_matches_profile_constraint(upstream, protocol)
-            && (matches!(&claude_replay_route, ClaudeThinkingReplayRoute::NoReplay)
-                || matches!(
-                    &claude_replay_route,
-                    ClaudeThinkingReplayRoute::Pinned {
-                        upstream_id,
-                        protocol: replay_protocol,
-                    } if upstream.id == *upstream_id && protocol == *replay_protocol
-                ))
-            && route_capability(upstream, protocol).is_some_and(|route| route.eligible)
+    let route_is_candidate =
+        |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
+            upstream.active
+                && upstream.supports_protocol(protocol)
+                && upstream.supports_model(model)
+                && route_matches_profile_constraint(upstream, key_fingerprint, protocol)
+                && (matches!(&claude_replay_route, ClaudeThinkingReplayRoute::NoReplay)
+                    || matches!(
+                        &claude_replay_route,
+                        ClaudeThinkingReplayRoute::Pinned {
+                            upstream_id,
+                            key_fingerprint: replay_key_fingerprint,
+                            protocol: replay_protocol,
+                        } if upstream.id == *upstream_id
+                            && key_fingerprint == replay_key_fingerprint
+                            && protocol == *replay_protocol
+                    ))
+                && route_capability(upstream, key_fingerprint, protocol)
+                    .is_some_and(|route| route.eligible)
+        };
+    let upstream_has_candidate_route = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
+        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            return false;
+        };
+        route_api_keys(upstream, &runtime_model_slug)
+            .into_iter()
+            .any(|api_key| {
+                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                route_is_candidate(upstream, &key_fingerprint, protocol)
+            })
     };
     let candidate_passes = if requested_features.optional.is_empty() {
         candidate_protocols
@@ -3631,21 +3675,23 @@ async fn process_gateway_request_inner(
             .map(|protocol| (None, protocol))
             .collect::<Vec<_>>()
     } else {
-        let miss_tiers = candidate_protocols
-            .iter()
-            .copied()
-            .flat_map(|protocol| {
-                let route_is_candidate = &route_is_candidate;
-                let route_capability = &route_capability;
-                routing_snapshot
-                    .upstreams
-                    .iter()
-                    .filter(move |upstream| route_is_candidate(upstream, protocol))
-                    .filter_map(move |upstream| {
-                        route_capability(upstream, protocol).map(|route| route.optional_misses)
-                    })
-            })
-            .collect::<std::collections::BTreeSet<_>>();
+        let mut miss_tiers = std::collections::BTreeSet::new();
+        for protocol in candidate_protocols.iter().copied() {
+            for upstream in &routing_snapshot.upstreams {
+                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                    continue;
+                };
+                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    if route_is_candidate(upstream, &key_fingerprint, protocol) {
+                        if let Some(route) = route_capability(upstream, &key_fingerprint, protocol)
+                        {
+                            miss_tiers.insert(route.optional_misses);
+                        }
+                    }
+                }
+            }
+        }
         miss_tiers
             .into_iter()
             .flat_map(|misses| {
@@ -3698,14 +3744,26 @@ async fn process_gateway_request_inner(
     };
 
     'candidate_passes: for (optional_miss_tier, protocol) in candidate_passes {
+        let upstream_optional_misses = |upstream: &UpstreamConfig| {
+            let runtime_model_slug = upstream.resolved_model_name(model)?;
+            route_api_keys(upstream, &runtime_model_slug)
+                .into_iter()
+                .filter_map(|api_key| {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    route_is_candidate(upstream, &key_fingerprint, protocol)
+                        .then(|| route_capability(upstream, &key_fingerprint, protocol))
+                        .flatten()
+                        .map(|route| route.optional_misses)
+                })
+                .min()
+        };
         let mut upstreams = routing_snapshot
             .upstreams
             .iter()
-            .filter(|upstream| route_is_candidate(upstream, protocol))
+            .filter(|upstream| upstream_has_candidate_route(upstream, protocol))
             .filter(|upstream| {
                 optional_miss_tier.is_none_or(|misses| {
-                    route_capability(upstream, protocol)
-                        .is_some_and(|route| route.optional_misses == misses)
+                    upstream_optional_misses(upstream).is_some_and(|candidate| candidate == misses)
                 })
             })
             .cloned()
@@ -3753,9 +3811,7 @@ async fn process_gateway_request_inner(
             .map(|upstream| {
                 (
                     upstream.id.clone(),
-                    route_capability(upstream, protocol)
-                        .map(|route| route.optional_misses)
-                        .unwrap_or(requested_features.optional.len()),
+                    upstream_optional_misses(upstream).unwrap_or(requested_features.optional.len()),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -3967,28 +4023,35 @@ async fn process_gateway_request_inner(
             let request_cost = upstream.request_cost_for_model(model);
             let minute_cost = runtime.minute_cost + request_cost;
             let five_hour_cost = runtime.five_hour_cost + request_cost;
-            let candidate_keys = upstream.keys_for_model(model);
-            let candidate_keys = if candidate_keys.is_empty() {
-                if upstream.api_key_models.is_empty() {
-                    vec![upstream.api_key.clone()]
-                } else {
-                    tracing::debug!(
-                        request_id = %request_id,
-                        downstream_key_id = %downstream.id,
-                        path = %request_path,
-                        original_model = %model,
-                        normalized_model = %normalized_model,
-                        selected_upstream_id = %upstream.id,
-                        selected_upstream_name = %upstream.name,
-                        selected_upstream_protocol = ?protocol,
-                        api_key_model_count = upstream.api_key_models.len(),
-                        "upstream has no mapped key for requested model; skipping"
-                    );
-                    continue;
-                }
-            } else {
-                candidate_keys
+            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                continue;
             };
+            let candidate_keys = route_api_keys(&upstream, &runtime_model_slug)
+                .into_iter()
+                .filter(|api_key| {
+                    let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                    route_is_candidate(&upstream, &key_fingerprint, protocol)
+                        && optional_miss_tier.is_none_or(|misses| {
+                            route_capability(&upstream, &key_fingerprint, protocol)
+                                .is_some_and(|route| route.optional_misses == misses)
+                        })
+                })
+                .collect::<Vec<_>>();
+            if candidate_keys.is_empty() {
+                tracing::debug!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream.id,
+                    path = %request_path,
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    selected_upstream_id = %upstream.id,
+                    selected_upstream_name = %upstream.name,
+                    selected_upstream_protocol = ?protocol,
+                    api_key_model_count = upstream.api_key_models.len(),
+                    "upstream has no eligible mapped key route for requested model; skipping"
+                );
+                continue;
+            }
             tracing::info!(
                 request_id = %request_id,
                 downstream_key_id = %downstream.id,
@@ -4015,11 +4078,12 @@ async fn process_gateway_request_inner(
             let mut stream_only_recovery_identity = None;
             let mut stream_only_recovery = StreamOnlyRecoveryState::default();
             for (key_index, api_key) in candidate_keys.iter().enumerate() {
+                let key_fingerprint = route_key_fingerprint(&upstream, api_key);
                 let mut concurrency_retry_attempts_used = 0u32;
                 let mut rate_limit_retry_attempts_used = 0u32;
                 let candidate_capability_snapshot = (*capability_snapshot).clone();
-                let resolved_route =
-                    route_capability(&upstream, protocol).and_then(|route| route.resolved.clone());
+                let resolved_route = route_capability(&upstream, &key_fingerprint, protocol)
+                    .and_then(|route| route.resolved.clone());
                 let mut attempt_mode = if stream_only_recovery.consumed {
                     UpstreamAttemptMode::Json
                 } else {
@@ -4179,26 +4243,61 @@ async fn process_gateway_request_inner(
                         && attempt_mode == UpstreamAttemptMode::SsePassThrough
                         && chat_fallback_stage.is_none()
                     {
-                        upstreams_for_retry
+                        let mut candidates = candidate_keys[key_index + 1..]
                             .iter()
-                            .skip(upstream_index + 1)
-                            .filter_map(|candidate| {
-                                let keys = candidate.keys_for_model(model);
-                                let api_key = keys.first().cloned().or_else(|| {
-                                    candidate
-                                        .api_key_models
-                                        .is_empty()
-                                        .then(|| candidate.api_key.clone())
-                                })?;
+                            .filter_map(|api_key| {
+                                let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                                let route =
+                                    route_capability(&upstream, &key_fingerprint, protocol)?;
                                 Some(RouteHedgeCandidate {
-                                    upstream: candidate.clone(),
-                                    api_key,
+                                    upstream: upstream.clone(),
+                                    api_key: api_key.clone(),
                                     protocol,
-                                    resolved_capabilities: route_capability(candidate, protocol)
-                                        .and_then(|route| route.resolved.clone()),
+                                    resolved_capabilities: route.resolved.clone(),
                                 })
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        candidates.extend(
+                            upstreams_for_retry
+                                .iter()
+                                .skip(upstream_index + 1)
+                                .filter_map(|candidate| {
+                                    let runtime_model_slug =
+                                        candidate.resolved_model_name(model)?;
+                                    route_api_keys(candidate, &runtime_model_slug)
+                                        .into_iter()
+                                        .find_map(|api_key| {
+                                            let key_fingerprint =
+                                                route_key_fingerprint(candidate, &api_key);
+                                            if !route_is_candidate(
+                                                candidate,
+                                                &key_fingerprint,
+                                                protocol,
+                                            ) || optional_miss_tier.is_some_and(|misses| {
+                                                route_capability(
+                                                    candidate,
+                                                    &key_fingerprint,
+                                                    protocol,
+                                                )
+                                                .is_none_or(|route| route.optional_misses != misses)
+                                            }) {
+                                                return None;
+                                            }
+                                            let route = route_capability(
+                                                candidate,
+                                                &key_fingerprint,
+                                                protocol,
+                                            )?;
+                                            Some(RouteHedgeCandidate {
+                                                upstream: candidate.clone(),
+                                                api_key,
+                                                protocol,
+                                                resolved_capabilities: route.resolved.clone(),
+                                            })
+                                        })
+                                }),
+                        );
+                        candidates
                     } else {
                         Vec::new()
                     };
@@ -4207,7 +4306,7 @@ async fn process_gateway_request_inner(
                         &state,
                         &upstream,
                         api_key,
-                        &candidate_keys[key_index + 1..],
+                        &[],
                         &route_hedge_candidates,
                         resolved_route.as_ref(),
                         &candidate_capability_snapshot,
@@ -4313,6 +4412,7 @@ async fn process_gateway_request_inner(
                                     &mut result.response_headers,
                                     &selected_upstream_id,
                                     &selected_upstream_name,
+                                    &result.selected_upstream_key_fingerprint,
                                     selected_upstream_protocol,
                                     protocol_transition_label(endpoint, selected_upstream_protocol),
                                     chat_fallback_stage.map(ChatFallbackStage::as_str),

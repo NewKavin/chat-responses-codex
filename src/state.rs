@@ -867,6 +867,7 @@ impl AppState {
     pub async fn build_capability_probe_job(
         &self,
         upstream_id: &str,
+        key_fingerprint: &str,
         exposed_model_slug: &str,
         runtime_model_slug: &str,
         protocol: UpstreamProtocol,
@@ -881,9 +882,10 @@ impl AppState {
             return Ok(None);
         };
         let capability_snapshot = self.capability_snapshot();
-        Self::build_capability_probe_job_with_snapshot(
+        Self::build_capability_probe_job_for_key_with_snapshot(
             &capability_snapshot,
             upstream,
+            key_fingerprint,
             exposed_model_slug,
             runtime_model_slug,
             protocol,
@@ -941,29 +943,6 @@ impl AppState {
             },
             plan_configuration: capability_snapshot.configuration.clone(),
         }))
-    }
-
-    fn build_capability_probe_job_with_snapshot(
-        capability_snapshot: &CapabilityRuntimeSnapshot,
-        upstream: &UpstreamConfig,
-        exposed_model_slug: &str,
-        runtime_model_slug: &str,
-        protocol: UpstreamProtocol,
-        reason: ProbeReason,
-    ) -> io::Result<Option<ProbeJob>> {
-        let Some(key_fingerprint) = first_model_key_fingerprint(upstream, runtime_model_slug)
-        else {
-            return Ok(None);
-        };
-        Self::build_capability_probe_job_for_key_with_snapshot(
-            capability_snapshot,
-            upstream,
-            &key_fingerprint,
-            exposed_model_slug,
-            runtime_model_slug,
-            protocol,
-            reason,
-        )
     }
 
     pub fn capability_probe_job_is_current(
@@ -2923,18 +2902,22 @@ impl AppState {
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 continue;
             };
-            for protocol in upstream.supported_protocols() {
-                if let Ok(Some(job)) = self
-                    .build_capability_probe_job(
-                        &upstream.id,
-                        model,
-                        &runtime_model_slug,
-                        protocol,
-                        ProbeReason::Manual,
-                    )
-                    .await
-                {
-                    queued += usize::from(self.queue_capability_probe(job));
+            for api_key in upstream.keys_for_model(&runtime_model_slug) {
+                let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+                for protocol in upstream.supported_protocols() {
+                    if let Ok(Some(job)) = self
+                        .build_capability_probe_job(
+                            &upstream.id,
+                            &key_fingerprint,
+                            model,
+                            &runtime_model_slug,
+                            protocol,
+                            ProbeReason::Manual,
+                        )
+                        .await
+                    {
+                        queued += usize::from(self.queue_capability_probe(job));
+                    }
                 }
             }
         }

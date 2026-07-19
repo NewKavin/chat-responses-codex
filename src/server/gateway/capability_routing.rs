@@ -132,20 +132,15 @@ impl GatewayContinuationState {
     pub(super) fn matches_route(
         &self,
         upstream: &UpstreamConfig,
+        key_fingerprint: &str,
         exposed_model: &str,
         protocol: UpstreamProtocol,
     ) -> bool {
         self.profile_key.upstream_id == upstream.id
+            && self.profile_key.key_fingerprint == key_fingerprint
             && self.profile_key.protocol == WireProtocol::from(protocol)
             && upstream.resolved_model_name(exposed_model).as_deref()
                 == Some(self.profile_key.runtime_model_slug.as_str())
-            && upstream
-                .keys_for_model(&self.profile_key.runtime_model_slug)
-                .iter()
-                .any(|api_key| {
-                    upstream_key_fingerprint(&upstream.id, api_key)
-                        == self.profile_key.key_fingerprint
-                })
     }
 
     pub(super) fn has_current_configuration_fingerprint(
@@ -155,18 +150,29 @@ impl GatewayContinuationState {
         exposed_model: &str,
     ) -> bool {
         upstreams.iter().any(|upstream| {
-            upstream.supported_protocols().into_iter().any(|protocol| {
-                self.matches_route(upstream, exposed_model, protocol)
-                    && AppState::route_configuration_fingerprint_with_snapshot(
-                        snapshot,
-                        upstream,
-                        &self.profile_key.key_fingerprint,
-                        exposed_model,
-                        &self.profile_key.runtime_model_slug,
-                        protocol,
-                    )
-                    .is_ok_and(|fingerprint| fingerprint == self.configuration_fingerprint())
-            })
+            let Some(runtime_model_slug) = upstream.resolved_model_name(exposed_model) else {
+                return false;
+            };
+            upstream
+                .keys_for_model(&runtime_model_slug)
+                .into_iter()
+                .any(|api_key| {
+                    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+                    upstream.supported_protocols().into_iter().any(|protocol| {
+                        self.matches_route(upstream, &key_fingerprint, exposed_model, protocol)
+                            && AppState::route_configuration_fingerprint_with_snapshot(
+                                snapshot,
+                                upstream,
+                                &key_fingerprint,
+                                exposed_model,
+                                &self.profile_key.runtime_model_slug,
+                                protocol,
+                            )
+                            .is_ok_and(|fingerprint| {
+                                fingerprint == self.configuration_fingerprint()
+                            })
+                    })
+                })
         })
     }
 
@@ -277,6 +283,7 @@ pub(super) enum ClaudeThinkingReplayRoute {
     NoReplay,
     Pinned {
         upstream_id: String,
+        key_fingerprint: String,
         protocol: UpstreamProtocol,
     },
     InvalidOrUnavailable,
@@ -418,14 +425,15 @@ pub(super) fn claude_thinking_replay_route(
                 if matched_route.is_some() {
                     return ClaudeThinkingReplayRoute::InvalidOrUnavailable;
                 }
-                matched_route = Some((upstream.id.clone(), protocol));
+                matched_route = Some((upstream.id.clone(), key_fingerprint.clone(), protocol));
             }
         }
     }
     matched_route
         .map(
-            |(upstream_id, protocol)| ClaudeThinkingReplayRoute::Pinned {
+            |(upstream_id, key_fingerprint, protocol)| ClaudeThinkingReplayRoute::Pinned {
                 upstream_id,
+                key_fingerprint,
                 protocol,
             },
         )
@@ -435,19 +443,15 @@ pub(super) fn claude_thinking_replay_route(
 pub(super) fn resolve_route_capabilities_with_snapshot(
     snapshot: &CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
     requested: &RequestedFeatures,
 ) -> Option<ResolvedCapabilities> {
-    let key_fingerprint = upstream
-        .keys_for_model(exposed_model_slug)
-        .first()
-        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-        .unwrap_or_default();
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
-        key_fingerprint,
+        key_fingerprint: key_fingerprint.to_string(),
         exposed_model_slug: exposed_model_slug.to_string(),
         runtime_model_slug: runtime_model_slug.to_string(),
         protocol: protocol.into(),
@@ -460,6 +464,7 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
     let effective_profile = exact_route_effective_profile(
         snapshot,
         upstream,
+        key_fingerprint,
         exposed_model_slug,
         runtime_model_slug,
         protocol,
@@ -512,25 +517,21 @@ struct ExactRouteEffectiveProfile<'a> {
 fn exact_route_effective_profile<'a>(
     snapshot: &'a CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
 ) -> ExactRouteEffectiveProfile<'a> {
-    let key_fingerprint = upstream
-        .keys_for_model(exposed_model_slug)
-        .first()
-        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-        .unwrap_or_default();
     let key = DialectProfileKey::for_key(
         upstream.id.clone(),
-        key_fingerprint.clone(),
+        key_fingerprint,
         runtime_model_slug,
         protocol.into(),
     );
     let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         snapshot,
         upstream,
-        &key_fingerprint,
+        key_fingerprint,
         exposed_model_slug,
         runtime_model_slug,
         protocol,
@@ -624,6 +625,7 @@ impl CatalogWitnessEntry {
             "protocol": wire_protocol_label(self.profile_key.protocol),
             "profile_key": {
                 "upstream_id": self.profile_key.upstream_id,
+                "key_fingerprint": self.profile_key.key_fingerprint,
                 "runtime_model_slug": self.profile_key.runtime_model_slug,
                 "protocol": wire_protocol_label(self.profile_key.protocol),
             },
@@ -647,69 +649,69 @@ pub(super) fn select_catalog_witness_entry(
     model: &str,
 ) -> Option<CatalogWitnessEntry> {
     let snapshot = state.capability_snapshot();
-    upstreams
+    let mut candidates = Vec::new();
+    for upstream in upstreams
         .iter()
         .filter(|upstream| upstream.active && upstream.supports_model(model))
-        .filter_map(|upstream| {
-            upstream
-                .resolved_model_name(model)
-                .map(|runtime_model_slug| (upstream, runtime_model_slug))
-        })
-        .flat_map(|(upstream, runtime_model_slug)| {
-            let snapshot = &snapshot;
-            upstream
-                .supported_protocols()
-                .into_iter()
-                .filter_map(move |protocol| {
-                    let effective_profile = exact_route_effective_profile(
-                        snapshot,
-                        upstream,
-                        model,
-                        &runtime_model_slug,
-                        protocol,
-                    );
-                    let resolved = resolve_route_capabilities_with_snapshot(
-                        snapshot,
-                        upstream,
-                        model,
-                        &runtime_model_slug,
-                        protocol,
-                        &RequestedFeatures::default(),
-                    )?;
-                    if resolved.profile_state == DialectProfileState::Unsupported {
-                        return None;
-                    }
-                    if !resolved.supports(Capability::FunctionTools)
-                        || !resolved.supports(Capability::ToolContinuation)
-                    {
-                        return None;
-                    }
-                    let rank = match resolved.profile_state {
-                        DialectProfileState::Verified => 3u8,
-                        DialectProfileState::Partial => 2u8,
-                        DialectProfileState::Unknown => 1u8,
-                        DialectProfileState::Unsupported => 0u8,
-                    };
-                    let supported = resolved
-                        .values
-                        .values()
-                        .filter(|value| {
-                            value.state == crate::capabilities::EvidenceState::Supported
-                        })
-                        .count();
-                    Some((
-                        rank,
-                        supported,
-                        u8::from(effective_profile.key.protocol == WireProtocol::Responses),
-                        upstream.priority,
-                        std::cmp::Reverse(upstream.failure_count),
-                        upstream.id.clone(),
-                        effective_profile.key,
-                        effective_profile.configuration_fingerprint,
-                        resolved,
-                    ))
-                })
-        })
+    {
+        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            continue;
+        };
+        for api_key in upstream.keys_for_model(&runtime_model_slug) {
+            let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+            for protocol in upstream.supported_protocols() {
+                let effective_profile = exact_route_effective_profile(
+                    &snapshot,
+                    upstream,
+                    &key_fingerprint,
+                    model,
+                    &runtime_model_slug,
+                    protocol,
+                );
+                let Some(resolved) = resolve_route_capabilities_with_snapshot(
+                    &snapshot,
+                    upstream,
+                    &key_fingerprint,
+                    model,
+                    &runtime_model_slug,
+                    protocol,
+                    &RequestedFeatures::default(),
+                ) else {
+                    continue;
+                };
+                if resolved.profile_state == DialectProfileState::Unsupported
+                    || !resolved.supports(Capability::FunctionTools)
+                    || !resolved.supports(Capability::ToolContinuation)
+                {
+                    continue;
+                }
+                let rank = match resolved.profile_state {
+                    DialectProfileState::Verified => 3u8,
+                    DialectProfileState::Partial => 2u8,
+                    DialectProfileState::Unknown => 1u8,
+                    DialectProfileState::Unsupported => 0u8,
+                };
+                let supported = resolved
+                    .values
+                    .values()
+                    .filter(|value| value.state == crate::capabilities::EvidenceState::Supported)
+                    .count();
+                candidates.push((
+                    rank,
+                    supported,
+                    u8::from(effective_profile.key.protocol == WireProtocol::Responses),
+                    upstream.priority,
+                    std::cmp::Reverse(upstream.failure_count),
+                    upstream.id.clone(),
+                    effective_profile.key,
+                    effective_profile.configuration_fingerprint,
+                    resolved,
+                ));
+            }
+        }
+    }
+    candidates
+        .into_iter()
         .max_by(|left, right| {
             left.0
                 .cmp(&right.0)
@@ -1075,6 +1077,46 @@ mod tests {
             &witness,
             responses_to_responses,
             responses_to_chat,
+        ));
+    }
+
+    #[test]
+    fn continuation_route_requires_the_exact_key_fingerprint() {
+        let upstream = UpstreamConfig {
+            id: "continuation-key-route".into(),
+            api_key: "key-a".into(),
+            api_keys: vec!["key-b".into()],
+            supported_models: vec!["opaque".into()],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let key_b = upstream_key_fingerprint(&upstream.id, "key-b");
+        let continuation = GatewayContinuationState::new(
+            DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_b.clone(),
+                "opaque",
+                WireProtocol::ChatCompletions,
+            ),
+            "fingerprint".into(),
+            None,
+            BTreeSet::new(),
+            WireProtocol::ChatCompletions,
+            WireProtocol::ChatCompletions,
+            None,
+        );
+        let key_a = upstream_key_fingerprint(&upstream.id, "key-a");
+        assert!(!continuation.matches_route(
+            &upstream,
+            &key_a,
+            "opaque",
+            UpstreamProtocol::ChatCompletions,
+        ));
+        assert!(continuation.matches_route(
+            &upstream,
+            &key_b,
+            "opaque",
+            UpstreamProtocol::ChatCompletions,
         ));
     }
 

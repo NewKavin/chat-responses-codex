@@ -265,6 +265,69 @@ async fn manual_probe_only_enqueues_and_returns_accepted() {
 }
 
 #[tokio::test]
+async fn admin_capability_routes_require_and_preserve_the_selected_key_identity() {
+    let fixture =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    let mut upstream = fixture.state.upstreams().await.into_iter().next().unwrap();
+    upstream.api_key = "key-a".into();
+    upstream.api_keys = vec!["key-b".into()];
+    upstream.api_key_models = vec![
+        ApiKeyModelConfig {
+            api_key: "key-a".into(),
+            supported_models: vec!["opaque".into()],
+        },
+        ApiKeyModelConfig {
+            api_key: "key-b".into(),
+            supported_models: vec!["opaque".into()],
+        },
+    ];
+    fixture
+        .state
+        .update_upstream("up-1", upstream.clone())
+        .await
+        .unwrap();
+    let key_b_fingerprint = upstream_key_fingerprint("up-1", "key-b");
+    let (sender, mut receiver) = mpsc::channel(2);
+    fixture.state.set_capability_probe_sender(sender);
+
+    let ambiguous = fixture
+        .get("/api/admin/capabilities/resolved?upstream_id=up-1&model=opaque&protocol=chat_completions")
+        .await;
+    assert_eq!(ambiguous.status(), StatusCode::BAD_REQUEST);
+
+    let resolved = fixture
+        .get(&format!(
+            "/api/admin/capabilities/resolved?upstream_id=up-1&key_fingerprint={key_b_fingerprint}&model=opaque&protocol=chat_completions"
+        ))
+        .await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(resolved).await["route"]["key_fingerprint"],
+        key_b_fingerprint
+    );
+
+    let queued = fixture
+        .post_json(
+            "/api/admin/capabilities/probe",
+            json!({
+                "upstream_id": "up-1",
+                "key_fingerprint": key_b_fingerprint,
+                "runtime_model_slug": "opaque",
+                "protocol": "chat_completions"
+            }),
+        )
+        .await;
+    assert_eq!(queued.status(), StatusCode::ACCEPTED);
+    let batch = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let jobs = batch.into_jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].key.key_fingerprint, key_b_fingerprint);
+}
+
+#[tokio::test]
 async fn manual_probe_requires_exact_active_route_and_real_queue_capacity() {
     let fixture =
         AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;

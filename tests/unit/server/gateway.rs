@@ -345,15 +345,20 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
         active: true,
         ..Default::default()
     };
-    let key =
-        DialectProfileKey::legacy(upstream.id.clone(), "opaque", WireProtocol::ChatCompletions);
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
     let mut captured_snapshot = CapabilityRuntimeSnapshot::default();
     let mut captured_profile = UpstreamDialectProfile::unknown(key.clone());
     captured_profile.configuration_fingerprint =
         AppState::route_configuration_fingerprint_with_snapshot(
             &captured_snapshot,
             &upstream,
-            "",
+            &key_fingerprint,
             "opaque",
             "opaque",
             UpstreamProtocol::ChatCompletions,
@@ -386,7 +391,11 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
         .capabilities
         .insert(Capability::ReasoningOutput, EvidenceState::Rejected);
     let cached = cache
-        .get(&(WireProtocol::ChatCompletions, upstream.id.clone()))
+        .get(&(
+            WireProtocol::ChatCompletions,
+            upstream.id.clone(),
+            key_fingerprint,
+        ))
         .unwrap();
     assert!(cached.eligible);
     assert_eq!(cached.optional_misses, 0);

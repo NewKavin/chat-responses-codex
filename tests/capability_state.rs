@@ -220,6 +220,7 @@ async fn disabled_capability_probe_configuration_rejects_jobs_and_reconciliation
     assert!(state
         .build_capability_probe_job(
             &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &upstream.api_key),
             "Lab/Disabled",
             "Lab/Disabled",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -235,6 +236,58 @@ async fn disabled_capability_probe_configuration_rejects_jobs_and_reconciliation
         .is_empty());
     assert!(!state.queue_capability_probe(single_probe_job(blocker_probe_batch())));
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn targeted_probe_job_is_bound_to_the_requested_key_fingerprint() {
+    let dir = tempdir().unwrap();
+    let upstream = UpstreamConfig {
+        id: "up-targeted-key".into(),
+        name: "targeted-key".into(),
+        base_url: "https://targeted-key.example/v1".into(),
+        api_key: "key-a".into(),
+        api_keys: vec!["key-b".into()],
+        api_key_models: vec![
+            chat_responses_codex::state::ApiKeyModelConfig {
+                api_key: "key-a".into(),
+                supported_models: vec!["glm-5.2".into()],
+            },
+            chat_responses_codex::state::ApiKeyModelConfig {
+                api_key: "key-b".into(),
+                supported_models: vec!["glm-5.2".into()],
+            },
+        ],
+        protocol: chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        protocols: vec![chat_responses_codex::routing::UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["glm-5.2".into()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream.clone()],
+            downstreams: vec![startup_downstream()],
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let key_b_fingerprint = upstream_key_fingerprint(&upstream.id, "key-b");
+
+    let job = state
+        .build_capability_probe_job(
+            &upstream.id,
+            &key_b_fingerprint,
+            "glm-5.2",
+            "glm-5.2",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+            ProbeReason::Manual,
+        )
+        .await
+        .unwrap()
+        .expect("the requested key route should produce a probe job");
+
+    assert_eq!(job.key.key_fingerprint, key_b_fingerprint);
 }
 
 #[tokio::test]
@@ -259,6 +312,7 @@ async fn probe_job_rejects_same_revision_when_immutable_configuration_changes() 
     let job = state
         .build_capability_probe_job(
             &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &upstream.api_key),
             "Lab/Binding",
             "Lab/Binding",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -340,6 +394,7 @@ async fn queued_probe_plan_keeps_configuration_snapshot_after_import() {
     let job = state
         .build_capability_probe_job(
             &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &upstream.api_key),
             "Lab/Plan",
             "Lab/Plan",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,

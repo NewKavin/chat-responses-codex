@@ -395,6 +395,7 @@ impl CapabilityProbeService {
 pub async fn maybe_queue_dialect_error_probe(
     state: &AppState,
     upstream_id: &str,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
@@ -438,6 +439,7 @@ pub async fn maybe_queue_dialect_error_probe(
     state
         .build_capability_probe_job(
             upstream_id,
+            key_fingerprint,
             exposed_model_slug,
             runtime_model_slug,
             protocol,
@@ -465,11 +467,19 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         return Ok(());
     }
     let plan = probe_plan_for_job(job);
-    let api_key = upstream
-        .keys_for_model(&job.key.runtime_model_slug)
+    let mapped_keys = upstream.keys_for_model(&job.key.runtime_model_slug);
+    let matching_keys = upstream
+        .available_keys()
         .into_iter()
-        .next()
-        .unwrap_or_else(|| upstream.api_key.clone());
+        .filter(|api_key| {
+            mapped_keys.iter().any(|mapped| mapped == api_key)
+                && upstream_key_fingerprint(&upstream.id, api_key) == job.key.key_fingerprint
+        })
+        .collect::<Vec<_>>();
+    let [api_key] = matching_keys.as_slice() else {
+        return Ok(());
+    };
+    let api_key = api_key.clone();
     let outcome = ProbeExecutor {
         client: state.client_for_url(&upstream.base_url),
         base_url: upstream.base_url.clone(),

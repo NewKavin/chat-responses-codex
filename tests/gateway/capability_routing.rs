@@ -690,6 +690,199 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
 }
 
 #[tokio::test]
+async fn catalog_witness_uses_the_key_with_verified_model_capabilities() {
+    let model = "arbitrary/per-key-reasoning";
+    let mut upstream = catalog_upstream("per-key-reasoning-route", &[model]);
+    upstream.api_keys = vec!["key-b".into()];
+    upstream.api_key_models = vec![
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-a".into(),
+            supported_models: vec![model.into()],
+        },
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-b".into(),
+            supported_models: vec![model.into()],
+        },
+    ];
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+
+    let put_profile = |api_key: &str, profile_state: DialectProfileState, efforts: &[&str]| {
+        let state = state.clone();
+        let upstream = upstream.clone();
+        let api_key = api_key.to_string();
+        let efforts = efforts
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect::<Vec<_>>();
+        async move {
+            let key_fingerprint =
+                chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &api_key);
+            let configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    &key_fingerprint,
+                    model,
+                    model,
+                    UpstreamProtocol::ChatCompletions,
+                )
+                .unwrap();
+            let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_fingerprint,
+                model,
+                WireProtocol::ChatCompletions,
+            ));
+            profile.configuration_fingerprint = configuration_fingerprint;
+            profile.state = profile_state;
+            profile
+                .capabilities
+                .insert(Capability::FunctionTools, EvidenceState::Supported);
+            profile
+                .capabilities
+                .insert(Capability::ToolContinuation, EvidenceState::Supported);
+            profile
+                .capabilities
+                .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+            profile
+                .reasoning_controls
+                .insert("reasoning_effort".into(), efforts);
+            state.upsert_dialect_profile(profile).await.unwrap();
+        }
+    };
+
+    put_profile("key-a", DialectProfileState::Partial, &["low", "medium"]).await;
+    put_profile(
+        "key-b",
+        DialectProfileState::Verified,
+        &["low", "medium", "xhigh"],
+    )
+    .await;
+
+    let catalog = get_models(state, &secret, true).await;
+    let witness = &catalog["models"][0]["gateway_catalog_witness"];
+    assert_eq!(
+        witness["profile_key"]["key_fingerprint"],
+        chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-b")
+    );
+}
+
+#[tokio::test]
+async fn gateway_selects_the_key_route_that_supports_required_capabilities() {
+    let authorizations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let authorizations_clone = authorizations.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let authorizations = authorizations_clone.clone();
+            async move {
+                let authorization = request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                authorizations.lock().unwrap().push(authorization);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-per-key-route",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "glm-5.2",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let model = "glm-5.2";
+    let mut upstream = catalog_upstream("per-key-required-route", &[model]);
+    upstream.base_url = format!("http://{address}");
+    upstream.api_key = "key-a".into();
+    upstream.api_keys = vec!["key-b".into()];
+    upstream.api_key_models = vec![
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-a".into(),
+            supported_models: vec![model.into()],
+        },
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-b".into(),
+            supported_models: vec![model.into()],
+        },
+    ];
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    for (api_key, tools) in [
+        ("key-a", EvidenceState::Rejected),
+        ("key-b", EvidenceState::Supported),
+    ] {
+        let key_fingerprint =
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, api_key);
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            model,
+            WireProtocol::ChatCompletions,
+        ));
+        profile.configuration_fingerprint = state
+            .route_configuration_fingerprint(
+                &upstream,
+                &key_fingerprint,
+                model,
+                model,
+                UpstreamProtocol::ChatCompletions,
+            )
+            .unwrap();
+        profile.state = DialectProfileState::Verified;
+        profile
+            .capabilities
+            .insert(Capability::FunctionTools, tools);
+        state.upsert_dialect_profile(profile).await.unwrap();
+    }
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "messages": [{"role": "user", "content": "use a tool"}],
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "description": "lookup",
+                                "parameters": {"type": "object", "properties": {}}
+                            }
+                        }],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(authorizations.lock().unwrap().as_slice(), ["Bearer key-b"]);
+}
+
+#[tokio::test]
 async fn codex_catalog_context_limits_come_only_from_the_selected_witness() {
     let model = "arbitrary/competing-contexts";
     let mut unrelated = catalog_upstream("a-unrelated-context", &[model]);
@@ -914,6 +1107,7 @@ async fn codex_catalog_witness_diagnostic_identifies_the_exact_profile_without_s
         diagnostic["profile_key"],
         json!({
             "upstream_id": "diagnostic-route",
+            "key_fingerprint": upstream_model_key_fingerprint(&upstream, model),
             "runtime_model_slug": model,
             "protocol": "chat_completions"
         })

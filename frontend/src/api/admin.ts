@@ -121,12 +121,14 @@ export interface DialectProfilesResponse {
 
 export interface ResolvedCapabilitiesParams {
   upstream_id: string
+  key_fingerprint: string
   model: string
   protocol: 'chat_completions' | 'responses'
 }
 
 export interface QueueDialectProbeRequest {
   upstream_id: string
+  key_fingerprint: string
   runtime_model_slug: string
   protocol: 'chat_completions' | 'responses'
 }

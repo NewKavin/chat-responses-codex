@@ -607,6 +607,226 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
     .await;
 }
 
+#[tokio::test]
+async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
+    with_proxy_env_cleared(|| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let requests_clone = requests.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let requests = requests_clone.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let authorization = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let payload: Value =
+                        serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push((authorization.clone(), payload.clone()));
+                    if authorization == "Bearer key-a" && payload["reasoning_effort"] == "xhigh" {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({
+                                "error": {"message": "reasoning_effort xhigh is unsupported"}
+                            })),
+                        )
+                            .into_response()
+                    } else {
+                        (StatusCode::OK, axum::Json(text_response("ok"))).into_response()
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let model = "glm-5.2";
+        let upstream = UpstreamConfig {
+            id: "per-key-probe".into(),
+            name: "per-key-probe".into(),
+            base_url: format!("http://{address}"),
+            api_key: "key-a".into(),
+            api_keys: vec!["key-b".into()],
+            api_key_models: vec![
+                chat_responses_codex::state::ApiKeyModelConfig {
+                    api_key: "key-a".into(),
+                    supported_models: vec![model.into()],
+                },
+                chat_responses_codex::state::ApiKeyModelConfig {
+                    api_key: "key-b".into(),
+                    supported_models: vec![model.into()],
+                },
+            ],
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![model.into()],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![upstream.clone()],
+                downstreams: vec![DownstreamConfig {
+                    id: "per-key-downstream".into(),
+                    name: "per-key-downstream".into(),
+                    hash: "unused".into(),
+                    plaintext_key: None,
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec![model.into()],
+                    rate_limit_enabled: false,
+                    per_minute_limit: 60,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: Vec::new(),
+                    expires_at: None,
+                    active: true,
+                }],
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig::default(),
+        );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                policies: vec![CapabilityPolicy {
+                    id: "per-key-reasoning-controls".into(),
+                    probe_candidates: ProbeCandidates {
+                        reasoning_controls: std::collections::BTreeMap::from([(
+                            "reasoning_effort".into(),
+                            vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                        )]),
+                        ..ProbeCandidates::default()
+                    },
+                    ..CapabilityPolicy::default()
+                }],
+                ..CapabilityConfiguration::default()
+            })
+            .await
+            .unwrap();
+
+        let jobs = state
+            .reconcile_dialect_profiles(1_700_000_000)
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_ne!(jobs[0].key.key_fingerprint, jobs[1].key.key_fingerprint);
+        let _service = CapabilityProbeService::spawn(state.clone());
+
+        let key_a = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-a"),
+            model,
+            WireProtocol::ChatCompletions,
+        );
+        let key_b = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-b"),
+            model,
+            WireProtocol::ChatCompletions,
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = state.capability_snapshot();
+                if snapshot.profiles.contains_key(&key_a) && snapshot.profiles.contains_key(&key_b)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both key routes should finish probing");
+
+        let snapshot = state.capability_snapshot();
+        assert_eq!(
+            snapshot.profiles[&key_a].reasoning_controls["reasoning_effort"],
+            vec!["low", "medium", "high"]
+        );
+        assert!(
+            snapshot.profiles[&key_b].reasoning_controls["reasoning_effort"]
+                .contains(&"xhigh".to_string())
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|(authorization, _)| authorization == "Bearer key-a"));
+        assert!(requests
+            .iter()
+            .any(|(authorization, _)| authorization == "Bearer key-b"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn stale_per_key_probe_job_does_not_send_http_or_write_a_profile() {
+    with_proxy_env_cleared(|| async move {
+        let mock = ProbeMock::chat(|_| text_response("must not be called")).await;
+        let model = "glm-5.2";
+        let upstream = UpstreamConfig {
+            id: "stale-key-probe".into(),
+            name: "stale-key-probe".into(),
+            base_url: mock.base_url.clone(),
+            api_key: "key-a".into(),
+            supported_models: vec![model.into()],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![upstream.clone()],
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig::default(),
+        );
+        let key_a_fingerprint =
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-a");
+        let stale_job = state
+            .build_capability_probe_job(
+                &upstream.id,
+                &key_a_fingerprint,
+                model,
+                model,
+                UpstreamProtocol::ChatCompletions,
+                ProbeReason::Manual,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .update_upstream(
+                &upstream.id,
+                UpstreamConfig {
+                    api_key: "key-b".into(),
+                    ..upstream.clone()
+                },
+            )
+            .await
+            .unwrap();
+
+        let _service = CapabilityProbeService::spawn(state.clone());
+        assert!(state.queue_capability_probe(stale_job));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(mock.request_count(), 0);
+        assert!(state.capability_snapshot().profiles.is_empty());
+    })
+    .await;
+}
+
 async fn run_probe_against(mock: &ProbeMock, plan: CapabilityProbePlan) -> ProbeOutcome {
     run_probe_plan_for_test(&mock.base_url, "probe-secret", plan, 20)
         .await

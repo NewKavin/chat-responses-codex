@@ -310,34 +310,38 @@ impl AggregateHarness {
             tempdir.path().join("state.json"),
             config,
         );
-        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
-            key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
-            upstream_id: UPSTREAM_ID.into(),
-            runtime_model_slug: MODEL.into(),
-            protocol: WireProtocol::Responses,
-        });
-        profile.state = DialectProfileState::Verified;
-        profile.configuration_fingerprint = state
-            .route_configuration_fingerprint(
-                &upstream,
-                &profile.key.key_fingerprint,
-                MODEL,
-                MODEL,
-                UpstreamProtocol::Responses,
-            )
-            .unwrap();
-        if matches!(&script, AggregateScript::RecoverThenPending) {
-            assert!(profile.capabilities.is_empty());
-        } else {
-            profile
-                .capabilities
-                .insert(Capability::NonStreamingResponse, EvidenceState::Rejected);
-            profile
-                .capabilities
-                .insert(Capability::TextStream, EvidenceState::Supported);
-            assert_eq!(profile.capabilities.len(), 2);
+        for api_key in upstream.keys_for_model(MODEL) {
+            let key_fingerprint =
+                chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &api_key);
+            let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+                key_fingerprint,
+                upstream_id: UPSTREAM_ID.into(),
+                runtime_model_slug: MODEL.into(),
+                protocol: WireProtocol::Responses,
+            });
+            profile.state = DialectProfileState::Verified;
+            profile.configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    &profile.key.key_fingerprint,
+                    MODEL,
+                    MODEL,
+                    UpstreamProtocol::Responses,
+                )
+                .unwrap();
+            if matches!(&script, AggregateScript::RecoverThenPending) {
+                assert!(profile.capabilities.is_empty());
+            } else {
+                profile
+                    .capabilities
+                    .insert(Capability::NonStreamingResponse, EvidenceState::Rejected);
+                profile
+                    .capabilities
+                    .insert(Capability::TextStream, EvidenceState::Supported);
+                assert_eq!(profile.capabilities.len(), 2);
+            }
+            state.upsert_dialect_profile(profile).await.unwrap();
         }
-        state.upsert_dialect_profile(profile).await.unwrap();
 
         Self {
             app: build_router(state.clone()),

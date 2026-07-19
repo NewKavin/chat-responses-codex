@@ -23,6 +23,8 @@ const DIAGNOSTIC_RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
 pub(super) const TROUBLESHOOTING_ROUTE_CAPTURE_HEADER: &str =
     "x-chat2responses-troubleshooting-route";
 const TROUBLESHOOTING_SELECTED_UPSTREAM_ID_HEADER: &str = "x-chat2responses-selected-upstream-id";
+const TROUBLESHOOTING_SELECTED_UPSTREAM_KEY_FINGERPRINT_HEADER: &str =
+    "x-chat2responses-selected-upstream-key-fingerprint";
 const TROUBLESHOOTING_SELECTED_UPSTREAM_NAME_HEADER: &str =
     "x-chat2responses-selected-upstream-name";
 const TROUBLESHOOTING_SELECTED_UPSTREAM_PROTOCOL_HEADER: &str =
@@ -210,6 +212,7 @@ struct MatrixProfileDetails {
 struct TroubleshootingRouteMetadata {
     selected_upstream_id: String,
     selected_upstream_name: String,
+    selected_upstream_key_fingerprint: String,
     selected_upstream_protocol: String,
     protocol_transition: String,
     fallback_stage: Option<String>,
@@ -678,6 +681,7 @@ async fn run_matrix_cell(
         Some((
             metadata.selected_upstream_id.clone(),
             metadata.selected_upstream_name.clone(),
+            metadata.selected_upstream_key_fingerprint.clone(),
             protocol,
         ))
     });
@@ -688,7 +692,7 @@ async fn run_matrix_cell(
     };
     let protocol_transition = selected_upstream
         .as_ref()
-        .map(|upstream| matrix_protocol_transition(endpoint, upstream.2).to_string())
+        .map(|upstream| matrix_protocol_transition(endpoint, upstream.3).to_string())
         .or_else(|| route_metadata.map(|metadata| metadata.protocol_transition.clone()));
     let profile_details = matrix_profile_details(&state, selected_upstream.as_ref(), model).await;
     let mut check_results = matrix_check_results_for_profile(&results);
@@ -755,7 +759,7 @@ async fn run_matrix_cell(
             .or_else(|| route_metadata.map(|metadata| metadata.selected_upstream_name.clone())),
         selected_upstream_protocol: selected_upstream
             .as_ref()
-            .map(|upstream| matrix_protocol_label(upstream.2).to_string())
+            .map(|upstream| matrix_protocol_label(upstream.3).to_string())
             .or_else(|| route_metadata.map(|metadata| metadata.selected_upstream_protocol.clone())),
         protocol_transition,
         fallback_stage: route_metadata.and_then(|metadata| metadata.fallback_stage.clone()),
@@ -818,35 +822,33 @@ async fn matrix_expectation_context(
         let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
             continue;
         };
-        let key_fingerprint = upstream
-            .keys_for_model(model)
-            .first()
-            .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-            .unwrap_or_default();
-        for protocol in upstream.supported_protocols() {
-            let mut route = crate::capabilities::RouteIdentity {
-                upstream_id: upstream.id.clone(),
-                key_fingerprint: key_fingerprint.clone(),
-                exposed_model_slug: model.to_string(),
-                runtime_model_slug: runtime_model_slug.clone(),
-                protocol: protocol.into(),
-                tags: BTreeSet::new(),
-            };
-            capability_snapshot
-                .configuration
-                .apply_route_tags(&mut route);
-            for expectation in capability_snapshot.configuration.expectations_for(&route) {
-                if !expectation.client_profiles.contains(&client_profile) {
-                    continue;
-                }
-                context
-                    .required
-                    .extend(expectation.required.iter().copied());
-                context
-                    .permitted_optional_downgrades
-                    .extend(expectation.permitted_optional_downgrades.iter().cloned());
-                if context.https_image_fixture.is_none() {
-                    context.https_image_fixture = expectation.https_image_fixture.clone();
+        for api_key in upstream.keys_for_model(&runtime_model_slug) {
+            let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+            for protocol in upstream.supported_protocols() {
+                let mut route = crate::capabilities::RouteIdentity {
+                    upstream_id: upstream.id.clone(),
+                    key_fingerprint: key_fingerprint.clone(),
+                    exposed_model_slug: model.to_string(),
+                    runtime_model_slug: runtime_model_slug.clone(),
+                    protocol: protocol.into(),
+                    tags: BTreeSet::new(),
+                };
+                capability_snapshot
+                    .configuration
+                    .apply_route_tags(&mut route);
+                for expectation in capability_snapshot.configuration.expectations_for(&route) {
+                    if !expectation.client_profiles.contains(&client_profile) {
+                        continue;
+                    }
+                    context
+                        .required
+                        .extend(expectation.required.iter().copied());
+                    context
+                        .permitted_optional_downgrades
+                        .extend(expectation.permitted_optional_downgrades.iter().cloned());
+                    if context.https_image_fixture.is_none() {
+                        context.https_image_fixture = expectation.https_image_fixture.clone();
+                    }
                 }
             }
         }
@@ -930,7 +932,7 @@ async fn selected_upstream_for_matrix_model(
     state: &AppState,
     model: &str,
     endpoint: &'static str,
-) -> Option<(String, String, crate::routing::UpstreamProtocol)> {
+) -> Option<(String, String, String, crate::routing::UpstreamProtocol)> {
     use crate::routing::UpstreamProtocol;
 
     match endpoint {
@@ -939,7 +941,17 @@ async fn selected_upstream_for_matrix_model(
                 .choose_upstream(model, UpstreamProtocol::Responses)
                 .await
             {
-                return Some((upstream.id, upstream.name, UpstreamProtocol::Responses));
+                let key_fingerprint = upstream
+                    .keys_for_model(model)
+                    .first()
+                    .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+                    .unwrap_or_else(|| upstream_key_fingerprint(&upstream.id, ""));
+                return Some((
+                    upstream.id,
+                    upstream.name,
+                    key_fingerprint,
+                    UpstreamProtocol::Responses,
+                ));
             }
             state
                 .choose_upstream(model, UpstreamProtocol::ChatCompletions)
@@ -947,8 +959,13 @@ async fn selected_upstream_for_matrix_model(
                 .ok()
                 .map(|upstream| {
                     (
-                        upstream.id,
-                        upstream.name,
+                        upstream.id.clone(),
+                        upstream.name.clone(),
+                        upstream
+                            .keys_for_model(model)
+                            .first()
+                            .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+                            .unwrap_or_else(|| upstream_key_fingerprint(&upstream.id, "")),
                         UpstreamProtocol::ChatCompletions,
                     )
                 })
@@ -959,8 +976,13 @@ async fn selected_upstream_for_matrix_model(
             .ok()
             .map(|upstream| {
                 (
-                    upstream.id,
-                    upstream.name,
+                    upstream.id.clone(),
+                    upstream.name.clone(),
+                    upstream
+                        .keys_for_model(model)
+                        .first()
+                        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+                        .unwrap_or_else(|| upstream_key_fingerprint(&upstream.id, "")),
                     UpstreamProtocol::ChatCompletions,
                 )
             }),
@@ -1031,10 +1053,10 @@ fn matrix_check_results_for_profile(
 
 async fn matrix_profile_details(
     state: &AppState,
-    selected_upstream: Option<&(String, String, crate::routing::UpstreamProtocol)>,
+    selected_upstream: Option<&(String, String, String, crate::routing::UpstreamProtocol)>,
     model: &str,
 ) -> MatrixProfileDetails {
-    let Some((upstream_id, _, upstream_protocol)) = selected_upstream else {
+    let Some((upstream_id, _, key_fingerprint, upstream_protocol)) = selected_upstream else {
         return MatrixProfileDetails {
             profile_state: "unknown".into(),
             profile_currentness: "missing".into(),
@@ -1064,11 +1086,6 @@ async fn matrix_profile_details(
     let runtime_model_slug = upstream
         .resolved_model_name(model)
         .unwrap_or_else(|| model.to_string());
-    let key_fingerprint = upstream
-        .keys_for_model(model)
-        .first()
-        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-        .unwrap_or_default();
     let key = crate::capabilities::DialectProfileKey::for_key(
         upstream_id.clone(),
         key_fingerprint.clone(),
@@ -3397,6 +3414,7 @@ pub(super) fn append_troubleshooting_route_headers(
     headers: &mut HeaderMap,
     upstream_id: &str,
     upstream_name: &str,
+    key_fingerprint: &str,
     upstream_protocol: crate::routing::UpstreamProtocol,
     protocol_transition: &str,
     fallback_stage: Option<&str>,
@@ -3407,6 +3425,11 @@ pub(super) fn append_troubleshooting_route_headers(
         headers,
         TROUBLESHOOTING_SELECTED_UPSTREAM_ID_HEADER,
         upstream_id,
+    );
+    insert_troubleshooting_route_header(
+        headers,
+        TROUBLESHOOTING_SELECTED_UPSTREAM_KEY_FINGERPRINT_HEADER,
+        key_fingerprint,
     );
     insert_troubleshooting_route_header(
         headers,
@@ -3956,6 +3979,13 @@ fn troubleshooting_route_metadata_from_headers(
         selected_upstream_name: headers
             .get(header::HeaderName::from_static(
                 TROUBLESHOOTING_SELECTED_UPSTREAM_NAME_HEADER,
+            ))?
+            .to_str()
+            .ok()?
+            .to_string(),
+        selected_upstream_key_fingerprint: headers
+            .get(header::HeaderName::from_static(
+                TROUBLESHOOTING_SELECTED_UPSTREAM_KEY_FINGERPRINT_HEADER,
             ))?
             .to_str()
             .ok()?
