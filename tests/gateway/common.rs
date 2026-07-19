@@ -101,7 +101,13 @@ pub(crate) async fn stamp_current_dialect_profile(
         .unwrap();
     profile.key.key_fingerprint = upstream_model_key_fingerprint(upstream, exposed_model);
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(upstream, exposed_model, &runtime_model_slug, protocol)
+        .route_configuration_fingerprint(
+            upstream,
+            &profile.key.key_fingerprint,
+            exposed_model,
+            &runtime_model_slug,
+            protocol,
+        )
         .unwrap();
     profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
 }

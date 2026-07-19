@@ -374,6 +374,7 @@ impl ClaudeResponsesThinkingFixture {
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &profile.key.key_fingerprint,
                 "opaque-public",
                 "opaque-public",
                 UpstreamProtocol::Responses,
@@ -410,6 +411,7 @@ impl ClaudeResponsesThinkingFixture {
             weak_profile.configuration_fingerprint = state
                 .route_configuration_fingerprint(
                     &weak_chat_upstream,
+                    &weak_profile.key.key_fingerprint,
                     "opaque-public",
                     "opaque-public",
                     UpstreamProtocol::ChatCompletions,
@@ -845,6 +847,7 @@ impl ClaudeThinkingFixture {
             profile.configuration_fingerprint = state
                 .route_configuration_fingerprint(
                     upstream,
+                    &profile.key.key_fingerprint,
                     "opaque-public",
                     "opaque-public",
                     UpstreamProtocol::ChatCompletions,

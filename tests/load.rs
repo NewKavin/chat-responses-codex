@@ -385,6 +385,7 @@ async fn stamp_load_profile(state: &AppState, profile: &mut UpstreamDialectProfi
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(
             upstream,
+            &profile.key.key_fingerprint,
             &profile.key.runtime_model_slug,
             &profile.key.runtime_model_slug,
             protocol,

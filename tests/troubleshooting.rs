@@ -204,6 +204,7 @@ async fn app_with_reasoning_capable_upstream(
     profile.configuration_fingerprint = app_state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "GLM-5.1",
             "GLM-5.1",
             UpstreamProtocol::ChatCompletions,
@@ -320,6 +321,7 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "vision-model",
             "vision-model",
             UpstreamProtocol::ChatCompletions,
@@ -601,6 +603,7 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
     profile.configuration_fingerprint = app_state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "GLM-5.1",
             "GLM-5.1",
             UpstreamProtocol::ChatCompletions,

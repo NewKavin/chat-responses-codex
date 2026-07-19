@@ -180,9 +180,6 @@ impl LearningHarness {
                 ..AppConfig::default()
             },
         );
-        let configuration_fingerprint = state
-            .route_configuration_fingerprint(&upstream, MODEL, MODEL, protocol)
-            .unwrap();
         for api_key in upstream.available_keys() {
             let key = DialectProfileKey {
                 key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
@@ -193,6 +190,15 @@ impl LearningHarness {
                 runtime_model_slug: MODEL.into(),
                 protocol: WireProtocol::from(protocol),
             };
+            let configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    &key.key_fingerprint,
+                    MODEL,
+                    MODEL,
+                    protocol,
+                )
+                .unwrap();
             let mut profile = UpstreamDialectProfile::unknown(key);
             profile.configuration_fingerprint = configuration_fingerprint.clone();
             state.upsert_dialect_profile(profile).await.unwrap();
@@ -964,7 +970,13 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
     };
     let mut profile = UpstreamDialectProfile::unknown(profile_key.clone());
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, MODEL, MODEL, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &upstream,
+            &profile_key.key_fingerprint,
+            MODEL,
+            MODEL,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     state.upsert_dialect_profile(profile).await.unwrap();
 
@@ -1129,6 +1141,7 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &profile.key.key_fingerprint,
                 runtime_model,
                 runtime_model,
                 UpstreamProtocol::ChatCompletions,
@@ -1275,6 +1288,7 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &profile.key.key_fingerprint,
                 MODEL,
                 runtime_model,
                 UpstreamProtocol::ChatCompletions,
@@ -1471,6 +1485,7 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &key.key_fingerprint,
                 MODEL,
                 &key.runtime_model_slug,
                 UpstreamProtocol::ChatCompletions,
@@ -1496,6 +1511,7 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
             profile.configuration_fingerprint = state
                 .route_configuration_fingerprint(
                     &upstream,
+                    &key.key_fingerprint,
                     MODEL,
                     &key.runtime_model_slug,
                     UpstreamProtocol::ChatCompletions,

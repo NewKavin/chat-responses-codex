@@ -139,6 +139,13 @@ impl GatewayContinuationState {
             && self.profile_key.protocol == WireProtocol::from(protocol)
             && upstream.resolved_model_name(exposed_model).as_deref()
                 == Some(self.profile_key.runtime_model_slug.as_str())
+            && upstream
+                .keys_for_model(&self.profile_key.runtime_model_slug)
+                .iter()
+                .any(|api_key| {
+                    upstream_key_fingerprint(&upstream.id, api_key)
+                        == self.profile_key.key_fingerprint
+                })
     }
 
     pub(super) fn has_current_configuration_fingerprint(
@@ -153,6 +160,7 @@ impl GatewayContinuationState {
                     && AppState::route_configuration_fingerprint_with_snapshot(
                         snapshot,
                         upstream,
+                        &self.profile_key.key_fingerprint,
                         exposed_model,
                         &self.profile_key.runtime_model_slug,
                         protocol,
@@ -368,44 +376,50 @@ pub(super) fn claude_thinking_replay_route(
         let Some(runtime_model_slug) = upstream.resolved_model_name(exposed_model_slug) else {
             continue;
         };
-        for protocol in upstream.supported_protocols() {
-            let Ok(profile_fingerprint) = AppState::route_configuration_fingerprint_with_snapshot(
-                snapshot,
-                upstream,
-                exposed_model_slug,
-                &runtime_model_slug,
-                protocol,
-            ) else {
-                continue;
-            };
-            let protocol_label = wire_protocol_label(protocol.into());
-            let matches = replay_blocks.iter().all(|block| {
-                let call_ids = block
-                    .call_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                let input = super::thinking_signature::ThinkingSignatureInput {
-                    thinking: &block.thinking,
-                    model: &runtime_model_slug,
-                    upstream_id: &upstream.id,
-                    protocol: protocol_label,
-                    profile_fingerprint: &profile_fingerprint,
-                    call_ids: &call_ids,
+        for api_key in upstream.keys_for_model(&runtime_model_slug) {
+            let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+            for protocol in upstream.supported_protocols() {
+                let Ok(profile_fingerprint) =
+                    AppState::route_configuration_fingerprint_with_snapshot(
+                        snapshot,
+                        upstream,
+                        &key_fingerprint,
+                        exposed_model_slug,
+                        &runtime_model_slug,
+                        protocol,
+                    )
+                else {
+                    continue;
                 };
-                super::thinking_signature::verify_thinking(
-                    state.config.jwt_secret.as_bytes(),
-                    &input,
-                    &block.signature,
-                )
-            });
-            if !matches {
-                continue;
+                let protocol_label = wire_protocol_label(protocol.into());
+                let matches = replay_blocks.iter().all(|block| {
+                    let call_ids = block
+                        .call_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    let input = super::thinking_signature::ThinkingSignatureInput {
+                        thinking: &block.thinking,
+                        model: &runtime_model_slug,
+                        upstream_id: &upstream.id,
+                        protocol: protocol_label,
+                        profile_fingerprint: &profile_fingerprint,
+                        call_ids: &call_ids,
+                    };
+                    super::thinking_signature::verify_thinking(
+                        state.config.jwt_secret.as_bytes(),
+                        &input,
+                        &block.signature,
+                    )
+                });
+                if !matches {
+                    continue;
+                }
+                if matched_route.is_some() {
+                    return ClaudeThinkingReplayRoute::InvalidOrUnavailable;
+                }
+                matched_route = Some((upstream.id.clone(), protocol));
             }
-            if matched_route.is_some() {
-                return ClaudeThinkingReplayRoute::InvalidOrUnavailable;
-            }
-            matched_route = Some((upstream.id.clone(), protocol));
         }
     }
     matched_route
@@ -502,19 +516,21 @@ fn exact_route_effective_profile<'a>(
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
 ) -> ExactRouteEffectiveProfile<'a> {
+    let key_fingerprint = upstream
+        .keys_for_model(exposed_model_slug)
+        .first()
+        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+        .unwrap_or_default();
     let key = DialectProfileKey::for_key(
         upstream.id.clone(),
-        upstream
-            .keys_for_model(exposed_model_slug)
-            .first()
-            .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-            .unwrap_or_default(),
+        key_fingerprint.clone(),
         runtime_model_slug,
         protocol.into(),
     );
     let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         snapshot,
         upstream,
+        &key_fingerprint,
         exposed_model_slug,
         runtime_model_slug,
         protocol,

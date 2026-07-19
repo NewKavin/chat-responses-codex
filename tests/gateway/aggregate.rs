@@ -140,6 +140,7 @@ impl ContextFallbackHarness {
             profile.configuration_fingerprint = state
                 .route_configuration_fingerprint(
                     &upstream,
+                    &profile.key.key_fingerprint,
                     MODEL,
                     runtime_model,
                     UpstreamProtocol::Responses,
@@ -317,7 +318,13 @@ impl AggregateHarness {
         });
         profile.state = DialectProfileState::Verified;
         profile.configuration_fingerprint = state
-            .route_configuration_fingerprint(&upstream, MODEL, MODEL, UpstreamProtocol::Responses)
+            .route_configuration_fingerprint(
+                &upstream,
+                &profile.key.key_fingerprint,
+                MODEL,
+                MODEL,
+                UpstreamProtocol::Responses,
+            )
             .unwrap();
         if matches!(&script, AggregateScript::RecoverThenPending) {
             assert!(profile.capabilities.is_empty());
@@ -889,7 +896,13 @@ async fn aggregate_learned_singleflight_follower_uses_actual_mode_for_cancellati
         protocol: WireProtocol::Responses,
     });
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, MODEL, MODEL, UpstreamProtocol::Responses)
+        .route_configuration_fingerprint(
+            &upstream,
+            &profile.key.key_fingerprint,
+            MODEL,
+            MODEL,
+            UpstreamProtocol::Responses,
+        )
         .unwrap();
     state.upsert_dialect_profile(profile).await.unwrap();
 

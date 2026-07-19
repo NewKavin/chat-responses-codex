@@ -567,13 +567,20 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
         let fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &chat_responses_codex::keys::upstream_key_fingerprint(
+                    &upstream.id,
+                    &upstream.api_key,
+                ),
                 "periodic-model",
                 "periodic-model",
                 UpstreamProtocol::ChatCompletions,
             )
             .unwrap();
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
-            key_fingerprint: String::new(),
+            key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
+                &upstream.id,
+                &upstream.api_key,
+            ),
             upstream_id: upstream.id.clone(),
             runtime_model_slug: "periodic-model".into(),
             protocol: WireProtocol::ChatCompletions,

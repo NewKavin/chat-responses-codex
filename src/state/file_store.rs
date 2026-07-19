@@ -1,6 +1,6 @@
 use super::{DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage, UsageLogQuery};
 use crate::capabilities::{
-    CapabilityConfiguration, CapabilityStateDocument, UpstreamDialectProfile,
+    CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
 };
 use crate::state::{StateStore, StoreFuture};
 use std::io;
@@ -136,6 +136,18 @@ impl StateStore for FileStateStore {
             document
                 .profiles
                 .retain(|key, _| key.upstream_id != upstream_id);
+            self.write_capability_document(&document).await
+        })
+    }
+
+    fn delete_dialect_profile<'a>(
+        &'a self,
+        key: &'a DialectProfileKey,
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            let _guard = self.capability_write_lock.lock().await;
+            let mut document = self.load_capability_document().await?;
+            document.profiles.remove(key);
             self.write_capability_document(&document).await
         })
     }

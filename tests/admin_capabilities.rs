@@ -406,6 +406,7 @@ async fn completed_probe_does_not_relabel_old_evidence_after_configuration_impor
         .state
         .route_configuration_fingerprint(
             &upstream,
+            &upstream_key_fingerprint("up-1", "upstream-secret"),
             "opaque",
             "opaque",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -487,6 +488,7 @@ async fn admin_capability_views_treat_schema_mismatched_profiles_as_stale() {
         .state
         .route_configuration_fingerprint(
             &upstream,
+            &upstream_key_fingerprint("up-1", "upstream-secret"),
             "opaque",
             "opaque",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -594,6 +596,7 @@ async fn admin_resolved_uses_the_first_key_mapped_to_the_requested_model() {
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &upstream_key_fingerprint(&upstream.id, "key-with-model"),
             "opaque",
             "opaque",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -639,6 +642,7 @@ async fn capability_admin_contract_exposes_sanitized_evidence_and_structured_con
         .state
         .route_configuration_fingerprint(
             &upstream,
+            &upstream_key_fingerprint("up-1", "upstream-secret"),
             "opaque",
             "opaque",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,

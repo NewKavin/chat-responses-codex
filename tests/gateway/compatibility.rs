@@ -163,6 +163,7 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     witness.configuration_fingerprint = state
         .route_configuration_fingerprint(
             witness_upstream,
+            &witness.key.key_fingerprint,
             model_slug,
             model_slug,
             UpstreamProtocol::ChatCompletions,
@@ -191,6 +192,7 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     weaker.configuration_fingerprint = state
         .route_configuration_fingerprint(
             weaker_upstream,
+            &weaker.key.key_fingerprint,
             model_slug,
             model_slug,
             UpstreamProtocol::ChatCompletions,

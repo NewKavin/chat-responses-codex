@@ -353,6 +353,7 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
         AppState::route_configuration_fingerprint_with_snapshot(
             &captured_snapshot,
             &upstream,
+            "",
             "opaque",
             "opaque",
             UpstreamProtocol::ChatCompletions,

@@ -98,6 +98,36 @@ fn first_model_key_fingerprint(upstream: &UpstreamConfig, model: &str) -> Option
         .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
 }
 
+fn upstream_protocol_from_wire(protocol: WireProtocol) -> Option<UpstreamProtocol> {
+    match protocol {
+        WireProtocol::ChatCompletions => Some(UpstreamProtocol::ChatCompletions),
+        WireProtocol::Responses => Some(UpstreamProtocol::Responses),
+        WireProtocol::Messages => None,
+    }
+}
+
+fn dialect_profile_key_is_routable(routing: &PersistedState, key: &DialectProfileKey) -> bool {
+    if key.key_fingerprint.is_empty() {
+        return false;
+    }
+    let Some(protocol) = upstream_protocol_from_wire(key.protocol) else {
+        return false;
+    };
+    let Some(upstream) = routing
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == key.upstream_id)
+    else {
+        return false;
+    };
+    upstream.active
+        && upstream.supports_protocol(protocol)
+        && upstream
+            .keys_for_model(&key.runtime_model_slug)
+            .iter()
+            .any(|api_key| upstream_key_fingerprint(&upstream.id, api_key) == key.key_fingerprint)
+}
+
 use context_profile::{
     normalize_context_profile_base_url, normalize_global_context_profiles_for_storage,
 };
@@ -309,6 +339,13 @@ impl StateStore for PostgresStateStore {
         Box::pin(async move {
             PostgresStateStore::delete_dialect_profiles_for_upstream(self, upstream_id).await
         })
+    }
+
+    fn delete_dialect_profile<'a>(
+        &'a self,
+        key: &'a DialectProfileKey,
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move { PostgresStateStore::delete_dialect_profile(self, key).await })
     }
 
     fn query_usage_logs_page<'a>(
@@ -854,9 +891,10 @@ impl AppState {
         )
     }
 
-    fn build_capability_probe_job_with_snapshot(
+    fn build_capability_probe_job_for_key_with_snapshot(
         capability_snapshot: &CapabilityRuntimeSnapshot,
         upstream: &UpstreamConfig,
+        key_fingerprint: &str,
         exposed_model_slug: &str,
         runtime_model_slug: &str,
         protocol: UpstreamProtocol,
@@ -867,20 +905,21 @@ impl AppState {
             || !upstream.supports_protocol(protocol)
             || upstream.resolved_model_name(exposed_model_slug).as_deref()
                 != Some(runtime_model_slug)
+            || !upstream
+                .keys_for_model(runtime_model_slug)
+                .iter()
+                .any(|api_key| upstream_key_fingerprint(&upstream.id, api_key) == key_fingerprint)
         {
             return Ok(None);
         }
         let configuration_fingerprint = Self::route_configuration_fingerprint_with_snapshot(
             capability_snapshot,
             upstream,
+            key_fingerprint,
             exposed_model_slug,
             runtime_model_slug,
             protocol,
         )?;
-        let Some(key_fingerprint) = first_model_key_fingerprint(upstream, runtime_model_slug)
-        else {
-            return Ok(None);
-        };
         Ok(Some(ProbeJob {
             key: DialectProfileKey::for_key(
                 upstream.id.clone(),
@@ -904,6 +943,29 @@ impl AppState {
         }))
     }
 
+    fn build_capability_probe_job_with_snapshot(
+        capability_snapshot: &CapabilityRuntimeSnapshot,
+        upstream: &UpstreamConfig,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+        reason: ProbeReason,
+    ) -> io::Result<Option<ProbeJob>> {
+        let Some(key_fingerprint) = first_model_key_fingerprint(upstream, runtime_model_slug)
+        else {
+            return Ok(None);
+        };
+        Self::build_capability_probe_job_for_key_with_snapshot(
+            capability_snapshot,
+            upstream,
+            &key_fingerprint,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+            reason,
+        )
+    }
+
     pub fn capability_probe_job_is_current(
         capability_snapshot: &CapabilityRuntimeSnapshot,
         upstream: &UpstreamConfig,
@@ -921,6 +983,12 @@ impl AppState {
             || !upstream.supports_protocol(protocol)
             || upstream.resolved_model_name(exposed_model_slug).as_deref()
                 != Some(job.key.runtime_model_slug.as_str())
+            || !upstream
+                .keys_for_model(&job.key.runtime_model_slug)
+                .iter()
+                .any(|api_key| {
+                    upstream_key_fingerprint(&upstream.id, api_key) == job.key.key_fingerprint
+                })
         {
             return false;
         }
@@ -933,6 +1001,7 @@ impl AppState {
             && Self::route_configuration_fingerprint_with_snapshot(
                 capability_snapshot,
                 upstream,
+                &job.key.key_fingerprint,
                 exposed_model_slug,
                 &job.key.runtime_model_slug,
                 protocol,
@@ -1274,9 +1343,24 @@ impl AppState {
         if !upstream.supports_protocol(protocol) {
             return Ok(false);
         }
+        let effective_key_fingerprint = if key.key_fingerprint.is_empty() {
+            first_model_key_fingerprint(upstream, &key.runtime_model_slug).unwrap_or_default()
+        } else {
+            key.key_fingerprint.clone()
+        };
+        if !upstream
+            .keys_for_model(&key.runtime_model_slug)
+            .iter()
+            .any(|api_key| {
+                upstream_key_fingerprint(&upstream.id, api_key) == effective_key_fingerprint
+            })
+        {
+            return Ok(false);
+        }
         let latest_fingerprint = Self::route_configuration_fingerprint_with_snapshot(
             &latest_snapshot,
             upstream,
+            &effective_key_fingerprint,
             exposed_model_slug,
             &key.runtime_model_slug,
             protocol,
@@ -1323,6 +1407,20 @@ impl AppState {
         let current = self.capability_snapshot();
         let mut profiles = current.profiles.clone();
         profiles.retain(|key, _| key.upstream_id != upstream_id);
+        self.capability_snapshot
+            .store(Arc::new(CapabilityRuntimeSnapshot {
+                configuration: current.configuration.clone(),
+                profiles,
+            }));
+        Ok(())
+    }
+
+    async fn delete_dialect_profile(&self, key: &DialectProfileKey) -> io::Result<()> {
+        let _guard = self.capability_update_lock.lock().await;
+        self.config_store.delete_dialect_profile(key).await?;
+        let current = self.capability_snapshot();
+        let mut profiles = current.profiles.clone();
+        profiles.remove(key);
         self.capability_snapshot
             .store(Arc::new(CapabilityRuntimeSnapshot {
                 configuration: current.configuration.clone(),
@@ -2335,20 +2433,14 @@ impl AppState {
     pub async fn reconcile_dialect_profiles(&self, now: u64) -> io::Result<Vec<ProbeJob>> {
         let routing = self.routing_snapshot().await;
         let snapshot = self.capability_snapshot();
-        let known_upstream_ids = routing
-            .upstreams
-            .iter()
-            .map(|upstream| upstream.id.clone())
-            .collect::<HashSet<_>>();
-        let stale_upstream_ids = snapshot
+        let stale_profile_keys = snapshot
             .profiles
             .keys()
-            .filter(|key| !known_upstream_ids.contains(&key.upstream_id))
-            .map(|key| key.upstream_id.clone())
-            .collect::<BTreeSet<_>>();
-        for upstream_id in stale_upstream_ids {
-            self.delete_dialect_profiles_for_upstream(&upstream_id)
-                .await?;
+            .filter(|key| !dialect_profile_key_is_routable(&routing, key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in stale_profile_keys {
+            self.delete_dialect_profile(&key).await?;
         }
 
         let snapshot = self.capability_snapshot();
@@ -2375,41 +2467,53 @@ impl AppState {
                 let Some(runtime) = upstream.resolved_model_name(&exposed) else {
                     continue;
                 };
-                let Some(key_fingerprint) = first_model_key_fingerprint(upstream, &runtime) else {
-                    continue;
-                };
-                for protocol in upstream.protocols.iter().copied() {
-                    let key = DialectProfileKey::for_key(
-                        upstream.id.clone(),
-                        key_fingerprint.clone(),
-                        runtime.clone(),
-                        protocol.into(),
-                    );
-                    let fingerprint = self
-                        .route_configuration_fingerprint(upstream, &exposed, &runtime, protocol)?;
-                    let current = snapshot.profiles.get(&key);
-                    if !current
-                        .map(|profile| {
-                            profile_is_current(profile, &fingerprint, now, refresh_interval_seconds)
-                        })
-                        .unwrap_or(false)
-                    {
-                        if let Some(index) = queued.get(&key).copied() {
-                            jobs[index].exposed_model_slugs.insert(exposed.clone());
-                        } else {
-                            let Some(job) = Self::build_capability_probe_job_with_snapshot(
-                                &snapshot,
-                                upstream,
-                                &exposed,
-                                &runtime,
-                                protocol,
-                                ProbeReason::ConfigurationChanged,
-                            )?
-                            else {
-                                continue;
-                            };
-                            queued.insert(key.clone(), jobs.len());
-                            jobs.push(job);
+                for api_key in upstream.keys_for_model(&runtime) {
+                    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+                    for protocol in upstream.supported_protocols() {
+                        let key = DialectProfileKey::for_key(
+                            upstream.id.clone(),
+                            key_fingerprint.clone(),
+                            runtime.clone(),
+                            protocol.into(),
+                        );
+                        let fingerprint = self.route_configuration_fingerprint(
+                            upstream,
+                            &key_fingerprint,
+                            &exposed,
+                            &runtime,
+                            protocol,
+                        )?;
+                        let current = snapshot.profiles.get(&key);
+                        if !current
+                            .map(|profile| {
+                                profile_is_current(
+                                    profile,
+                                    &fingerprint,
+                                    now,
+                                    refresh_interval_seconds,
+                                )
+                            })
+                            .unwrap_or(false)
+                        {
+                            if let Some(index) = queued.get(&key).copied() {
+                                jobs[index].exposed_model_slugs.insert(exposed.clone());
+                            } else {
+                                let Some(job) =
+                                    Self::build_capability_probe_job_for_key_with_snapshot(
+                                        &snapshot,
+                                        upstream,
+                                        &key_fingerprint,
+                                        &exposed,
+                                        &runtime,
+                                        protocol,
+                                        ProbeReason::ConfigurationChanged,
+                                    )?
+                                else {
+                                    continue;
+                                };
+                                queued.insert(key.clone(), jobs.len());
+                                jobs.push(job);
+                            }
                         }
                     }
                 }
@@ -2463,21 +2567,168 @@ impl AppState {
         &self,
         mut capability_state: CapabilityStateDocument,
     ) -> io::Result<()> {
+        let _guard = self.capability_update_lock.lock().await;
         let migrated =
             crate::capabilities::sanitize_sensitive_urls(&mut capability_state.configuration);
-        let compiled = capability_state
-            .configuration
-            .compile()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let compiled = Arc::new(
+            capability_state
+                .configuration
+                .compile()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        );
         if migrated {
             self.config_store
                 .persist_capability_configuration(&capability_state.configuration)
                 .await?;
         }
+
+        let routing = self.routing_snapshot().await;
+        let fingerprint_snapshot = CapabilityRuntimeSnapshot {
+            configuration: compiled.clone(),
+            profiles: BTreeMap::new(),
+        };
+        let original_keys = capability_state
+            .profiles
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut reconciled = BTreeMap::new();
+        for (stored_key, mut profile) in std::mem::take(&mut capability_state.profiles) {
+            let Some(upstream) = routing
+                .upstreams
+                .iter()
+                .find(|upstream| upstream.id == stored_key.upstream_id)
+            else {
+                self.config_store
+                    .delete_dialect_profile(&stored_key)
+                    .await?;
+                continue;
+            };
+            let Some(protocol) = upstream_protocol_from_wire(stored_key.protocol) else {
+                self.config_store
+                    .delete_dialect_profile(&stored_key)
+                    .await?;
+                continue;
+            };
+            if !upstream.active || !upstream.supports_protocol(protocol) {
+                self.config_store
+                    .delete_dialect_profile(&stored_key)
+                    .await?;
+                continue;
+            }
+
+            let mut exposed_models = upstream
+                .route_models()
+                .into_iter()
+                .filter(|exposed| {
+                    upstream.resolved_model_name(exposed).as_deref()
+                        == Some(stored_key.runtime_model_slug.as_str())
+                })
+                .collect::<Vec<_>>();
+            if exposed_models.is_empty()
+                && upstream
+                    .resolved_model_name(&stored_key.runtime_model_slug)
+                    .as_deref()
+                    == Some(stored_key.runtime_model_slug.as_str())
+            {
+                exposed_models.push(stored_key.runtime_model_slug.clone());
+            }
+            let route_keys = upstream.keys_for_model(&stored_key.runtime_model_slug);
+            if exposed_models.is_empty() || route_keys.is_empty() {
+                self.config_store
+                    .delete_dialect_profile(&stored_key)
+                    .await?;
+                continue;
+            }
+            let key_fingerprints = route_keys
+                .iter()
+                .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+                .collect::<BTreeSet<_>>();
+
+            if !stored_key.key_fingerprint.is_empty() {
+                if key_fingerprints.contains(&stored_key.key_fingerprint) {
+                    profile.key = stored_key.clone();
+                    reconciled.insert(stored_key, profile);
+                } else {
+                    self.config_store
+                        .delete_dialect_profile(&stored_key)
+                        .await?;
+                }
+                continue;
+            }
+
+            let Some(key_fingerprint) = key_fingerprints
+                .iter()
+                .next()
+                .filter(|_| key_fingerprints.len() == 1)
+            else {
+                self.config_store
+                    .delete_dialect_profile(&stored_key)
+                    .await?;
+                continue;
+            };
+            let matching_exposed = exposed_models.iter().find(|exposed| {
+                let legacy = Self::legacy_route_configuration_fingerprint_material_with_snapshot(
+                    &fingerprint_snapshot,
+                    upstream,
+                    exposed,
+                    &stored_key.runtime_model_slug,
+                    protocol,
+                );
+                if legacy
+                    .as_ref()
+                    .is_ok_and(|fingerprint| fingerprint == &profile.configuration_fingerprint)
+                {
+                    return true;
+                }
+                Self::route_configuration_fingerprint_with_snapshot(
+                    &fingerprint_snapshot,
+                    upstream,
+                    key_fingerprint,
+                    exposed,
+                    &stored_key.runtime_model_slug,
+                    protocol,
+                )
+                .is_ok_and(|fingerprint| fingerprint == profile.configuration_fingerprint)
+            });
+            let Some(exposed_model) = matching_exposed else {
+                self.config_store
+                    .delete_dialect_profile(&stored_key)
+                    .await?;
+                continue;
+            };
+            let rebound_key = DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_fingerprint.clone(),
+                stored_key.runtime_model_slug.clone(),
+                stored_key.protocol,
+            );
+            if original_keys.contains(&rebound_key) || reconciled.contains_key(&rebound_key) {
+                self.config_store
+                    .delete_dialect_profile(&stored_key)
+                    .await?;
+                continue;
+            }
+            profile.key = rebound_key.clone();
+            profile.configuration_fingerprint =
+                Self::route_configuration_fingerprint_with_snapshot(
+                    &fingerprint_snapshot,
+                    upstream,
+                    key_fingerprint,
+                    exposed_model,
+                    &stored_key.runtime_model_slug,
+                    protocol,
+                )?;
+            self.config_store.upsert_dialect_profile(&profile).await?;
+            self.config_store
+                .delete_dialect_profile(&stored_key)
+                .await?;
+            reconciled.insert(rebound_key, profile);
+        }
         self.capability_snapshot
             .store(Arc::new(CapabilityRuntimeSnapshot {
-                configuration: Arc::new(compiled),
-                profiles: capability_state.profiles,
+                configuration: compiled,
+                profiles: reconciled,
             }));
         Ok(())
     }
@@ -2494,19 +2745,18 @@ impl AppState {
             let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
                 continue;
             };
-            let Some(key_fingerprint) = first_model_key_fingerprint(upstream, &runtime_model_slug)
-            else {
-                continue;
-            };
-            for protocol in upstream.supported_protocols() {
-                jobs.entry(DialectProfileKey::for_key(
-                    upstream.id.clone(),
-                    key_fingerprint.clone(),
-                    runtime_model_slug.clone(),
-                    protocol.into(),
-                ))
-                .or_default()
-                .insert(exposed_model.clone());
+            for api_key in upstream.keys_for_model(&runtime_model_slug) {
+                let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+                for protocol in upstream.supported_protocols() {
+                    jobs.entry(DialectProfileKey::for_key(
+                        upstream.id.clone(),
+                        key_fingerprint.clone(),
+                        runtime_model_slug.clone(),
+                        protocol.into(),
+                    ))
+                    .or_default()
+                    .insert(exposed_model.clone());
+                }
             }
         }
         jobs
@@ -2539,9 +2789,10 @@ impl AppState {
                 WireProtocol::Responses => UpstreamProtocol::Responses,
                 WireProtocol::Messages => continue,
             };
-            let Some(mut job) = Self::build_capability_probe_job_with_snapshot(
+            let Some(mut job) = Self::build_capability_probe_job_for_key_with_snapshot(
                 &capability_snapshot,
                 upstream,
+                &key.key_fingerprint,
                 exposed_model_slug,
                 &key.runtime_model_slug,
                 protocol,
@@ -2604,45 +2855,44 @@ impl AppState {
                 let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
                     continue;
                 };
-                let Some(key_fingerprint) =
-                    first_model_key_fingerprint(upstream, &runtime_model_slug)
-                else {
-                    continue;
-                };
-                for protocol in upstream.supported_protocols() {
-                    let key = DialectProfileKey::for_key(
-                        upstream.id.clone(),
-                        key_fingerprint.clone(),
-                        runtime_model_slug.clone(),
-                        protocol.into(),
-                    );
-                    let fingerprint = match Self::route_configuration_fingerprint_with_snapshot(
-                        &snapshot,
-                        upstream,
-                        &exposed_model,
-                        &runtime_model_slug,
-                        protocol,
-                    ) {
-                        Ok(fingerprint) => fingerprint,
-                        Err(error) => {
-                            tracing::warn!(
-                                upstream_id = %upstream.id,
-                                exposed_model = %exposed_model,
-                                runtime_model = %runtime_model_slug,
-                                protocol = ?protocol,
-                                error = %error,
-                                "skipping capability probe for route with invalid fingerprint"
-                            );
+                for api_key in upstream.keys_for_model(&runtime_model_slug) {
+                    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+                    for protocol in upstream.supported_protocols() {
+                        let key = DialectProfileKey::for_key(
+                            upstream.id.clone(),
+                            key_fingerprint.clone(),
+                            runtime_model_slug.clone(),
+                            protocol.into(),
+                        );
+                        let fingerprint = match Self::route_configuration_fingerprint_with_snapshot(
+                            &snapshot,
+                            upstream,
+                            &key_fingerprint,
+                            &exposed_model,
+                            &runtime_model_slug,
+                            protocol,
+                        ) {
+                            Ok(fingerprint) => fingerprint,
+                            Err(error) => {
+                                tracing::warn!(
+                                    upstream_id = %upstream.id,
+                                    exposed_model = %exposed_model,
+                                    runtime_model = %runtime_model_slug,
+                                    protocol = ?protocol,
+                                    error = %error,
+                                    "skipping capability probe for route with invalid fingerprint"
+                                );
+                                continue;
+                            }
+                        };
+                        let current = snapshot.profiles.get(&key).is_some_and(|profile| {
+                            profile_is_current(profile, &fingerprint, now, refresh_interval_seconds)
+                        });
+                        if current {
                             continue;
                         }
-                    };
-                    let current = snapshot.profiles.get(&key).is_some_and(|profile| {
-                        profile_is_current(profile, &fingerprint, now, refresh_interval_seconds)
-                    });
-                    if current {
-                        continue;
+                        jobs.entry(key).or_default().insert(exposed_model.clone());
                     }
-                    jobs.entry(key).or_default().insert(exposed_model.clone());
                 }
             }
         }
@@ -2694,12 +2944,31 @@ impl AppState {
     pub fn route_configuration_fingerprint(
         &self,
         upstream: &UpstreamConfig,
+        key_fingerprint: &str,
         exposed_model_slug: &str,
         runtime_model_slug: &str,
         protocol: UpstreamProtocol,
     ) -> io::Result<String> {
         let snapshot = self.capability_snapshot();
         Self::route_configuration_fingerprint_with_snapshot(
+            &snapshot,
+            upstream,
+            key_fingerprint,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+        )
+    }
+
+    pub fn legacy_route_configuration_fingerprint(
+        &self,
+        upstream: &UpstreamConfig,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+    ) -> io::Result<String> {
+        let snapshot = self.capability_snapshot();
+        Self::legacy_route_configuration_fingerprint_material_with_snapshot(
             &snapshot,
             upstream,
             exposed_model_slug,
@@ -2711,6 +2980,47 @@ impl AppState {
     pub fn route_configuration_fingerprint_with_snapshot(
         snapshot: &CapabilityRuntimeSnapshot,
         upstream: &UpstreamConfig,
+        key_fingerprint: &str,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+    ) -> io::Result<String> {
+        let legacy = Self::legacy_route_configuration_fingerprint_material_with_snapshot(
+            snapshot,
+            upstream,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+        )?;
+        if key_fingerprint.trim().is_empty() {
+            return Ok(legacy);
+        }
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(legacy.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(key_fingerprint.as_bytes());
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    pub fn legacy_route_configuration_fingerprint_with_snapshot(
+        snapshot: &CapabilityRuntimeSnapshot,
+        upstream: &UpstreamConfig,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+    ) -> io::Result<String> {
+        Self::legacy_route_configuration_fingerprint_material_with_snapshot(
+            snapshot,
+            upstream,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+        )
+    }
+
+    fn legacy_route_configuration_fingerprint_material_with_snapshot(
+        snapshot: &CapabilityRuntimeSnapshot,
+        upstream: &UpstreamConfig,
         exposed_model_slug: &str,
         runtime_model_slug: &str,
         protocol: UpstreamProtocol,
@@ -2719,8 +3029,7 @@ impl AppState {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let mut route = crate::capabilities::RouteIdentity {
             upstream_id: upstream.id.clone(),
-            key_fingerprint: first_model_key_fingerprint(upstream, runtime_model_slug)
-                .unwrap_or_default(),
+            key_fingerprint: String::new(),
             exposed_model_slug: exposed_model_slug.to_owned(),
             runtime_model_slug: runtime_model_slug.to_owned(),
             protocol: WireProtocol::from(protocol),
@@ -2888,15 +3197,17 @@ impl AppState {
                     .categories
                     .contains(&ModelQualificationCategory::Passed);
                 let level = if passed {
+                    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &record.api_key);
                     let profile_key = DialectProfileKey::for_key(
                         upstream.id.clone(),
-                        upstream_key_fingerprint(&upstream.id, &record.api_key),
+                        key_fingerprint.clone(),
                         record.model.clone(),
                         WireProtocol::from(record.protocol),
                     );
                     let profile = Self::route_configuration_fingerprint_with_snapshot(
                         &capability_snapshot,
                         &upstream,
+                        &key_fingerprint,
                         &record.model,
                         &record.model,
                         record.protocol,

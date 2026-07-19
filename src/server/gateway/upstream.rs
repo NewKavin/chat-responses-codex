@@ -1114,6 +1114,7 @@ pub(super) async fn send_to_upstream(
             profile_fingerprint: AppState::route_configuration_fingerprint_with_snapshot(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -1358,6 +1359,7 @@ pub(super) async fn send_to_upstream(
         let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,
@@ -1408,6 +1410,7 @@ pub(super) async fn send_to_upstream(
         let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,
@@ -1477,6 +1480,7 @@ pub(super) async fn send_to_upstream(
             profile_fingerprint: AppState::route_configuration_fingerprint_with_snapshot(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,

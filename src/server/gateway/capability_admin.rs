@@ -136,6 +136,7 @@ pub(super) async fn admin_capabilities_resolved(
     let current_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         &capability_snapshot,
         upstream,
+        &key_fingerprint,
         &query.model,
         &runtime_model_slug,
         protocol,
@@ -377,6 +378,7 @@ fn profile_is_current_for_any_route(
             AppState::route_configuration_fingerprint_with_snapshot(
                 snapshot,
                 upstream,
+                &profile.key.key_fingerprint,
                 &exposed,
                 &profile.key.runtime_model_slug,
                 protocol,
@@ -407,19 +409,22 @@ fn profile_is_current_for_route(
     profile.key
         == DialectProfileKey::for_key(
             upstream.id.clone(),
-            upstream
-                .keys_for_model(exposed_model_slug)
-                .first()
-                .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-                .unwrap_or_default(),
+            profile.key.key_fingerprint.clone(),
             runtime_model_slug,
             WireProtocol::from(protocol),
         )
+        && upstream
+            .keys_for_model(runtime_model_slug)
+            .iter()
+            .any(|api_key| {
+                upstream_key_fingerprint(&upstream.id, api_key) == profile.key.key_fingerprint
+            })
         && profile.configuration_fingerprint == fingerprint
         && profile.probe_schema_version == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
         && AppState::route_configuration_fingerprint_with_snapshot(
             snapshot,
             upstream,
+            &profile.key.key_fingerprint,
             exposed_model_slug,
             runtime_model_slug,
             protocol,

@@ -1064,13 +1064,14 @@ async fn matrix_profile_details(
     let runtime_model_slug = upstream
         .resolved_model_name(model)
         .unwrap_or_else(|| model.to_string());
+    let key_fingerprint = upstream
+        .keys_for_model(model)
+        .first()
+        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+        .unwrap_or_default();
     let key = crate::capabilities::DialectProfileKey::for_key(
         upstream_id.clone(),
-        upstream
-            .keys_for_model(model)
-            .first()
-            .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
-            .unwrap_or_default(),
+        key_fingerprint.clone(),
         runtime_model_slug.clone(),
         crate::capabilities::WireProtocol::from(*upstream_protocol),
     );
@@ -1078,6 +1079,7 @@ async fn matrix_profile_details(
     let current_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         &capability_snapshot,
         upstream,
+        &key_fingerprint,
         model,
         &runtime_model_slug,
         *upstream_protocol,

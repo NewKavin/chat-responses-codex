@@ -327,21 +327,27 @@ impl PostgresStateStore {
 
         for row in conn
             .query(
-                "SELECT upstream_id, runtime_model_slug, protocol, profile
+                "SELECT upstream_id, key_fingerprint, runtime_model_slug, protocol, profile
                  FROM dialect_profiles
-                 ORDER BY upstream_id, runtime_model_slug, protocol",
+                 ORDER BY upstream_id, key_fingerprint, runtime_model_slug, protocol",
                 &[],
             )
             .await
             .map_err(io_other)?
         {
             let upstream_id: String = row.get(0);
-            let runtime_model_slug: String = row.get(1);
-            let protocol = decode_wire_protocol_key(&row.get::<_, String>(2))?;
-            let profile_json: String = row.get(3);
+            let key_fingerprint: String = row.get(1);
+            let runtime_model_slug: String = row.get(2);
+            let protocol = decode_wire_protocol_key(&row.get::<_, String>(3))?;
+            let profile_json: String = row.get(4);
             let mut profile: UpstreamDialectProfile = serde_json::from_str(&profile_json)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let key = DialectProfileKey::legacy(upstream_id, runtime_model_slug, protocol);
+            let key = DialectProfileKey::for_key(
+                upstream_id,
+                key_fingerprint,
+                runtime_model_slug,
+                protocol,
+            );
             profile.key = key.clone();
             document.profiles.insert(key, profile);
         }
@@ -376,19 +382,41 @@ impl PostgresStateStore {
         let updated_at = u64_to_i64(unix_seconds());
         conn.execute(
             "INSERT INTO dialect_profiles (
-                upstream_id, runtime_model_slug, protocol, profile, updated_at
+                upstream_id, key_fingerprint, runtime_model_slug, protocol, profile, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5
+                $1, $2, $3, $4, $5, $6
             )
-            ON CONFLICT (upstream_id, runtime_model_slug, protocol) DO UPDATE SET
+            ON CONFLICT (upstream_id, key_fingerprint, runtime_model_slug, protocol) DO UPDATE SET
                 profile = EXCLUDED.profile,
                 updated_at = EXCLUDED.updated_at",
             &[
                 &profile.key.upstream_id,
+                &profile.key.key_fingerprint,
                 &profile.key.runtime_model_slug,
                 &protocol,
                 &profile_json,
                 &updated_at,
+            ],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
+    }
+
+    pub async fn delete_dialect_profile(&self, key: &DialectProfileKey) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let protocol = encode_wire_protocol_key(key.protocol)?;
+        conn.execute(
+            "DELETE FROM dialect_profiles
+             WHERE upstream_id = $1
+               AND key_fingerprint = $2
+               AND runtime_model_slug = $3
+               AND protocol = $4",
+            &[
+                &key.upstream_id,
+                &key.key_fingerprint,
+                &key.runtime_model_slug,
+                &protocol,
             ],
         )
         .await
@@ -705,9 +733,70 @@ impl PostgresStateStore {
     }
 
     async fn initialize_schema(&self) -> io::Result<()> {
-        let conn = self.pool.get().await.map_err(io_other)?;
-        conn.batch_execute(SCHEMA_SQL).await.map_err(io_other)
+        let mut conn = self.pool.get().await.map_err(io_other)?;
+        let tx = conn.transaction().await.map_err(io_other)?;
+        tx.batch_execute(SCHEMA_SQL).await.map_err(io_other)?;
+        migrate_dialect_profiles_primary_key(&tx).await?;
+        tx.commit().await.map_err(io_other)
     }
+}
+
+async fn migrate_dialect_profiles_primary_key(tx: &Transaction<'_>) -> io::Result<()> {
+    tx.batch_execute(
+        "ALTER TABLE dialect_profiles
+         ADD COLUMN IF NOT EXISTS key_fingerprint TEXT NOT NULL DEFAULT ''",
+    )
+    .await
+    .map_err(io_other)?;
+
+    let row = tx
+        .query_opt(
+            "SELECT c.conname,
+                    array_agg(a.attname ORDER BY key_column.ordinality)
+             FROM pg_constraint AS c
+             JOIN LATERAL unnest(c.conkey) WITH ORDINALITY
+                 AS key_column(attnum, ordinality) ON TRUE
+             JOIN pg_attribute AS a
+               ON a.attrelid = c.conrelid
+              AND a.attnum = key_column.attnum
+             WHERE c.conrelid = 'dialect_profiles'::regclass
+               AND c.contype = 'p'
+             GROUP BY c.oid, c.conname",
+            &[],
+        )
+        .await
+        .map_err(io_other)?;
+    let target = [
+        "upstream_id",
+        "key_fingerprint",
+        "runtime_model_slug",
+        "protocol",
+    ];
+    let Some(row) = row else {
+        tx.batch_execute(
+            "ALTER TABLE dialect_profiles
+             ADD CONSTRAINT dialect_profiles_pkey
+             PRIMARY KEY (upstream_id, key_fingerprint, runtime_model_slug, protocol)",
+        )
+        .await
+        .map_err(io_other)?;
+        return Ok(());
+    };
+    let constraint_name: String = row.get(0);
+    let columns: Vec<String> = row.get(1);
+    if columns.iter().map(String::as_str).eq(target) {
+        return Ok(());
+    }
+
+    let quoted_name = constraint_name.replace('"', "\"\"");
+    tx.batch_execute(&format!(
+        "ALTER TABLE dialect_profiles DROP CONSTRAINT \"{quoted_name}\";
+         ALTER TABLE dialect_profiles
+         ADD CONSTRAINT dialect_profiles_pkey
+         PRIMARY KEY (upstream_id, key_fingerprint, runtime_model_slug, protocol)"
+    ))
+    .await
+    .map_err(io_other)
 }
 
 async fn sync_config_tables(tx: &Transaction<'_>, state: &PersistedState) -> io::Result<()> {
@@ -1499,11 +1588,12 @@ CREATE TABLE IF NOT EXISTS capability_configuration (
 
 CREATE TABLE IF NOT EXISTS dialect_profiles (
     upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
+    key_fingerprint TEXT NOT NULL DEFAULT '',
     runtime_model_slug TEXT NOT NULL,
     protocol TEXT NOT NULL,
     profile TEXT NOT NULL,
     updated_at BIGINT NOT NULL,
-    PRIMARY KEY (upstream_id, runtime_model_slug, protocol)
+    PRIMARY KEY (upstream_id, key_fingerprint, runtime_model_slug, protocol)
 );
 
 CREATE TABLE IF NOT EXISTS response_history (

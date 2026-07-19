@@ -1,6 +1,6 @@
 use super::{DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage, UsageLogQuery};
 use crate::capabilities::{
-    CapabilityConfiguration, CapabilityStateDocument, UpstreamDialectProfile,
+    CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
 };
 use std::future::Future;
 use std::io;
@@ -32,6 +32,13 @@ pub trait StateStore: Send + Sync {
     fn delete_dialect_profiles_for_upstream<'a>(
         &'a self,
         _upstream_id: &'a str,
+    ) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete_dialect_profile<'a>(
+        &'a self,
+        _key: &'a DialectProfileKey,
     ) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async { Ok(()) })
     }

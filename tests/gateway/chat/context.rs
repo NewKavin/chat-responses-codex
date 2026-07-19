@@ -573,6 +573,7 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
             profile.configuration_fingerprint = state
                 .route_configuration_fingerprint(
                     &upstream,
+                    &profile.key.key_fingerprint,
                     "MiniMax2.7",
                     runtime_model,
                     UpstreamProtocol::ChatCompletions,

@@ -2,17 +2,20 @@ use chat_responses_codex::capabilities::{
     CapabilityConfiguration, DialectProfileKey, UpstreamDialectProfile, WireProtocol,
 };
 use chat_responses_codex::keys::generate_downstream_key;
+use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, CompatibilityUsageMetadata,
-    DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile, ModelContextConfig,
-    ModelRequestCostConfig, PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
+    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, AppState,
+    CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
+    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UsageLog,
+    UsageLogQuery,
 };
 use serde_json::json;
 use serde_json::Map;
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::OnceLock;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -87,7 +90,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
     if let Some(password) = &injected_password {
         env::set_var("PGPASSWORD", password);
     }
-    reset_test_database(&database_url);
+    reset_test_database_async(&database_url).await;
 
     let config = AppConfig::default();
     let state = AppState::load_from_database_url(&database_url, config.clone())
@@ -615,6 +618,177 @@ async fn postgres_roundtrip_preserves_capability_state() {
         .expect("should reload state from PostgreSQL after upstream removal");
     assert!(!removed.capability_snapshot().profiles.contains_key(&key));
 
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_roundtrips_two_key_profiles_for_the_same_model_protocol() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!(
+            "skipping postgres keyed profile roundtrip test: PG_TEST_DATABASE_URL is not set"
+        );
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should initialize postgres schema");
+    reset_test_database(&database_url);
+    state
+        .insert_upstream(UpstreamConfig {
+            id: "up-keyed-roundtrip".into(),
+            name: "keyed roundtrip".into(),
+            base_url: "https://keyed-roundtrip.example/v1".into(),
+            api_key: "key-a".into(),
+            api_keys: vec!["key-b".into()],
+            api_key_models: vec![
+                ApiKeyModelConfig {
+                    api_key: "key-a".into(),
+                    supported_models: vec!["glm-5.2".into()],
+                },
+                ApiKeyModelConfig {
+                    api_key: "key-b".into(),
+                    supported_models: vec!["glm-5.2".into()],
+                },
+            ],
+            protocol: UpstreamProtocol::Responses,
+            protocols: vec![UpstreamProtocol::Responses],
+            supported_models: vec!["glm-5.2".into()],
+            active: true,
+            ..UpstreamConfig::default()
+        })
+        .await
+        .unwrap();
+    for api_key in ["key-a", "key-b"] {
+        let key_fingerprint = upstream_key_fingerprint("up-keyed-roundtrip", api_key);
+        let key = DialectProfileKey::for_key(
+            "up-keyed-roundtrip",
+            key_fingerprint.clone(),
+            "glm-5.2",
+            WireProtocol::Responses,
+        );
+        let mut profile = UpstreamDialectProfile::unknown(key);
+        profile.configuration_fingerprint = state
+            .route_configuration_fingerprint(
+                &state
+                    .snapshot()
+                    .await
+                    .upstreams
+                    .into_iter()
+                    .find(|upstream| upstream.id == "up-keyed-roundtrip")
+                    .unwrap(),
+                &key_fingerprint,
+                "glm-5.2",
+                "glm-5.2",
+                UpstreamProtocol::Responses,
+            )
+            .unwrap();
+        state.upsert_dialect_profile(profile).await.unwrap();
+    }
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload keyed profiles");
+    let profiles = reloaded.capability_snapshot();
+    assert!(profiles.profiles.contains_key(&DialectProfileKey::for_key(
+        "up-keyed-roundtrip",
+        upstream_key_fingerprint("up-keyed-roundtrip", "key-a"),
+        "glm-5.2",
+        WireProtocol::Responses,
+    )));
+    assert!(profiles.profiles.contains_key(&DialectProfileKey::for_key(
+        "up-keyed-roundtrip",
+        upstream_key_fingerprint("up-keyed-roundtrip", "key-b"),
+        "glm-5.2",
+        WireProtocol::Responses,
+    )));
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_migrates_the_legacy_dialect_profile_primary_key() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres primary-key migration test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    let config = AppConfig::default();
+    let _ = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should initialize postgres schema");
+    execute_pg_sql(&database_url, "DROP TABLE dialect_profiles; CREATE TABLE dialect_profiles (upstream_id TEXT NOT NULL, runtime_model_slug TEXT NOT NULL, protocol TEXT NOT NULL, profile TEXT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (upstream_id, runtime_model_slug, protocol))").await;
+    let _ = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("legacy profile table should migrate transactionally");
+    let columns = query_primary_key_columns_async(&database_url).await;
+    assert_eq!(
+        columns,
+        vec![
+            "upstream_id".to_string(),
+            "key_fingerprint".to_string(),
+            "runtime_model_slug".to_string(),
+            "protocol".to_string(),
+        ]
+    );
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_profile_primary_key_migration_rolls_back_atomically() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres migration rollback test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    let config = AppConfig::default();
+    let _ = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should initialize postgres schema");
+    execute_pg_sql(&database_url, "DROP TABLE dialect_profiles; CREATE TABLE dialect_profiles (upstream_id TEXT NOT NULL, runtime_model_slug TEXT NOT NULL, protocol TEXT NOT NULL, profile TEXT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (upstream_id, runtime_model_slug, protocol))").await;
+
+    let mut client = postgres_client(&database_url).await;
+    let tx = client.transaction().await.unwrap();
+    let migration = tx
+        .batch_execute(
+            "ALTER TABLE dialect_profiles ADD COLUMN key_fingerprint TEXT NOT NULL DEFAULT '';
+             ALTER TABLE dialect_profiles DROP CONSTRAINT dialect_profiles_pkey;
+             ALTER TABLE dialect_profiles ADD CONSTRAINT dialect_profiles_pkey
+                 PRIMARY KEY (upstream_id, key_fingerprint, runtime_model_slug, protocol);
+             ALTER TABLE dialect_profiles ADD CONSTRAINT invalid_rollback_fixture
+                 CHECK (missing_column IS NOT NULL)",
+        )
+        .await;
+    assert!(migration.is_err());
+    drop(tx);
+
+    assert_eq!(
+        query_primary_key_columns_async(&database_url).await,
+        vec![
+            "upstream_id".to_string(),
+            "runtime_model_slug".to_string(),
+            "protocol".to_string(),
+        ]
+    );
+    assert!(!query_column_exists(&database_url, "key_fingerprint").await);
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
     }
@@ -1172,6 +1346,74 @@ fn query_count(database_url: &str, table: &str, column: &str, value: &str) -> i6
         .trim()
         .parse()
         .expect("count query should return an integer")
+}
+
+async fn postgres_client(database_url: &str) -> tokio_postgres::Client {
+    let mut config = tokio_postgres::Config::from_str(database_url).unwrap();
+    if config.get_password().is_none() {
+        if let Ok(password) = env::var("PGPASSWORD") {
+            config.password(password);
+        }
+    }
+    let (client, connection) = config.connect(tokio_postgres::NoTls).await.unwrap();
+    tokio::spawn(async move {
+        connection
+            .await
+            .expect("postgres test connection should remain healthy");
+    });
+    client
+}
+
+async fn execute_pg_sql(database_url: &str, sql: &str) {
+    postgres_client(database_url)
+        .await
+        .batch_execute(sql)
+        .await
+        .unwrap();
+}
+
+async fn reset_test_database_async(database_url: &str) {
+    execute_pg_sql(
+        database_url,
+        "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_model_request_costs, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
+    )
+    .await;
+}
+
+async fn query_primary_key_columns_async(database_url: &str) -> Vec<String> {
+    let client = postgres_client(database_url).await;
+    client
+        .query(
+            "SELECT a.attname
+             FROM pg_constraint AS c
+             JOIN LATERAL unnest(c.conkey) WITH ORDINALITY
+                 AS k(attnum, ordinality) ON TRUE
+             JOIN pg_attribute AS a
+               ON a.attrelid = c.conrelid
+              AND a.attnum = k.attnum
+             WHERE c.conrelid = 'dialect_profiles'::regclass
+               AND c.contype = 'p'
+             ORDER BY k.ordinality",
+            &[],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect()
+}
+
+async fn query_column_exists(database_url: &str, column: &str) -> bool {
+    let client = postgres_client(database_url).await;
+    client
+        .query_opt(
+            "SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'dialect_profiles' AND column_name = $1",
+            &[&column],
+        )
+        .await
+        .unwrap()
+        .is_some()
 }
 
 fn reset_test_database(database_url: &str) {

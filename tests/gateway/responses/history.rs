@@ -366,7 +366,7 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
     );
     for runtime_model in [exposed_model, fallback_model] {
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
-            key_fingerprint: String::new(),
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, runtime_model),
             upstream_id: upstream.id.clone(),
             runtime_model_slug: runtime_model.into(),
             protocol: WireProtocol::Responses,
@@ -375,6 +375,7 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &profile.key.key_fingerprint,
                 exposed_model,
                 runtime_model,
                 UpstreamProtocol::Responses,

@@ -605,6 +605,7 @@ async fn qualification_decision_uses_exact_current_profile_for_full_level() {
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "chat-ok",
             "chat-ok",
             UpstreamProtocol::ChatCompletions,

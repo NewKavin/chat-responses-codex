@@ -197,7 +197,13 @@ async fn put_catalog_profile_for_protocol(
     capabilities: &[(Capability, EvidenceState)],
 ) -> String {
     let configuration_fingerprint = state
-        .route_configuration_fingerprint(upstream, model, model, protocol)
+        .route_configuration_fingerprint(
+            upstream,
+            &upstream_model_key_fingerprint(upstream, model),
+            model,
+            model,
+            protocol,
+        )
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
         key_fingerprint: upstream_model_key_fingerprint(upstream, model),
@@ -234,7 +240,13 @@ async fn stamp_current_profile(
         .unwrap();
     profile.key.key_fingerprint = upstream_model_key_fingerprint(upstream, exposed_model);
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(upstream, exposed_model, &runtime_model_slug, protocol)
+        .route_configuration_fingerprint(
+            upstream,
+            &profile.key.key_fingerprint,
+            exposed_model,
+            &runtime_model_slug,
+            protocol,
+        )
         .unwrap();
     profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
 }
@@ -307,7 +319,13 @@ async fn assert_stale_profile_is_not_authoritative(mismatch: StaleProfileMismatc
     upstream.base_url = format!("http://{address}");
     let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
     let current_fingerprint = state
-        .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &upstream,
+            &upstream_model_key_fingerprint(&upstream, model),
+            model,
+            model,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
         key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
@@ -622,7 +640,13 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
         .await
         .unwrap();
     let configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &upstream,
+            &upstream_model_key_fingerprint(&upstream, model),
+            model,
+            model,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
         key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
@@ -1214,7 +1238,13 @@ async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallb
         (Capability::ReasoningOutput, EvidenceState::Supported),
     ];
     let configuration_fingerprint = state
-        .route_configuration_fingerprint(&witness, model, model, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &witness,
+            &upstream_model_key_fingerprint(&witness, model),
+            model,
+            model,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     let mut witness_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
         key_fingerprint: upstream_model_key_fingerprint(&witness, model),
