@@ -334,7 +334,7 @@ async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn upstream_model_not_supported_message_is_classified_as_protocol_unsupported() {
+async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported() {
     with_proxy_env_cleared(|| async move {
         let tempdir = tempdir().unwrap();
         let state_path = tempdir.path().join("state.json");
@@ -426,37 +426,192 @@ async fn upstream_model_not_supported_message_is_classified_as_protocol_unsuppor
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["error"]["type"], "upstream_error");
-        assert_eq!(payload["error"]["code"], "upstream_protocol_unsupported");
-        assert_eq!(payload["error"]["category"], "upstream_protocol_unsupported");
-        assert_eq!(payload["error"]["details"]["scope"], "upstream");
+        assert_eq!(payload["error"]["code"], "upstream_model_unsupported");
+        assert_eq!(payload["error"]["category"], "upstream_model_unsupported");
+        assert_eq!(payload["error"]["details"]["attempt_count"], 1);
+        assert_eq!(
+            payload["error"]["details"]["class_counts"]["model_unsupported"],
+            1
+        );
         assert!(
             payload["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("model is not supported"),
+                .contains("requested model is unsupported"),
             "unexpected downstream error payload: {payload}"
         );
 
         let snapshot = state.snapshot().await;
         assert_eq!(snapshot.usage_logs.len(), 1);
         let log = &snapshot.usage_logs[0];
-        assert_eq!(log.status_code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
         assert_eq!(
             log.error_category.as_deref(),
-            Some("upstream_protocol_unsupported")
+            Some("upstream_model_unsupported")
         );
         assert!(
             log.error_message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("model is not supported"),
+                .contains("requested model is unsupported"),
             "unexpected log error message: {:?}",
             log.error_message
         );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn multi_key_capacity_exhaustion_uses_shortest_retry_and_safe_terminal_error() {
+    with_proxy_env_cleared(|| async move {
+        let tempdir = tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let attempts = attempts.clone();
+                move |headers: HeaderMap| {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        let retry_after = if headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            == Some("Bearer key-a-secret")
+                        {
+                            "30"
+                        } else {
+                            "7"
+                        };
+                        let mut response_headers = HeaderMap::new();
+                        response_headers.insert(
+                            header::RETRY_AFTER,
+                            HeaderValue::from_str(retry_after).unwrap(),
+                        );
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            response_headers,
+                            axum::Json(json!({
+                                "error": {
+                                    "message": "no available channel for model glm-5.2 under group free (distributor)",
+                                    "code": "openai_error"
+                                }
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![UpstreamConfig {
+                    id: "up-multi-key-capacity".into(),
+                    name: "multi-key-capacity".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "key-a-secret".into(),
+                    api_keys: vec!["key-b-secret".into()],
+                    api_key_models: vec![
+                        chat_responses_codex::state::ApiKeyModelConfig {
+                            api_key: "key-a-secret".into(),
+                            supported_models: vec!["glm-5.2".into()],
+                        },
+                        chat_responses_codex::state::ApiKeyModelConfig {
+                            api_key: "key-b-secret".into(),
+                            supported_models: vec!["glm-5.2".into()],
+                        },
+                    ],
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["glm-5.2".into()],
+                    active: true,
+                    ..Default::default()
+                }],
+                downstreams: vec![DownstreamConfig {
+                    id: "down-multi-key-capacity".into(),
+                    name: "capacity-client".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["glm-5.2".into()],
+                    per_minute_limit: 60,
+                    rate_limit_enabled: true,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                }],
+                ..Default::default()
+            },
+            tempdir.path().join("state.json"),
+            AppConfig::default(),
+        );
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "glm-5.2",
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("7")
+        );
+        let payload: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+        assert_eq!(payload["error"]["details"]["attempt_count"], 2);
+        assert_eq!(
+            payload["error"]["details"]["class_counts"]["capacity_unavailable"],
+            2
+        );
+        let rendered = payload.to_string();
+        for forbidden in [
+            "key-a-secret",
+            "key-b-secret",
+            "no available channel",
+            "glm-5.2 under group free",
+        ] {
+            assert!(!rendered.contains(forbidden), "leaked {forbidden}: {rendered}");
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     })
     .await;
 }

@@ -2,6 +2,61 @@ use crate::routing::UpstreamProtocol;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RouteFailureClass {
+    CapacityUnavailable,
+    TransientServer,
+    Transport,
+    RateLimited,
+    KeyQuota,
+    Credentials,
+    ModelUnsupported,
+    FeatureUnsupported,
+    ProtocolUnsupported,
+    RequestRejected,
+}
+
+impl RouteFailureClass {
+    pub const ALL: [Self; 10] = [
+        Self::CapacityUnavailable,
+        Self::TransientServer,
+        Self::Transport,
+        Self::RateLimited,
+        Self::KeyQuota,
+        Self::Credentials,
+        Self::ModelUnsupported,
+        Self::FeatureUnsupported,
+        Self::ProtocolUnsupported,
+        Self::RequestRejected,
+    ];
+
+    pub fn is_temporary(self) -> bool {
+        matches!(
+            self,
+            Self::CapacityUnavailable
+                | Self::TransientServer
+                | Self::Transport
+                | Self::RateLimited
+                | Self::KeyQuota
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CapacityUnavailable => "capacity_unavailable",
+            Self::TransientServer => "transient_server",
+            Self::Transport => "transport",
+            Self::RateLimited => "rate_limited",
+            Self::KeyQuota => "key_quota",
+            Self::Credentials => "credentials",
+            Self::ModelUnsupported => "model_unsupported",
+            Self::FeatureUnsupported => "feature_unsupported",
+            Self::ProtocolUnsupported => "protocol_unsupported",
+            Self::RequestRejected => "request_rejected",
+        }
+    }
+}
+
 pub const ADMIN_SESSION_TTL_SECONDS: u64 = 12 * 60 * 60;
 pub const DEFAULT_UPSTREAM_HEDGE_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_HEDGE_DELAY_MS: u64 = 12_000;

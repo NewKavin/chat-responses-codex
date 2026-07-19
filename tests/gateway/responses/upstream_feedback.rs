@@ -697,7 +697,7 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
 }
 
 #[tokio::test]
-async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() {
+async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -811,19 +811,18 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
         .await
         .unwrap();
 
-    // 5xx + nested 4xx: now returns 503 (TemporaryUpstreamUnavailable)
-    // so the outer loop tries the next upstream.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains("upstream server error"),
-        "unexpected gateway body: {body}"
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["class_counts"]["transient_server"],
+        1
     );
 }
 
 #[tokio::test]
-async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_requests() {
+async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -938,14 +937,20 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
         .await
         .unwrap();
 
-    // 5xx + nested 429: now returns 503 (TemporaryUpstreamUnavailable)
-    // so the outer loop tries the next upstream.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("30")
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains("upstream server error"),
-        "unexpected gateway body: {body}"
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["class_counts"]["transient_server"],
+        1
     );
 }
 

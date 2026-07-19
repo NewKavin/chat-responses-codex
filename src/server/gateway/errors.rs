@@ -1,9 +1,94 @@
+use super::route_attempts::{AttemptLedger, TerminalFailure};
 use crate::state::DownstreamAdmissionRejection;
-use crate::upstream_feedback::UpstreamFeedbackClassification;
+use crate::upstream_feedback::{
+    ClassifiedUpstreamFailure, FailureClass, UpstreamFeedbackClassification,
+};
 use axum::extract::Json;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};
+
+pub(super) fn terminal_route_failure_error(ledger: &AttemptLedger) -> GatewayError {
+    let terminal = ledger.terminal_failure();
+    let mut class_counts = Map::new();
+    for class in FailureClass::ALL {
+        class_counts.insert(class.as_str().to_string(), json!(ledger.class_count(class)));
+    }
+    let mut details = Map::from_iter([
+        ("attempt_count".to_string(), json!(ledger.attempt_count())),
+        (
+            "route_count".to_string(),
+            json!(ledger.distinct_route_count()),
+        ),
+        (
+            "cooled_candidate_count".to_string(),
+            json!(ledger.cooled_candidate_count()),
+        ),
+        ("class_counts".to_string(), Value::Object(class_counts)),
+    ]);
+
+    let (status, message, error_type, code, retry_after_seconds) = match terminal {
+        TerminalFailure::Temporary { retry_after } => {
+            let retry_after_seconds = retry_after.as_secs();
+            details.insert(
+                "retry_after_seconds".to_string(),
+                json!(retry_after_seconds),
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "all eligible upstream routes are temporarily unavailable",
+                "upstream_error",
+                "upstream_routes_exhausted",
+                Some(retry_after_seconds),
+            )
+        }
+        TerminalFailure::Credentials => (
+            StatusCode::BAD_GATEWAY,
+            "all eligible upstream routes rejected their credentials",
+            "upstream_error",
+            "upstream_credentials_exhausted",
+            None,
+        ),
+        TerminalFailure::ModelUnsupported => (
+            StatusCode::BAD_GATEWAY,
+            "the requested model is unsupported by all eligible upstream routes",
+            "upstream_error",
+            "upstream_model_unsupported",
+            None,
+        ),
+        TerminalFailure::CapabilityUnsupported => (
+            StatusCode::BAD_REQUEST,
+            "the requested capability is unsupported by all eligible upstream routes",
+            "invalid_request_error",
+            "capability_not_supported",
+            None,
+        ),
+        TerminalFailure::ProtocolUnsupported => (
+            StatusCode::BAD_GATEWAY,
+            "the requested protocol is unsupported by all eligible upstream routes",
+            "upstream_error",
+            "upstream_protocol_unsupported",
+            None,
+        ),
+        TerminalFailure::MixedRoutesExhausted => (
+            StatusCode::BAD_GATEWAY,
+            "all eligible upstream routes were exhausted",
+            "upstream_error",
+            "upstream_routes_exhausted",
+            None,
+        ),
+    };
+
+    GatewayError::classified(
+        status,
+        message,
+        error_type,
+        code,
+        code,
+        retry_after_seconds,
+        Some(Value::Object(details)),
+    )
+}
 
 pub(super) fn upstream_empty_response_error() -> GatewayError {
     GatewayError::upstream_empty_response(false)
@@ -149,6 +234,116 @@ impl GatewayError {
             },
         }
     }
+
+    pub(super) fn from_classified_upstream_failure(
+        failure: ClassifiedUpstreamFailure,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        let upstream_status = failure.upstream_status;
+        let retry_after_seconds = failure.retry_after.map(|retry_after| retry_after.as_secs());
+        let details = || {
+            let mut details = Map::from_iter([("scope".to_string(), json!("upstream"))]);
+            if let Some(status) = upstream_status {
+                details.insert("upstream_status".to_string(), json!(status));
+            }
+            Value::Object(details)
+        };
+
+        match failure.class {
+            FailureClass::CapacityUnavailable if upstream_status == Some(429) => {
+                Self::ConcurrencyFull {
+                    message,
+                    retry_after_seconds,
+                }
+            }
+            FailureClass::CapacityUnavailable => Self::classified(
+                StatusCode::SERVICE_UNAVAILABLE,
+                message,
+                "upstream_error",
+                "upstream_capacity_unavailable",
+                "upstream_capacity_unavailable",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::TransientServer => Self::classified(
+                StatusCode::SERVICE_UNAVAILABLE,
+                message,
+                "upstream_error",
+                "upstream_temporary_unavailable",
+                "upstream_temporary_unavailable",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::Transport => Self::classified(
+                StatusCode::BAD_GATEWAY,
+                message,
+                "upstream_error",
+                "upstream_network_error",
+                "upstream_network_error",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::RateLimited => Self::TooManyRequests {
+                message,
+                retry_after_seconds,
+            },
+            FailureClass::KeyQuota => Self::classified(
+                StatusCode::TOO_MANY_REQUESTS,
+                message,
+                "upstream_error",
+                "upstream_key_quota_exhausted",
+                "upstream_key_quota_exhausted",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::Credentials => Self::classified(
+                match upstream_status {
+                    Some(401) => StatusCode::UNAUTHORIZED,
+                    Some(403) => StatusCode::FORBIDDEN,
+                    _ => StatusCode::BAD_GATEWAY,
+                },
+                message,
+                "upstream_error",
+                "upstream_auth_error",
+                "upstream_auth_error",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::ModelUnsupported => Self::classified(
+                StatusCode::BAD_GATEWAY,
+                message,
+                "upstream_error",
+                "upstream_model_unsupported",
+                "upstream_model_unsupported",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::FeatureUnsupported => Self::classified(
+                StatusCode::BAD_REQUEST,
+                message,
+                "invalid_request_error",
+                "capability_not_supported",
+                "capability_not_supported",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::ProtocolUnsupported => Self::classified(
+                StatusCode::BAD_GATEWAY,
+                message,
+                "upstream_error",
+                "upstream_protocol_unsupported",
+                "upstream_protocol_unsupported",
+                retry_after_seconds,
+                Some(details()),
+            ),
+            FailureClass::RequestRejected => Self::upstream_bad_request(
+                message,
+                StatusCode::from_u16(upstream_status.unwrap_or(400))
+                    .unwrap_or(StatusCode::BAD_REQUEST),
+            ),
+        }
+    }
     pub(super) fn gateway_forbidden(message: impl Into<String>, code: &'static str) -> Self {
         Self::classified(
             StatusCode::FORBIDDEN,
@@ -281,20 +476,6 @@ impl GatewayError {
             Some(json!({ "scope": "upstream" })),
         )
     }
-    pub(super) fn upstream_auth_error(message: impl Into<String>, status: StatusCode) -> Self {
-        Self::classified(
-            status,
-            message,
-            "upstream_error",
-            "upstream_auth_error",
-            "upstream_auth_error",
-            None,
-            Some(json!({
-                "scope": "upstream",
-                "upstream_status": status.as_u16(),
-            })),
-        )
-    }
     pub(super) fn upstream_timeout(message: impl Into<String>) -> Self {
         Self::classified(
             StatusCode::GATEWAY_TIMEOUT,
@@ -364,6 +545,28 @@ impl GatewayError {
             _ => None,
         }
     }
+    pub(super) fn upstream_status(&self) -> Option<u16> {
+        match self {
+            GatewayError::TooManyRequests { .. } | GatewayError::ConcurrencyFull { .. } => {
+                Some(StatusCode::TOO_MANY_REQUESTS.as_u16())
+            }
+            GatewayError::Unauthorized(_) => Some(StatusCode::UNAUTHORIZED.as_u16()),
+            GatewayError::Forbidden(_) => Some(StatusCode::FORBIDDEN.as_u16()),
+            GatewayError::BadRequest(_) => Some(StatusCode::BAD_REQUEST.as_u16()),
+            GatewayError::GatewayTimeout(_) => Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
+            GatewayError::TemporaryUpstreamUnavailable(_) => {
+                Some(StatusCode::SERVICE_UNAVAILABLE.as_u16())
+            }
+            GatewayError::Upstream(_) => None,
+            GatewayError::Classified { status, meta, .. } => meta
+                .details
+                .as_ref()
+                .and_then(|details| details.get("upstream_status"))
+                .and_then(Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok())
+                .or_else(|| Some(status.as_u16())),
+        }
+    }
     pub(super) fn error_type(&self) -> &'static str {
         match self {
             GatewayError::Unauthorized(_) => "gateway_auth_error",
@@ -407,6 +610,60 @@ impl GatewayError {
         match self {
             GatewayError::Classified { meta, .. } => meta.category,
             _ => self.error_code(),
+        }
+    }
+
+    pub(super) fn route_failure_class(&self) -> Option<FailureClass> {
+        match self {
+            GatewayError::TooManyRequests { .. } => Some(FailureClass::RateLimited),
+            GatewayError::ConcurrencyFull { .. } => Some(FailureClass::CapacityUnavailable),
+            GatewayError::TemporaryUpstreamUnavailable(_) => Some(FailureClass::TransientServer),
+            GatewayError::Upstream(_) | GatewayError::GatewayTimeout(_) => None,
+            GatewayError::Unauthorized(_) => Some(FailureClass::Credentials),
+            GatewayError::BadRequest(_) => Some(FailureClass::RequestRejected),
+            GatewayError::Forbidden(_) => Some(FailureClass::Credentials),
+            GatewayError::Classified { meta, .. } => {
+                let category = meta.category;
+                if category.starts_with("stream_")
+                    || category.starts_with("upstream_stream_")
+                    || category.starts_with("gateway_")
+                    || category == "upstream_invalid_response"
+                {
+                    return None;
+                }
+                if category == "upstream_key_quota_exhausted" {
+                    Some(FailureClass::KeyQuota)
+                } else if category == "upstream_capacity_unavailable" {
+                    Some(FailureClass::CapacityUnavailable)
+                } else if category == "upstream_network_error" || category == "upstream_timeout" {
+                    Some(FailureClass::Transport)
+                } else if category == "upstream_auth_error"
+                    || category == "upstream_credentials_rejected"
+                {
+                    Some(FailureClass::Credentials)
+                } else if category == "upstream_model_unsupported" {
+                    Some(FailureClass::ModelUnsupported)
+                } else if category == "capability_not_supported"
+                    || category == "gateway_protocol_capability_unsupported"
+                {
+                    Some(FailureClass::FeatureUnsupported)
+                } else if category == "upstream_protocol_unsupported" {
+                    Some(FailureClass::ProtocolUnsupported)
+                } else if category == "upstream_request_rejected"
+                    || category == "upstream_context_limit"
+                {
+                    Some(FailureClass::RequestRejected)
+                } else if category == "upstream_rate_limited" {
+                    Some(FailureClass::RateLimited)
+                } else if category == "upstream_temporary_unavailable"
+                    || category == "upstream_routes_exhausted"
+                    || category == "upstream_capacity_unavailable"
+                {
+                    Some(FailureClass::TransientServer)
+                } else {
+                    None
+                }
+            }
         }
     }
     pub(super) fn is_stream_only_recovery_candidate(&self) -> bool {

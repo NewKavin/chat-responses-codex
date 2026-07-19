@@ -80,7 +80,7 @@ pub use types::{
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
-    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig,
+    ModelContextConfig, ModelRequestCostConfig, PersistedState, RouteFailureClass, UpstreamConfig,
     UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,

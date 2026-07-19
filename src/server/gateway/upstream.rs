@@ -6,22 +6,11 @@ use crate::capabilities::{
 };
 use crate::keys::upstream_key_fingerprint;
 use crate::protocol::image_adapter::ImageDialect;
+use crate::upstream_feedback::{classify_upstream_response, UpstreamFeedbackInput};
 use std::collections::BTreeSet;
 
 const GATEWAY_CLAUDE_METADATA_KEY: &str = "_gateway_claude";
 const GATEWAY_CLAUDE_THINKING_KEY: &str = "_gateway_claude_thinking";
-
-pub(super) fn parse_retry_after_seconds(
-    headers: &reqwest::header::HeaderMap,
-    default_retry_seconds: u64,
-) -> u64 {
-    headers
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(default_retry_seconds.max(1))
-        .max(1)
-}
 
 pub(super) fn is_context_limit_error(error_text: &str) -> bool {
     let normalized = error_text.to_ascii_lowercase();
@@ -189,22 +178,15 @@ pub(super) fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
 }
 
 pub(super) fn should_try_next_key(error: &GatewayError) -> bool {
-    // Key rotation is only useful for failures that may be credential-specific.
-    // Shared upstream concurrency pressure should stay on the same key long
-    // enough for the account-level backoff loop to retry first.
-    match error {
-        GatewayError::Unauthorized(_)
-        | GatewayError::TooManyRequests { .. }
-        | GatewayError::GatewayTimeout(_)
-        | GatewayError::Upstream(_)
-        | GatewayError::TemporaryUpstreamUnavailable(_) => true,
-        GatewayError::Classified { status, meta, .. } => {
-            meta.category == "upstream_auth_error"
-                || (meta.category.starts_with("upstream_")
-                    && (*status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()))
-        }
-        _ => false,
+    // Preserve the same-key concurrency retry budget before rotating. Other
+    // route-attributable failures may differ across Keys and should not pin the
+    // request to a failed Key.
+    if matches!(error, GatewayError::ConcurrencyFull { .. }) {
+        return false;
     }
+    error
+        .route_failure_class()
+        .is_some_and(|class| class != FailureClass::RequestRejected)
 }
 
 pub(super) fn should_retry_without_stream(error: &GatewayError) -> bool {
@@ -213,7 +195,14 @@ pub(super) fn should_retry_without_stream(error: &GatewayError) -> bool {
         | GatewayError::Upstream(_)
         | GatewayError::TemporaryUpstreamUnavailable(_) => true,
         GatewayError::Classified { status, meta, .. } => {
-            meta.category.starts_with("upstream_") && status.is_server_error()
+            (meta.category.starts_with("upstream_")
+                && status.is_server_error()
+                && !matches!(
+                    meta.category,
+                    "upstream_model_unsupported" | "upstream_protocol_unsupported"
+                ))
+                || (meta.category == "capability_not_supported"
+                    && error.message().to_ascii_lowercase().contains("stream"))
         }
         _ => false,
     }
@@ -1709,7 +1698,14 @@ pub(super) async fn send_to_upstream(
             }
         }
 
-        // Classify the upstream response to determine how to handle it
+        let classified_feedback = classify_upstream_response(UpstreamFeedbackInput {
+            status: status.as_u16(),
+            headers: &headers,
+            body: Some(&error_text),
+            target_model: Some(&final_upstream_model),
+        });
+        // Retain the legacy summary label for log compatibility while routing
+        // decisions use the precise Key-route classification above.
         let feedback = UpstreamFeedbackClassification::from_response(
             status.as_u16(),
             &headers,
@@ -1832,105 +1828,10 @@ pub(super) async fn send_to_upstream(
             ), status));
         }
 
-        if matches!(status.as_u16(), 401 | 403) {
-            return Err(GatewayError::upstream_auth_error(
-                upstream_error_message.clone(),
-                status,
-            ));
-        }
-
-        if matches!(
-            feedback,
-            UpstreamFeedbackClassification::ProtocolUnsupported
-        ) {
-            return Err(GatewayError::upstream_temporary_unavailable(
-                upstream_error_message.clone(),
-                "upstream_protocol_unsupported",
-            ));
-        }
-
-        // When the upstream HTTP status is 5xx, the upstream itself is failing.
-        // A nested 4xx inner_code in the body (e.g. 400 "bad request") does not mean
-        // the *gateway* client request was bad; treat as temporary so we try another upstream.
-        let upstream_is_server_error = status.is_server_error();
-
-        if let Some(inner_code) = upstream_error_code {
-            if (400..=499).contains(&inner_code) {
-                if upstream_is_server_error {
-                    return Err(GatewayError::upstream_temporary_unavailable(
-                        upstream_error_message.clone(),
-                        "upstream_temporary_unavailable",
-                    ));
-                }
-
-                if inner_code == 429 {
-                    let retry_after_seconds = parse_retry_after_seconds(
-                        &headers,
-                        state.config.upstream_rate_limit_default_retry_seconds,
-                    );
-                    return Err(GatewayError::TooManyRequests {
-                        message: upstream_error_message.clone(),
-                        retry_after_seconds: Some(retry_after_seconds),
-                    });
-                }
-                return Err(GatewayError::upstream_bad_request(
-                    if upstream_error_message.is_empty() {
-                        format!("upstream rejected request with status {inner_code}")
-                    } else {
-                        upstream_error_message
-                    },
-                    status,
-                ));
-            }
-        }
-
-        // Handle feedback-based decisions
-        match feedback {
-            UpstreamFeedbackClassification::RateLimited => {
-                let retry_after_seconds = parse_retry_after_seconds(
-                    &headers,
-                    state.config.upstream_rate_limit_default_retry_seconds,
-                );
-                return Err(GatewayError::TooManyRequests {
-                    message: upstream_error_message.clone(),
-                    retry_after_seconds: Some(retry_after_seconds),
-                });
-            }
-            UpstreamFeedbackClassification::ConcurrencyFull => {
-                return Err(GatewayError::ConcurrencyFull {
-                    message: upstream_error_message.clone(),
-                    retry_after_seconds: None,
-                });
-            }
-            UpstreamFeedbackClassification::ProviderBusy
-            | UpstreamFeedbackClassification::TemporaryUnavailable => {
-                // Return error to allow outer loop to try next upstream
-                return Err(GatewayError::upstream_temporary_unavailable(
-                    upstream_error_message.clone(),
-                    "upstream_temporary_unavailable",
-                ));
-            }
-            UpstreamFeedbackClassification::ProtocolUnsupported => {
-                // Protocol not supported, return error to try next upstream
-                return Err(GatewayError::upstream_temporary_unavailable(
-                    upstream_error_message.clone(),
-                    "upstream_protocol_unsupported",
-                ));
-            }
-            UpstreamFeedbackClassification::Unknown => {
-                // Unknown error - pass through client errors (4xx) as BadRequest,
-                // server errors (5xx) as Upstream. The upstream_error_message
-                // already contains a clear, client-facing description.
-                if status.is_client_error() {
-                    return Err(GatewayError::upstream_bad_request(
-                        upstream_error_message.clone(),
-                        status,
-                    ));
-                } else {
-                    return Err(GatewayError::Upstream(upstream_error_message.clone()));
-                }
-            }
-        }
+        return Err(GatewayError::from_classified_upstream_failure(
+            classified_feedback,
+            upstream_error_message,
+        ));
     };
 
     let applied_effort_control = applied_claude_effort_control_evidence(

@@ -9,6 +9,198 @@ use std::sync::atomic::AtomicUsize;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+#[test]
+fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(503),
+        class: FailureClass::TransientServer,
+        retry_after: Some(Duration::from_secs(30)),
+    });
+    ledger.record_cooled(AttemptFailure {
+        route_id: "route-b".into(),
+        upstream_status: Some(429),
+        class: FailureClass::RateLimited,
+        retry_after: Some(Duration::from_secs(7)),
+    });
+
+    assert_eq!(
+        ledger.terminal_failure(),
+        TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(7)
+        }
+    );
+}
+
+#[test]
+fn route_attempts_groups_homogeneous_terminal_classes() {
+    for (class, expected) in [
+        (FailureClass::Credentials, TerminalFailure::Credentials),
+        (
+            FailureClass::ModelUnsupported,
+            TerminalFailure::ModelUnsupported,
+        ),
+        (
+            FailureClass::FeatureUnsupported,
+            TerminalFailure::CapabilityUnsupported,
+        ),
+        (
+            FailureClass::ProtocolUnsupported,
+            TerminalFailure::ProtocolUnsupported,
+        ),
+    ] {
+        let mut ledger = AttemptLedger::default();
+        ledger.record(AttemptFailure {
+            route_id: "route".into(),
+            upstream_status: Some(400),
+            class,
+            retry_after: None,
+        });
+        assert_eq!(ledger.terminal_failure(), expected);
+    }
+}
+
+#[test]
+fn route_attempts_reports_mixed_non_temporary_exhaustion() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(401),
+        class: FailureClass::Credentials,
+        retry_after: None,
+    });
+    ledger.record(AttemptFailure {
+        route_id: "route-b".into(),
+        upstream_status: Some(400),
+        class: FailureClass::ModelUnsupported,
+        retry_after: None,
+    });
+    assert_eq!(
+        ledger.terminal_failure(),
+        TerminalFailure::MixedRoutesExhausted
+    );
+}
+
+fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
+    let mut ledger = AttemptLedger::default();
+    for (index, class) in classes.iter().copied().enumerate() {
+        ledger.record(AttemptFailure {
+            route_id: format!("route-secret-{index}"),
+            upstream_status: Some(400),
+            class,
+            retry_after: class
+                .is_temporary()
+                .then(|| Duration::from_secs(11 + index as u64)),
+        });
+    }
+    terminal_route_failure_error(&ledger)
+}
+
+#[test]
+fn route_attempts_maps_terminal_failures_to_stable_errors() {
+    for (classes, expected_status, expected_code) in [
+        (
+            vec![FailureClass::TransientServer],
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_routes_exhausted",
+        ),
+        (
+            vec![FailureClass::Credentials],
+            StatusCode::BAD_GATEWAY,
+            "upstream_credentials_exhausted",
+        ),
+        (
+            vec![FailureClass::ModelUnsupported],
+            StatusCode::BAD_GATEWAY,
+            "upstream_model_unsupported",
+        ),
+        (
+            vec![FailureClass::FeatureUnsupported],
+            StatusCode::BAD_REQUEST,
+            "capability_not_supported",
+        ),
+        (
+            vec![FailureClass::ProtocolUnsupported],
+            StatusCode::BAD_GATEWAY,
+            "upstream_protocol_unsupported",
+        ),
+        (
+            vec![FailureClass::Credentials, FailureClass::ModelUnsupported],
+            StatusCode::BAD_GATEWAY,
+            "upstream_routes_exhausted",
+        ),
+    ] {
+        let error = terminal_error_for(&classes);
+        assert_eq!(error.status_code(), expected_status);
+        assert_eq!(error.error_code(), expected_code);
+    }
+}
+
+#[test]
+fn route_attempts_terminal_details_are_numeric_and_secret_free() {
+    let error = terminal_error_for(&[FailureClass::TransientServer, FailureClass::RateLimited]);
+    let details = error.safe_details();
+    assert_eq!(details["attempt_count"], 2);
+    assert_eq!(details["class_counts"]["transient_server"], 1);
+    assert_eq!(details["class_counts"]["rate_limited"], 1);
+    assert_eq!(details["retry_after_seconds"], 11);
+    let rendered = details.to_string();
+    for forbidden in ["route-secret", "fingerprint", "upstream body", "prompt"] {
+        assert!(
+            !rendered.contains(forbidden),
+            "leaked {forbidden}: {rendered}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn route_attempts_preserves_openai_and_anthropic_error_envelopes() {
+    let openai = terminal_error_for(&[FailureClass::Credentials]).into_response();
+    assert_eq!(openai.status(), StatusCode::BAD_GATEWAY);
+    let openai_payload: Value =
+        serde_json::from_slice(&to_bytes(openai.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        openai_payload["error"]["code"],
+        "upstream_credentials_exhausted"
+    );
+    assert_eq!(openai_payload["error"]["details"]["attempt_count"], 1);
+
+    let anthropic =
+        terminal_error_for(&[FailureClass::ProtocolUnsupported]).into_anthropic_response();
+    assert_eq!(anthropic.status(), StatusCode::BAD_GATEWAY);
+    let anthropic_payload: Value =
+        serde_json::from_slice(&to_bytes(anthropic.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(anthropic_payload["type"], "error");
+    assert_eq!(
+        anthropic_payload["error"]["code"],
+        "upstream_protocol_unsupported"
+    );
+    assert_eq!(
+        anthropic_payload["error"]["details"]["class_counts"]["protocol_unsupported"],
+        1
+    );
+}
+
+#[test]
+fn route_attempts_converts_classified_upstream_feedback_before_aggregation() {
+    let error = GatewayError::from_classified_upstream_failure(
+        crate::upstream_feedback::ClassifiedUpstreamFailure {
+            class: FailureClass::ModelUnsupported,
+            upstream_status: Some(400),
+            retry_after: None,
+        },
+        "provider model rejection",
+    );
+    assert_eq!(error.status_code(), StatusCode::BAD_GATEWAY);
+    assert_eq!(error.error_code(), "upstream_model_unsupported");
+    assert_eq!(
+        error.route_failure_class(),
+        Some(FailureClass::ModelUnsupported)
+    );
+}
+
 fn resolved_stream_capabilities(
     text_stream_source: CapabilitySource,
     nonstream_state: EvidenceState,

@@ -5,7 +5,7 @@ use crate::capabilities::{
     Capability, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey, EvidenceState,
     RequestedFeatures, ResolvedCapabilities, WireProtocol,
 };
-use crate::keys::upstream_key_fingerprint;
+use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::{
     chat_request_to_responses_payload_with_context,
     chat_response_to_responses_payload_with_tool_registry, responses_response_to_chat_payload,
@@ -55,6 +55,7 @@ mod context;
 mod dialect_retry;
 mod errors;
 mod responses_fallback;
+mod route_attempts;
 mod stream;
 pub(super) mod thinking_signature;
 mod troubleshooting;
@@ -68,6 +69,7 @@ use compat::*;
 use context::*;
 use errors::*;
 use responses_fallback::*;
+use route_attempts::*;
 use stream::*;
 use troubleshooting::*;
 use upstream::*;
@@ -182,6 +184,33 @@ fn route_api_keys(upstream: &UpstreamConfig, model: &str) -> Vec<String> {
 
 fn route_key_fingerprint(upstream: &UpstreamConfig, api_key: &str) -> String {
     upstream_key_fingerprint(&upstream.id, api_key)
+}
+
+fn record_route_attempt(
+    ledger: &mut AttemptLedger,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+    error: &GatewayError,
+) {
+    let Some(class) = error.route_failure_class() else {
+        return;
+    };
+    if class == FailureClass::RequestRejected {
+        return;
+    }
+    ledger.record(AttemptFailure {
+        route_id: anonymous_route_id(
+            &upstream.id,
+            key_fingerprint,
+            runtime_model_slug,
+            WireProtocol::from(protocol),
+        ),
+        upstream_status: error.upstream_status(),
+        class,
+        retry_after: error.retry_after_seconds().map(Duration::from_secs),
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3713,6 +3742,7 @@ async fn process_gateway_request_inner(
         "resolved candidate protocols"
     );
     let mut last_error = None;
+    let mut attempt_ledger = AttemptLedger::default();
     let preferred_upstream_id = if let Some(upstream_id) = response_history_context
         .as_ref()
         .and_then(ResponseHistoryContext::continuation_upstream_id)
@@ -4514,6 +4544,14 @@ async fn process_gateway_request_inner(
                                 && !stream_only_recovery.final_attempt
                                 && should_try_next_key(&error) =>
                         {
+                            record_route_attempt(
+                                &mut attempt_ledger,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &error,
+                            );
                             tracing::warn!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
@@ -4623,6 +4661,18 @@ async fn process_gateway_request_inner(
                                 continue;
                             }
 
+                            record_route_attempt(
+                                &mut attempt_ledger,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &GatewayError::ConcurrencyFull {
+                                    message: String::new(),
+                                    retry_after_seconds: Some(retry_after_seconds),
+                                },
+                            );
+
                             break;
                         }
                         Err(GatewayError::TooManyRequests {
@@ -4722,6 +4772,18 @@ async fn process_gateway_request_inner(
                                 continue;
                             }
 
+                            record_route_attempt(
+                                &mut attempt_ledger,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &GatewayError::TooManyRequests {
+                                    message: String::new(),
+                                    retry_after_seconds: Some(retry_after_seconds),
+                                },
+                            );
+
                             break;
                         }
                         Err(error @ GatewayError::BadRequest(_)) => {
@@ -4749,9 +4811,52 @@ async fn process_gateway_request_inner(
                             last_error = Some(error);
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
-                            break;
+                            break 'candidate_passes;
                         }
-                        Err(error) if error.status_code() == StatusCode::BAD_REQUEST => {
+                        Err(error)
+                            if error.status_code() == StatusCode::BAD_REQUEST
+                                && !(attempt_mode == UpstreamAttemptMode::SsePassThrough
+                                    && should_retry_without_stream(&error)) =>
+                        {
+                            let class = error.route_failure_class();
+                            if class == Some(FailureClass::RequestRejected) {
+                                maybe_record_chat_fallback_stage_failure(
+                                    &state,
+                                    &downstream.id,
+                                    client_family,
+                                    normalized_model,
+                                    &upstream.id,
+                                    chat_fallback_stage,
+                                    &error,
+                                );
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    downstream_key_id = %downstream.id,
+                                    path = %request_path,
+                                    original_model = %model,
+                                    normalized_model = %normalized_model,
+                                    selected_upstream_id = %upstream.id,
+                                    selected_upstream_protocol = ?protocol,
+                                    selected_upstream_key_prefix = %key_prefix(api_key),
+                                    error = %error,
+                                    error_category = %error.error_category(),
+                                    "upstream rejected request payload"
+                                );
+                                last_error = Some(error);
+                                last_failure_upstream =
+                                    Some((upstream.id.clone(), Some(upstream.name.clone())));
+                                break 'candidate_passes;
+                            }
+                            if class.is_some() {
+                                record_route_attempt(
+                                    &mut attempt_ledger,
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                    &error,
+                                );
+                            }
                             maybe_record_chat_fallback_stage_failure(
                                 &state,
                                 &downstream.id,
@@ -4815,6 +4920,14 @@ async fn process_gateway_request_inner(
                                 "upstream temporarily unavailable, trying next candidate"
                             );
                             state.mark_upstream_failure(&upstream.id).await.ok();
+                            record_route_attempt(
+                                &mut attempt_ledger,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &GatewayError::TemporaryUpstreamUnavailable(message.clone()),
+                            );
                             last_error = Some(GatewayError::TemporaryUpstreamUnavailable(message));
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -4833,7 +4946,20 @@ async fn process_gateway_request_inner(
                                 error = %error,
                                 "upstream request failed"
                             );
-                            state.mark_upstream_failure(&upstream.id).await.ok();
+                            if error
+                                .route_failure_class()
+                                .is_some_and(|class| class != FailureClass::RequestRejected)
+                            {
+                                state.mark_upstream_failure(&upstream.id).await.ok();
+                            }
+                            record_route_attempt(
+                                &mut attempt_ledger,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &error,
+                            );
                             last_error = Some(error);
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -4848,7 +4974,25 @@ async fn process_gateway_request_inner(
         }
     }
 
-    if let Some(error) = last_error {
+    if let Some(last_route_error) = last_error {
+        let should_aggregate = !attempt_ledger.is_empty()
+            && (attempt_ledger.distinct_route_count() > 1
+                || matches!(
+                    last_route_error.route_failure_class(),
+                    Some(
+                        FailureClass::CapacityUnavailable
+                            | FailureClass::TransientServer
+                            | FailureClass::KeyQuota
+                            | FailureClass::ModelUnsupported
+                            | FailureClass::FeatureUnsupported
+                            | FailureClass::ProtocolUnsupported
+                    )
+                ));
+        let error = if should_aggregate {
+            terminal_route_failure_error(&attempt_ledger)
+        } else {
+            last_route_error
+        };
         let (upstream_id, upstream_name) = last_failure_upstream
             .as_ref()
             .map(|(id, name)| (id.as_str(), name.as_deref()))
