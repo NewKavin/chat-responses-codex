@@ -30,6 +30,8 @@ mod model_discovery;
 mod model_qualification;
 #[path = "state/normalize.rs"]
 mod normalize;
+#[path = "state/route_health.rs"]
+mod route_health;
 #[path = "state/types.rs"]
 mod types;
 #[path = "state/usage.rs"]
@@ -73,6 +75,11 @@ pub use model_qualification::{
     qualify_model_on_upstream, DirectQualificationResult, KeyQualificationDecision,
     ModelQualificationApplySummary, ModelQualificationCategory, ModelQualificationEvidence,
     ModelQualificationLevel, QualificationObservation, UpstreamQualificationDecision,
+};
+pub use route_health::{
+    HealthLease, HealthStateSnapshot, KeyHealthKey, RouteAvailability, RouteHealthKey,
+    RouteHealthPermit, RouteHealthRegistry, RouteOutcome, RouteSetAggregateKey,
+    ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
@@ -247,6 +254,7 @@ pub struct AppState {
     pending_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
     usage_log_flush_running: Arc<AtomicBool>,
     upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
+    route_health: Arc<Mutex<RouteHealthRegistry>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
@@ -550,6 +558,7 @@ impl AppState {
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
+            route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
             ))),
@@ -608,6 +617,7 @@ impl AppState {
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
+            route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
             ))),
@@ -660,6 +670,7 @@ impl AppState {
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
+            route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
             ))),
@@ -726,6 +737,140 @@ impl AppState {
         } else {
             self.client.clone()
         }
+    }
+
+    pub async fn reserve_route_health(
+        &self,
+        route: &RouteHealthKey,
+        key: &KeyHealthKey,
+    ) -> RouteAvailability<RouteHealthPermit> {
+        let availability = self.route_health.lock().await.reserve(route, key);
+        match availability {
+            RouteAvailability::Ready(lease) => {
+                RouteAvailability::Ready(RouteHealthPermit::new(self.route_health.clone(), lease))
+            }
+            RouteAvailability::Cooling { retry_after } => {
+                RouteAvailability::Cooling { retry_after }
+            }
+            RouteAvailability::HalfOpenBusy { retry_after } => {
+                RouteAvailability::HalfOpenBusy { retry_after }
+            }
+        }
+    }
+
+    pub async fn observe_route_failure(
+        &self,
+        route: &RouteHealthKey,
+        class: RouteFailureClass,
+        retry_after: Option<Duration>,
+    ) {
+        self.route_health
+            .lock()
+            .await
+            .observe_route_failure(route, class, retry_after);
+    }
+
+    pub async fn observe_key_failure(
+        &self,
+        key: &KeyHealthKey,
+        class: RouteFailureClass,
+        retry_after: Option<Duration>,
+    ) {
+        self.route_health
+            .lock()
+            .await
+            .observe_key_failure(key, class, retry_after);
+    }
+
+    pub async fn observe_route_set_failure(
+        &self,
+        aggregate: &RouteSetAggregateKey,
+        class: RouteFailureClass,
+        retry_after: Option<Duration>,
+    ) {
+        self.route_health
+            .lock()
+            .await
+            .observe_route_set_failure(aggregate, class, retry_after);
+    }
+
+    pub async fn route_health_snapshot(
+        &self,
+        route: &RouteHealthKey,
+    ) -> Option<HealthStateSnapshot> {
+        self.route_health.lock().await.route_health_snapshot(route)
+    }
+
+    pub async fn key_health_snapshot(&self, key: &KeyHealthKey) -> Option<HealthStateSnapshot> {
+        self.route_health.lock().await.key_health_snapshot(key)
+    }
+
+    /// Reconcile process-local health identities after a configuration change.  This never
+    /// persists anything and keeps an active half-open lease alive long enough for its owner to
+    /// finish cleanly.
+    pub async fn reconcile_route_health(&self, upstreams: &[UpstreamConfig]) {
+        let upstreams = upstreams.to_vec();
+        let mut registry = self.route_health.lock().await;
+        registry.retain_routes(
+            |route| {
+                let Some(upstream) = upstreams
+                    .iter()
+                    .find(|candidate| candidate.id == route.upstream_id && candidate.active)
+                else {
+                    return false;
+                };
+                if !upstream.supports_protocol(match route.protocol {
+                    crate::capabilities::WireProtocol::ChatCompletions => {
+                        UpstreamProtocol::ChatCompletions
+                    }
+                    crate::capabilities::WireProtocol::Responses => UpstreamProtocol::Responses,
+                    crate::capabilities::WireProtocol::Messages => return false,
+                }) {
+                    return false;
+                }
+                if !upstream.available_keys().iter().any(|api_key| {
+                    upstream_key_fingerprint(&upstream.id, api_key) == route.key_fingerprint
+                }) {
+                    return false;
+                }
+                upstream.route_models().is_empty()
+                    || upstream
+                        .keys_for_model(&route.runtime_model_slug)
+                        .iter()
+                        .any(|api_key| {
+                            upstream_key_fingerprint(&upstream.id, api_key) == route.key_fingerprint
+                        })
+            },
+            |key| {
+                upstreams.iter().any(|upstream| {
+                    upstream.id == key.upstream_id
+                        && upstream.active
+                        && upstream.available_keys().iter().any(|api_key| {
+                            upstream_key_fingerprint(&upstream.id, api_key) == key.key_fingerprint
+                        })
+                })
+            },
+            |aggregate| {
+                upstreams.iter().any(|upstream| {
+                    upstream.id == aggregate.upstream_id
+                        && upstream.active
+                        && upstream.supports_protocol(match aggregate.protocol {
+                            crate::capabilities::WireProtocol::ChatCompletions => {
+                                UpstreamProtocol::ChatCompletions
+                            }
+                            crate::capabilities::WireProtocol::Responses => {
+                                UpstreamProtocol::Responses
+                            }
+                            crate::capabilities::WireProtocol::Messages => return false,
+                        })
+                        && (upstream.route_models().is_empty()
+                            || upstream
+                                .route_models()
+                                .iter()
+                                .any(|model| model == &aggregate.runtime_model_slug))
+                })
+            },
+        );
     }
 
     pub async fn get_cached_json<T>(&self, key: &str) -> Option<T>
