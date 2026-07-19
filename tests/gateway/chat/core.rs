@@ -673,6 +673,7 @@ async fn downstream_chat_request_uses_exact_model_name_for_upstream_request_body
             .await
             .unwrap();
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "up-1".into(),
             runtime_model_slug: "deepseek-ai/deepseek-v4-pro".into(),
             protocol: WireProtocol::ChatCompletions,

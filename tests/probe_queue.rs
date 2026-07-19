@@ -43,6 +43,7 @@ fn plan_configuration_for_alias(
 fn job(upstream: &str, model: &str) -> ProbeJob {
     ProbeJob {
         key: DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: upstream.into(),
             runtime_model_slug: model.into(),
             protocol: WireProtocol::ChatCompletions,

@@ -78,11 +78,11 @@ fn gateway_global_test_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 fn stream_only_unit_profile_key(index: usize) -> DialectProfileKey {
-    DialectProfileKey {
-        upstream_id: format!("unit-up-{index}"),
-        runtime_model_slug: format!("Unit/Route-{index}"),
-        protocol: WireProtocol::ChatCompletions,
-    }
+    DialectProfileKey::legacy(
+        format!("unit-up-{index}"),
+        format!("Unit/Route-{index}"),
+        WireProtocol::ChatCompletions,
+    )
 }
 
 #[test]
@@ -345,11 +345,8 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
         active: true,
         ..Default::default()
     };
-    let key = DialectProfileKey {
-        upstream_id: upstream.id.clone(),
-        runtime_model_slug: "opaque".into(),
-        protocol: WireProtocol::ChatCompletions,
-    };
+    let key =
+        DialectProfileKey::legacy(upstream.id.clone(), "opaque", WireProtocol::ChatCompletions);
     let mut captured_snapshot = CapabilityRuntimeSnapshot::default();
     let mut captured_profile = UpstreamDialectProfile::unknown(key.clone());
     captured_profile.configuration_fingerprint =

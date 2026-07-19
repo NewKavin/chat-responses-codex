@@ -140,6 +140,7 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "gpt-4.1-mini".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -609,6 +610,7 @@ async fn verified_native_responses_route_preserves_hosted_tools_unchanged() {
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "responses-native".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::Responses,
@@ -668,6 +670,7 @@ async fn verified_native_responses_route_preserves_hosted_tools_unchanged() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     let mut restricted_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "responses-native".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::Responses,

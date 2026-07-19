@@ -24,6 +24,16 @@ describe('admin ui structure', () => {
     expect(board).not.toContain('summary-card')
   })
 
+  it('uses anonymous route ids for model probe channels', () => {
+    const board = source('components/ModelProbeBoard.vue')
+    const charts = source('utils/modelProbeCharts.ts')
+
+    expect(board).toContain('channel.route_id')
+    expect(board).not.toContain('channel.key_prefix')
+    expect(charts).toContain('route_id')
+    expect(charts).not.toContain('key_prefix')
+  })
+
   it('uses the responsive upstream management workbench', () => {
     const page = source('views/admin/Upstreams.vue')
 

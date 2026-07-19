@@ -4,7 +4,9 @@ use crate::capabilities::{
     EvidenceState, ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeReason,
     RouteFingerprintInput, UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
-use crate::keys::{validated_downstream_plaintext, verify_downstream_key};
+use crate::keys::{
+    upstream_key_fingerprint, validated_downstream_plaintext, verify_downstream_key,
+};
 use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
@@ -61,7 +63,6 @@ use postgres::PostgresStateStore;
 pub use store::{StateStore, StoreFuture};
 
 pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
-pub use model_discovery::model_discovery_key_prefix;
 #[allow(unused_imports)]
 pub use model_discovery::{
     fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently,
@@ -88,6 +89,14 @@ pub use usage::{
     portal_model_is_allowed, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage, TokenQuota,
     TokenUsage,
 };
+
+fn first_model_key_fingerprint(upstream: &UpstreamConfig, model: &str) -> Option<String> {
+    upstream
+        .keys_for_model(model)
+        .into_iter()
+        .next()
+        .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
+}
 
 use context_profile::{
     normalize_context_profile_base_url, normalize_global_context_profiles_for_storage,
@@ -868,12 +877,17 @@ impl AppState {
             runtime_model_slug,
             protocol,
         )?;
+        let Some(key_fingerprint) = first_model_key_fingerprint(upstream, runtime_model_slug)
+        else {
+            return Ok(None);
+        };
         Ok(Some(ProbeJob {
-            key: DialectProfileKey {
-                upstream_id: upstream.id.clone(),
-                runtime_model_slug: runtime_model_slug.to_owned(),
-                protocol: protocol.into(),
-            },
+            key: DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_fingerprint,
+                runtime_model_slug,
+                protocol.into(),
+            ),
             exposed_model_slugs: BTreeSet::from([exposed_model_slug.to_owned()]),
             reason,
             configuration: ProbeConfigurationBinding {
@@ -2361,12 +2375,16 @@ impl AppState {
                 let Some(runtime) = upstream.resolved_model_name(&exposed) else {
                     continue;
                 };
+                let Some(key_fingerprint) = first_model_key_fingerprint(upstream, &runtime) else {
+                    continue;
+                };
                 for protocol in upstream.protocols.iter().copied() {
-                    let key = DialectProfileKey {
-                        upstream_id: upstream.id.clone(),
-                        runtime_model_slug: runtime.clone(),
-                        protocol: protocol.into(),
-                    };
+                    let key = DialectProfileKey::for_key(
+                        upstream.id.clone(),
+                        key_fingerprint.clone(),
+                        runtime.clone(),
+                        protocol.into(),
+                    );
                     let fingerprint = self
                         .route_configuration_fingerprint(upstream, &exposed, &runtime, protocol)?;
                     let current = snapshot.profiles.get(&key);
@@ -2476,12 +2494,17 @@ impl AppState {
             let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
                 continue;
             };
+            let Some(key_fingerprint) = first_model_key_fingerprint(upstream, &runtime_model_slug)
+            else {
+                continue;
+            };
             for protocol in upstream.supported_protocols() {
-                jobs.entry(DialectProfileKey {
-                    upstream_id: upstream.id.clone(),
-                    runtime_model_slug: runtime_model_slug.clone(),
-                    protocol: protocol.into(),
-                })
+                jobs.entry(DialectProfileKey::for_key(
+                    upstream.id.clone(),
+                    key_fingerprint.clone(),
+                    runtime_model_slug.clone(),
+                    protocol.into(),
+                ))
                 .or_default()
                 .insert(exposed_model.clone());
             }
@@ -2581,12 +2604,18 @@ impl AppState {
                 let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model) else {
                     continue;
                 };
+                let Some(key_fingerprint) =
+                    first_model_key_fingerprint(upstream, &runtime_model_slug)
+                else {
+                    continue;
+                };
                 for protocol in upstream.supported_protocols() {
-                    let key = DialectProfileKey {
-                        upstream_id: upstream.id.clone(),
-                        runtime_model_slug: runtime_model_slug.clone(),
-                        protocol: protocol.into(),
-                    };
+                    let key = DialectProfileKey::for_key(
+                        upstream.id.clone(),
+                        key_fingerprint.clone(),
+                        runtime_model_slug.clone(),
+                        protocol.into(),
+                    );
                     let fingerprint = match Self::route_configuration_fingerprint_with_snapshot(
                         &snapshot,
                         upstream,
@@ -2690,6 +2719,8 @@ impl AppState {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let mut route = crate::capabilities::RouteIdentity {
             upstream_id: upstream.id.clone(),
+            key_fingerprint: first_model_key_fingerprint(upstream, runtime_model_slug)
+                .unwrap_or_default(),
             exposed_model_slug: exposed_model_slug.to_owned(),
             runtime_model_slug: runtime_model_slug.to_owned(),
             protocol: WireProtocol::from(protocol),
@@ -2857,11 +2888,12 @@ impl AppState {
                     .categories
                     .contains(&ModelQualificationCategory::Passed);
                 let level = if passed {
-                    let profile_key = DialectProfileKey {
-                        upstream_id: upstream.id.clone(),
-                        runtime_model_slug: record.model.clone(),
-                        protocol: WireProtocol::from(record.protocol),
-                    };
+                    let profile_key = DialectProfileKey::for_key(
+                        upstream.id.clone(),
+                        upstream_key_fingerprint(&upstream.id, &record.api_key),
+                        record.model.clone(),
+                        WireProtocol::from(record.protocol),
+                    );
                     let profile = Self::route_configuration_fingerprint_with_snapshot(
                         &capability_snapshot,
                         &upstream,

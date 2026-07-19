@@ -45,6 +45,7 @@ fn matching_expectation_adds_https_image_case_to_probe_plan() {
         });
     let compiled = Arc::new(configuration.compile().unwrap());
     let route = RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "up-vision".into(),
         exposed_model_slug: "public-vision".into(),
         runtime_model_slug: "opaque/vision-model".into(),
@@ -85,6 +86,7 @@ fn responses_image_expectation_probes_https_and_data_url_inputs() {
         });
     let compiled = configuration.compile().unwrap();
     let route = RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "up-vision".into(),
         exposed_model_slug: "public-vision".into(),
         runtime_model_slug: "opaque/vision".into(),
@@ -141,6 +143,7 @@ fn matching_policy_adds_declared_candidates_and_extensions_to_probe_plan() {
     .compile()
     .unwrap();
     let route = RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         exposed_model_slug: "public".into(),
         runtime_model_slug: "lab/opaque".into(),
@@ -207,6 +210,7 @@ fn queued_probe_preserves_exposed_model_for_fixture_selection() {
         });
     let compiled = Arc::new(configuration.compile().unwrap());
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-vision".into(),
         runtime_model_slug: "opaque/runtime-vision".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -569,6 +573,7 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
             )
             .unwrap();
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: upstream.id.clone(),
             runtime_model_slug: "periodic-model".into(),
             protocol: WireProtocol::ChatCompletions,
@@ -804,6 +809,7 @@ async fn candidate_and_extension_probe_evidence_is_persisted_in_profile() {
     )
     .await;
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "probe-upstream".into(),
         runtime_model_slug: "probe-model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -2015,6 +2021,7 @@ async fn normal_gateway_request_never_launches_a_probe() {
         let state_path = tempdir.path().join("state.json");
         let downstream_key = generate_downstream_key("gw");
         let key = DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "up-1".into(),
             runtime_model_slug: "gpt-4.1-mini".into(),
             protocol: WireProtocol::ChatCompletions,

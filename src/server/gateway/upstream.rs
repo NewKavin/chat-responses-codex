@@ -4,6 +4,7 @@ use crate::capabilities::{
     RequestedFeatures, ResolvedCapabilities, RouteIdentity, WireProtocol,
     DIALECT_PROBE_SCHEMA_VERSION,
 };
+use crate::keys::upstream_key_fingerprint;
 use crate::protocol::image_adapter::ImageDialect;
 use std::collections::BTreeSet;
 
@@ -534,6 +535,7 @@ fn compatibility_profile_state(state: DialectProfileState) -> &'static str {
 fn build_compatibility_usage_metadata(
     snapshot: &CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     upstream_protocol: UpstreamProtocol,
@@ -546,6 +548,7 @@ fn build_compatibility_usage_metadata(
 ) -> CompatibilityUsageMetadata {
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
+        key_fingerprint: key_fingerprint.to_string(),
         exposed_model_slug: exposed_model_slug.to_string(),
         runtime_model_slug: runtime_model_slug.to_string(),
         protocol: WireProtocol::from(upstream_protocol),
@@ -1060,6 +1063,7 @@ pub(super) async fn send_to_upstream(
     stream_only_recovery_leader: &mut Option<StreamOnlyRecoveryLeader>,
     stream_only_recovery_identity: &mut Option<(DialectProfileKey, String)>,
 ) -> Result<DispatchResult, GatewayError> {
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
     let mut active_capability_snapshot = capability_snapshot.clone();
     let mut resolved_capabilities = resolved_capabilities.cloned();
     let mut attempt_mode = attempt_mode;
@@ -1281,11 +1285,12 @@ pub(super) async fn send_to_upstream(
     }
 
     if final_upstream_model != selected_upstream_model {
-        let fallback_profile_key = DialectProfileKey {
-            upstream_id: upstream.id.clone(),
-            runtime_model_slug: final_upstream_model.clone(),
-            protocol: WireProtocol::from(upstream_protocol),
-        };
+        let fallback_profile_key = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            final_upstream_model.clone(),
+            WireProtocol::from(upstream_protocol),
+        );
         if !active_capability_snapshot
             .profiles
             .contains_key(&fallback_profile_key)
@@ -1363,11 +1368,12 @@ pub(super) async fn send_to_upstream(
                 "upstream_invalid_response",
             )
         })?;
-        let profile_key = DialectProfileKey {
-            upstream_id: upstream.id.clone(),
-            runtime_model_slug: final_upstream_model.clone(),
-            protocol: WireProtocol::from(upstream_protocol),
-        };
+        let profile_key = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            final_upstream_model.clone(),
+            WireProtocol::from(upstream_protocol),
+        );
         match begin_stream_only_recovery(
             state,
             profile_key.clone(),
@@ -1412,11 +1418,12 @@ pub(super) async fn send_to_upstream(
                 "gateway_response_history_invalid",
             )
         })?;
-        let profile_key = DialectProfileKey {
-            upstream_id: upstream.id.clone(),
-            runtime_model_slug: final_upstream_model.clone(),
-            protocol: WireProtocol::from(upstream_protocol),
-        };
+        let profile_key = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            final_upstream_model.clone(),
+            WireProtocol::from(upstream_protocol),
+        );
         let profile_reasoning_carrier = active_capability_snapshot
             .profiles
             .get(&profile_key)
@@ -1977,6 +1984,7 @@ pub(super) async fn send_to_upstream(
             build_compatibility_usage_metadata(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -2166,6 +2174,7 @@ pub(super) async fn send_to_upstream(
             build_compatibility_usage_metadata(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -2261,6 +2270,7 @@ pub(super) async fn send_to_upstream(
         build_compatibility_usage_metadata(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,

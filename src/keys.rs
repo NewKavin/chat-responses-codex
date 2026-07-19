@@ -1,3 +1,4 @@
+use crate::capabilities::WireProtocol;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -6,6 +7,7 @@ use rand::random;
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use subtle::ConstantTimeEq;
 
@@ -69,4 +71,56 @@ fn legacy_digest(plaintext: &str, salt: &str) -> String {
     salt.hash(&mut hasher);
     plaintext.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+fn sha256_hex(parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        })
+}
+
+fn wire_protocol_identity(protocol: WireProtocol) -> &'static [u8] {
+    match protocol {
+        WireProtocol::ChatCompletions => b"chat_completions",
+        WireProtocol::Responses => b"responses",
+        WireProtocol::Messages => b"messages",
+    }
+}
+
+pub fn upstream_key_fingerprint(upstream_id: &str, api_key: &str) -> String {
+    sha256_hex(&[
+        b"chat2responses:key:v1",
+        b"\0",
+        upstream_id.as_bytes(),
+        b"\0",
+        api_key.trim().as_bytes(),
+    ])
+}
+
+pub fn anonymous_route_id(
+    upstream_id: &str,
+    key_fingerprint: &str,
+    runtime_model_slug: &str,
+    protocol: WireProtocol,
+) -> String {
+    let digest = sha256_hex(&[
+        b"chat2responses:route-id:v1",
+        b"\0",
+        upstream_id.as_bytes(),
+        b"\0",
+        key_fingerprint.as_bytes(),
+        b"\0",
+        runtime_model_slug.as_bytes(),
+        b"\0",
+        wire_protocol_identity(protocol),
+    ]);
+    format!("route_{}", &digest[..16])
 }

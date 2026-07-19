@@ -1,6 +1,7 @@
+use chat_responses_codex::capabilities::WireProtocol;
 use chat_responses_codex::keys::{
-    downstream_secret_fingerprint, generate_downstream_key, validated_downstream_plaintext,
-    verify_downstream_key,
+    anonymous_route_id, downstream_secret_fingerprint, generate_downstream_key,
+    upstream_key_fingerprint, validated_downstream_plaintext, verify_downstream_key,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -89,4 +90,28 @@ fn stored_plaintext_validation_covers_argon2_and_legacy_hash_formats() {
     }
 
     assert_eq!(validated_downstream_plaintext(None, &argon2.hash), None);
+}
+
+#[test]
+fn upstream_key_fingerprint_is_domain_separated_trimmed_and_upstream_scoped() {
+    let fingerprint = upstream_key_fingerprint("up-a", " secret-key ");
+
+    assert_eq!(fingerprint, upstream_key_fingerprint("up-a", "secret-key"));
+    assert_ne!(fingerprint, upstream_key_fingerprint("up-b", "secret-key"));
+    assert_ne!(fingerprint, upstream_key_fingerprint("up-a", "rotated-key"));
+    assert_eq!(
+        fingerprint,
+        "60c9985cdf9ec0e721ca09fa7a92970b95d6da200aae8bae4ff09239c7206802"
+    );
+}
+
+#[test]
+fn route_id_does_not_embed_a_secret_or_key_fingerprint() {
+    let fingerprint = upstream_key_fingerprint("up-a", "secret-key");
+    let route_id = anonymous_route_id("up-a", &fingerprint, "glm-5.2", WireProtocol::Responses);
+
+    assert_eq!(route_id, "route_741e07bf874c1e8e");
+    assert!(route_id.starts_with("route_"));
+    assert!(!route_id.contains("secret-key"));
+    assert!(!route_id.contains(&fingerprint));
 }

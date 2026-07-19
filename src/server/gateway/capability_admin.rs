@@ -3,6 +3,7 @@ use crate::capabilities::{
     Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey, ProbeReason,
     RequestedFeatures, ResolutionInput, RouteIdentity, UpstreamDialectProfile, WireProtocol,
 };
+use crate::keys::upstream_key_fingerprint;
 use axum::extract::{Path, Query};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -110,8 +111,14 @@ pub(super) async fn admin_capabilities_resolved(
     };
 
     let capability_snapshot = state.capability_snapshot();
+    let key_fingerprint = upstream
+        .keys_for_model(&query.model)
+        .first()
+        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+        .unwrap_or_default();
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
+        key_fingerprint: key_fingerprint.clone(),
         exposed_model_slug: query.model.clone(),
         runtime_model_slug: runtime_model_slug.clone(),
         protocol: WireProtocol::from(protocol),
@@ -398,11 +405,16 @@ fn profile_is_current_for_route(
     fingerprint: &str,
 ) -> bool {
     profile.key
-        == DialectProfileKey {
-            upstream_id: upstream.id.clone(),
-            runtime_model_slug: runtime_model_slug.to_owned(),
-            protocol: WireProtocol::from(protocol),
-        }
+        == DialectProfileKey::for_key(
+            upstream.id.clone(),
+            upstream
+                .keys_for_model(exposed_model_slug)
+                .first()
+                .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+                .unwrap_or_default(),
+            runtime_model_slug,
+            WireProtocol::from(protocol),
+        )
         && profile.configuration_fingerprint == fingerprint
         && profile.probe_schema_version == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
         && AppState::route_configuration_fingerprint_with_snapshot(

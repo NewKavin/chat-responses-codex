@@ -205,6 +205,7 @@ impl DialectRetryFixture {
         );
 
         let key = DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "up-1".into(),
             runtime_model_slug: "opaque/model".into(),
             protocol: WireProtocol::ChatCompletions,
@@ -241,6 +242,7 @@ impl DialectRetryFixture {
 
     async fn with_correction(self, correction: DialectCorrectionRule) -> Self {
         let key = DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "up-1".into(),
             runtime_model_slug: "opaque/model".into(),
             protocol: WireProtocol::ChatCompletions,

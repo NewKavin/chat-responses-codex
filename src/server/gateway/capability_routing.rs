@@ -3,6 +3,7 @@ use crate::capabilities::{
     DialectProfileState, ReasoningCarrier, RequestedFeatures, ResolutionInput,
     ResolvedCapabilities, RouteIdentity, SemanticPolicy, WireProtocol,
 };
+use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
 use crate::state::{AppState, UpstreamConfig};
 use serde_json::Value;
@@ -425,8 +426,14 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
     protocol: UpstreamProtocol,
     requested: &RequestedFeatures,
 ) -> Option<ResolvedCapabilities> {
+    let key_fingerprint = upstream
+        .keys_for_model(exposed_model_slug)
+        .first()
+        .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+        .unwrap_or_default();
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
+        key_fingerprint,
         exposed_model_slug: exposed_model_slug.to_string(),
         runtime_model_slug: runtime_model_slug.to_string(),
         protocol: protocol.into(),
@@ -495,11 +502,16 @@ fn exact_route_effective_profile<'a>(
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
 ) -> ExactRouteEffectiveProfile<'a> {
-    let key = DialectProfileKey {
-        upstream_id: upstream.id.clone(),
-        runtime_model_slug: runtime_model_slug.to_owned(),
-        protocol: protocol.into(),
-    };
+    let key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        upstream
+            .keys_for_model(exposed_model_slug)
+            .first()
+            .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+            .unwrap_or_default(),
+        runtime_model_slug,
+        protocol.into(),
+    );
     let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         snapshot,
         upstream,
@@ -594,7 +606,11 @@ impl CatalogWitnessEntry {
             "upstream_id": self.profile_key.upstream_id,
             "runtime_model_slug": self.profile_key.runtime_model_slug,
             "protocol": wire_protocol_label(self.profile_key.protocol),
-            "profile_key": self.profile_key,
+            "profile_key": {
+                "upstream_id": self.profile_key.upstream_id,
+                "runtime_model_slug": self.profile_key.runtime_model_slug,
+                "protocol": wire_protocol_label(self.profile_key.protocol),
+            },
             "configuration_fingerprint": self.configuration_fingerprint,
             "profile_state": profile_state_label(self.profile_state),
             "probe_schema_version": self.probe_schema_version,

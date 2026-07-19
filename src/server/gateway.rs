@@ -5,6 +5,7 @@ use crate::capabilities::{
     Capability, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey, EvidenceState,
     RequestedFeatures, ResolvedCapabilities, WireProtocol,
 };
+use crate::keys::upstream_key_fingerprint;
 use crate::protocol::{
     chat_request_to_responses_payload_with_context,
     chat_response_to_responses_payload_with_tool_registry, responses_response_to_chat_payload,
@@ -3350,10 +3351,19 @@ async fn process_gateway_request_inner(
                     .filter_map(|protocol| {
                         upstream
                             .resolved_model_name(model)
-                            .map(|runtime_model_slug| DialectProfileKey {
-                                upstream_id: upstream.id.clone(),
-                                runtime_model_slug,
-                                protocol: WireProtocol::from(protocol),
+                            .map(|runtime_model_slug| {
+                                DialectProfileKey::for_key(
+                                    upstream.id.clone(),
+                                    upstream
+                                        .keys_for_model(model)
+                                        .first()
+                                        .map(|api_key| {
+                                            upstream_key_fingerprint(&upstream.id, api_key)
+                                        })
+                                        .unwrap_or_default(),
+                                    runtime_model_slug,
+                                    WireProtocol::from(protocol),
+                                )
                             })
                     })
             })
@@ -3385,6 +3395,11 @@ async fn process_gateway_request_inner(
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 continue;
             };
+            let key_fingerprint = upstream
+                .keys_for_model(model)
+                .first()
+                .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+                .unwrap_or_default();
             for protocol in upstream.supported_protocols() {
                 let Some(candidate) =
                     route_capability(upstream, protocol).and_then(|route| route.resolved.as_ref())
@@ -3401,11 +3416,12 @@ async fn process_gateway_request_inner(
                     candidate_transition,
                     witness_transition,
                 ) {
-                    allowed.insert(DialectProfileKey {
-                        upstream_id: upstream.id.clone(),
-                        runtime_model_slug: runtime_model_slug.clone(),
-                        protocol: WireProtocol::from(protocol),
-                    });
+                    allowed.insert(DialectProfileKey::for_key(
+                        upstream.id.clone(),
+                        key_fingerprint.clone(),
+                        runtime_model_slug.clone(),
+                        WireProtocol::from(protocol),
+                    ));
                 }
             }
         }
@@ -3423,11 +3439,16 @@ async fn process_gateway_request_inner(
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 return false;
             };
-            let candidate_key = DialectProfileKey {
-                upstream_id: upstream.id.clone(),
+            let candidate_key = DialectProfileKey::for_key(
+                upstream.id.clone(),
+                upstream
+                    .keys_for_model(model)
+                    .first()
+                    .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+                    .unwrap_or_default(),
                 runtime_model_slug,
-                protocol: WireProtocol::from(protocol),
-            };
+                WireProtocol::from(protocol),
+            );
             if let Some(profile_key) = continuation_profile_key.as_ref() {
                 return candidate_key == *profile_key;
             }

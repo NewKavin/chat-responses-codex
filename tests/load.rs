@@ -754,6 +754,7 @@ async fn load_gateway_first_meaningful_event_baseline() {
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "gpt-4.1-mini".into(),
         protocol: WireProtocol::Responses,
@@ -945,6 +946,7 @@ async fn load_gateway_first_meaningful_event() {
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "gpt-4.1-mini".into(),
         protocol: WireProtocol::Responses,

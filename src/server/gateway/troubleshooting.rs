@@ -3,6 +3,7 @@ use super::compatibility_semantics::{
     MeaningfulSseEventDetector, SemanticCheckResult, SemanticExpectation, StrictMessagesToolTrace,
 };
 use crate::capabilities::AgentClientProfile;
+use crate::keys::upstream_key_fingerprint;
 use crate::state::{unix_seconds, AppState};
 use axum::body::{to_bytes, Body};
 use axum::extract::{Json, State};
@@ -817,9 +818,15 @@ async fn matrix_expectation_context(
         let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
             continue;
         };
+        let key_fingerprint = upstream
+            .keys_for_model(model)
+            .first()
+            .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+            .unwrap_or_default();
         for protocol in upstream.supported_protocols() {
             let mut route = crate::capabilities::RouteIdentity {
                 upstream_id: upstream.id.clone(),
+                key_fingerprint: key_fingerprint.clone(),
                 exposed_model_slug: model.to_string(),
                 runtime_model_slug: runtime_model_slug.clone(),
                 protocol: protocol.into(),
@@ -1057,11 +1064,16 @@ async fn matrix_profile_details(
     let runtime_model_slug = upstream
         .resolved_model_name(model)
         .unwrap_or_else(|| model.to_string());
-    let key = crate::capabilities::DialectProfileKey {
-        upstream_id: upstream_id.clone(),
-        runtime_model_slug: runtime_model_slug.clone(),
-        protocol: crate::capabilities::WireProtocol::from(*upstream_protocol),
-    };
+    let key = crate::capabilities::DialectProfileKey::for_key(
+        upstream_id.clone(),
+        upstream
+            .keys_for_model(model)
+            .first()
+            .map(|api_key| upstream_key_fingerprint(&upstream.id, api_key))
+            .unwrap_or_default(),
+        runtime_model_slug.clone(),
+        crate::capabilities::WireProtocol::from(*upstream_protocol),
+    );
     let raw_profile = capability_snapshot.profiles.get(&key);
     let current_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         &capability_snapshot,

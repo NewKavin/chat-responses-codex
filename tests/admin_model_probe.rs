@@ -2,6 +2,8 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
+use chat_responses_codex::capabilities::WireProtocol;
+use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
@@ -122,7 +124,7 @@ async fn admin_model_probe_discovery_results_expand_duplicate_indices() {
 }
 
 #[tokio::test]
-async fn admin_model_probe_returns_channel_status_and_models() {
+async fn admin_model_probe_returns_route_id_channel_status_and_models() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
 
@@ -193,11 +195,19 @@ async fn admin_model_probe_returns_channel_status_and_models() {
 
     let channels = result["channels"].as_array().unwrap();
     assert_eq!(channels.len(), 2);
+    let healthy_fingerprint = upstream_key_fingerprint("upstream-healthy", "healthy-key");
+    let healthy_route_id = anonymous_route_id(
+        "upstream-healthy",
+        &healthy_fingerprint,
+        "models-probe",
+        WireProtocol::ChatCompletions,
+    );
 
     let healthy = channels
         .iter()
         .find(|item| item["upstream_name"] == "Healthy Upstream")
         .unwrap();
+    assert_eq!(healthy["route_id"], healthy_route_id);
     assert_eq!(healthy["status"], "healthy");
     assert_eq!(healthy["model_count"], 2);
     assert_eq!(
@@ -220,4 +230,10 @@ async fn admin_model_probe_returns_channel_status_and_models() {
     assert_eq!(models[0]["model"], "gpt-4o");
     assert_eq!(models[1]["model"], "gpt-4o-mini");
     assert_eq!(models[0]["channel_count"], 1);
+
+    let serialized = result.to_string();
+    assert!(!serialized.contains("key_prefix"));
+    assert!(!serialized.contains("healthy-key"));
+    assert!(!serialized.contains("failing-key"));
+    assert!(!serialized.contains(&healthy_fingerprint));
 }

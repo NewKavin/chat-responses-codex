@@ -200,6 +200,7 @@ async fn put_catalog_profile_for_protocol(
         .route_configuration_fingerprint(upstream, model, model, protocol)
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.to_owned(),
         protocol: protocol.into(),
@@ -231,6 +232,7 @@ async fn stamp_current_profile(
         .iter()
         .find(|upstream| upstream.id == upstream_id)
         .unwrap();
+    profile.key.key_fingerprint = upstream_model_key_fingerprint(upstream, exposed_model);
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(upstream, exposed_model, &runtime_model_slug, protocol)
         .unwrap();
@@ -308,6 +310,7 @@ async fn assert_stale_profile_is_not_authoritative(mismatch: StaleProfileMismatc
         .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::ChatCompletions)
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -622,6 +625,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
         .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::ChatCompletions)
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1213,6 +1217,7 @@ async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallb
         .route_configuration_fingerprint(&witness, model, model, UpstreamProtocol::ChatCompletions)
         .unwrap();
     let mut witness_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&witness, model),
         upstream_id: witness.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1388,6 +1393,7 @@ async fn required_image_never_routes_to_text_only_candidate() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "text-only".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1489,6 +1495,7 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "text-only".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1613,6 +1620,7 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
         AppConfig::default(),
     );
     let witness_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "priority-low".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1635,6 +1643,7 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
     state.upsert_dialect_profile(witness).await.unwrap();
 
     let weaker_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "priority-high".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1747,6 +1756,7 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
         .unwrap();
 
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1878,6 +1888,7 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
         .unwrap();
 
     let mut raw_strong = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "raw-strong".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1901,6 +1912,7 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
     state.upsert_dialect_profile(raw_strong).await.unwrap();
 
     let mut resolved_strong = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "resolved-strong".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1995,6 +2007,7 @@ async fn catalog_witness_considers_every_supported_protocol() {
     );
 
     let mut responses_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "multi-protocol".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::Responses,
@@ -2172,6 +2185,7 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
     );
 
     let weak_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "responses-weak".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::Responses,
@@ -2192,6 +2206,7 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
     state.upsert_dialect_profile(weak).await.unwrap();
 
     let strong_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "chat-strong".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -2371,6 +2386,7 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
 
     for upstream_id in ["a-other", "z-prev"] {
         let key = DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: upstream_id.into(),
             runtime_model_slug: "opaque/model".into(),
             protocol: WireProtocol::Responses,
@@ -2456,6 +2472,10 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
         upgraded.request_state["_gateway_continuation"]["profile_key"],
         json!({
             "upstream_id": "z-prev",
+            "key_fingerprint": chat_responses_codex::keys::upstream_key_fingerprint(
+                "z-prev",
+                "responses-secret",
+            ),
             "runtime_model_slug": "opaque/model",
             "protocol": "responses"
         })

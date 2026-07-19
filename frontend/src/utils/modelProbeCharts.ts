@@ -30,7 +30,7 @@ export const sortProbeChannels = (
     if (statusOrder !== 0) return statusOrder
     return (
       left.upstream_name.localeCompare(right.upstream_name) ||
-      left.key_prefix.localeCompare(right.key_prefix)
+      left.route_id.localeCompare(right.route_id)
     )
   })
 
@@ -88,7 +88,7 @@ export const filterProbeChannels = (
     const haystack = [
       channel.upstream_id,
       channel.upstream_name,
-      channel.key_prefix,
+      channel.route_id,
       ...channel.models
     ].join(' ').toLowerCase()
     return haystack.includes(normalizedQuery)

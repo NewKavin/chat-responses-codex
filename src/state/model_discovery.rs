@@ -13,18 +13,6 @@ pub struct KeyModelDiscoveryResult {
     pub error: Option<String>,
 }
 
-/// Keep the legacy model-probe channel label generation in one place while the
-/// discovery result itself remains index-only and cannot carry a raw Key.
-pub fn model_discovery_key_prefix(key: &str) -> String {
-    let key = key.trim();
-    let prefix = key.chars().take(8).collect::<String>();
-    if key.chars().count() <= 8 {
-        prefix
-    } else {
-        format!("{}...", prefix)
-    }
-}
-
 pub async fn fetch_models_from_upstream(
     client: &reqwest::Client,
     base_url: &str,

@@ -341,11 +341,7 @@ impl PostgresStateStore {
             let profile_json: String = row.get(3);
             let mut profile: UpstreamDialectProfile = serde_json::from_str(&profile_json)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let key = DialectProfileKey {
-                upstream_id,
-                runtime_model_slug,
-                protocol,
-            };
+            let key = DialectProfileKey::legacy(upstream_id, runtime_model_slug, protocol);
             profile.key = key.clone();
             document.profiles.insert(key, profile);
         }

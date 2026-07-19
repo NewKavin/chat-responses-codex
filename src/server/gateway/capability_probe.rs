@@ -17,6 +17,7 @@ use crate::capabilities::{
     ProbeQueueState, ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField,
     UpstreamDialectProfile, WireProtocol,
 };
+use crate::keys::upstream_key_fingerprint;
 use crate::protocol::stream_aggregate::{SseEvent, MAX_STREAM_AGGREGATE_TOTAL_BYTES};
 use crate::protocol::{
     ProtocolError, StreamAggregateResult, StreamResponseAggregator, UpstreamStreamErrorKind,
@@ -196,6 +197,7 @@ pub fn probe_plan_for_job(job: &ProbeJob) -> ProbePlan {
         .unwrap_or_else(|| job.key.runtime_model_slug.clone());
     let mut route = RouteIdentity {
         upstream_id: job.key.upstream_id.clone(),
+        key_fingerprint: job.key.key_fingerprint.clone(),
         exposed_model_slug: primary_exposed_model,
         runtime_model_slug: job.key.runtime_model_slug.clone(),
         protocol: job.key.protocol,
@@ -212,6 +214,7 @@ pub fn probe_plan_for_job(job: &ProbeJob) -> ProbePlan {
         .find_map(|exposed_model_slug| {
             let mut alias_route = RouteIdentity {
                 upstream_id: job.key.upstream_id.clone(),
+                key_fingerprint: job.key.key_fingerprint.clone(),
                 exposed_model_slug: exposed_model_slug.clone(),
                 runtime_model_slug: job.key.runtime_model_slug.clone(),
                 protocol: job.key.protocol,
@@ -275,11 +278,12 @@ pub async fn run_probe_plan_for_model_for_test(
     plan: CapabilityProbePlan,
     timeout_seconds: u64,
 ) -> io::Result<ProbeOutcome> {
-    let key = DialectProfileKey {
-        upstream_id: "probe-upstream".to_owned(),
-        runtime_model_slug: runtime_model_slug.to_owned(),
-        protocol: plan.protocol,
-    };
+    let key = DialectProfileKey::for_key(
+        "probe-upstream",
+        upstream_key_fingerprint("probe-upstream", api_key),
+        runtime_model_slug,
+        plan.protocol,
+    );
     let client = Client::builder().build().expect("probe test client");
     ProbeExecutor {
         client,

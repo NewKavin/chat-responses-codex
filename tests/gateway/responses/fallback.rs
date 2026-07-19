@@ -156,6 +156,7 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
     );
     for upstream_id in ["fallback-exact", "fallback-alternative"] {
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: upstream_id.into(),
             runtime_model_slug: model.into(),
             protocol: WireProtocol::ChatCompletions,

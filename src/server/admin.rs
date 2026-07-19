@@ -1,11 +1,11 @@
+use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    fetch_models_from_upstream_keys_concurrently, model_discovery_key_prefix,
-    portal_model_is_allowed, unix_seconds, AnnouncementConfig, AnnouncementLevel,
-    ApiKeyModelConfig, AppState, DefaultModelContextConfig, DownstreamConfig, FreekeySyncItem,
-    GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
-    ModelQualificationEvidence, ModelQualificationLevel, UpstreamConfig, UpstreamMutationError,
-    UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    fetch_models_from_upstream_keys_concurrently, portal_model_is_allowed, unix_seconds,
+    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState, DefaultModelContextConfig,
+    DownstreamConfig, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
+    ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
+    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
@@ -142,7 +142,7 @@ pub(super) struct ModelProbeSummary {
 pub(super) struct ModelProbeChannel {
     upstream_id: String,
     upstream_name: String,
-    key_prefix: String,
+    route_id: String,
     status: String,
     latency_ms: u64,
     model_count: usize,
@@ -973,11 +973,17 @@ pub(super) async fn build_model_probe_response(
                 error,
                 ..
             } = result;
-            let key_prefix = keys
-                .get(key_index)
-                .map(|key| model_discovery_key_prefix(key))
-                .unwrap_or_else(|| format!("key-{}", key_index + 1));
-            let channel_id = format!("{}:{}", upstream.id, key_prefix);
+            let Some(api_key) = keys.get(key_index) else {
+                continue;
+            };
+            let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+            let route_id = anonymous_route_id(
+                &upstream.id,
+                &key_fingerprint,
+                "models-probe",
+                upstream.protocol.into(),
+            );
+            let channel_id = route_id.clone();
             if let Some(allowlist) = allowlist {
                 models.retain(|model| portal_model_is_allowed(allowlist, model));
             }
@@ -1003,7 +1009,7 @@ pub(super) async fn build_model_probe_response(
             channels.push(ModelProbeChannel {
                 upstream_id: upstream.id.clone(),
                 upstream_name: upstream.name.clone(),
-                key_prefix,
+                route_id,
                 status: status.to_string(),
                 latency_ms,
                 model_count: models.len(),
@@ -1017,7 +1023,7 @@ pub(super) async fn build_model_probe_response(
     channels.sort_by(|left, right| {
         left.upstream_name
             .cmp(&right.upstream_name)
-            .then(left.key_prefix.cmp(&right.key_prefix))
+            .then(left.route_id.cmp(&right.route_id))
     });
 
     let mut models = model_channels

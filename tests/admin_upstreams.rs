@@ -594,6 +594,10 @@ async fn qualification_decision_uses_exact_current_profile_for_full_level() {
     };
     let state = create_test_state_with_upstreams(vec![upstream.clone()]);
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
+            &upstream.id,
+            &upstream.api_key,
+        ),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "chat-ok".to_string(),
         protocol: WireProtocol::ChatCompletions,

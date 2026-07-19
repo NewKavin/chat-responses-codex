@@ -586,6 +586,7 @@ async fn postgres_roundtrip_preserves_capability_state() {
         .expect("should persist capability configuration");
 
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "Lab/Case-Sensitive".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1016,6 +1017,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
         .expect("should persist delete fixture downstream");
     state
         .upsert_dialect_profile(UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: upstream_id.clone(),
             runtime_model_slug: "Delete-Model".into(),
             protocol: WireProtocol::Responses,

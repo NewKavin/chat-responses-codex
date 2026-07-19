@@ -365,6 +365,7 @@ impl ClaudeResponsesThinkingFixture {
             .await
             .unwrap();
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, "opaque-public"),
             upstream_id: upstream.id.clone(),
             runtime_model_slug: "opaque-public".into(),
             protocol: WireProtocol::Responses,
@@ -397,6 +398,10 @@ impl ClaudeResponsesThinkingFixture {
         state.upsert_dialect_profile(profile).await.unwrap();
         if let Some(reasoning_supported) = chat_reasoning_supported {
             let mut weak_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+                key_fingerprint: upstream_model_key_fingerprint(
+                    &weak_chat_upstream,
+                    "opaque-public",
+                ),
                 upstream_id: weak_chat_upstream.id.clone(),
                 runtime_model_slug: "opaque-public".into(),
                 protocol: WireProtocol::ChatCompletions,
@@ -830,6 +835,7 @@ impl ClaudeThinkingFixture {
                 .find(|upstream| upstream.id == route.id)
                 .unwrap();
             let key = DialectProfileKey {
+                key_fingerprint: upstream_model_key_fingerprint(upstream, "opaque-public"),
                 upstream_id: route.id.into(),
                 runtime_model_slug: "opaque-public".into(),
                 protocol: WireProtocol::ChatCompletions,

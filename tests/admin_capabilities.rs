@@ -6,8 +6,11 @@ use chat_responses_codex::capabilities::{
     DialectProfileState, EvidenceState, RouteCapabilityOverride, UpstreamDialectProfile,
     WireProtocol,
 };
+use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::server::{build_router, CapabilityProbeService};
-use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UpstreamConfig};
+use chat_responses_codex::state::{
+    ApiKeyModelConfig, AppConfig, AppState, PersistedState, UpstreamConfig,
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io;
@@ -76,6 +79,7 @@ impl AdminCapabilityFixture {
         );
 
         let key = DialectProfileKey {
+            key_fingerprint: upstream_key_fingerprint("up-1", "upstream-secret"),
             upstream_id: "up-1".into(),
             runtime_model_slug: "opaque".into(),
             protocol: WireProtocol::ChatCompletions,
@@ -408,6 +412,7 @@ async fn completed_probe_does_not_relabel_old_evidence_after_configuration_impor
         )
         .unwrap();
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint("up-1", "upstream-secret"),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -488,6 +493,7 @@ async fn admin_capability_views_treat_schema_mismatched_profiles_as_stale() {
         )
         .unwrap();
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint("up-1", "upstream-secret"),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -545,6 +551,80 @@ async fn admin_capability_views_treat_schema_mismatched_profiles_as_stale() {
 }
 
 #[tokio::test]
+async fn admin_resolved_uses_the_first_key_mapped_to_the_requested_model() {
+    let tempdir = tempdir().unwrap();
+    let upstream = UpstreamConfig {
+        id: "mapped-upstream".into(),
+        name: "Mapped upstream".into(),
+        base_url: "https://example.invalid".into(),
+        api_key: "key-without-model".into(),
+        api_keys: vec!["key-with-model".into()],
+        api_key_models: vec![
+            ApiKeyModelConfig {
+                api_key: "key-without-model".into(),
+                supported_models: Vec::new(),
+            },
+            ApiKeyModelConfig {
+                api_key: "key-with-model".into(),
+                supported_models: vec!["opaque".into()],
+            },
+        ],
+        supported_models: vec!["opaque".into()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream.clone()],
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            jwt_secret: "test_secret".into(),
+            ..AppConfig::default()
+        },
+    );
+    let key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        upstream_key_fingerprint(&upstream.id, "key-with-model"),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
+    let mut profile = UpstreamDialectProfile::unknown(key);
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            &upstream,
+            "opaque",
+            "opaque",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
+    profile.state = DialectProfileState::Verified;
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/capabilities/resolved?upstream_id=mapped-upstream&model=opaque&protocol=chat_completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!(
+                        "Bearer {}",
+                        generate_admin_token("admin", "test_secret").unwrap()
+                    ),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response_json(response).await;
+
+    assert_eq!(body["profile_currentness"], "current");
+    assert_eq!(body["profile_state"], "verified");
+}
+
+#[tokio::test]
 async fn capability_admin_contract_exposes_sanitized_evidence_and_structured_conflicts() {
     let fixture = AdminCapabilityFixture::new().await;
     let configuration =
@@ -565,6 +645,7 @@ async fn capability_admin_contract_exposes_sanitized_evidence_and_structured_con
         )
         .unwrap();
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint("up-1", "upstream-secret"),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque".into(),
         protocol: WireProtocol::ChatCompletions,

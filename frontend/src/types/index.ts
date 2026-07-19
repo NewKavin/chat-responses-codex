@@ -291,7 +291,7 @@ export interface ModelProbeSummary {
 export interface ModelProbeChannel {
   upstream_id: string
   upstream_name: string
-  key_prefix: string
+  route_id: string
   status: 'healthy' | 'offline' | 'degraded' | string
   latency_ms: number
   model_count: number

@@ -19,6 +19,7 @@ fn single_probe_job(batch: ProbeJobBatch) -> ProbeJob {
 fn blocker_probe_batch() -> ProbeJobBatch {
     ProbeJobBatch::single(ProbeJob {
         key: DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "blocker-upstream".into(),
             runtime_model_slug: "Lab/Blocker".into(),
             protocol: WireProtocol::ChatCompletions,
@@ -418,6 +419,7 @@ async fn profile_round_trip_uses_exact_case_sensitive_key() {
     let path = dir.path().join("state.json");
     let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "Lab/Case-Sensitive".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -474,6 +476,7 @@ async fn stream_only_learning_and_configuration_replace_do_not_lose_updates() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-learning".into(),
         runtime_model_slug: "Lab/Atomic".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -531,6 +534,7 @@ async fn stream_only_learning_reloads_latest_sidecar_before_single_publish() {
         AppConfig::default(),
     );
     let target_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-learning".into(),
         runtime_model_slug: "Lab/Target".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -560,6 +564,7 @@ async fn stream_only_learning_reloads_latest_sidecar_before_single_publish() {
         .await
         .unwrap();
     let unrelated_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-unrelated".into(),
         runtime_model_slug: "Lab/Unrelated".into(),
         protocol: WireProtocol::Responses,
@@ -603,6 +608,7 @@ async fn stream_only_learning_rejects_fingerprint_and_schema_mismatches() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-learning".into(),
         runtime_model_slug: "Lab/Stale".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -664,6 +670,7 @@ async fn stream_only_learning_rejects_fingerprint_stale_against_latest_configura
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "Lab/Changed".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -741,6 +748,7 @@ async fn stream_only_learning_does_not_recreate_a_deleted_upstream_profile() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "Lab/Deleted".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -783,6 +791,7 @@ async fn removing_upstream_clears_capability_profiles_for_that_upstream() {
         .await
         .unwrap();
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "Lab/Case-Sensitive".into(),
         protocol: WireProtocol::ChatCompletions,

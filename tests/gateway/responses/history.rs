@@ -366,6 +366,7 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
     );
     for runtime_model in [exposed_model, fallback_model] {
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: upstream.id.clone(),
             runtime_model_slug: runtime_model.into(),
             protocol: WireProtocol::Responses,
@@ -622,6 +623,7 @@ async fn downstream_responses_previous_response_id_replays_prior_state_and_outpu
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "gpt-4.1-mini".into(),
         protocol: WireProtocol::ChatCompletions,

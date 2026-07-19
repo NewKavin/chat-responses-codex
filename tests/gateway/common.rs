@@ -40,6 +40,14 @@ pub(crate) fn generate_downstream_key(prefix: &str) -> GeneratedDownstreamKey {
     }
 }
 
+pub(crate) fn upstream_model_key_fingerprint(upstream: &UpstreamConfig, model: &str) -> String {
+    upstream
+        .keys_for_model(model)
+        .first()
+        .map(|api_key| chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, api_key))
+        .unwrap_or_default()
+}
+
 const PROXY_ENV_VARS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -91,6 +99,7 @@ pub(crate) async fn stamp_current_dialect_profile(
         .iter()
         .find(|upstream| upstream.id == upstream_id)
         .unwrap();
+    profile.key.key_fingerprint = upstream_model_key_fingerprint(upstream, exposed_model);
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(upstream, exposed_model, &runtime_model_slug, protocol)
         .unwrap();

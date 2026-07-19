@@ -131,6 +131,7 @@ impl ContextFallbackHarness {
             (FALLBACK_MODEL, fallback_nonstream),
         ] {
             let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+                key_fingerprint: upstream_model_key_fingerprint(&upstream, runtime_model),
                 upstream_id: UPSTREAM_ID.into(),
                 runtime_model_slug: runtime_model.into(),
                 protocol: WireProtocol::Responses,
@@ -309,6 +310,7 @@ impl AggregateHarness {
             config,
         );
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: MODEL.into(),
             protocol: WireProtocol::Responses,
@@ -881,6 +883,7 @@ async fn aggregate_learned_singleflight_follower_uses_actual_mode_for_cancellati
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: MODEL.into(),
         protocol: WireProtocol::Responses,
@@ -942,6 +945,7 @@ async fn aggregate_learned_singleflight_follower_uses_actual_mode_for_cancellati
     let learned_profile = learned
         .profiles
         .get(&DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: MODEL.into(),
             protocol: WireProtocol::Responses,
