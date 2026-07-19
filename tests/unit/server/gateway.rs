@@ -1,7 +1,7 @@
 use super::*;
 use crate::capabilities::{
-    Capability, CapabilityRuntimeSnapshot, DialectProfileKey, EvidenceState, RequestedFeatures,
-    UpstreamDialectProfile, WireProtocol,
+    Capability, CapabilityHintKey, CapabilityRuntimeSnapshot, DialectProfileKey, EvidenceState,
+    RequestedFeatures, RuntimeCapabilityHints, UpstreamDialectProfile, WireProtocol,
 };
 use axum::body::to_bytes;
 use std::collections::BTreeSet;
@@ -152,6 +152,68 @@ fn route_attempts_terminal_details_are_numeric_and_secret_free() {
             "leaked {forbidden}: {rendered}"
         );
     }
+}
+
+fn tracked_route(fingerprint: &str) -> RouteHealthKey {
+    RouteHealthKey {
+        upstream_id: "up-1".into(),
+        key_fingerprint: fingerprint.into(),
+        runtime_model_slug: "glm-5.2".into(),
+        protocol: WireProtocol::Responses,
+    }
+}
+
+fn tracked_aggregate() -> RouteSetAggregateKey {
+    RouteSetAggregateKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "glm-5.2".into(),
+        protocol: WireProtocol::Responses,
+    }
+}
+
+#[test]
+fn request_route_tracker_prevents_reselecting_a_physical_route() {
+    let mut tracker = RequestRouteTracker::default();
+    let route = tracked_route("fingerprint-a");
+
+    assert!(tracker.should_attempt(&route));
+    tracker.record_physical_attempt(route.clone());
+    assert!(!tracker.should_attempt(&route));
+}
+
+#[test]
+fn request_route_tracker_aggregates_once_only_after_every_eligible_route_failed() {
+    let mut tracker = RequestRouteTracker::default();
+    let aggregate = tracked_aggregate();
+    let route_a = tracked_route("fingerprint-a");
+    let route_b = tracked_route("fingerprint-b");
+    tracker.register_eligible(aggregate.clone(), route_a.clone());
+    tracker.register_eligible(aggregate.clone(), route_b.clone());
+
+    assert!(tracker.take_newly_exhausted().is_empty());
+
+    tracker.record_physical_attempt(route_a.clone());
+    tracker.record_failure(
+        &route_a,
+        FailureClass::TransientServer,
+        Some(Duration::from_secs(30)),
+    );
+    assert!(tracker.take_newly_exhausted().is_empty());
+
+    tracker.record_physical_attempt(route_b.clone());
+    assert!(tracker.take_newly_exhausted().is_empty());
+    tracker.record_failure(
+        &route_b,
+        FailureClass::RateLimited,
+        Some(Duration::from_secs(7)),
+    );
+
+    let observations = tracker.take_newly_exhausted();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].key, aggregate);
+    assert_eq!(observations[0].class, FailureClass::RateLimited);
+    assert_eq!(observations[0].retry_after, Some(Duration::from_secs(7)));
+    assert!(tracker.take_newly_exhausted().is_empty());
 }
 
 #[tokio::test]
@@ -598,6 +660,117 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
     assert_eq!(
         hot_updated_snapshot.profiles[&key].capabilities[&Capability::ReasoningOutput],
         EvidenceState::Rejected
+    );
+}
+
+#[test]
+fn request_route_capability_cache_overlays_value_and_protocol_hints_exactly() {
+    let upstream = UpstreamConfig {
+        id: "up-runtime-hint".into(),
+        base_url: "https://unit.invalid".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["opaque".into()],
+        active: true,
+        ..Default::default()
+    };
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let profile_key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
+    let mut snapshot = CapabilityRuntimeSnapshot::default();
+    let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+        &snapshot,
+        &upstream,
+        &key_fingerprint,
+        "opaque",
+        "opaque",
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let mut profile = UpstreamDialectProfile::unknown(profile_key.clone());
+    profile.configuration_fingerprint = configuration_fingerprint.clone();
+    profile
+        .capabilities
+        .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+    snapshot.profiles.insert(profile_key.clone(), profile);
+    let requested = RequestedFeatures {
+        optional: BTreeSet::from([Capability::ReasoningOutput]),
+        ..RequestedFeatures::default()
+    };
+
+    let mut hints = RuntimeCapabilityHints::new(8, Duration::from_secs(900));
+    hints.insert(
+        CapabilityHintKey::feature(
+            profile_key.clone(),
+            Capability::ReasoningOutput,
+            Some("xhigh".into()),
+        ),
+        configuration_fingerprint.clone(),
+    );
+    let value_snapshot = hints.snapshot();
+    let xhigh = build_request_route_capability_cache_with_hints(
+        &snapshot,
+        std::slice::from_ref(&upstream),
+        "opaque",
+        EndpointKind::ChatCompletions,
+        &requested,
+        &value_snapshot,
+        Some("xhigh"),
+    );
+    assert!(
+        !xhigh
+            .get(&(
+                WireProtocol::ChatCompletions,
+                upstream.id.clone(),
+                key_fingerprint.clone(),
+            ))
+            .unwrap()
+            .eligible
+    );
+
+    let plain = build_request_route_capability_cache_with_hints(
+        &snapshot,
+        std::slice::from_ref(&upstream),
+        "opaque",
+        EndpointKind::ChatCompletions,
+        &requested,
+        &value_snapshot,
+        None,
+    );
+    assert!(
+        plain
+            .get(&(
+                WireProtocol::ChatCompletions,
+                upstream.id.clone(),
+                key_fingerprint.clone(),
+            ))
+            .unwrap()
+            .eligible
+    );
+
+    hints.insert(
+        CapabilityHintKey::protocol(profile_key),
+        configuration_fingerprint,
+    );
+    let protocol_snapshot = hints.snapshot();
+    let protocol_blocked = build_request_route_capability_cache_with_hints(
+        &snapshot,
+        std::slice::from_ref(&upstream),
+        "opaque",
+        EndpointKind::ChatCompletions,
+        &requested,
+        &protocol_snapshot,
+        None,
+    );
+    assert!(
+        !protocol_blocked
+            .get(&(WireProtocol::ChatCompletions, upstream.id, key_fingerprint,))
+            .unwrap()
+            .eligible
     );
 }
 

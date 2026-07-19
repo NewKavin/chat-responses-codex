@@ -2,6 +2,7 @@ mod policy;
 mod probe_queue;
 mod profile;
 mod resolver;
+mod runtime_hints;
 mod types;
 
 pub use policy::{
@@ -16,6 +17,10 @@ pub use profile::{
     ProbeOutcome, RouteFingerprintInput,
 };
 pub use resolver::{CapabilityResolutionError, CapabilityResolver, ResolutionInput};
+pub use runtime_hints::{
+    CapabilityHintDiscriminator, CapabilityHintKey, RuntimeCapabilityHintSnapshot,
+    RuntimeCapabilityHints, RUNTIME_CAPABILITY_HINT_CAPACITY, RUNTIME_CAPABILITY_HINT_TTL,
+};
 pub use types::*;
 
 pub const CAPABILITY_SCHEMA_VERSION: u32 = 1;

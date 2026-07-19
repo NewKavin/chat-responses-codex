@@ -503,6 +503,7 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         .unwrap_or_else(|| UpstreamDialectProfile::unknown(job.key.clone()));
     profile.configuration_fingerprint = job.configuration.configuration_fingerprint.clone();
     profile.probe_schema_version = job.configuration.probe_schema_version;
+    let mut conclusive_capabilities = None;
     match outcome {
         ProbeOutcome::OperationalFailure {
             code,
@@ -530,6 +531,7 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
             http_status,
             attempted_at,
         } => {
+            conclusive_capabilities = Some(capabilities.keys().copied().collect::<BTreeSet<_>>());
             apply_probe_outcome(
                 &mut profile,
                 ProbeOutcome::Conclusive {
@@ -547,9 +549,18 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
             );
         }
     }
-    let _ = state
+    let applied = state
         .upsert_dialect_profile_if_probe_current(profile, &job.configuration)
         .await?;
+    if applied {
+        if let Some(capabilities) = conclusive_capabilities {
+            state.clear_runtime_capability_hints_after_probe(
+                &job.key,
+                &job.configuration.configuration_fingerprint,
+                &capabilities,
+            );
+        }
+    }
     Ok(())
 }
 

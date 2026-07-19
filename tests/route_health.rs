@@ -1,7 +1,7 @@
 use chat_responses_codex::capabilities::WireProtocol;
 use chat_responses_codex::state::{
     AppConfig, AppState, KeyHealthKey, PersistedState, RouteAvailability, RouteFailureClass,
-    RouteHealthKey, RouteHealthRegistry, RouteOutcome,
+    RouteHealthKey, RouteHealthRegistry, RouteOutcome, RouteSetAggregateKey,
 };
 use std::time::Duration;
 
@@ -50,6 +50,31 @@ async fn route_cooldown_has_one_half_open_lease_and_resets_after_success() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn successful_route_state_does_not_create_a_new_half_open_lease() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("fingerprint-a", "glm-5.2");
+    let key = key("fingerprint-a");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    tokio::time::advance(Duration::from_secs(12)).await;
+    let recovery = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open recovery lease, got {other:?}"),
+    };
+    registry.finish(recovery, RouteOutcome::Success);
+
+    let healthy = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("expected healthy route, got {other:?}"),
+    };
+    assert!(!healthy.is_half_open());
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn key_credentials_cool_all_routes_for_that_key_but_not_another_key() {
     let mut registry = RouteHealthRegistry::new(16, 16);
     let key_a = key("fingerprint-a");
@@ -61,7 +86,10 @@ async fn key_credentials_cool_all_routes_for_that_key_but_not_another_key() {
     registry.observe_key_failure(&key_a, RouteFailureClass::Credentials, None);
     assert!(matches!(
         registry.reserve(&route_a_model, &key_a),
-        RouteAvailability::Cooling { .. }
+        RouteAvailability::Cooling {
+            class: RouteFailureClass::Credentials,
+            ..
+        }
     ));
     assert!(matches!(
         registry.reserve(&route_a_other_model, &key_a),
@@ -83,7 +111,10 @@ async fn route_failure_isolated_from_another_model_on_the_same_key() {
     registry.observe_route_failure(&failed, RouteFailureClass::CapacityUnavailable, None);
     assert!(matches!(
         registry.reserve(&failed, &key),
-        RouteAvailability::Cooling { .. }
+        RouteAvailability::Cooling {
+            class: RouteFailureClass::CapacityUnavailable,
+            ..
+        }
     ));
     assert!(matches!(
         registry.reserve(&healthy, &key),
@@ -142,6 +173,31 @@ async fn aggregate_failure_never_blocks_a_recovered_exact_route() {
         registry.reserve(&route, &key),
         RouteAvailability::Ready(_)
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn aggregate_snapshot_retains_failure_class_step_and_retry_after() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let aggregate = RouteSetAggregateKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "glm-5.2".into(),
+        protocol: WireProtocol::Responses,
+    };
+
+    registry.observe_route_set_failure(
+        &aggregate,
+        RouteFailureClass::RateLimited,
+        Some(Duration::from_secs(7)),
+    );
+    let snapshot = registry
+        .route_set_health_snapshot(&aggregate)
+        .expect("aggregate observation should be inspectable");
+    assert_eq!(snapshot.consecutive_failures, 1);
+    assert_eq!(
+        snapshot.last_failure_class,
+        Some(RouteFailureClass::RateLimited)
+    );
+    assert_eq!(snapshot.cooldown_remaining, Duration::from_secs(7));
 }
 
 #[tokio::test(start_paused = true)]
@@ -245,7 +301,10 @@ async fn route_and_key_half_open_leases_are_acquired_atomically() {
     };
     assert!(matches!(
         registry.reserve(&route, &key),
-        RouteAvailability::HalfOpenBusy { .. }
+        RouteAvailability::HalfOpenBusy {
+            class: RouteFailureClass::Credentials,
+            ..
+        }
     ));
     registry.finish(lease, RouteOutcome::Cancelled);
 }

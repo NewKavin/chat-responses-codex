@@ -1,7 +1,8 @@
 use crate::capabilities::{
     Capability, CapabilityResolver, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey,
     DialectProfileState, ReasoningCarrier, RequestedFeatures, ResolutionInput,
-    ResolvedCapabilities, RouteIdentity, SemanticPolicy, WireProtocol,
+    ResolvedCapabilities, RouteIdentity, RuntimeCapabilityHintSnapshot, SemanticPolicy,
+    WireProtocol,
 };
 use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
@@ -449,6 +450,30 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
     protocol: UpstreamProtocol,
     requested: &RequestedFeatures,
 ) -> Option<ResolvedCapabilities> {
+    resolve_route_capabilities_with_runtime_hints(
+        snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+        requested,
+        &RuntimeCapabilityHintSnapshot::default(),
+        None,
+    )
+}
+
+pub(super) fn resolve_route_capabilities_with_runtime_hints(
+    snapshot: &CapabilityRuntimeSnapshot,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    exposed_model_slug: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+    requested: &RequestedFeatures,
+    runtime_hints: &RuntimeCapabilityHintSnapshot,
+    requested_value: Option<&str>,
+) -> Option<ResolvedCapabilities> {
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
         key_fingerprint: key_fingerprint.to_string(),
@@ -504,6 +529,38 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
                 .field_sources
                 .insert("max_output_tokens".into(), CapabilitySource::Override);
         }
+    }
+    let profile = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug,
+        protocol.into(),
+    );
+    let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+        snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+    )
+    .ok()?;
+    if runtime_hints.blocks_protocol(&profile, &configuration_fingerprint) {
+        return None;
+    }
+    for (capability, value) in
+        runtime_hints.blocked_features(&profile, &configuration_fingerprint, requested_value)
+    {
+        if value.is_some() || requested.required.contains(&capability) {
+            return None;
+        }
+        resolved.values.insert(
+            capability,
+            crate::capabilities::ResolvedCapability {
+                state: crate::capabilities::EvidenceState::Rejected,
+                source: CapabilitySource::Probe,
+            },
+        );
     }
     Some(resolved)
 }

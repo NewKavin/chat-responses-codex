@@ -515,7 +515,7 @@ async fn stream_only_learning_failed_aggregate_does_not_change_evidence() {
 }
 
 #[tokio::test]
-async fn stream_only_learning_pre_recovery_operational_retry_does_not_wait_on_itself() {
+async fn stream_only_learning_pre_recovery_429_returns_without_waiting() {
     let harness = LearningHarness::new_protocol_config(
         UpstreamProtocol::ChatCompletions,
         EmptyJsonUsage::ExplicitZero,
@@ -530,9 +530,9 @@ async fn stream_only_learning_pre_recovery_operational_retry_does_not_wait_on_it
     let response = tokio::time::timeout(Duration::from_secs(2), harness.send())
         .await
         .expect("operational retry must not wait on its own recovery leader");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(harness.stream_flags(), vec![false, false, true]);
-    assert_eq!(harness.hits.load(Ordering::SeqCst), 3);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(harness.stream_flags(), vec![false]);
+    assert_eq!(harness.hits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1027,7 +1027,7 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
         .await
         .expect("follower must not hang")
         .unwrap();
-    assert_eq!(follower_response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(follower_response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     assert_eq!(
         requests.lock().unwrap().as_slice(),

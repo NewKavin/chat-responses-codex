@@ -51,8 +51,14 @@ pub struct RouteSetAggregateKey {
 #[derive(Debug)]
 pub enum RouteAvailability<T> {
     Ready(T),
-    Cooling { retry_after: Duration },
-    HalfOpenBusy { retry_after: Duration },
+    Cooling {
+        class: RouteFailureClass,
+        retry_after: Duration,
+    },
+    HalfOpenBusy {
+        class: RouteFailureClass,
+        retry_after: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -138,7 +144,15 @@ impl Drop for RouteHealthPermit {
 pub enum RouteOutcome {
     Success,
     RouteFailure(RouteFailureClass),
+    RouteFailureWithRetry {
+        class: RouteFailureClass,
+        retry_after: Duration,
+    },
     KeyFailure(RouteFailureClass),
+    KeyFailureWithRetry {
+        class: RouteFailureClass,
+        retry_after: Duration,
+    },
     UncertainRouteFailure(RouteFailureClass),
     Cancelled,
 }
@@ -259,6 +273,24 @@ impl RouteHealthRegistry {
             .map(|state| health_snapshot(state, Instant::now()))
     }
 
+    pub fn route_set_health_snapshot(
+        &self,
+        aggregate: &RouteSetAggregateKey,
+    ) -> Option<HealthStateSnapshot> {
+        self.aggregates.get(aggregate).map(|state| {
+            let now = Instant::now();
+            HealthStateSnapshot {
+                consecutive_failures: state.consecutive_failures,
+                last_failure_class: state.last_failure_class,
+                cooldown_remaining: state
+                    .cooldown_until
+                    .map(|until| until.saturating_duration_since(now))
+                    .unwrap_or_default(),
+                half_open: false,
+            }
+        })
+    }
+
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
@@ -297,11 +329,17 @@ impl RouteHealthRegistry {
             state.last_access = now;
             if state.is_cooling(now) {
                 return RouteAvailability::Cooling {
+                    class: state
+                        .last_failure_class
+                        .expect("cooling key health must retain its failure class"),
                     retry_after: state.retry_after(now),
                 };
             }
             if state.half_open_generation.is_some() {
                 return RouteAvailability::HalfOpenBusy {
+                    class: state
+                        .last_failure_class
+                        .expect("half-open key health must retain its failure class"),
                     retry_after: state.retry_after(now).max(HALF_OPEN_BUSY_RETRY),
                 };
             }
@@ -310,11 +348,17 @@ impl RouteHealthRegistry {
             state.last_access = now;
             if state.is_cooling(now) {
                 return RouteAvailability::Cooling {
+                    class: state
+                        .last_failure_class
+                        .expect("cooling route health must retain its failure class"),
                     retry_after: state.retry_after(now),
                 };
             }
             if state.half_open_generation.is_some() {
                 return RouteAvailability::HalfOpenBusy {
+                    class: state
+                        .last_failure_class
+                        .expect("half-open route health must retain its failure class"),
                     retry_after: state.retry_after(now).max(HALF_OPEN_BUSY_RETRY),
                 };
             }
@@ -333,7 +377,9 @@ impl RouteHealthRegistry {
 
     fn reserve_expired_half_open_key(&mut self, key: &KeyHealthKey, now: Instant) -> Option<u64> {
         let can_reserve = self.keys.get(key).is_some_and(|state| {
-            !state.cooldown_until.is_some_and(|until| until > now)
+            state.last_failure_class.is_some()
+                && state.cooldown_until.is_some()
+                && !state.cooldown_until.is_some_and(|until| until > now)
                 && state.half_open_generation.is_none()
         });
         if !can_reserve {
@@ -352,7 +398,9 @@ impl RouteHealthRegistry {
         now: Instant,
     ) -> Option<u64> {
         let can_reserve = self.routes.get(route).is_some_and(|state| {
-            !state.cooldown_until.is_some_and(|until| until > now)
+            state.last_failure_class.is_some()
+                && state.cooldown_until.is_some()
+                && !state.cooldown_until.is_some_and(|until| until > now)
                 && state.half_open_generation.is_none()
         });
         if !can_reserve {
@@ -385,9 +433,17 @@ impl RouteHealthRegistry {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 self.observe_route_failure_at(&lease.route, class, None, now);
             }
+            RouteOutcome::RouteFailureWithRetry { class, retry_after } => {
+                self.release_key_lease(&lease.key, lease.key_generation, now);
+                self.observe_route_failure_at(&lease.route, class, Some(retry_after), now);
+            }
             RouteOutcome::KeyFailure(class) => {
                 self.release_route_lease(&lease.route, lease.route_generation, now);
                 self.observe_key_failure_at(&lease.key, class, None, now);
+            }
+            RouteOutcome::KeyFailureWithRetry { class, retry_after } => {
+                self.release_route_lease(&lease.route, lease.route_generation, now);
+                self.observe_key_failure_at(&lease.key, class, Some(retry_after), now);
             }
             RouteOutcome::UncertainRouteFailure(class) => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);

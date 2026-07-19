@@ -413,6 +413,27 @@ async fn recognized_token_field_400_gets_one_known_correction() {
 }
 
 #[tokio::test]
+async fn dialect_correction_reserves_admission_for_each_physical_attempt() {
+    let fixture = DialectRetryFixture::scripted(vec![
+        reply_400(json!({"error":{"param":"max_tokens","code":"unsupported_parameter"}})),
+        reply_ok("corrected"),
+    ])
+    .await
+    .with_correction(DialectCorrectionRule::SwitchTokenLimit {
+        rejected: TokenLimitField::MaxTokens,
+        replacement: TokenLimitField::MaxCompletionTokens,
+    })
+    .await;
+
+    assert_eq!(fixture.send().await.status(), StatusCode::OK);
+    assert_eq!(fixture.upstream_hits(), 2);
+    let runtime = fixture.state.upstream_runtime_snapshots().await;
+    let upstream = runtime.get("up-1").expect("upstream runtime should exist");
+    assert_eq!(upstream.minute_cost, 2.0);
+    assert_eq!(upstream.in_flight, 0);
+}
+
+#[tokio::test]
 async fn captured_claude_adapters_come_from_successful_dialect_retry_attempt() {
     let fixture = DialectRetryFixture::scripted(vec![
         reply_400(json!({"error":{"param":"max_tokens","code":"unsupported_parameter"}})),
@@ -456,11 +477,15 @@ async fn correction_never_removes_semantic_state() {
 
 #[tokio::test]
 async fn auth_quota_arbitrary_4xx_and_started_stream_are_never_corrected() {
-    for status in [401, 403, 409, 429, 500] {
+    for status in [401, 403, 409, 429] {
         let fixture = DialectRetryFixture::status(status).await;
         let _ = fixture.send().await;
         assert_eq!(fixture.upstream_hits(), 1);
     }
+
+    let fixture = DialectRetryFixture::status(500).await;
+    let _ = fixture.send().await;
+    assert_eq!(fixture.upstream_hits(), 2);
 
     let fixture = DialectRetryFixture::stream_then_error().await;
     let response = fixture.send_stream().await;
@@ -470,7 +495,7 @@ async fn auth_quota_arbitrary_4xx_and_started_stream_are_never_corrected() {
 
 #[tokio::test]
 async fn non_context_statuses_with_context_words_are_never_retried() {
-    for status in [401, 403, 409, 429, 500] {
+    for status in [401, 403, 409, 429] {
         let fixture =
             DialectRetryFixture::status_with_message(status, "token limit exceeded".into()).await;
         let _ = fixture.send().await;
@@ -480,6 +505,11 @@ async fn non_context_statuses_with_context_words_are_never_retried() {
             "status {status} must not trigger a context-limit retry"
         );
     }
+
+    let fixture =
+        DialectRetryFixture::status_with_message(500, "token limit exceeded".into()).await;
+    let _ = fixture.send().await;
+    assert_eq!(fixture.upstream_hits(), 2);
 }
 
 #[tokio::test]
@@ -488,13 +518,18 @@ async fn responses_to_chat_auth_and_quota_errors_never_drop_tools_or_retry() {
         let fixture = DialectRetryFixture::bad_response_status(status).await;
         let response = fixture.send_responses_with_tool().await;
 
-        assert_eq!(response.status().as_u16(), status);
+        let expected_status = match status {
+            401 | 403 => 502,
+            429 => 503,
+            _ => status,
+        };
+        assert_eq!(response.status().as_u16(), expected_status);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         let expected_code = match status {
             400 => "upstream_request_rejected",
-            401 | 403 => "upstream_auth_error",
-            429 => "upstream_rate_limited",
+            401 | 403 => "upstream_credentials_exhausted",
+            429 => "upstream_routes_exhausted",
             _ => unreachable!(),
         };
         assert_eq!(payload["error"]["code"], expected_code);

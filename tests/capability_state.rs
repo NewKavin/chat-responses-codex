@@ -1280,7 +1280,9 @@ async fn inserting_upstream_does_not_wait_for_full_probe_queue() {
         .expect("configuration persistence must not wait for probe queue capacity")
         .unwrap()
         .unwrap();
-    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
+    let blocker = receiver
+        .try_recv()
+        .expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"
@@ -1347,7 +1349,9 @@ async fn updating_upstream_does_not_wait_for_full_probe_queue() {
         .expect("configuration persistence must not wait for probe queue capacity")
         .unwrap()
         .unwrap();
-    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
+    let blocker = receiver
+        .try_recv()
+        .expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"
@@ -1783,7 +1787,9 @@ async fn freekey_sync_does_not_wait_for_full_probe_queue() {
     .expect("configuration persistence must not wait for probe queue capacity")
     .unwrap();
     assert_eq!(summary.created, 2);
-    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
+    let blocker = receiver
+        .try_recv()
+        .expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"

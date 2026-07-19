@@ -261,7 +261,7 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
         .unwrap();
 
     assert!(continuation_response.status().is_server_error());
-    assert_eq!(exact_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(exact_hits.load(Ordering::SeqCst), 3);
     assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
 }
 
@@ -418,10 +418,10 @@ async fn downstream_responses_bad_response_status_preserves_tools_without_retry(
 
     let response = app.oneshot(request).await.unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["error"]["code"], "upstream_auth_error");
+    assert_eq!(payload["error"]["code"], "upstream_credentials_exhausted");
 
     let captures = capture.lock().unwrap().clone();
     assert_eq!(captures.len(), 1);
@@ -1310,19 +1310,19 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
 
     let response = app.oneshot(request).await.unwrap();
 
-    // The upstream rejected with 403 on every attempt. This is an auth error,
-    // not a protocol-unsupported (503) situation.
+    // The upstream rejected with 403. This is a credentials exhaustion error,
+    // not a protocol-unsupported situation.
     assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
-        "persistent 403 from upstream should surface as 403 auth error, not 503"
+        StatusCode::BAD_GATEWAY,
+        "persistent 403 from upstream should surface as credentials exhaustion"
     );
 
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
-        payload["error"]["code"], "upstream_auth_error",
-        "error category should be upstream_auth_error, not upstream_protocol_unsupported"
+        payload["error"]["code"], "upstream_credentials_exhausted",
+        "error category should be credentials exhaustion, not protocol unsupported"
     );
 
     let captures = capture.lock().unwrap().clone();

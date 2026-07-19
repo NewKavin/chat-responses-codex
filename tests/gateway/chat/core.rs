@@ -341,19 +341,27 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
 
+        let attempts = Arc::new(AtomicUsize::new(0));
         let upstream_app = Router::new().route(
             "/v1/chat/completions",
-            post(move || async move {
-                (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({
-                        "error": {
-                            "message": "The 'glm-5.2' model is not supported when using Codex with a ChatGPT account.",
-                            "type": "badrequesterror",
-                            "code": 400
-                        }
-                    })),
-                )
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({
+                                "error": {
+                                    "message": "The 'glm-5.2' model is not supported when using Codex with a ChatGPT account.",
+                                    "type": "badrequesterror",
+                                    "code": 400
+                                }
+                            })),
+                        )
+                    }
+                }
             }),
         );
 
@@ -402,27 +410,27 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
             AppConfig::default(),
         );
 
-        let app = build_router(state.clone());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header(
-                        "Authorization",
-                        format!("Bearer {}", downstream_key.plaintext),
-                    )
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "model": "glm-5.2",
-                            "messages": [{"role": "user", "content": "Hello"}],
-                            "stream": false
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
+        let make_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "glm-5.2",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let response = build_router(state.clone())
+            .oneshot(make_request())
             .await
             .unwrap();
 
@@ -458,9 +466,21 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
                 .as_deref()
                 .unwrap_or_default()
                 .contains("requested model is unsupported"),
-            "unexpected log error message: {:?}",
-            log.error_message
+                "unexpected log error message: {:?}",
+                log.error_message
         );
+
+        let second = build_router(state)
+            .oneshot(make_request())
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+        let second_payload: Value = serde_json::from_slice(
+            &to_bytes(second.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second_payload["error"]["code"], "upstream_model_unsupported");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     })
     .await;
 }

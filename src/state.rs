@@ -1,8 +1,9 @@
 use crate::capabilities::{
     normalize_route_base_url, profile_is_current, route_fingerprint, Capability,
-    CapabilityConfiguration, CapabilityRuntimeSnapshot, CapabilityStateDocument, DialectProfileKey,
-    EvidenceState, ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeReason,
-    RouteFingerprintInput, UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
+    CapabilityConfiguration, CapabilityHintKey, CapabilityRuntimeSnapshot, CapabilityStateDocument,
+    DialectProfileKey, EvidenceState, ProbeConfigurationBinding, ProbeJob, ProbeJobBatch,
+    ProbeReason, RouteFingerprintInput, RuntimeCapabilityHintSnapshot, RuntimeCapabilityHints,
+    UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
 use crate::keys::{
     upstream_key_fingerprint, validated_downstream_plaintext, verify_downstream_key,
@@ -255,6 +256,7 @@ pub struct AppState {
     usage_log_flush_running: Arc<AtomicBool>,
     upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
     route_health: Arc<Mutex<RouteHealthRegistry>>,
+    runtime_capability_hints: Arc<StdMutex<RuntimeCapabilityHints>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
@@ -559,6 +561,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
+            runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
             ))),
@@ -618,6 +621,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
+            runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
             ))),
@@ -671,6 +675,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
+            runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
             ))),
@@ -749,11 +754,11 @@ impl AppState {
             RouteAvailability::Ready(lease) => {
                 RouteAvailability::Ready(RouteHealthPermit::new(self.route_health.clone(), lease))
             }
-            RouteAvailability::Cooling { retry_after } => {
-                RouteAvailability::Cooling { retry_after }
+            RouteAvailability::Cooling { class, retry_after } => {
+                RouteAvailability::Cooling { class, retry_after }
             }
-            RouteAvailability::HalfOpenBusy { retry_after } => {
-                RouteAvailability::HalfOpenBusy { retry_after }
+            RouteAvailability::HalfOpenBusy { class, retry_after } => {
+                RouteAvailability::HalfOpenBusy { class, retry_after }
             }
         }
     }
@@ -803,6 +808,119 @@ impl AppState {
 
     pub async fn key_health_snapshot(&self, key: &KeyHealthKey) -> Option<HealthStateSnapshot> {
         self.route_health.lock().await.key_health_snapshot(key)
+    }
+
+    pub async fn route_set_health_snapshot(
+        &self,
+        aggregate: &RouteSetAggregateKey,
+    ) -> Option<HealthStateSnapshot> {
+        self.route_health
+            .lock()
+            .await
+            .route_set_health_snapshot(aggregate)
+    }
+
+    pub fn runtime_capability_hints_snapshot(&self) -> RuntimeCapabilityHintSnapshot {
+        self.runtime_capability_hints
+            .lock()
+            .expect("runtime capability hint lock poisoned")
+            .snapshot()
+    }
+
+    pub fn insert_runtime_capability_hint(
+        &self,
+        key: CapabilityHintKey,
+        configuration_fingerprint: String,
+    ) -> bool {
+        self.runtime_capability_hints
+            .lock()
+            .expect("runtime capability hint lock poisoned")
+            .insert(key, configuration_fingerprint)
+    }
+
+    pub fn clear_runtime_capability_hints_for_success(
+        &self,
+        profile: &DialectProfileKey,
+        configuration_fingerprint: &str,
+        capabilities: &BTreeSet<Capability>,
+        requested_value: Option<&str>,
+        protocol_succeeded: bool,
+    ) {
+        let mut hints = self
+            .runtime_capability_hints
+            .lock()
+            .expect("runtime capability hint lock poisoned");
+        hints.clear_features_for_success(
+            profile,
+            configuration_fingerprint,
+            capabilities,
+            requested_value,
+        );
+        if protocol_succeeded {
+            hints.remove(&CapabilityHintKey::protocol(profile.clone()));
+        }
+    }
+
+    pub fn clear_runtime_capability_hints_after_probe(
+        &self,
+        profile: &DialectProfileKey,
+        configuration_fingerprint: &str,
+        capabilities: &BTreeSet<Capability>,
+    ) {
+        self.runtime_capability_hints
+            .lock()
+            .expect("runtime capability hint lock poisoned")
+            .clear_after_conclusive_probe(profile, configuration_fingerprint, capabilities);
+    }
+
+    pub fn reconcile_runtime_capability_hints(&self, upstreams: &[UpstreamConfig]) {
+        let snapshot = self.capability_snapshot();
+        let upstreams = upstreams.to_vec();
+        self.runtime_capability_hints
+            .lock()
+            .expect("runtime capability hint lock poisoned")
+            .retain_current(|key, fingerprint| {
+                let Some(upstream) = upstreams
+                    .iter()
+                    .find(|candidate| candidate.id == key.profile.upstream_id && candidate.active)
+                else {
+                    return false;
+                };
+                let Some(protocol) = upstream_protocol_from_wire(key.profile.protocol) else {
+                    return false;
+                };
+                let Some(api_key) = upstream.available_keys().into_iter().find(|api_key| {
+                    upstream_key_fingerprint(&upstream.id, api_key) == key.profile.key_fingerprint
+                }) else {
+                    return false;
+                };
+                if !upstream
+                    .keys_for_model(&key.profile.runtime_model_slug)
+                    .iter()
+                    .any(|candidate| candidate == &api_key)
+                {
+                    return false;
+                }
+                let exposed_models = upstream.route_models();
+                let exposed_models = if exposed_models.is_empty() {
+                    vec![key.profile.runtime_model_slug.clone()]
+                } else {
+                    exposed_models
+                };
+                exposed_models.into_iter().any(|exposed_model| {
+                    upstream.resolved_model_name(&exposed_model).as_deref()
+                        == Some(key.profile.runtime_model_slug.as_str())
+                        && Self::route_configuration_fingerprint_with_snapshot(
+                            &snapshot,
+                            upstream,
+                            &key.profile.key_fingerprint,
+                            &exposed_model,
+                            &key.profile.runtime_model_slug,
+                            protocol,
+                        )
+                        .is_ok_and(|current| current == fingerprint)
+                })
+            });
     }
 
     /// Reconcile process-local health identities after a configuration change.  This never
@@ -871,6 +989,8 @@ impl AppState {
                 })
             },
         );
+        drop(registry);
+        self.reconcile_runtime_capability_hints(&upstreams);
     }
 
     pub async fn get_cached_json<T>(&self, key: &str) -> Option<T>
@@ -2398,6 +2518,8 @@ impl AppState {
             Ok(())
         })
         .await?;
+        let current_upstreams = self.snapshot().await.upstreams;
+        self.reconcile_route_health(&current_upstreams).await;
         let jobs = self.capability_probe_jobs_for_upstream(&queue_candidate);
         self.submit_capability_probe_jobs(jobs, ProbeReason::ConfigurationChanged)
             .await
@@ -2428,6 +2550,8 @@ impl AppState {
             })
             .await?;
         if updated {
+            let current_upstreams = self.snapshot().await.upstreams.clone();
+            self.reconcile_route_health(&current_upstreams).await;
             if let Some(upstream) = self
                 .snapshot()
                 .await
@@ -2457,6 +2581,8 @@ impl AppState {
         if removed {
             self.delete_dialect_profiles_for_upstream(upstream_id)
                 .await?;
+            let current_upstreams = self.snapshot().await.upstreams;
+            self.reconcile_route_health(&current_upstreams).await;
         }
 
         Ok(removed)
@@ -2528,18 +2654,24 @@ impl AppState {
     }
 
     pub async fn set_upstream_active(&self, upstream_id: &str, active: bool) -> io::Result<bool> {
-        self.mutate_persisted_state_io(|state| {
-            let Some(upstream) = state
-                .upstreams
-                .iter_mut()
-                .find(|upstream| upstream.id == upstream_id)
-            else {
-                return Ok(false);
-            };
-            upstream.active = active;
-            Ok(true)
-        })
-        .await
+        let updated = self
+            .mutate_persisted_state_io(|state| {
+                let Some(upstream) = state
+                    .upstreams
+                    .iter_mut()
+                    .find(|upstream| upstream.id == upstream_id)
+                else {
+                    return Ok(false);
+                };
+                upstream.active = active;
+                Ok(true)
+            })
+            .await?;
+        if updated {
+            let current_upstreams = self.snapshot().await.upstreams;
+            self.reconcile_route_health(&current_upstreams).await;
+        }
+        Ok(updated)
     }
 
     pub async fn upstreams(&self) -> Vec<UpstreamConfig> {
@@ -3465,88 +3597,94 @@ impl AppState {
             ));
         }
 
-        self.mutate_persisted_state_io(move |state| {
-            let mut updated = HashSet::new();
-            for decision in &decisions {
-                if !updated.insert(decision.upstream_id.clone()) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "duplicate upstream qualification decision",
-                    ));
+        let result = self
+            .mutate_persisted_state_io(move |state| {
+                let mut updated = HashSet::new();
+                for decision in &decisions {
+                    if !updated.insert(decision.upstream_id.clone()) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "duplicate upstream qualification decision",
+                        ));
+                    }
+                    let upstream = state
+                        .upstreams
+                        .iter_mut()
+                        .find(|value| value.id == decision.upstream_id)
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::NotFound, "upstream disappeared")
+                        })?;
+                    let configured_keys = upstream
+                        .available_keys()
+                        .into_iter()
+                        .collect::<HashSet<_>>();
+                    if decision
+                        .keys
+                        .iter()
+                        .any(|key| !configured_keys.contains(key.api_key.trim()))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "qualification referenced an unknown upstream key",
+                        ));
+                    }
+
+                    upstream.api_key_models = decision
+                        .keys
+                        .iter()
+                        .map(|key| ApiKeyModelConfig {
+                            api_key: key.api_key.clone(),
+                            supported_models: key.retained.iter().cloned().collect(),
+                        })
+                        .collect();
+                    let retained = decision
+                        .keys
+                        .iter()
+                        .flat_map(|key| key.retained.iter().cloned())
+                        .collect::<BTreeSet<_>>();
+                    upstream
+                        .premium_models
+                        .retain(|model| retained.contains(model));
+                    upstream.supported_models = retained
+                        .into_iter()
+                        .filter(|model| !upstream.premium_models.contains(model))
+                        .collect();
+                    upstream.normalize_for_storage();
+                    upstream
+                        .validate_configuration()
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
                 }
-                let upstream = state
+
+                let exposed = state
                     .upstreams
-                    .iter_mut()
-                    .find(|value| value.id == decision.upstream_id)
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::NotFound, "upstream disappeared")
-                    })?;
-                let configured_keys = upstream
-                    .available_keys()
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                if decision
-                    .keys
                     .iter()
-                    .any(|key| !configured_keys.contains(key.api_key.trim()))
-                {
+                    .filter(|upstream| upstream.active)
+                    .flat_map(UpstreamConfig::route_models)
+                    .collect::<BTreeSet<_>>();
+                if exposed.is_empty() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "qualification referenced an unknown upstream key",
+                        "qualification would remove the final routable model",
                     ));
                 }
+                let downstream = state
+                    .downstreams
+                    .iter_mut()
+                    .find(|value| value.id == downstream_id)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "downstream not found")
+                    })?;
+                downstream.model_allowlist = exposed.iter().cloned().collect();
 
-                upstream.api_key_models = decision
-                    .keys
-                    .iter()
-                    .map(|key| ApiKeyModelConfig {
-                        api_key: key.api_key.clone(),
-                        supported_models: key.retained.iter().cloned().collect(),
-                    })
-                    .collect();
-                let retained = decision
-                    .keys
-                    .iter()
-                    .flat_map(|key| key.retained.iter().cloned())
-                    .collect::<BTreeSet<_>>();
-                upstream
-                    .premium_models
-                    .retain(|model| retained.contains(model));
-                upstream.supported_models = retained
-                    .into_iter()
-                    .filter(|model| !upstream.premium_models.contains(model))
-                    .collect();
-                upstream.normalize_for_storage();
-                upstream
-                    .validate_configuration()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            }
-
-            let exposed = state
-                .upstreams
-                .iter()
-                .filter(|upstream| upstream.active)
-                .flat_map(UpstreamConfig::route_models)
-                .collect::<BTreeSet<_>>();
-            if exposed.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "qualification would remove the final routable model",
-                ));
-            }
-            let downstream = state
-                .downstreams
-                .iter_mut()
-                .find(|value| value.id == downstream_id)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "downstream not found"))?;
-            downstream.model_allowlist = exposed.iter().cloned().collect();
-
-            Ok(ModelQualificationApplySummary {
-                upstreams_updated: updated.len(),
-                retained_models: exposed.len(),
+                Ok(ModelQualificationApplySummary {
+                    upstreams_updated: updated.len(),
+                    retained_models: exposed.len(),
+                })
             })
-        })
-        .await
+            .await?;
+        let current_upstreams = self.snapshot().await.upstreams;
+        self.reconcile_route_health(&current_upstreams).await;
+        Ok(result)
     }
 
     async fn mutate_persisted_state<T, E, F, M>(&self, mutator: F, map_io: M) -> Result<T, E>
@@ -3558,10 +3696,7 @@ impl AppState {
         let mut state = self.inner.lock().await;
         let mut candidate_state = state.clone();
         let result = mutator(&mut candidate_state)?;
-        if !downstream_plaintext_pairs_unchanged(
-            &state.downstreams,
-            &candidate_state.downstreams,
-        ) {
+        if !downstream_plaintext_pairs_unchanged(&state.downstreams, &candidate_state.downstreams) {
             validate_downstream_plaintext_pairs(&mut candidate_state);
         }
 
@@ -3864,36 +3999,48 @@ impl AppState {
         upstream.normalize_for_storage();
         upstream.validate_configuration()?;
 
-        let mut inner = self.inner.lock().await;
-        if inner.upstreams.iter().any(|u| u.id == upstream.id) {
-            return Err(format!("Upstream with ID '{}' already exists", upstream.id));
+        {
+            let mut inner = self.inner.lock().await;
+            if inner.upstreams.iter().any(|u| u.id == upstream.id) {
+                return Err(format!("Upstream with ID '{}' already exists", upstream.id));
+            }
+            inner.upstreams.push(upstream);
         }
-        inner.upstreams.push(upstream);
+        let current_upstreams = self.snapshot().await.upstreams;
+        self.reconcile_route_health(&current_upstreams).await;
         Ok(())
     }
 
     /// Delete an upstream
     pub async fn delete_upstream_by_id(&self, id: &str) -> Result<(), String> {
-        let mut inner = self.inner.lock().await;
-        let initial_len = inner.upstreams.len();
-        inner.upstreams.retain(|u| u.id != id);
-        if inner.upstreams.len() < initial_len {
-            Ok(())
-        } else {
-            Err(format!("Upstream '{}' not found", id))
+        {
+            let mut inner = self.inner.lock().await;
+            let initial_len = inner.upstreams.len();
+            inner.upstreams.retain(|u| u.id != id);
+            if inner.upstreams.len() == initial_len {
+                return Err(format!("Upstream '{}' not found", id));
+            }
         }
+        let current_upstreams = self.snapshot().await.upstreams;
+        self.reconcile_route_health(&current_upstreams).await;
+        Ok(())
     }
 
     /// Toggle upstream active status
     pub async fn toggle_upstream_by_id(&self, id: &str) -> Result<bool, String> {
-        let mut inner = self.inner.lock().await;
-        let upstream = inner
-            .upstreams
-            .iter_mut()
-            .find(|u| u.id == id)
-            .ok_or_else(|| format!("Upstream '{}' not found", id))?;
-        upstream.active = !upstream.active;
-        Ok(upstream.active)
+        let active = {
+            let mut inner = self.inner.lock().await;
+            let upstream = inner
+                .upstreams
+                .iter_mut()
+                .find(|u| u.id == id)
+                .ok_or_else(|| format!("Upstream '{}' not found", id))?;
+            upstream.active = !upstream.active;
+            upstream.active
+        };
+        let current_upstreams = self.snapshot().await.upstreams;
+        self.reconcile_route_health(&current_upstreams).await;
+        Ok(active)
     }
 
     /// Add a new downstream

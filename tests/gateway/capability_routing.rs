@@ -1323,7 +1323,7 @@ async fn codex_capability_request_is_constrained_to_catalog_witness_over_priorit
     }
     let recovered = app.oneshot(make_request()).await.unwrap();
     assert_eq!(recovered.status(), StatusCode::OK);
-    assert_eq!(witness_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(witness_hits.load(Ordering::SeqCst), 3);
     assert_eq!(superset_hits.load(Ordering::SeqCst), 1);
     assert_eq!(weaker_hits.load(Ordering::SeqCst), 0);
 }
@@ -1495,7 +1495,7 @@ async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallb
         .await
         .unwrap();
 
-    assert_eq!(witness_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(witness_hits.load(Ordering::SeqCst), 2);
     assert_eq!(incompatible_hits.load(Ordering::SeqCst), 0);
     assert!(response.status().is_server_error());
 }

@@ -1,4 +1,6 @@
+use crate::state::{RouteHealthKey, RouteSetAggregateKey};
 pub(super) use crate::upstream_feedback::FailureClass;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -20,6 +22,120 @@ pub(super) enum TerminalFailure {
     MixedRoutesExhausted,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RouteSetObservation {
+    pub key: RouteSetAggregateKey,
+    pub class: FailureClass,
+    pub retry_after: Option<Duration>,
+}
+
+#[derive(Default)]
+struct RouteSetAttemptState {
+    eligible_routes: HashSet<RouteHealthKey>,
+    attempted_routes: HashSet<RouteHealthKey>,
+    failures: HashMap<RouteHealthKey, (FailureClass, Option<Duration>)>,
+}
+
+/// Request-local route bookkeeping.  It deliberately records only routes that reached a
+/// physical attempt; pre-existing cooldowns can be reported to the terminal ledger but cannot
+/// manufacture a new route-set health observation.
+#[derive(Default)]
+pub(super) struct RequestRouteTracker {
+    attempted_routes: HashSet<RouteHealthKey>,
+    route_sets: HashMap<RouteSetAggregateKey, RouteSetAttemptState>,
+    route_to_set: HashMap<RouteHealthKey, RouteSetAggregateKey>,
+    observed_sets: HashSet<RouteSetAggregateKey>,
+}
+
+impl RequestRouteTracker {
+    pub fn register_eligible(&mut self, aggregate: RouteSetAggregateKey, route: RouteHealthKey) {
+        self.route_to_set.insert(route.clone(), aggregate.clone());
+        self.route_sets
+            .entry(aggregate)
+            .or_default()
+            .eligible_routes
+            .insert(route);
+    }
+
+    pub fn should_attempt(&self, route: &RouteHealthKey) -> bool {
+        !self.attempted_routes.contains(route)
+    }
+
+    pub fn record_physical_attempt(&mut self, route: RouteHealthKey) {
+        self.attempted_routes.insert(route.clone());
+        if let Some(aggregate) = self.route_to_set.get(&route) {
+            if let Some(state) = self.route_sets.get_mut(aggregate) {
+                state.attempted_routes.insert(route);
+            }
+        }
+    }
+
+    pub fn record_failure(
+        &mut self,
+        route: &RouteHealthKey,
+        class: FailureClass,
+        retry_after: Option<Duration>,
+    ) {
+        let Some(aggregate) = self.route_to_set.get(route) else {
+            return;
+        };
+        let Some(state) = self.route_sets.get_mut(aggregate) else {
+            return;
+        };
+        if state.attempted_routes.contains(route) {
+            state.failures.insert(route.clone(), (class, retry_after));
+        }
+    }
+
+    pub fn take_newly_exhausted(&mut self) -> Vec<RouteSetObservation> {
+        let mut observations = Vec::new();
+        let candidates = self
+            .route_sets
+            .iter()
+            .filter(|(key, state)| {
+                !self.observed_sets.contains(*key)
+                    && !state.eligible_routes.is_empty()
+                    && !state.attempted_routes.is_empty()
+                    && state
+                        .eligible_routes
+                        .iter()
+                        .all(|route| state.failures.contains_key(route))
+            })
+            .map(|(key, state)| {
+                let failure = representative_failure(&state.failures);
+                (key.clone(), failure)
+            })
+            .collect::<Vec<_>>();
+
+        for (key, (class, retry_after)) in candidates {
+            self.observed_sets.insert(key.clone());
+            observations.push(RouteSetObservation {
+                key,
+                class,
+                retry_after,
+            });
+        }
+        observations
+    }
+}
+
+fn representative_failure(
+    failures: &HashMap<RouteHealthKey, (FailureClass, Option<Duration>)>,
+) -> (FailureClass, Option<Duration>) {
+    let mut values = failures.values().copied().collect::<Vec<_>>();
+    values.sort_by_key(|(class, retry_after)| {
+        (
+            if class.is_temporary() { 0u8 } else { 1u8 },
+            retry_after.unwrap_or(Duration::from_secs(0)),
+            class.as_str(),
+        )
+    });
+    values
+        .into_iter()
+        .next()
+        .expect("an exhausted route set must contain a failure")
+}
+
 #[derive(Default)]
 pub(super) struct AttemptLedger {
     failures: Vec<AttemptFailure>,
@@ -28,12 +144,40 @@ pub(super) struct AttemptLedger {
 
 impl AttemptLedger {
     pub fn record(&mut self, failure: AttemptFailure) {
-        self.failures.push(failure);
+        self.cooled_candidates
+            .retain(|candidate| candidate.route_id != failure.route_id);
+        if let Some(existing) = self
+            .failures
+            .iter_mut()
+            .find(|candidate| candidate.route_id == failure.route_id)
+        {
+            *existing = failure;
+        } else {
+            self.failures.push(failure);
+        }
     }
 
-    #[allow(dead_code)] // Used once route-health cooldown candidates are wired in Task 7.
     pub fn record_cooled(&mut self, failure: AttemptFailure) {
-        self.cooled_candidates.push(failure);
+        if self
+            .failures
+            .iter()
+            .any(|candidate| candidate.route_id == failure.route_id)
+        {
+            return;
+        }
+        if let Some(existing) = self
+            .cooled_candidates
+            .iter_mut()
+            .find(|candidate| candidate.route_id == failure.route_id)
+        {
+            let current_retry = existing.retry_after.unwrap_or(Duration::MAX);
+            let new_retry = failure.retry_after.unwrap_or(Duration::MAX);
+            if new_retry < current_retry {
+                *existing = failure;
+            }
+        } else {
+            self.cooled_candidates.push(failure);
+        }
     }
 
     pub fn is_empty(&self) -> bool {

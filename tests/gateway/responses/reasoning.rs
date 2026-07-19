@@ -572,7 +572,7 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
         .unwrap();
 
     assert!(continuation_response.status().is_server_error());
-    assert_eq!(exact_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(exact_hits.load(Ordering::SeqCst), 3);
     assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
 }
 

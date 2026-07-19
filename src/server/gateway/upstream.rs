@@ -178,12 +178,10 @@ pub(super) fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
 }
 
 pub(super) fn should_try_next_key(error: &GatewayError) -> bool {
-    // Preserve the same-key concurrency retry budget before rotating. Other
-    // route-attributable failures may differ across Keys and should not pin the
-    // request to a failed Key.
-    if matches!(error, GatewayError::ConcurrencyFull { .. }) {
-        return false;
-    }
+    // Route-attributable failures may differ across Keys and should not pin the
+    // request to a failed Key.  A real upstream 429 (including a provider
+    // concurrency response) is cooled at the exact route and never retried in
+    // place.
     error
         .route_failure_class()
         .is_some_and(|class| class != FailureClass::RequestRejected)
@@ -656,21 +654,51 @@ fn send_route_hedge_attempt(
     control: HedgeAttemptControl,
 ) -> futures_util::future::BoxFuture<'static, Result<RouteHedgeReady, GatewayError>> {
     async move {
-        context
+        let runtime_model_slug = candidate
+            .upstream
+            .resolved_model_name(&context.model)
+            .unwrap_or_else(|| context.model.clone());
+        let (route_health_key, key_health_key) = super::route_health_keys(
+            &candidate.upstream,
+            &candidate.key_fingerprint,
+            &runtime_model_slug,
+            candidate.protocol,
+        );
+        let route_health_permit = match context
+            .state
+            .reserve_route_health(&route_health_key, &key_health_key)
+            .await
+        {
+            crate::state::RouteAvailability::Ready(permit) => {
+                std::sync::Arc::new(tokio::sync::Mutex::new(Some(permit)))
+            }
+            crate::state::RouteAvailability::Cooling { retry_after, .. }
+            | crate::state::RouteAvailability::HalfOpenBusy { retry_after, .. } => {
+                return Err(GatewayError::upstream_temporary_unavailable(
+                    format!("hedged route cooling for {}s", retry_after.as_secs()),
+                    "upstream_hedge_route_cooling",
+                ));
+            }
+        };
+        if let Err(error) = context
             .state
             .try_reserve_upstream_hedge(&candidate.upstream, &context.model)
             .await
-            .map_err(|error| {
-                GatewayError::upstream_temporary_unavailable(
-                    error.message,
-                    "upstream_hedge_capacity_unavailable",
-                )
-            })?;
-        let upstream_request_guard =
-            UpstreamRequestGuard::new(context.state.clone(), candidate.upstream.id.clone());
+        {
+            super::finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled).await;
+            return Err(GatewayError::upstream_temporary_unavailable(
+                error.message,
+                "upstream_hedge_capacity_unavailable",
+            ));
+        }
+        let upstream_request_guard = UpstreamRequestReservation::new(UpstreamRequestGuard::new(
+            context.state.clone(),
+            candidate.upstream.id.clone(),
+        ));
         let completion = StreamCompletionContext {
             state: context.state.clone(),
             upstream_id: candidate.upstream.id.clone(),
+            route_health_permit,
             upstream_request_guard: upstream_request_guard.clone(),
             downstream_concurrency_guard: context.downstream_concurrency_guard.clone(),
             hedge_control: Some(control.clone()),
@@ -708,7 +736,8 @@ fn send_route_hedge_attempt(
             context.user_agent.as_deref(),
             false,
             global_context_profile.as_ref(),
-            Some(completion),
+            Some(completion.clone()),
+            upstream_request_guard.clone(),
             context.response_history_context,
             None,
             Some(control.clone()),
@@ -717,7 +746,23 @@ fn send_route_hedge_attempt(
             &mut stream_only_recovery_leader,
             &mut stream_only_recovery_identity,
         )
-        .await?;
+        .await;
+        let result = match result {
+            Ok(result) => {
+                if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
+                    completion.mark_success().await;
+                }
+                result
+            }
+            Err(error) => {
+                super::finish_route_health_permit(
+                    &completion.route_health_permit,
+                    super::route_health_outcome(&error),
+                )
+                .await;
+                return Err(error);
+            }
+        };
         drop(upstream_request_guard);
         Ok(RouteHedgeReady {
             result: Box::new(result),
@@ -1044,6 +1089,7 @@ pub(super) async fn send_to_upstream(
     chat_fallback_requested: bool,
     global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
+    upstream_request_guard: UpstreamRequestReservation,
     mut response_history_context: Option<ResponseHistoryContext>,
     active_request_guard: Option<&mut ActiveGatewayRequestGuard>,
     hedge_control: Option<HedgeAttemptControl>,
@@ -1053,6 +1099,7 @@ pub(super) async fn send_to_upstream(
     stream_only_recovery_identity: &mut Option<(DialectProfileKey, String)>,
 ) -> Result<DispatchResult, GatewayError> {
     let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+    let runtime_capability_hints = state.runtime_capability_hints_snapshot();
     let mut active_capability_snapshot = capability_snapshot.clone();
     let mut resolved_capabilities = resolved_capabilities.cloned();
     let mut attempt_mode = attempt_mode;
@@ -1302,7 +1349,7 @@ pub(super) async fn send_to_upstream(
                 })),
             ));
         }
-        resolved_capabilities = resolve_route_capabilities_with_snapshot(
+        resolved_capabilities = resolve_route_capabilities_with_runtime_hints(
             &active_capability_snapshot,
             upstream,
             &key_fingerprint,
@@ -1310,6 +1357,8 @@ pub(super) async fn send_to_upstream(
             &final_upstream_model,
             upstream_protocol,
             requested_features,
+            &runtime_capability_hints,
+            inference_strength,
         );
         if resolved_capabilities.is_none() {
             return Err(GatewayError::classified(
@@ -1381,7 +1430,7 @@ pub(super) async fn send_to_upstream(
                 stream_only_recovery.final_attempt = true;
                 let fresh = state.capability_snapshot();
                 active_capability_snapshot = (*fresh).clone();
-                resolved_capabilities = resolve_route_capabilities_with_snapshot(
+                resolved_capabilities = resolve_route_capabilities_with_runtime_hints(
                     &active_capability_snapshot,
                     upstream,
                     &key_fingerprint,
@@ -1389,6 +1438,8 @@ pub(super) async fn send_to_upstream(
                     &final_upstream_model,
                     upstream_protocol,
                     requested_features,
+                    &runtime_capability_hints,
+                    inference_strength,
                 );
                 attempt_mode = select_upstream_attempt_mode(false, resolved_capabilities.as_ref());
             }
@@ -1693,6 +1744,9 @@ pub(super) async fn send_to_upstream(
                     upstream_body = corrected_body;
                     dialect_retry_attempted = true;
                     dialect_retry_count = 1;
+                    upstream_request_guard
+                        .reserve_next(state, upstream, model)
+                        .await?;
                     continue;
                 }
             }
@@ -1817,6 +1871,9 @@ pub(super) async fn send_to_upstream(
                         reduced_cap,
                         "context limit hit; retrying once with reduced output token cap"
                     );
+                    upstream_request_guard
+                        .reserve_next(state, upstream, model)
+                        .await?;
                     continue;
                 }
             }

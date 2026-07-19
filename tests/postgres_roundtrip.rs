@@ -1109,9 +1109,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         "CREATE OR REPLACE FUNCTION reject_usage_log_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'config mutation must not insert usage logs'; END; $$; CREATE TRIGGER reject_usage_log_insert_trigger BEFORE INSERT ON usage_logs FOR EACH ROW EXECUTE FUNCTION reject_usage_log_insert();",
     );
 
-    let mutation = state
-        .set_upstream_active(&upstream_id, false)
-        .await;
+    let mutation = state.set_upstream_active(&upstream_id, false).await;
 
     execute_psql(
         &database_url,
@@ -1232,7 +1230,10 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
     assert!(state.remove_downstream(&downstream_id).await.unwrap());
     assert!(state.remove_upstream(&upstream_id).await.unwrap());
 
-    assert_eq!(query_count(&database_url, "downstreams", "id", &downstream_id), 0);
+    assert_eq!(
+        query_count(&database_url, "downstreams", "id", &downstream_id),
+        0
+    );
     assert_eq!(
         query_count(
             &database_url,
@@ -1251,7 +1252,10 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
         ),
         0
     );
-    assert_eq!(query_count(&database_url, "upstreams", "id", &upstream_id), 0);
+    assert_eq!(
+        query_count(&database_url, "upstreams", "id", &upstream_id),
+        0
+    );
     assert_eq!(
         query_count(
             &database_url,
