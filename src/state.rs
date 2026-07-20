@@ -2786,26 +2786,7 @@ impl AppState {
 
         let mut models = HashSet::new();
         for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
-            let upstream_models = if upstream.route_models().is_empty() {
-                match self
-                    .fetch_models_from_endpoint(&upstream.base_url, &upstream.api_key)
-                    .await
-                {
-                    Ok(models) => models,
-                    Err(error) => {
-                        tracing::warn!(
-                            upstream = %upstream.id,
-                            error = %error,
-                            "failed to discover upstream models"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                upstream.route_models()
-            };
-
-            for model in upstream_models {
+            for model in upstream.route_models() {
                 if downstream.model_allowlist.is_empty()
                     || portal_model_is_allowed(&downstream.model_allowlist, &model)
                 {

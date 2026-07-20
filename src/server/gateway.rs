@@ -1797,13 +1797,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
 
     let mut exposed_models = std::collections::BTreeSet::new();
     for upstream in snapshot.upstreams.iter().filter(|u| u.active) {
-        let upstream_models = if upstream.route_models().is_empty() {
-            // Models discovered via endpoint probe have no known context window.
-            upstream.supported_models.clone()
-        } else {
-            upstream.route_models()
-        };
-        for model in upstream_models {
+        for model in upstream.route_models() {
             if downstream.model_allowlist.is_empty()
                 || portal_model_is_allowed(&downstream.model_allowlist, &model)
             {

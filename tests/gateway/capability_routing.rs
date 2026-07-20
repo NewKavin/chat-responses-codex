@@ -275,6 +275,68 @@ async fn get_models(state: AppState, secret: &str, codex: bool) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+#[tokio::test]
+async fn persisted_catalog_never_probes_an_upstream_when_the_catalog_is_empty() {
+    let model_requests = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_requests_for_handler = model_requests.clone();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(move || {
+            let model_requests = model_requests_for_handler.clone();
+            async move {
+                model_requests.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "object": "list",
+                    "data": [{"id": "live-only-model", "object": "model"}]
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let mut upstream = catalog_upstream("empty-persisted-catalog", &[]);
+    upstream.base_url = format!("http://{address}");
+    let (_tempdir, state, secret) = catalog_state(vec![upstream], Vec::new());
+
+    let standard = get_models(state.clone(), &secret, false).await;
+    assert_eq!(standard["data"], json!([]));
+    let codex = get_models(state, &secret, true).await;
+    assert_eq!(codex["models"], json!([]));
+    assert_eq!(model_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn persisted_catalog_stays_stable_while_a_route_is_in_cooldown() {
+    let model = "stable-catalog-model";
+    let upstream = catalog_upstream("stable-catalog-route", &[model]);
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    let before = get_models(state.clone(), &secret, false).await;
+
+    let route = chat_responses_codex::state::RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
+            &upstream.id,
+            &upstream.api_key,
+        ),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    state
+        .observe_route_failure(
+            &route,
+            chat_responses_codex::state::RouteFailureClass::CapacityUnavailable,
+            None,
+        )
+        .await;
+
+    let after = get_models(state, &secret, false).await;
+    assert_eq!(after, before);
+}
+
 #[derive(Clone, Copy)]
 enum StaleProfileMismatch {
     Fingerprint,
