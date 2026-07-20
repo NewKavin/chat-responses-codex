@@ -472,3 +472,33 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         );
     }
 }
+
+#[test]
+fn deployment_surfaces_document_model_key_sync_and_process_local_health() {
+    let dotenv = fs::read_to_string(".env.example").expect(".env.example should be readable");
+    let compose =
+        fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
+    let deployment = fs::read_to_string("DEPLOYMENT.md").expect("DEPLOYMENT.md should be readable");
+
+    assert!(dotenv.contains("UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=900"));
+    assert!(compose.contains(
+        "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-900}"
+    ));
+
+    for (name, surface) in [
+        (".env.example", dotenv.as_str()),
+        ("docker-compose.yml", compose.as_str()),
+        ("DEPLOYMENT.md", deployment.as_str()),
+    ] {
+        for marker in [
+            "Set to 0 to disable background model-key synchronization.",
+            "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.",
+            "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.",
+            "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.",
+            "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.",
+            "Exact route health is process-local; run one active gateway instance per database.",
+        ] {
+            assert!(surface.contains(marker), "{name} should state `{marker}`");
+        }
+    }
+}

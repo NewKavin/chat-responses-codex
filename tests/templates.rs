@@ -152,6 +152,36 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
 }
 
 #[test]
+fn deployment_docs_explain_multi_key_route_resilience_contract() {
+    let readme = fs::read_to_string("README.md").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+
+    for (name, documentation) in [("README.md", readme), ("DEPLOYMENT.md", deployment)] {
+        for marker in [
+            "authoritative empty mapping",
+            "persisted model catalog",
+            "same exact route once",
+            "without sleeping inside the request",
+            "full `Retry-After`",
+            "503 `upstream_routes_exhausted`",
+            "502 `upstream_credentials_exhausted`",
+            "502 `upstream_model_unsupported`",
+            "400 `capability_not_supported`",
+            "502 `upstream_protocol_unsupported`",
+            "same idempotency identifier",
+            "at-least-once",
+            "runtime route health resets on restart",
+            "does not change the persisted model catalog",
+        ] {
+            assert!(
+                documentation.contains(marker),
+                "{name} should document `{marker}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn codex_docs_mention_the_copy_ready_relative_catalog_path() {
     let readme = fs::read_to_string("README.md").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
