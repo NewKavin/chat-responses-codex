@@ -279,7 +279,7 @@ async fn downstream_responses_allows_function_call_success_with_zero_output_toke
 }
 
 #[tokio::test]
-async fn downstream_models_supports_configured_portal_models_listed_as_upstream_catalog() {
+async fn downstream_models_do_not_live_discover_an_empty_portal_catalog() {
     let models_hit = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -370,24 +370,18 @@ async fn downstream_models_supports_configured_portal_models_listed_as_upstream_
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let mut ids = payload["data"]
+    let ids = payload["data"]
         .as_array()
         .unwrap()
         .iter()
         .map(|item| item["id"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    ids.sort();
-    let mut expected = PORTAL_COMPAT_MODELS
-        .iter()
-        .map(|model| (*model).to_string())
-        .collect::<Vec<_>>();
-    expected.sort();
-    assert_eq!(ids, expected);
-    assert_eq!(models_hit.load(Ordering::SeqCst), 1);
+    assert!(ids.is_empty());
+    assert_eq!(models_hit.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn downstream_models_expose_raw_upstream_models_when_supported_models_are_empty() {
+async fn downstream_models_do_not_expose_live_models_when_persisted_catalog_is_empty() {
     let models_hit = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -473,12 +467,12 @@ async fn downstream_models_expose_raw_upstream_models_when_supported_models_are_
         .iter()
         .map(|item| item["id"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["GLM-5"]);
-    assert_eq!(models_hit.load(Ordering::SeqCst), 1);
+    assert!(ids.is_empty());
+    assert_eq!(models_hit.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn downstream_models_are_discovered_from_upstream_when_configured_models_are_empty() {
+async fn empty_persisted_catalog_skips_discovery_but_preserves_legacy_request_routing() {
     let chat_capture = Arc::new(Mutex::new(RequestCapture::default()));
     let models_hit = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
@@ -622,8 +616,8 @@ async fn downstream_models_are_discovered_from_upstream_when_configured_models_a
         .iter()
         .map(|item| item["id"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["gpt-4.1-mini", "gpt-4o-mini"]);
-    assert_eq!(models_hit.load(Ordering::SeqCst), 1);
+    assert!(ids.is_empty());
+    assert_eq!(models_hit.load(Ordering::SeqCst), 0);
 
     let chat_response = app
         .oneshot(

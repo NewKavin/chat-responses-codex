@@ -465,6 +465,10 @@ impl RouteHealthRegistry {
         self.observe_route_failure_at(route, class, retry_after, Instant::now());
     }
 
+    pub fn clear_route_health(&mut self, route: &RouteHealthKey) {
+        self.clear_route(route, Instant::now());
+    }
+
     pub fn observe_key_failure(
         &mut self,
         key: &KeyHealthKey,

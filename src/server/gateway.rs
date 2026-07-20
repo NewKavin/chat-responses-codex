@@ -366,6 +366,9 @@ async fn record_route_attempt(
     if class == FailureClass::RequestRejected {
         return;
     }
+    if class == FailureClass::ModelUnsupported {
+        state.submit_targeted_model_discovery(&upstream.id, key_fingerprint, runtime_model_slug);
+    }
     apply_runtime_capability_failure_hint(
         state,
         capability_snapshot,

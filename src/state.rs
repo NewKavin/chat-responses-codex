@@ -27,6 +27,8 @@ mod context_profile;
 mod freekey_sync;
 #[path = "state/model_discovery.rs"]
 mod model_discovery;
+#[path = "state/model_key_sync.rs"]
+mod model_key_sync;
 #[path = "state/model_qualification.rs"]
 mod model_qualification;
 #[path = "state/normalize.rs"]
@@ -70,6 +72,9 @@ pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
 pub use model_discovery::{
     fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently,
     KeyModelDiscoveryResult,
+};
+pub use model_key_sync::{
+    ModelKeySyncService, ModelKeySyncSummary, TARGETED_DISCOVERY_QUEUE_CAPACITY,
 };
 pub use model_qualification::{
     build_key_qualification_decision, classify_qualification_level, confirmed_level,
@@ -269,6 +274,8 @@ pub struct AppState {
     capability_probe_sender: Arc<StdMutex<Option<mpsc::Sender<ProbeJobBatch>>>>,
     capability_probe_submissions:
         Arc<StdMutex<HashMap<DialectProfileKey, ProbeConfigurationBinding>>>,
+    model_key_sync_runtime: Arc<StdMutex<model_key_sync::ModelKeySyncRuntime>>,
+    model_key_sync_lock: Arc<Mutex<()>>,
     troubleshooting_route_capture_token: Arc<str>,
     pub store_path: PathBuf,
     pub config: AppConfig,
@@ -577,6 +584,10 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
             capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            model_key_sync_runtime: Arc::new(StdMutex::new(
+                model_key_sync::ModelKeySyncRuntime::default(),
+            )),
+            model_key_sync_lock: Arc::new(Mutex::new(())),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
             store_path,
             client: build_upstream_http_client(&config, false),
@@ -637,6 +648,10 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
             capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            model_key_sync_runtime: Arc::new(StdMutex::new(
+                model_key_sync::ModelKeySyncRuntime::default(),
+            )),
+            model_key_sync_lock: Arc::new(Mutex::new(())),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
             store_path,
             client: build_upstream_http_client(&config, false),
@@ -691,6 +706,10 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
             capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            model_key_sync_runtime: Arc::new(StdMutex::new(
+                model_key_sync::ModelKeySyncRuntime::default(),
+            )),
+            model_key_sync_lock: Arc::new(Mutex::new(())),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
             store_path: PathBuf::new(),
             client: build_upstream_http_client(&config, false),
@@ -773,6 +792,10 @@ impl AppState {
             .lock()
             .await
             .observe_route_failure(route, class, retry_after);
+    }
+
+    pub async fn clear_route_health(&self, route: &RouteHealthKey) {
+        self.route_health.lock().await.clear_route_health(route);
     }
 
     pub async fn observe_key_failure(
@@ -991,6 +1014,7 @@ impl AppState {
         );
         drop(registry);
         self.reconcile_runtime_capability_hints(&upstreams);
+        self.reconcile_model_key_sync_runtime(&upstreams);
     }
 
     pub async fn get_cached_json<T>(&self, key: &str) -> Option<T>
