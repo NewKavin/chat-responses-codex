@@ -4,10 +4,11 @@
 //! kept separate from the upstream admission state because a credential or capacity failure on
 //! one virtual route must not make the other routes of the same account unavailable.
 
-use super::types::RouteFailureClass;
+use super::types::{RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig};
 use crate::capabilities::WireProtocol;
+use crate::keys::upstream_key_fingerprint;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -289,6 +290,115 @@ impl RouteHealthRegistry {
                 half_open: false,
             }
         })
+    }
+
+    pub fn upstream_snapshots(
+        &self,
+        upstreams: &[UpstreamConfig],
+    ) -> HashMap<String, RouteHealthSnapshotDto> {
+        let now = Instant::now();
+        upstreams
+            .iter()
+            .map(|upstream| (upstream.id.clone(), self.upstream_snapshot(upstream, now)))
+            .collect()
+    }
+
+    fn upstream_snapshot(&self, upstream: &UpstreamConfig, now: Instant) -> RouteHealthSnapshotDto {
+        let routes = self.enumerable_routes(upstream);
+        let mut snapshot = RouteHealthSnapshotDto {
+            failure_classes: RouteFailureClass::ALL
+                .into_iter()
+                .map(|class| (class.as_str().to_string(), 0))
+                .collect::<BTreeMap<_, _>>(),
+            ..RouteHealthSnapshotDto::default()
+        };
+
+        for route in routes {
+            let key = KeyHealthKey {
+                upstream_id: route.upstream_id.clone(),
+                key_fingerprint: route.key_fingerprint.clone(),
+            };
+            let key_state = self.keys.get(&key);
+            let route_state = self.routes.get(&route);
+            let active_state = key_state
+                .filter(|state| state.is_active())
+                .or_else(|| route_state.filter(|state| state.is_active()));
+            if let Some(state) = active_state {
+                snapshot.half_open_routes += 1;
+                increment_failure_class(&mut snapshot, state.last_failure_class);
+                continue;
+            }
+
+            let cooling_state = key_state
+                .filter(|state| state.is_cooling(now))
+                .or_else(|| route_state.filter(|state| state.is_cooling(now)));
+            if let Some(state) = cooling_state {
+                snapshot.cooldown_routes += 1;
+                increment_failure_class(&mut snapshot, state.last_failure_class);
+                let retry_after = duration_seconds_ceil(state.retry_after(now));
+                snapshot.earliest_retry_after_seconds = Some(
+                    snapshot
+                        .earliest_retry_after_seconds
+                        .map_or(retry_after, |current| current.min(retry_after)),
+                );
+            } else {
+                snapshot.healthy_routes += 1;
+            }
+        }
+
+        snapshot
+    }
+
+    fn enumerable_routes(&self, upstream: &UpstreamConfig) -> HashSet<RouteHealthKey> {
+        if !upstream.active {
+            return HashSet::new();
+        }
+        let protocols = upstream
+            .supported_protocols()
+            .into_iter()
+            .map(WireProtocol::from)
+            .collect::<HashSet<_>>();
+        let current_fingerprints = upstream
+            .available_keys()
+            .into_iter()
+            .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
+            .collect::<HashSet<_>>();
+
+        if upstream.api_key_models.is_empty() {
+            return self
+                .routes
+                .keys()
+                .filter(|route| {
+                    route.upstream_id == upstream.id
+                        && current_fingerprints.contains(&route.key_fingerprint)
+                        && protocols.contains(&route.protocol)
+                })
+                .cloned()
+                .collect();
+        }
+
+        let mut routes = HashSet::new();
+        for mapping in &upstream.api_key_models {
+            let key_fingerprint = upstream_key_fingerprint(&upstream.id, &mapping.api_key);
+            if !current_fingerprints.contains(&key_fingerprint) {
+                continue;
+            }
+            for model in &mapping.supported_models {
+                let model = model.trim();
+                if model.is_empty() {
+                    continue;
+                }
+                for protocol in &protocols {
+                    routes.insert(RouteHealthKey {
+                        upstream_id: upstream.id.clone(),
+                        key_fingerprint: key_fingerprint.clone(),
+                        runtime_model_slug: model.to_string(),
+                        protocol: *protocol,
+                    });
+                }
+            }
+        }
+        routes
     }
 
     pub fn route_count(&self) -> usize {
@@ -706,6 +816,24 @@ impl RouteHealthRegistry {
         self.aggregates
             .retain(|aggregate, _| aggregate_is_current(aggregate));
     }
+}
+
+fn increment_failure_class(
+    snapshot: &mut RouteHealthSnapshotDto,
+    class: Option<RouteFailureClass>,
+) {
+    if let Some(class) = class {
+        *snapshot
+            .failure_classes
+            .entry(class.as_str().to_string())
+            .or_default() += 1;
+    }
+}
+
+fn duration_seconds_ceil(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
 }
 
 impl Default for RouteHealthRegistry {

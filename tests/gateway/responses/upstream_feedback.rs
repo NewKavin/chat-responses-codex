@@ -688,8 +688,11 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
-async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
+#[tokio::test(flavor = "current_thread")]
+async fn route_failure_observability_separates_upstream_500_from_downstream_503() {
+    use chat_responses_codex::capabilities::WireProtocol;
+    use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
+
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -705,11 +708,11 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
                 HeaderValue::from_static("application/json"),
             );
             (
-                StatusCode::BAD_GATEWAY,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 headers,
                 axum::Json(json!({
                     "error": {
-                        "message": "expecting, delimiter: line 1 column 78 (char 77)",
+                        "message": "raw-provider-error-secret",
                         "type": "badrequesterror",
                         "param": null,
                         "code": 400
@@ -775,10 +778,22 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
             global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
-        AppConfig::default(),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
+    let capture = TracingCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(capture.clone())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("gateway test process must install tracing only once");
 
     let response = app
         .clone()
@@ -794,7 +809,15 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
                 .body(Body::from(
                     json!({
                         "model": "gpt-4",
-                        "messages": [{"role": "user", "content": "Hello"}]
+                        "messages": [{"role": "user", "content": "prompt-secret"}],
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "description": "tool-argument-secret",
+                                "parameters": {"type": "object"}
+                            }
+                        }]
                     })
                     .to_string(),
                 ))
@@ -811,6 +834,47 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
         payload["error"]["details"]["class_counts"]["transient_server"],
         1
     );
+
+    let usage_logs = state.usage_logs().await;
+    let usage_log = usage_logs
+        .last()
+        .expect("failed request must write usage log");
+    assert_eq!(usage_log.status_code, 503);
+    assert_eq!(
+        usage_log.error_category.as_deref(),
+        Some("upstream_routes_exhausted")
+    );
+    let usage_summary = usage_log.error_message.as_deref().unwrap_or_default();
+    assert!(!usage_summary.contains("raw-provider-error-secret"));
+    assert!(!usage_summary.contains("prompt-secret"));
+    assert!(!usage_summary.contains("tool-argument-secret"));
+
+    let key_fingerprint = upstream_key_fingerprint("up-1", "upstream-secret");
+    let route_id = anonymous_route_id(
+        "up-1",
+        &key_fingerprint,
+        "gpt-4",
+        WireProtocol::ChatCompletions,
+    );
+    let trace = capture.contents();
+    assert!(trace.contains("upstream_status=500"), "{trace}");
+    assert!(trace.contains("downstream_status=503"), "{trace}");
+    assert!(trace.contains(&format!("route_id={route_id}")), "{trace}");
+    assert!(trace.contains("failure_class=transient_server"), "{trace}");
+    assert!(trace.contains("route_action=routes_exhausted"), "{trace}");
+    assert!(trace.contains("same_route_retry=true"), "{trace}");
+    assert!(trace.contains("cooldown_seconds="), "{trace}");
+    assert!(trace.contains("remaining_candidates=0"), "{trace}");
+    for secret in [
+        "upstream-secret",
+        key_fingerprint.as_str(),
+        "key_prefix",
+        "prompt-secret",
+        "tool-argument-secret",
+        "raw-provider-error-secret",
+    ] {
+        assert!(!trace.contains(secret), "trace leaked {secret}: {trace}");
+    }
 }
 
 #[tokio::test]

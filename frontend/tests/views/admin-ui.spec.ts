@@ -34,6 +34,18 @@ describe('admin ui structure', () => {
     expect(charts).not.toContain('key_prefix')
   })
 
+  it('uses anonymous route ids for capability profile actions', () => {
+    const api = source('api/admin.ts')
+    const types = source('types/index.ts')
+    const center = source('components/TroubleshootingCenter.vue')
+    const page = source('views/admin/Troubleshooting.vue')
+
+    for (const contents of [api, types, center, page]) {
+      expect(contents).toContain('route_id')
+      expect(contents).not.toContain('key_fingerprint')
+    }
+  })
+
   it('uses the responsive upstream management workbench', () => {
     const page = source('views/admin/Upstreams.vue')
 

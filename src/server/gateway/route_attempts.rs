@@ -290,6 +290,17 @@ impl AttemptLedger {
             .count()
     }
 
+    pub fn terminal_observation(&self) -> Option<AttemptFailure> {
+        self.failures
+            .last()
+            .or_else(|| {
+                self.cooled_candidates
+                    .iter()
+                    .min_by_key(|failure| failure.retry_after.unwrap_or(Duration::MAX))
+            })
+            .cloned()
+    }
+
     pub fn terminal_failure(&self) -> TerminalFailure {
         let candidates = self
             .failures

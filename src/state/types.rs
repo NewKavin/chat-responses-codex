@@ -1,6 +1,15 @@
 use crate::routing::UpstreamProtocol;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RouteHealthSnapshotDto {
+    pub healthy_routes: usize,
+    pub cooldown_routes: usize,
+    pub half_open_routes: usize,
+    pub earliest_retry_after_seconds: Option<u64>,
+    pub failure_classes: BTreeMap<String, usize>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RouteFailureClass {

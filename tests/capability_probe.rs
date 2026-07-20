@@ -770,9 +770,18 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
     .await;
 }
 
-#[tokio::test]
-async fn stale_per_key_probe_job_does_not_send_http_or_write_a_profile() {
+#[tokio::test(flavor = "current_thread")]
+async fn stale_per_key_probe_job_redaction_hides_keyed_identity_in_tracing() {
     with_proxy_env_cleared(|| async move {
+        let capture = TracingCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
         let mock = ProbeMock::chat(|_| text_response("must not be called")).await;
         let model = "glm-5.2";
         let upstream = UpstreamConfig {
@@ -806,6 +815,13 @@ async fn stale_per_key_probe_job_does_not_send_http_or_write_a_profile() {
             .await
             .unwrap()
             .unwrap();
+        let configuration_fingerprint = stale_job.configuration.configuration_fingerprint.clone();
+        let route_id = chat_responses_codex::keys::anonymous_route_id(
+            &upstream.id,
+            &key_a_fingerprint,
+            model,
+            WireProtocol::ChatCompletions,
+        );
         state
             .update_upstream(
                 &upstream.id,
@@ -823,6 +839,23 @@ async fn stale_per_key_probe_job_does_not_send_http_or_write_a_profile() {
 
         assert_eq!(mock.request_count(), 0);
         assert!(state.capability_snapshot().profiles.is_empty());
+
+        let trace = capture.contents();
+        assert!(trace.contains(&format!("route_id={route_id}")), "{trace}");
+        assert!(trace.contains("capability probe queued"), "{trace}");
+        assert!(trace.contains("capability probe completed"), "{trace}");
+        for secret in [
+            "key-a",
+            key_a_fingerprint.as_str(),
+            configuration_fingerprint.as_str(),
+            "key_fingerprint",
+            "configuration_fingerprint",
+        ] {
+            assert!(
+                !trace.contains(secret),
+                "probe trace leaked {secret}: {trace}"
+            );
+        }
     })
     .await;
 }

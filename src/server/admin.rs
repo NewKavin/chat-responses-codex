@@ -5,7 +5,8 @@ use crate::state::{
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState, DefaultModelContextConfig,
     DownstreamConfig, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
     ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
-    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    RouteHealthSnapshotDto, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision,
+    UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
@@ -460,6 +461,7 @@ fn classify_user_agent(user_agent: Option<&str>) -> Option<String> {
 pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
     let runtime_snapshots = state.upstream_runtime_snapshots().await;
+    let route_health_snapshots = state.route_health_snapshots(&snapshot.upstreams).await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -470,6 +472,7 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         #[serde(flatten)]
         config: UpstreamConfig,
         runtime_state: Option<UpstreamRuntimeStateResponse>,
+        route_health: RouteHealthSnapshotDto,
     }
 
     #[derive(serde::Serialize)]
@@ -517,6 +520,10 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
             });
 
             UpstreamWithRuntime {
+                route_health: route_health_snapshots
+                    .get(&config.id)
+                    .cloned()
+                    .unwrap_or_default(),
                 config,
                 runtime_state,
             }

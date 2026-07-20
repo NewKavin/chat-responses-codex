@@ -6,7 +6,8 @@ use crate::capabilities::{
     UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
 use crate::keys::{
-    upstream_key_fingerprint, validated_downstream_plaintext, verify_downstream_key,
+    anonymous_route_id, upstream_key_fingerprint, validated_downstream_plaintext,
+    verify_downstream_key,
 };
 use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
@@ -93,10 +94,10 @@ pub use types::{
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
-    ModelContextConfig, ModelRequestCostConfig, PersistedState, RouteFailureClass, UpstreamConfig,
-    UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
-    DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
-    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+    ModelContextConfig, ModelRequestCostConfig, PersistedState, RouteFailureClass,
+    RouteHealthSnapshotDto, UpstreamConfig, UpstreamMutationError, UsageLog,
+    ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS, DEFAULT_UPSTREAM_HEDGE_ENABLED,
+    DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS, DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
 };
 pub use usage::{
     portal_model_is_allowed, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage, TokenQuota,
@@ -843,6 +844,13 @@ impl AppState {
             .route_set_health_snapshot(aggregate)
     }
 
+    pub async fn route_health_snapshots(
+        &self,
+        upstreams: &[UpstreamConfig],
+    ) -> HashMap<String, RouteHealthSnapshotDto> {
+        self.route_health.lock().await.upstream_snapshots(upstreams)
+    }
+
     pub fn runtime_capability_hints_snapshot(&self) -> RuntimeCapabilityHintSnapshot {
         self.runtime_capability_hints
             .lock()
@@ -1124,6 +1132,18 @@ impl AppState {
             submissions.insert(key.clone(), binding.clone());
         }
         if sender.try_send(ProbeJobBatch::single(job)).is_ok() {
+            tracing::info!(
+                upstream_id = %key.upstream_id,
+                route_id = %anonymous_route_id(
+                    &key.upstream_id,
+                    &key.key_fingerprint,
+                    &key.runtime_model_slug,
+                    key.protocol,
+                ),
+                runtime_model = %key.runtime_model_slug,
+                protocol = ?key.protocol,
+                "capability probe queued"
+            );
             return true;
         }
         let mut submissions = self
@@ -1150,6 +1170,18 @@ impl AppState {
             .expect("probe submission lock poisoned");
         if submissions.get(key).is_some_and(|queued| queued == binding) {
             submissions.remove(key);
+            tracing::info!(
+                upstream_id = %key.upstream_id,
+                route_id = %anonymous_route_id(
+                    &key.upstream_id,
+                    &key.key_fingerprint,
+                    &key.runtime_model_slug,
+                    key.protocol,
+                ),
+                runtime_model = %key.runtime_model_slug,
+                protocol = ?key.protocol,
+                "capability probe completed"
+            );
         }
     }
 

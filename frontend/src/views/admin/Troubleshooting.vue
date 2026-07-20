@@ -90,7 +90,7 @@ const loadDialectProfiles = async (): Promise<DialectProfileSummary[]> => {
 
 const getResolvedCapabilities = async (payload: {
   upstream_id: string
-  key_fingerprint: string
+  route_id: string
   model: string
   protocol: 'chat_completions' | 'responses'
 }) => {
@@ -100,7 +100,7 @@ const getResolvedCapabilities = async (payload: {
 
 const queueDialectProbe = async (payload: {
   upstream_id: string
-  key_fingerprint: string
+  route_id: string
   runtime_model_slug: string
   protocol: 'chat_completions' | 'responses'
 }) => {

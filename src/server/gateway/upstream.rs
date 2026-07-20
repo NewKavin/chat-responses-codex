@@ -4,7 +4,7 @@ use crate::capabilities::{
     RequestedFeatures, ResolvedCapabilities, RouteIdentity, WireProtocol,
     DIALECT_PROBE_SCHEMA_VERSION,
 };
-use crate::keys::upstream_key_fingerprint;
+use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::image_adapter::ImageDialect;
 use crate::upstream_feedback::{classify_upstream_response, UpstreamFeedbackInput};
 use std::collections::BTreeSet;
@@ -135,6 +135,7 @@ pub(super) fn parse_upstream_error_payload(error_text: &str) -> ParsedUpstreamEr
     parsed
 }
 
+#[cfg(test)]
 pub(super) fn extract_upstream_error_message(error_text: &str) -> String {
     let parsed = parse_upstream_error_payload(error_text);
 
@@ -581,11 +582,12 @@ fn build_compatibility_usage_metadata(
 struct HedgeStreamReady {
     reader: UpstreamStreamReader,
     reservation: Option<UpstreamRequestGuard>,
-    key_prefix: String,
+    route_id: String,
 }
 
 struct RouteHedgeReady {
     result: Box<DispatchResult>,
+    route_id: String,
 }
 
 enum HedgeWinnerReady {
@@ -785,6 +787,12 @@ fn send_route_hedge_attempt(
         drop(upstream_request_guard);
         Ok(RouteHedgeReady {
             result: Box::new(result),
+            route_id: anonymous_route_id(
+                &route_health_key.upstream_id,
+                &route_health_key.key_fingerprint,
+                &route_health_key.runtime_model_slug,
+                route_health_key.protocol,
+            ),
         })
     }
     .boxed()
@@ -856,7 +864,12 @@ async fn send_hedge_stream_attempt(
     Ok(HedgeStreamReady {
         reader,
         reservation: Some(reservation),
-        key_prefix: key_prefix(&api_key),
+        route_id: anonymous_route_id(
+            &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &api_key),
+            &request_model,
+            WireProtocol::from(upstream_protocol),
+        ),
     })
 }
 
@@ -893,7 +906,12 @@ async fn prefetch_stream_with_hedges(
     type HedgeFuture =
         futures_util::future::BoxFuture<'static, (u32, Result<HedgeWinnerReady, GatewayError>)>;
     let mut attempts = futures_stream::FuturesUnordered::<HedgeFuture>::new();
-    let primary_key_prefix = key_prefix(primary_api_key);
+    let primary_route_id = anonymous_route_id(
+        &upstream.id,
+        &upstream_key_fingerprint(&upstream.id, primary_api_key),
+        request_model,
+        WireProtocol::from(upstream_protocol),
+    );
     attempts.push(
         async move {
             (
@@ -904,7 +922,7 @@ async fn prefetch_stream_with_hedges(
                         HedgeWinnerReady::Stream(Box::new(HedgeStreamReady {
                             reader,
                             reservation: None,
-                            key_prefix: primary_key_prefix,
+                            route_id: primary_route_id,
                         }))
                     }),
             )
@@ -956,7 +974,7 @@ async fn prefetch_stream_with_hedges(
                                     hedge_winner_upstream_id = %upstream.id,
                                     selected_upstream_id = %upstream.id,
                                     hedge_winner_attempt = attempt_index,
-                                    hedge_winner_key_prefix = %ready.key_prefix,
+                                    route_id = %ready.route_id,
                                     hedge_extra_attempts_launched = launched_extra_attempts,
                                     hedge_losers_cancelled = attempts.len(),
                                     first_usable_output_latency_ms = started.elapsed().as_millis() as u64,
@@ -970,6 +988,7 @@ async fn prefetch_stream_with_hedges(
                                     hedge_enabled = state.config.upstream_hedge_enabled,
                                     hedge_winner_upstream_id = %ready.result.selected_upstream_id,
                                     selected_upstream_id = %ready.result.selected_upstream_id,
+                                    route_id = %ready.route_id,
                                     hedge_winner_attempt = attempt_index,
                                     hedge_extra_attempts_launched = launched_extra_attempts,
                                     hedge_losers_cancelled = attempts.len(),
@@ -1030,7 +1049,12 @@ async fn prefetch_stream_with_hedges(
                         request_id,
                         selected_upstream_id = %candidate.upstream.id,
                         hedge_attempt = attempt_index,
-                        hedge_key_prefix = %key_prefix(&candidate.api_key),
+                        route_id = %anonymous_route_id(
+                            &candidate.route_health_key.upstream_id,
+                            &candidate.route_health_key.key_fingerprint,
+                            &candidate.route_health_key.runtime_model_slug,
+                            candidate.route_health_key.protocol,
+                        ),
                         "launching slow first-output route hedge"
                     );
                     let future = send_route_hedge_attempt(context, candidate, control);
@@ -1049,7 +1073,12 @@ async fn prefetch_stream_with_hedges(
                         request_id,
                         selected_upstream_id = %upstream.id,
                         hedge_attempt = attempt_index,
-                        hedge_key_prefix = %key_prefix(&api_key),
+                        route_id = %anonymous_route_id(
+                            &upstream.id,
+                            &upstream_key_fingerprint(&upstream.id, &api_key),
+                            request_model,
+                            WireProtocol::from(upstream_protocol),
+                        ),
                         "launching slow first-output key hedge"
                     );
                     let future = send_hedge_stream_attempt(HedgeStreamAttempt {
@@ -1748,7 +1777,6 @@ pub(super) async fn send_to_upstream(
         let headers = response.headers().clone();
         let error_body = response.bytes().await.unwrap_or_default();
         let error_text = String::from_utf8_lossy(&error_body).to_string();
-        let raw_upstream_error_message = extract_upstream_error_message(&error_text);
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
         if !stream_only_recovery.consumed && !dialect_retry_attempted {
@@ -1789,17 +1817,8 @@ pub(super) async fn send_to_upstream(
         );
         // Log-facing excerpt: full diagnostic context (status, classification,
         // upstream code, message) for operators reading the server log.
-        let error_excerpt = safe_upstream_error_summary(
-            status,
-            upstream_error_code,
-            feedback,
-            &raw_upstream_error_message,
-        );
-        // Client-facing message: the upstream's real error text when available.
-        // Falls back to
-        // a status-based hint when the upstream body had no parseable message.
-        let upstream_error_message =
-            upstream_client_message(status, feedback, &raw_upstream_error_message);
+        let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback);
+        let upstream_error_message = upstream_client_message(status);
 
         tracing::warn!(
             request_id = %request_id,

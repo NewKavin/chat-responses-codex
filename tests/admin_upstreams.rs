@@ -16,13 +16,15 @@ use chat_responses_codex::capabilities::{
     Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
     WireProtocol,
 };
+use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     build_key_qualification_decision, confirmed_level, qualify_model_on_upstream, unix_seconds,
     ApiKeyModelConfig, AppConfig, AppState, DownstreamConfig, KeyQualificationDecision,
     ModelQualificationCategory, ModelQualificationLevel, PersistedState, QualificationObservation,
-    StateStore, StoreFuture, UpstreamConfig, UpstreamQualificationDecision,
+    RouteFailureClass, RouteHealthKey, StateStore, StoreFuture, UpstreamConfig,
+    UpstreamQualificationDecision,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -761,6 +763,77 @@ async fn test_upstreams_list_returns_all_upstreams() {
     assert_eq!(upstreams[0]["active"], true);
     assert_eq!(upstreams[1]["id"], "upstream-2");
     assert_eq!(upstreams[1]["active"], false);
+}
+
+#[tokio::test]
+async fn test_upstreams_list_route_health_is_aggregate_and_secret_free() {
+    let key_a = "upstream-secret-a";
+    let key_b = "upstream-secret-b";
+    let upstream = UpstreamConfig {
+        id: "upstream-safe-health".to_string(),
+        name: "Safe Health".to_string(),
+        base_url: "https://api.example.invalid".to_string(),
+        api_key: key_a.to_string(),
+        api_keys: vec![key_b.to_string()],
+        api_key_models: vec![
+            ApiKeyModelConfig {
+                api_key: key_a.to_string(),
+                supported_models: vec!["glm-5.2".to_string()],
+            },
+            ApiKeyModelConfig {
+                api_key: key_b.to_string(),
+                supported_models: vec!["glm-5.2".to_string()],
+            },
+        ],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["glm-5.2".to_string()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = create_test_state_with_upstreams(vec![upstream]);
+    let cooling_fingerprint = upstream_key_fingerprint("upstream-safe-health", key_a);
+    state
+        .observe_route_failure(
+            &RouteHealthKey {
+                upstream_id: "upstream-safe-health".to_string(),
+                key_fingerprint: cooling_fingerprint.clone(),
+                runtime_model_slug: "glm-5.2".to_string(),
+                protocol: WireProtocol::ChatCompletions,
+            },
+            RouteFailureClass::CapacityUnavailable,
+            Some(Duration::from_secs(90)),
+        )
+        .await;
+
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let upstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    let route_health = &upstreams[0]["route_health"];
+
+    assert_eq!(route_health["healthy_routes"], 1);
+    assert_eq!(route_health["cooldown_routes"], 1);
+    assert_eq!(route_health["half_open_routes"], 0);
+    assert!(route_health["earliest_retry_after_seconds"].is_number());
+    assert_eq!(route_health["failure_classes"]["capacity_unavailable"], 1);
+    let serialized = route_health.to_string();
+    assert!(!serialized.contains(key_a));
+    assert!(!serialized.contains(key_b));
+    assert!(!serialized.contains(&cooling_fingerprint));
+    assert!(!serialized.contains("key_prefix"));
 }
 
 #[tokio::test]

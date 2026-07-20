@@ -461,7 +461,10 @@ async fn assert_stale_profile_is_not_authoritative(mismatch: StaleProfileMismatc
     assert_eq!(catalog_model["input_modalities"], json!(["text"]));
     assert_eq!(catalog_model["supports_parallel_tool_calls"], false);
     assert_eq!(diagnostic["profile_state"], "unknown");
-    assert_eq!(diagnostic["configuration_fingerprint"], current_fingerprint);
+    assert_eq!(
+        diagnostic["configuration_id"],
+        format!("sha256:{}", &current_fingerprint[..16])
+    );
     assert_eq!(
         diagnostic["probe_schema_version"],
         DIALECT_PROBE_SCHEMA_VERSION
@@ -822,9 +825,16 @@ async fn catalog_witness_uses_the_key_with_verified_model_capabilities() {
 
     let catalog = get_models(state, &secret, true).await;
     let witness = &catalog["models"][0]["gateway_catalog_witness"];
+    let key_b_fingerprint =
+        chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-b");
     assert_eq!(
-        witness["profile_key"]["key_fingerprint"],
-        chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-b")
+        witness["profile_key"]["route_id"],
+        chat_responses_codex::keys::anonymous_route_id(
+            &upstream.id,
+            &key_b_fingerprint,
+            model,
+            WireProtocol::ChatCompletions,
+        )
     );
 }
 
@@ -1165,11 +1175,18 @@ async fn codex_catalog_witness_diagnostic_identifies_the_exact_profile_without_s
 
     let catalog = get_models(state, &secret, true).await;
     let diagnostic = &catalog["models"][0]["gateway_catalog_witness"];
+    let key_fingerprint = upstream_model_key_fingerprint(&upstream, model);
+    let route_id = chat_responses_codex::keys::anonymous_route_id(
+        &upstream.id,
+        &key_fingerprint,
+        model,
+        WireProtocol::ChatCompletions,
+    );
     assert_eq!(
         diagnostic["profile_key"],
         json!({
             "upstream_id": "diagnostic-route",
-            "key_fingerprint": upstream_model_key_fingerprint(&upstream, model),
+            "route_id": route_id,
             "runtime_model_slug": model,
             "protocol": "chat_completions"
         })
@@ -1177,15 +1194,20 @@ async fn codex_catalog_witness_diagnostic_identifies_the_exact_profile_without_s
     assert_eq!(diagnostic["runtime_model_slug"], model);
     assert_eq!(diagnostic["protocol"], "chat_completions");
     assert_eq!(
-        diagnostic["configuration_fingerprint"],
-        configuration_fingerprint
+        diagnostic["configuration_id"],
+        format!("sha256:{}", &configuration_fingerprint[..16])
     );
     assert_eq!(diagnostic["profile_state"], "verified");
     assert_eq!(
         diagnostic["probe_schema_version"],
         DIALECT_PROBE_SCHEMA_VERSION
     );
-    assert!(!diagnostic.to_string().contains(&upstream_secret));
+    let serialized = diagnostic.to_string();
+    assert!(!serialized.contains(&upstream_secret));
+    assert!(!serialized.contains(&key_fingerprint));
+    assert!(!serialized.contains(&configuration_fingerprint));
+    assert!(!serialized.contains("key_fingerprint"));
+    assert!(!serialized.contains("configuration_fingerprint"));
 }
 
 #[tokio::test]

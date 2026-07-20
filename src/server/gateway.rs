@@ -1047,15 +1047,6 @@ impl StreamTimeouts {
     }
 }
 
-fn key_prefix(key: &str) -> String {
-    let key = key.trim();
-    if key.len() <= 8 {
-        key.to_string()
-    } else {
-        format!("{}...", &key[..8])
-    }
-}
-
 #[derive(Clone)]
 struct StreamUsageLogContext {
     state: AppState,
@@ -4135,6 +4126,7 @@ async fn process_gateway_request_inner(
     } else {
         None
     };
+    let mut any_same_route_retry = false;
 
     'candidate_passes: for (optional_miss_tier, protocol) in candidate_passes {
         let upstream_optional_misses = |upstream: &UpstreamConfig| {
@@ -4467,6 +4459,12 @@ async fn process_gateway_request_inner(
                 let key_fingerprint = route_key_fingerprint(&upstream, api_key);
                 let (route_health_key, key_health_key) =
                     route_health_keys(&upstream, &key_fingerprint, &runtime_model_slug, protocol);
+                let route_id = anonymous_route_id(
+                    &upstream.id,
+                    &key_fingerprint,
+                    &runtime_model_slug,
+                    WireProtocol::from(protocol),
+                );
                 if !request_route_attempts.should_attempt(&route_health_key) {
                     continue;
                 }
@@ -4527,7 +4525,7 @@ async fn process_gateway_request_inner(
                         normalized_model = %normalized_model,
                         selected_upstream_id = %upstream.id,
                         selected_upstream_protocol = ?protocol,
-                        selected_upstream_key_prefix = %key_prefix(api_key),
+                        route_id = %route_id,
                         upstream_attempt_mode = attempt_mode.as_str(),
                         request_cost,
                         "reserved upstream capacity"
@@ -4803,6 +4801,7 @@ async fn process_gateway_request_inner(
                     {
                         stream_only_recovery.consumed = true;
                         same_route_retry_attempted = true;
+                        any_same_route_retry = true;
                         attempt_mode = UpstreamAttemptMode::SseAggregate;
                         continue;
                     }
@@ -5005,6 +5004,7 @@ async fn process_gateway_request_inner(
                                 && should_retry_same_route_once(&error) =>
                         {
                             same_route_retry_attempted = true;
+                            any_same_route_retry = true;
                             tracing::info!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
@@ -5013,6 +5013,14 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
+                                route_id = %route_id,
+                                upstream_status = error.upstream_status().unwrap_or_default(),
+                                downstream_status = error.status_code().as_u16(),
+                                failure_class = %error.route_failure_class().map(FailureClass::as_str).unwrap_or("unclassified"),
+                                route_action = %"same_route_retry",
+                                same_route_retry = true,
+                                cooldown_seconds = 0,
+                                remaining_candidates = candidate_keys.len().saturating_sub(key_index + 1),
                                 retry_delay_ms = 300,
                                 error_category = %error.error_category(),
                                 "retrying transient upstream failure on the same route"
@@ -5054,8 +5062,8 @@ async fn process_gateway_request_inner(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
+                                route_id = %route_id,
+                                error_category = %error.error_category(),
                                 "upstream key failed; trying next key"
                             );
                             last_error = Some(error);
@@ -5077,8 +5085,7 @@ async fn process_gateway_request_inner(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %message,
+                                route_id = %route_id,
                                 retry_after_seconds,
                                 "upstream concurrency/capacity response; moving to another route"
                             );
@@ -5154,8 +5161,7 @@ async fn process_gateway_request_inner(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %message,
+                                route_id = %route_id,
                                 retry_after_seconds,
                                 "upstream rate limited; moving to another route"
                             );
@@ -5225,8 +5231,8 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
+                                route_id = %route_id,
+                                error_category = %error.error_category(),
                                 "upstream rejected request payload"
                             );
                             last_error = Some(error);
@@ -5263,8 +5269,7 @@ async fn process_gateway_request_inner(
                                     normalized_model = %normalized_model,
                                     selected_upstream_id = %upstream.id,
                                     selected_upstream_protocol = ?protocol,
-                                    selected_upstream_key_prefix = %key_prefix(api_key),
-                                    error = %error,
+                                    route_id = %route_id,
                                     error_category = %error.error_category(),
                                     "upstream rejected request payload"
                                 );
@@ -5312,8 +5317,7 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
+                                route_id = %route_id,
                                 error_category = %error.error_category(),
                                 "upstream rejected request payload"
                             );
@@ -5339,14 +5343,14 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                route_id = %route_id,
                                 upstream_attempt_mode = attempt_mode.as_str(),
-                                error = %error,
                                 error_category = %error.error_category(),
                                 stream_to_json_recovery = true,
                                 "streaming upstream attempt failed; retrying without stream"
                             );
                             same_route_retry_attempted = true;
+                            any_same_route_retry = true;
                             attempt_mode = UpstreamAttemptMode::Json;
                             continue;
                         }
@@ -5359,8 +5363,7 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %message,
+                                route_id = %route_id,
                                 "upstream temporarily unavailable, trying next candidate"
                             );
                             finish_route_health_permit(
@@ -5401,8 +5404,8 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
+                                route_id = %route_id,
+                                error_category = %error.error_category(),
                                 "upstream request failed"
                             );
                             finish_route_health_permit(
@@ -5441,6 +5444,8 @@ async fn process_gateway_request_inner(
 
     if let Some(last_route_error) = last_error {
         let attempt_ledger = request_route_attempts.ledger_snapshot();
+        let fallback_upstream_status = last_route_error.upstream_status();
+        let fallback_failure_class = last_route_error.route_failure_class();
         let should_aggregate = !attempt_ledger.is_empty()
             && (attempt_ledger.distinct_route_count() > 1
                 || matches!(
@@ -5493,6 +5498,31 @@ async fn process_gateway_request_inner(
         }
         downstream_concurrency_guard.release();
         active_request_guard.fail_and_finish(error.error_category());
+        let terminal_observation = attempt_ledger.terminal_observation();
+        let upstream_status = terminal_observation
+            .as_ref()
+            .and_then(|failure| failure.upstream_status)
+            .or(fallback_upstream_status)
+            .unwrap_or_default();
+        let failure_class = terminal_observation
+            .as_ref()
+            .map(|failure| failure.class.as_str())
+            .or_else(|| fallback_failure_class.map(FailureClass::as_str))
+            .unwrap_or("unclassified");
+        let cooldown_seconds = terminal_observation
+            .as_ref()
+            .and_then(|failure| failure.retry_after)
+            .map(|duration| {
+                duration
+                    .as_secs()
+                    .saturating_add(u64::from(duration.subsec_nanos() > 0))
+            })
+            .or_else(|| error.retry_after_seconds())
+            .unwrap_or_default();
+        let route_id = terminal_observation
+            .as_ref()
+            .map(|failure| failure.route_id.as_str())
+            .unwrap_or("route_unknown");
         tracing::error!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -5500,7 +5530,15 @@ async fn process_gateway_request_inner(
             original_model = %model,
             normalized_model = %normalized_model,
             endpoint = %request_path,
-            error = %error,
+            route_id = %route_id,
+            upstream_status,
+            downstream_status = error.status_code().as_u16(),
+            failure_class = %failure_class,
+            route_action = %"routes_exhausted",
+            same_route_retry = any_same_route_retry,
+            cooldown_seconds,
+            remaining_candidates = 0,
+            error_category = %error.error_category(),
             "request failed after exhausting upstream candidates"
         );
         return Err(error);

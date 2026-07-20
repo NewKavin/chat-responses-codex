@@ -538,7 +538,7 @@ export interface CapabilityConfigurationDocument {
 
 export interface DialectProfileKey {
   upstream_id: string
-  key_fingerprint: string
+  route_id: string
   runtime_model_slug: string
   protocol: 'chat_completions' | 'responses'
 }

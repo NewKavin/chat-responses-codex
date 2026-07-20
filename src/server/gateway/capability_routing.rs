@@ -4,7 +4,7 @@ use crate::capabilities::{
     ResolvedCapabilities, RouteIdentity, RuntimeCapabilityHintSnapshot, SemanticPolicy,
     WireProtocol,
 };
-use crate::keys::upstream_key_fingerprint;
+use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::routing::UpstreamProtocol;
 use crate::state::{AppState, UpstreamConfig};
 use serde_json::Value;
@@ -676,17 +676,23 @@ pub(super) fn is_compatible_catalog_superset(
 
 impl CatalogWitnessEntry {
     pub fn diagnostic(&self) -> serde_json::Value {
+        let route_id = anonymous_route_id(
+            &self.profile_key.upstream_id,
+            &self.profile_key.key_fingerprint,
+            &self.profile_key.runtime_model_slug,
+            self.profile_key.protocol,
+        );
         serde_json::json!({
             "upstream_id": self.profile_key.upstream_id,
             "runtime_model_slug": self.profile_key.runtime_model_slug,
             "protocol": wire_protocol_label(self.profile_key.protocol),
             "profile_key": {
                 "upstream_id": self.profile_key.upstream_id,
-                "key_fingerprint": self.profile_key.key_fingerprint,
+                "route_id": route_id,
                 "runtime_model_slug": self.profile_key.runtime_model_slug,
                 "protocol": wire_protocol_label(self.profile_key.protocol),
             },
-            "configuration_fingerprint": self.configuration_fingerprint,
+            "configuration_id": self.configuration_fingerprint.as_deref().and_then(safe_configuration_id),
             "profile_state": profile_state_label(self.profile_state),
             "probe_schema_version": self.probe_schema_version,
             "rank": {
@@ -698,6 +704,11 @@ impl CatalogWitnessEntry {
             },
         })
     }
+}
+
+fn safe_configuration_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| format!("sha256:{}", value.chars().take(16).collect::<String>()))
 }
 
 pub(super) fn select_catalog_witness_entry(

@@ -1,7 +1,10 @@
 use chat_responses_codex::capabilities::WireProtocol;
+use chat_responses_codex::keys::upstream_key_fingerprint;
+use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AppConfig, AppState, KeyHealthKey, PersistedState, RouteAvailability, RouteFailureClass,
-    RouteHealthKey, RouteHealthRegistry, RouteOutcome, RouteSetAggregateKey,
+    ApiKeyModelConfig, AppConfig, AppState, KeyHealthKey, PersistedState, RouteAvailability,
+    RouteFailureClass, RouteHealthKey, RouteHealthRegistry, RouteOutcome, RouteSetAggregateKey,
+    UpstreamConfig,
 };
 use std::time::Duration;
 
@@ -19,6 +22,69 @@ fn route(fingerprint: &str, model: &str) -> RouteHealthKey {
         runtime_model_slug: model.into(),
         protocol: WireProtocol::Responses,
     }
+}
+
+fn snapshot_upstream(active: bool) -> UpstreamConfig {
+    UpstreamConfig {
+        id: "snapshot-upstream".into(),
+        name: "snapshot-upstream".into(),
+        base_url: "https://example.invalid".into(),
+        api_key: "snapshot-secret".into(),
+        api_key_models: vec![ApiKeyModelConfig {
+            api_key: "snapshot-secret".into(),
+            supported_models: vec!["glm-5.2".into()],
+        }],
+        protocol: UpstreamProtocol::Responses,
+        supported_models: vec!["glm-5.2".into()],
+        active,
+        ..UpstreamConfig::default()
+    }
+}
+
+#[test]
+fn route_health_snapshot_excludes_inactive_upstreams() {
+    let registry = RouteHealthRegistry::new(16, 16);
+    let upstream = snapshot_upstream(false);
+
+    let snapshot = registry.upstream_snapshots(&[upstream]);
+    let snapshot = &snapshot["snapshot-upstream"];
+
+    assert_eq!(snapshot.healthy_routes, 0);
+    assert_eq!(snapshot.cooldown_routes, 0);
+    assert_eq!(snapshot.half_open_routes, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn route_health_snapshot_uses_key_cooldown_before_route_half_open() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let upstream = snapshot_upstream(true);
+    let fingerprint = upstream_key_fingerprint(&upstream.id, "snapshot-secret");
+    let key = KeyHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: fingerprint.clone(),
+    };
+    let route = RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: fingerprint,
+        runtime_model_slug: "glm-5.2".into(),
+        protocol: WireProtocol::Responses,
+    };
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let _route_half_open = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected route half-open lease, got {other:?}"),
+    };
+    registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
+    assert!(registry.route_health_snapshot(&route).unwrap().half_open);
+    assert!(!registry.key_health_snapshot(&key).unwrap().half_open);
+
+    let snapshot = registry.upstream_snapshots(&[upstream]);
+    let snapshot = &snapshot["snapshot-upstream"];
+    assert_eq!(snapshot.healthy_routes, 0);
+    assert_eq!(snapshot.cooldown_routes, 1);
+    assert_eq!(snapshot.half_open_routes, 0);
+    assert_eq!(snapshot.failure_classes["credentials"], 1);
 }
 
 #[tokio::test(start_paused = true)]

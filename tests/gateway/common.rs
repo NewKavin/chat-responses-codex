@@ -28,6 +28,42 @@ pub use std::time::Duration;
 pub use tempfile::tempdir;
 pub use tower::ServiceExt;
 
+#[derive(Clone, Default)]
+pub(crate) struct TracingCapture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl TracingCapture {
+    pub(crate) fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+    }
+}
+
+pub(crate) struct TracingCaptureWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for TracingCaptureWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for TracingCapture {
+    type Writer = TracingCaptureWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        TracingCaptureWriter {
+            bytes: self.bytes.clone(),
+        }
+    }
+}
+
 pub(crate) fn generate_downstream_key(prefix: &str) -> GeneratedDownstreamKey {
     let plaintext = format!("{prefix}-{}", uuid::Uuid::new_v4().simple());
     let salt = format!("test-{}", uuid::Uuid::new_v4().simple());

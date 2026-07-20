@@ -3,7 +3,7 @@ use crate::capabilities::{
     Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey, ProbeReason,
     RequestedFeatures, ResolutionInput, RouteIdentity, UpstreamDialectProfile, WireProtocol,
 };
-use crate::keys::upstream_key_fingerprint;
+use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use axum::extract::{Path, Query};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -13,6 +13,8 @@ pub(super) struct CapabilityResolvedQuery {
     upstream_id: String,
     #[serde(default)]
     key_fingerprint: Option<String>,
+    #[serde(default)]
+    route_id: Option<String>,
     model: String,
     protocol: String,
 }
@@ -22,6 +24,8 @@ pub(super) struct ManualProbeRequest {
     upstream_id: String,
     #[serde(default)]
     key_fingerprint: Option<String>,
+    #[serde(default)]
+    route_id: Option<String>,
     #[serde(default)]
     exposed_model_slug: Option<String>,
     runtime_model_slug: String,
@@ -120,12 +124,14 @@ pub(super) async fn admin_capabilities_resolved(
         .into_iter()
         .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
         .collect::<Vec<_>>();
-    let key_fingerprint = match query.key_fingerprint {
-        Some(fingerprint) if key_fingerprints.contains(&fingerprint) => Some(fingerprint),
-        Some(_) => None,
-        None if key_fingerprints.len() == 1 => Some(key_fingerprints[0].clone()),
-        None => None,
-    };
+    let key_fingerprint = select_key_fingerprint(
+        &upstream.id,
+        &key_fingerprints,
+        &runtime_model_slug,
+        WireProtocol::from(protocol),
+        query.route_id.as_deref(),
+        query.key_fingerprint.as_deref(),
+    );
     let Some(key_fingerprint) = key_fingerprint else {
         return (
             StatusCode::BAD_REQUEST,
@@ -220,7 +226,12 @@ pub(super) async fn admin_capabilities_resolved(
         "configuration_fingerprint": safe_fingerprint(capability_snapshot.configuration.digest()),
         "route": {
             "upstream_id": upstream.id,
-            "key_fingerprint": key_fingerprint,
+            "route_id": anonymous_route_id(
+                &upstream.id,
+                &key_fingerprint,
+                &runtime_model_slug,
+                WireProtocol::from(protocol),
+            ),
             "exposed_model_slug": query.model,
             "runtime_model_slug": runtime_model_slug,
             "protocol": enum_string(WireProtocol::from(protocol)),
@@ -280,14 +291,26 @@ pub(super) async fn admin_capability_probe(
         }
     };
     let routing = state.routing_snapshot().await;
-    let key_fingerprint = body.key_fingerprint.or_else(|| {
-        let keys = routing
-            .upstreams
-            .iter()
-            .find(|upstream| upstream.id == body.upstream_id)
-            .map(|upstream| upstream.keys_for_model(&body.runtime_model_slug))?;
-        (keys.len() == 1).then(|| upstream_key_fingerprint(&body.upstream_id, &keys[0]))
-    });
+    let key_fingerprints = routing
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == body.upstream_id)
+        .map(|upstream| {
+            upstream
+                .keys_for_model(&body.runtime_model_slug)
+                .into_iter()
+                .map(|api_key| upstream_key_fingerprint(&body.upstream_id, &api_key))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let key_fingerprint = select_key_fingerprint(
+        &body.upstream_id,
+        &key_fingerprints,
+        &body.runtime_model_slug,
+        protocol,
+        body.route_id.as_deref(),
+        body.key_fingerprint.as_deref(),
+    );
     let Some(key_fingerprint) = key_fingerprint else {
         return capability_probe_error(
             StatusCode::BAD_REQUEST,
@@ -385,6 +408,32 @@ fn parse_wire_protocol(value: &str) -> Option<WireProtocol> {
         "responses" => Some(WireProtocol::Responses),
         _ => None,
     }
+}
+
+fn select_key_fingerprint(
+    upstream_id: &str,
+    key_fingerprints: &[String],
+    runtime_model_slug: &str,
+    protocol: WireProtocol,
+    route_id: Option<&str>,
+    legacy_key_fingerprint: Option<&str>,
+) -> Option<String> {
+    if let Some(route_id) = route_id {
+        let matched = key_fingerprints.iter().find(|fingerprint| {
+            anonymous_route_id(upstream_id, fingerprint, runtime_model_slug, protocol) == route_id
+        })?;
+        if legacy_key_fingerprint.is_some_and(|legacy| legacy != matched) {
+            return None;
+        }
+        return Some(matched.clone());
+    }
+    if let Some(legacy) = legacy_key_fingerprint {
+        return key_fingerprints
+            .iter()
+            .find(|fingerprint| fingerprint.as_str() == legacy)
+            .cloned();
+    }
+    (key_fingerprints.len() == 1).then(|| key_fingerprints[0].clone())
 }
 
 fn profile_is_current_for_any_route(
@@ -563,10 +612,16 @@ fn capability_profile_summary(
                 .map(sanitize_identifier)
         })
         .flatten();
+    let route_id = anonymous_route_id(
+        &profile.key.upstream_id,
+        &profile.key.key_fingerprint,
+        &profile.key.runtime_model_slug,
+        profile.key.protocol,
+    );
     json!({
         "key": {
             "upstream_id": profile.key.upstream_id,
-            "key_fingerprint": profile.key.key_fingerprint,
+            "route_id": route_id,
             "runtime_model_slug": profile.key.runtime_model_slug,
             "protocol": enum_string(profile.key.protocol),
         },
