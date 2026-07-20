@@ -626,6 +626,7 @@ struct RouteHedgeContext {
     inference_strength: Option<String>,
     user_agent: Option<String>,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
+    route_attempts: RequestRouteAttempts,
     response_history_context: Option<ResponseHistoryContext>,
     stream_only_recovery_request_safe: bool,
 }
@@ -654,14 +655,11 @@ fn send_route_hedge_attempt(
     control: HedgeAttemptControl,
 ) -> futures_util::future::BoxFuture<'static, Result<RouteHedgeReady, GatewayError>> {
     async move {
-        let runtime_model_slug = candidate
-            .upstream
-            .resolved_model_name(&context.model)
-            .unwrap_or_else(|| context.model.clone());
-        let (route_health_key, key_health_key) = super::route_health_keys(
+        let route_health_key = candidate.route_health_key.clone();
+        let (_, key_health_key) = super::route_health_keys(
             &candidate.upstream,
             &candidate.key_fingerprint,
-            &runtime_model_slug,
+            &route_health_key.runtime_model_slug,
             candidate.protocol,
         );
         let route_health_permit = match context
@@ -698,6 +696,8 @@ fn send_route_hedge_attempt(
         let completion = StreamCompletionContext {
             state: context.state.clone(),
             upstream_id: candidate.upstream.id.clone(),
+            route_health_key: route_health_key.clone(),
+            route_attempts: context.route_attempts.clone(),
             route_health_permit,
             upstream_request_guard: upstream_request_guard.clone(),
             downstream_concurrency_guard: context.downstream_concurrency_guard.clone(),
@@ -738,6 +738,8 @@ fn send_route_hedge_attempt(
             global_context_profile.as_ref(),
             Some(completion.clone()),
             upstream_request_guard.clone(),
+            context.route_attempts.clone(),
+            route_health_key.clone(),
             context.response_history_context,
             None,
             Some(control.clone()),
@@ -760,6 +762,23 @@ fn send_route_hedge_attempt(
                     super::route_health_outcome(&error),
                 )
                 .await;
+                if !context.route_attempts.should_attempt(&route_health_key) {
+                    super::record_route_attempt(
+                        &context.state,
+                        &context.route_attempts,
+                        &route_health_key,
+                        &context.capability_snapshot,
+                        &context.requested_features,
+                        context.inference_strength.as_deref(),
+                        &context.model,
+                        &candidate.upstream,
+                        &candidate.key_fingerprint,
+                        &route_health_key.runtime_model_slug,
+                        candidate.protocol,
+                        &error,
+                    )
+                    .await;
+                }
                 return Err(error);
             }
         };
@@ -1090,6 +1109,8 @@ pub(super) async fn send_to_upstream(
     global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
     upstream_request_guard: UpstreamRequestReservation,
+    route_attempts: RequestRouteAttempts,
+    route_health_key: RouteHealthKey,
     mut response_history_context: Option<ResponseHistoryContext>,
     active_request_guard: Option<&mut ActiveGatewayRequestGuard>,
     hedge_control: Option<HedgeAttemptControl>,
@@ -1667,6 +1688,7 @@ pub(super) async fn send_to_upstream(
         }
     }
     let response = loop {
+        route_attempts.record_physical_attempt(route_health_key.clone());
         let send_future = state
             .client_for_url(&url)
             .post(url.clone())
@@ -2023,6 +2045,7 @@ pub(super) async fn send_to_upstream(
                             downstream_concurrency_guard: completion
                                 .downstream_concurrency_guard
                                 .clone(),
+                            route_attempts: route_attempts.clone(),
                             response_history_context: response_history_context.clone(),
                             stream_only_recovery_request_safe,
                         });

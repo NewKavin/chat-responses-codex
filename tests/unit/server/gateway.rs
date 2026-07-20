@@ -3,6 +3,7 @@ use crate::capabilities::{
     Capability, CapabilityHintKey, CapabilityRuntimeSnapshot, DialectProfileKey, EvidenceState,
     RequestedFeatures, RuntimeCapabilityHints, UpstreamDialectProfile, WireProtocol,
 };
+use crate::state::PersistedState;
 use axum::body::to_bytes;
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicUsize;
@@ -214,6 +215,141 @@ fn request_route_tracker_aggregates_once_only_after_every_eligible_route_failed(
     assert_eq!(observations[0].class, FailureClass::RateLimited);
     assert_eq!(observations[0].retry_after, Some(Duration::from_secs(7)));
     assert!(tracker.take_newly_exhausted().is_empty());
+}
+
+#[test]
+fn shared_request_route_attempts_unify_hedge_physical_attempts_and_failures() {
+    let attempts = RequestRouteAttempts::default();
+    let aggregate = tracked_aggregate();
+    let primary = tracked_route("fingerprint-a");
+    let hedge = tracked_route("fingerprint-b");
+    attempts.register_eligible(aggregate, primary.clone());
+    attempts.register_eligible(tracked_aggregate(), hedge.clone());
+
+    attempts.record_physical_attempt(primary.clone());
+    attempts.record_physical_attempt(hedge.clone());
+    assert!(!attempts.should_attempt(&primary));
+    assert!(!attempts.should_attempt(&hedge));
+
+    attempts.record_failure(
+        &primary,
+        FailureClass::TransientServer,
+        Some(Duration::from_secs(30)),
+    );
+    attempts.record_failure(
+        &hedge,
+        FailureClass::RateLimited,
+        Some(Duration::from_secs(7)),
+    );
+
+    let observations = attempts.take_newly_exhausted();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].class, FailureClass::RateLimited);
+    let ledger = attempts.ledger_snapshot();
+    assert_eq!(ledger.distinct_route_count(), 2);
+    assert_eq!(ledger.class_count(FailureClass::TransientServer), 1);
+    assert_eq!(ledger.class_count(FailureClass::RateLimited), 1);
+}
+
+fn stream_completion_fixture(
+    route: RouteHealthKey,
+    route_attempts: RequestRouteAttempts,
+    permit: RouteHealthPermit,
+    state: AppState,
+) -> StreamCompletionContext {
+    StreamCompletionContext {
+        state: state.clone(),
+        upstream_id: route.upstream_id.clone(),
+        route_health_key: route,
+        route_attempts,
+        route_health_permit: Arc::new(TokioMutex::new(Some(permit))),
+        upstream_request_guard: UpstreamRequestReservation::new(UpstreamRequestGuard::new(
+            state.clone(),
+            "up-1".into(),
+        )),
+        downstream_concurrency_guard: DownstreamConcurrencyGuard::new(state, "down-1".into()),
+        hedge_control: None,
+    }
+}
+
+#[tokio::test]
+async fn stream_transport_failure_updates_only_its_exact_route_and_shared_aggregate() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let route = tracked_route("stream-failure");
+    let key = KeyHealthKey {
+        upstream_id: route.upstream_id.clone(),
+        key_fingerprint: route.key_fingerprint.clone(),
+    };
+    let permit = match state.reserve_route_health(&route, &key).await {
+        RouteAvailability::Ready(permit) => permit,
+        availability => panic!("unexpected route availability: {availability:?}"),
+    };
+    let attempts = RequestRouteAttempts::default();
+    attempts.register_eligible(tracked_aggregate(), route.clone());
+    attempts.record_physical_attempt(route.clone());
+    let completion =
+        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone());
+
+    completion.mark_failure().await;
+
+    let route_health = state.route_health_snapshot(&route).await.unwrap();
+    assert_eq!(route_health.consecutive_failures, 1);
+    assert_eq!(
+        route_health.last_failure_class,
+        Some(FailureClass::Transport)
+    );
+    let aggregate_health = state
+        .route_set_health_snapshot(&tracked_aggregate())
+        .await
+        .unwrap();
+    assert_eq!(aggregate_health.consecutive_failures, 1);
+    assert_eq!(
+        attempts
+            .ledger_snapshot()
+            .class_count(FailureClass::Transport),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stream_cancellation_releases_exact_route_without_recording_failure() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let route = tracked_route("stream-cancelled");
+    let key = KeyHealthKey {
+        upstream_id: route.upstream_id.clone(),
+        key_fingerprint: route.key_fingerprint.clone(),
+    };
+    let permit = match state.reserve_route_health(&route, &key).await {
+        RouteAvailability::Ready(permit) => permit,
+        availability => panic!("unexpected route availability: {availability:?}"),
+    };
+    let attempts = RequestRouteAttempts::default();
+    attempts.register_eligible(tracked_aggregate(), route.clone());
+    attempts.record_physical_attempt(route.clone());
+    let completion =
+        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone());
+
+    completion.mark_cancelled().await;
+
+    if let Some(route_health) = state.route_health_snapshot(&route).await {
+        assert_eq!(route_health.consecutive_failures, 0);
+        assert_eq!(route_health.last_failure_class, None);
+    }
+    assert!(attempts.ledger_snapshot().is_empty());
+    assert!(state
+        .route_set_health_snapshot(&tracked_aggregate())
+        .await
+        .is_none());
 }
 
 #[tokio::test]

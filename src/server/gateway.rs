@@ -348,8 +348,7 @@ fn clear_runtime_capability_hints_for_success(
 
 async fn record_route_attempt(
     state: &AppState,
-    ledger: &mut AttemptLedger,
-    route_tracker: &mut RequestRouteTracker,
+    route_attempts: &RequestRouteAttempts,
     route_health_key: &RouteHealthKey,
     capability_snapshot: &CapabilityRuntimeSnapshot,
     requested: &RequestedFeatures,
@@ -381,23 +380,17 @@ async fn record_route_attempt(
     )
     .await;
     let retry_after = error.retry_after_seconds().map(Duration::from_secs);
-    route_tracker.record_failure(route_health_key, class, retry_after);
-    for observation in route_tracker.take_newly_exhausted() {
+    route_attempts.record_failure_with_status(
+        route_health_key,
+        class,
+        retry_after,
+        error.upstream_status(),
+    );
+    for observation in route_attempts.take_newly_exhausted() {
         state
             .observe_route_set_failure(&observation.key, observation.class, observation.retry_after)
             .await;
     }
-    ledger.record(AttemptFailure {
-        route_id: anonymous_route_id(
-            &upstream.id,
-            key_fingerprint,
-            runtime_model_slug,
-            WireProtocol::from(protocol),
-        ),
-        upstream_status: error.upstream_status(),
-        class,
-        retry_after,
-    });
 }
 
 fn route_set_aggregate_key(
@@ -466,7 +459,7 @@ async fn finish_route_health_permit(
 }
 
 fn record_cooled_route_attempt(
-    ledger: &mut AttemptLedger,
+    route_attempts: &RequestRouteAttempts,
     upstream: &UpstreamConfig,
     key_fingerprint: &str,
     runtime_model_slug: &str,
@@ -474,7 +467,7 @@ fn record_cooled_route_attempt(
     class: FailureClass,
     retry_after: Duration,
 ) {
-    ledger.record_cooled(AttemptFailure {
+    route_attempts.record_cooled(AttemptFailure {
         route_id: anonymous_route_id(
             &upstream.id,
             key_fingerprint,
@@ -531,6 +524,7 @@ struct RouteHedgeCandidate {
     upstream: UpstreamConfig,
     api_key: String,
     key_fingerprint: String,
+    route_health_key: RouteHealthKey,
     protocol: UpstreamProtocol,
     resolved_capabilities: Option<ResolvedCapabilities>,
 }
@@ -2154,6 +2148,8 @@ impl UpstreamRequestReservation {
 struct StreamCompletionContext {
     state: AppState,
     upstream_id: String,
+    route_health_key: RouteHealthKey,
+    route_attempts: RequestRouteAttempts,
     route_health_permit: Arc<TokioMutex<Option<RouteHealthPermit>>>,
     upstream_request_guard: UpstreamRequestReservation,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
@@ -2191,6 +2187,17 @@ impl StreamCompletionContext {
             RouteOutcome::UncertainRouteFailure(FailureClass::Transport),
         )
         .await;
+        self.route_attempts
+            .record_failure(&self.route_health_key, FailureClass::Transport, None);
+        for observation in self.route_attempts.take_newly_exhausted() {
+            self.state
+                .observe_route_set_failure(
+                    &observation.key,
+                    observation.class,
+                    observation.retry_after,
+                )
+                .await;
+        }
         if let Err(error) = self.state.mark_upstream_failure(&self.upstream_id).await {
             tracing::warn!(
                 selected_upstream_id = %self.upstream_id,
@@ -2198,6 +2205,10 @@ impl StreamCompletionContext {
                 "failed to update legacy upstream failure count after stream failure"
             );
         }
+    }
+
+    async fn mark_cancelled(&self) {
+        finish_route_health_permit(&self.route_health_permit, RouteOutcome::Cancelled).await;
     }
 }
 
@@ -2943,10 +2954,13 @@ async fn finalize_stream_error(
     if let Some(context) = completion_context {
         context.release_all().await;
         if hedge_loser {
+            context.mark_cancelled().await;
             return;
         }
         if mark_upstream_failure {
             context.mark_failure().await;
+        } else {
+            context.mark_cancelled().await;
         }
     }
 
@@ -3026,6 +3040,7 @@ fn spawn_stream_normal_completion_cleanup(
             if hedge_loser {
                 if let Some(context) = completion_context {
                     context.release_all().await;
+                    context.mark_cancelled().await;
                 }
                 return;
             }
@@ -4063,7 +4078,7 @@ async fn process_gateway_request_inner(
             })
             .collect::<Vec<_>>()
     };
-    let mut request_route_tracker = RequestRouteTracker::default();
+    let request_route_attempts = RequestRouteAttempts::default();
     for protocol in candidate_protocols.iter().copied() {
         for upstream in &routing_snapshot.upstreams {
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
@@ -4076,7 +4091,7 @@ async fn process_gateway_request_inner(
                 }
                 let (route_health_key, _) =
                     route_health_keys(upstream, &key_fingerprint, &runtime_model_slug, protocol);
-                request_route_tracker.register_eligible(
+                request_route_attempts.register_eligible(
                     route_set_aggregate_key(upstream, &runtime_model_slug, protocol),
                     route_health_key,
                 );
@@ -4094,7 +4109,6 @@ async fn process_gateway_request_inner(
         "resolved candidate protocols"
     );
     let mut last_error = None;
-    let mut attempt_ledger = AttemptLedger::default();
     let preferred_upstream_id = if let Some(upstream_id) = response_history_context
         .as_ref()
         .and_then(ResponseHistoryContext::continuation_upstream_id)
@@ -4406,7 +4420,7 @@ async fn process_gateway_request_inner(
                         &runtime_model_slug,
                         protocol,
                     );
-                    request_route_tracker.should_attempt(&route_health_key)
+                    request_route_attempts.should_attempt(&route_health_key)
                         && route_is_candidate(&upstream, &key_fingerprint, protocol)
                         && optional_miss_tier.is_none_or(|misses| {
                             route_capability(&upstream, &key_fingerprint, protocol)
@@ -4456,6 +4470,9 @@ async fn process_gateway_request_inner(
                 let key_fingerprint = route_key_fingerprint(&upstream, api_key);
                 let (route_health_key, key_health_key) =
                     route_health_keys(&upstream, &key_fingerprint, &runtime_model_slug, protocol);
+                if !request_route_attempts.should_attempt(&route_health_key) {
+                    continue;
+                }
                 let route_health_permit = match state
                     .reserve_route_health(&route_health_key, &key_health_key)
                     .await
@@ -4464,7 +4481,7 @@ async fn process_gateway_request_inner(
                     RouteAvailability::Cooling { class, retry_after }
                     | RouteAvailability::HalfOpenBusy { class, retry_after } => {
                         record_cooled_route_attempt(
-                            &mut attempt_ledger,
+                            &request_route_attempts,
                             &upstream,
                             &key_fingerprint,
                             &runtime_model_slug,
@@ -4505,8 +4522,6 @@ async fn process_gateway_request_inner(
                     let upstream_request_guard = UpstreamRequestReservation::new(
                         UpstreamRequestGuard::new(state.clone(), upstream.id.clone()),
                     );
-                    request_route_tracker.record_physical_attempt(route_health_key.clone());
-
                     tracing::info!(
                         request_id = %request_id,
                         downstream_key_id = %downstream.id,
@@ -4531,6 +4546,8 @@ async fn process_gateway_request_inner(
                         .then(|| StreamCompletionContext {
                             state: state.clone(),
                             upstream_id: upstream.id.clone(),
+                            route_health_key: route_health_key.clone(),
+                            route_attempts: request_route_attempts.clone(),
                             route_health_permit: route_health_permit.clone(),
                             upstream_request_guard: upstream_request_guard.clone(),
                             downstream_concurrency_guard: downstream_concurrency_guard.clone(),
@@ -4652,12 +4669,22 @@ async fn process_gateway_request_inner(
                             .iter()
                             .filter_map(|api_key| {
                                 let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                                let (route_health_key, _) = route_health_keys(
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                );
+                                if !request_route_attempts.should_attempt(&route_health_key) {
+                                    return None;
+                                }
                                 let route =
                                     route_capability(&upstream, &key_fingerprint, protocol)?;
                                 Some(RouteHedgeCandidate {
                                     upstream: upstream.clone(),
                                     api_key: api_key.clone(),
                                     key_fingerprint: key_fingerprint.clone(),
+                                    route_health_key,
                                     protocol,
                                     resolved_capabilities: route.resolved.clone(),
                                 })
@@ -4675,18 +4702,29 @@ async fn process_gateway_request_inner(
                                         .find_map(|api_key| {
                                             let key_fingerprint =
                                                 route_key_fingerprint(candidate, &api_key);
+                                            let (route_health_key, _) = route_health_keys(
+                                                candidate,
+                                                &key_fingerprint,
+                                                &runtime_model_slug,
+                                                protocol,
+                                            );
                                             if !route_is_candidate(
                                                 candidate,
                                                 &key_fingerprint,
                                                 protocol,
-                                            ) || optional_miss_tier.is_some_and(|misses| {
-                                                route_capability(
-                                                    candidate,
-                                                    &key_fingerprint,
-                                                    protocol,
-                                                )
-                                                .is_none_or(|route| route.optional_misses != misses)
-                                            }) {
+                                            ) || !request_route_attempts
+                                                .should_attempt(&route_health_key)
+                                                || optional_miss_tier.is_some_and(|misses| {
+                                                    route_capability(
+                                                        candidate,
+                                                        &key_fingerprint,
+                                                        protocol,
+                                                    )
+                                                    .is_none_or(|route| {
+                                                        route.optional_misses != misses
+                                                    })
+                                                })
+                                            {
                                                 return None;
                                             }
                                             let route = route_capability(
@@ -4698,6 +4736,7 @@ async fn process_gateway_request_inner(
                                                 upstream: candidate.clone(),
                                                 api_key,
                                                 key_fingerprint,
+                                                route_health_key,
                                                 protocol,
                                                 resolved_capabilities: route.resolved.clone(),
                                             })
@@ -4735,6 +4774,8 @@ async fn process_gateway_request_inner(
                         global_context_profile.as_ref(),
                         stream_completion_context.clone(),
                         upstream_request_guard.clone(),
+                        request_route_attempts.clone(),
+                        route_health_key.clone(),
                         dispatch_response_history_context.clone(),
                         Some(&mut active_request_guard),
                         None,
@@ -4774,6 +4815,16 @@ async fn process_gateway_request_inner(
                             let selected_upstream_id = result.selected_upstream_id.clone();
                             let selected_upstream_name = result.selected_upstream_name.clone();
                             let selected_upstream_protocol = result.selected_upstream_protocol;
+                            let primary_route = selected_upstream_id == upstream.id
+                                && result.selected_upstream_key_fingerprint == key_fingerprint
+                                && selected_upstream_protocol == protocol;
+                            if !primary_route {
+                                finish_route_health_permit(
+                                    &route_health_permit,
+                                    RouteOutcome::Cancelled,
+                                )
+                                .await;
+                            }
                             if selected_upstream_id != upstream.id {
                                 upstream_request_guard.release().await;
                             }
@@ -4882,11 +4933,13 @@ async fn process_gateway_request_inner(
                                         );
                                     }
                                 }
-                                finish_route_health_permit(
-                                    &route_health_permit,
-                                    RouteOutcome::Success,
-                                )
-                                .await;
+                                if primary_route {
+                                    finish_route_health_permit(
+                                        &route_health_permit,
+                                        RouteOutcome::Success,
+                                    )
+                                    .await;
+                                }
                                 if let Err(error) =
                                     state.mark_upstream_success(&selected_upstream_id).await
                                 {
@@ -4982,8 +5035,7 @@ async fn process_gateway_request_inner(
                             .await;
                             record_route_attempt(
                                 &state,
-                                &mut attempt_ledger,
-                                &mut request_route_tracker,
+                                &request_route_attempts,
                                 &route_health_key,
                                 &capability_snapshot,
                                 &requested_features,
@@ -5051,8 +5103,7 @@ async fn process_gateway_request_inner(
 
                             record_route_attempt(
                                 &state,
-                                &mut attempt_ledger,
-                                &mut request_route_tracker,
+                                &request_route_attempts,
                                 &route_health_key,
                                 &capability_snapshot,
                                 &requested_features,
@@ -5126,8 +5177,7 @@ async fn process_gateway_request_inner(
 
                             record_route_attempt(
                                 &state,
-                                &mut attempt_ledger,
-                                &mut request_route_tracker,
+                                &request_route_attempts,
                                 &route_health_key,
                                 &capability_snapshot,
                                 &requested_features,
@@ -5234,8 +5284,7 @@ async fn process_gateway_request_inner(
                                 .await;
                                 record_route_attempt(
                                     &state,
-                                    &mut attempt_ledger,
-                                    &mut request_route_tracker,
+                                    &request_route_attempts,
                                     &route_health_key,
                                     &capability_snapshot,
                                     &requested_features,
@@ -5328,8 +5377,7 @@ async fn process_gateway_request_inner(
                             .await;
                             record_route_attempt(
                                 &state,
-                                &mut attempt_ledger,
-                                &mut request_route_tracker,
+                                &request_route_attempts,
                                 &route_health_key,
                                 &capability_snapshot,
                                 &requested_features,
@@ -5367,8 +5415,7 @@ async fn process_gateway_request_inner(
                             .await;
                             record_route_attempt(
                                 &state,
-                                &mut attempt_ledger,
-                                &mut request_route_tracker,
+                                &request_route_attempts,
                                 &route_health_key,
                                 &capability_snapshot,
                                 &requested_features,
@@ -5396,6 +5443,7 @@ async fn process_gateway_request_inner(
     }
 
     if let Some(last_route_error) = last_error {
+        let attempt_ledger = request_route_attempts.ledger_snapshot();
         let should_aggregate = !attempt_ledger.is_empty()
             && (attempt_ledger.distinct_route_count() > 1
                 || matches!(

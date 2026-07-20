@@ -1,7 +1,9 @@
+use crate::keys::anonymous_route_id;
 use crate::state::{RouteHealthKey, RouteSetAggregateKey};
 pub(super) use crate::upstream_feedback::FailureClass;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,15 +77,18 @@ impl RequestRouteTracker {
         route: &RouteHealthKey,
         class: FailureClass,
         retry_after: Option<Duration>,
-    ) {
+    ) -> bool {
         let Some(aggregate) = self.route_to_set.get(route) else {
-            return;
+            return false;
         };
         let Some(state) = self.route_sets.get_mut(aggregate) else {
-            return;
+            return false;
         };
         if state.attempted_routes.contains(route) {
             state.failures.insert(route.clone(), (class, retry_after));
+            true
+        } else {
+            false
         }
     }
 
@@ -136,10 +141,86 @@ fn representative_failure(
         .expect("an exhausted route set must contain a failure")
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct AttemptLedger {
     failures: Vec<AttemptFailure>,
     cooled_candidates: Vec<AttemptFailure>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RequestRouteAttempts {
+    tracker: Arc<Mutex<RequestRouteTracker>>,
+    ledger: Arc<Mutex<AttemptLedger>>,
+}
+
+impl RequestRouteAttempts {
+    fn tracker(&self) -> std::sync::MutexGuard<'_, RequestRouteTracker> {
+        self.tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn ledger(&self) -> std::sync::MutexGuard<'_, AttemptLedger> {
+        self.ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn register_eligible(&self, aggregate: RouteSetAggregateKey, route: RouteHealthKey) {
+        self.tracker().register_eligible(aggregate, route);
+    }
+
+    pub fn should_attempt(&self, route: &RouteHealthKey) -> bool {
+        self.tracker().should_attempt(route)
+    }
+
+    pub fn record_physical_attempt(&self, route: RouteHealthKey) {
+        self.tracker().record_physical_attempt(route);
+    }
+
+    pub fn record_failure(
+        &self,
+        route: &RouteHealthKey,
+        class: FailureClass,
+        retry_after: Option<Duration>,
+    ) {
+        self.record_failure_with_status(route, class, retry_after, None);
+    }
+
+    pub fn record_failure_with_status(
+        &self,
+        route: &RouteHealthKey,
+        class: FailureClass,
+        retry_after: Option<Duration>,
+        upstream_status: Option<u16>,
+    ) {
+        if !self.tracker().record_failure(route, class, retry_after) {
+            return;
+        }
+        self.ledger().record(AttemptFailure {
+            route_id: anonymous_route_id(
+                &route.upstream_id,
+                &route.key_fingerprint,
+                &route.runtime_model_slug,
+                route.protocol,
+            ),
+            upstream_status,
+            class,
+            retry_after,
+        });
+    }
+
+    pub fn record_cooled(&self, failure: AttemptFailure) {
+        self.ledger().record_cooled(failure);
+    }
+
+    pub fn take_newly_exhausted(&self) -> Vec<RouteSetObservation> {
+        self.tracker().take_newly_exhausted()
+    }
+
+    pub fn ledger_snapshot(&self) -> AttemptLedger {
+        self.ledger().clone()
+    }
 }
 
 impl AttemptLedger {
