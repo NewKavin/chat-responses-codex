@@ -3493,8 +3493,14 @@ impl AppState {
                 let passed = record
                     .categories
                     .contains(&ModelQualificationCategory::Passed);
+                let key_fingerprint = upstream_key_fingerprint(&upstream.id, &record.api_key);
+                let route_id = anonymous_route_id(
+                    &upstream.id,
+                    &key_fingerprint,
+                    &record.model,
+                    WireProtocol::from(record.protocol),
+                );
                 let level = if passed {
-                    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &record.api_key);
                     let profile_key = DialectProfileKey::for_key(
                         upstream.id.clone(),
                         key_fingerprint.clone(),
@@ -3539,17 +3545,9 @@ impl AppState {
                 } else {
                     record.categories[0]
                 };
-                let key_prefix = {
-                    let prefix = record.api_key.chars().take(8).collect::<String>();
-                    if record.api_key.chars().count() > 8 {
-                        format!("{prefix}...")
-                    } else {
-                        prefix
-                    }
-                };
                 evidence.push(ModelQualificationEvidence {
                     upstream_id: upstream.id.clone(),
-                    key_prefix,
+                    route_id,
                     model: record.model.clone(),
                     protocol: record.protocol,
                     level,
@@ -3594,8 +3592,8 @@ impl AppState {
             }
 
             evidence.sort_by(|left, right| {
-                left.key_prefix
-                    .cmp(&right.key_prefix)
+                left.route_id
+                    .cmp(&right.route_id)
                     .then_with(|| left.model.cmp(&right.model))
                     .then_with(|| {
                         let rank = |protocol| match protocol {

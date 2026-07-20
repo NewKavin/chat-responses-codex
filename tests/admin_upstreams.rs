@@ -486,6 +486,15 @@ async fn qualify_models_admin_can_select_upstreams_without_applying() {
         .unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert!(payload["summary"]["retained_models"].as_u64().unwrap() > 0);
+    let evidence = payload["upstreams"][0]["evidence"]
+        .as_array()
+        .expect("qualification evidence array");
+    assert!(!evidence.is_empty());
+    assert!(evidence.iter().all(|item| item["route_id"]
+        .as_str()
+        .is_some_and(|route_id| route_id.starts_with("route_") && route_id.len() == 22)));
+    assert!(!payload.to_string().contains("key_prefix"));
+    assert!(!payload.to_string().contains("secret-k"));
     assert!(!payload.to_string().contains("secret-key"));
     assert!(!payload.to_string().contains(&mock));
     assert_eq!(

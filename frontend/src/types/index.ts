@@ -329,7 +329,7 @@ export type ModelQualificationCategory =
 
 export interface ModelQualificationEvidence {
   upstream_id: string
-  key_prefix: string
+  route_id: string
   model: string
   protocol: 'ChatCompletions' | 'Responses'
   level: ModelQualificationLevel
