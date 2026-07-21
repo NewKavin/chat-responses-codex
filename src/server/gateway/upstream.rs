@@ -4,23 +4,13 @@ use crate::capabilities::{
     RequestedFeatures, ResolvedCapabilities, RouteIdentity, WireProtocol,
     DIALECT_PROBE_SCHEMA_VERSION,
 };
+use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::image_adapter::ImageDialect;
+use crate::upstream_feedback::{classify_upstream_response, UpstreamFeedbackInput};
 use std::collections::BTreeSet;
 
 const GATEWAY_CLAUDE_METADATA_KEY: &str = "_gateway_claude";
 const GATEWAY_CLAUDE_THINKING_KEY: &str = "_gateway_claude_thinking";
-
-pub(super) fn parse_retry_after_seconds(
-    headers: &reqwest::header::HeaderMap,
-    default_retry_seconds: u64,
-) -> u64 {
-    headers
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(default_retry_seconds.max(1))
-        .max(1)
-}
 
 pub(super) fn is_context_limit_error(error_text: &str) -> bool {
     let normalized = error_text.to_ascii_lowercase();
@@ -145,6 +135,7 @@ pub(super) fn parse_upstream_error_payload(error_text: &str) -> ParsedUpstreamEr
     parsed
 }
 
+#[cfg(test)]
 pub(super) fn extract_upstream_error_message(error_text: &str) -> String {
     let parsed = parse_upstream_error_payload(error_text);
 
@@ -188,22 +179,13 @@ pub(super) fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
 }
 
 pub(super) fn should_try_next_key(error: &GatewayError) -> bool {
-    // Key rotation is only useful for failures that may be credential-specific.
-    // Shared upstream concurrency pressure should stay on the same key long
-    // enough for the account-level backoff loop to retry first.
-    match error {
-        GatewayError::Unauthorized(_)
-        | GatewayError::TooManyRequests { .. }
-        | GatewayError::GatewayTimeout(_)
-        | GatewayError::Upstream(_)
-        | GatewayError::TemporaryUpstreamUnavailable(_) => true,
-        GatewayError::Classified { status, meta, .. } => {
-            meta.category == "upstream_auth_error"
-                || (meta.category.starts_with("upstream_")
-                    && (*status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()))
-        }
-        _ => false,
-    }
+    // Route-attributable failures may differ across Keys and should not pin the
+    // request to a failed Key.  A real upstream 429 (including a provider
+    // concurrency response) is cooled at the exact route and never retried in
+    // place.
+    error
+        .route_failure_class()
+        .is_some_and(|class| class != FailureClass::RequestRejected)
 }
 
 pub(super) fn should_retry_without_stream(error: &GatewayError) -> bool {
@@ -212,7 +194,14 @@ pub(super) fn should_retry_without_stream(error: &GatewayError) -> bool {
         | GatewayError::Upstream(_)
         | GatewayError::TemporaryUpstreamUnavailable(_) => true,
         GatewayError::Classified { status, meta, .. } => {
-            meta.category.starts_with("upstream_") && status.is_server_error()
+            (meta.category.starts_with("upstream_")
+                && status.is_server_error()
+                && !matches!(
+                    meta.category,
+                    "upstream_model_unsupported" | "upstream_protocol_unsupported"
+                ))
+                || (meta.category == "capability_not_supported"
+                    && error.message().to_ascii_lowercase().contains("stream"))
         }
         _ => false,
     }
@@ -534,6 +523,7 @@ fn compatibility_profile_state(state: DialectProfileState) -> &'static str {
 fn build_compatibility_usage_metadata(
     snapshot: &CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     upstream_protocol: UpstreamProtocol,
@@ -546,6 +536,7 @@ fn build_compatibility_usage_metadata(
 ) -> CompatibilityUsageMetadata {
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
+        key_fingerprint: key_fingerprint.to_string(),
         exposed_model_slug: exposed_model_slug.to_string(),
         runtime_model_slug: runtime_model_slug.to_string(),
         protocol: WireProtocol::from(upstream_protocol),
@@ -591,11 +582,12 @@ fn build_compatibility_usage_metadata(
 struct HedgeStreamReady {
     reader: UpstreamStreamReader,
     reservation: Option<UpstreamRequestGuard>,
-    key_prefix: String,
+    route_id: String,
 }
 
 struct RouteHedgeReady {
     result: Box<DispatchResult>,
+    route_id: String,
 }
 
 enum HedgeWinnerReady {
@@ -636,6 +628,7 @@ struct RouteHedgeContext {
     inference_strength: Option<String>,
     user_agent: Option<String>,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
+    route_attempts: RequestRouteAttempts,
     response_history_context: Option<ResponseHistoryContext>,
     stream_only_recovery_request_safe: bool,
 }
@@ -664,21 +657,49 @@ fn send_route_hedge_attempt(
     control: HedgeAttemptControl,
 ) -> futures_util::future::BoxFuture<'static, Result<RouteHedgeReady, GatewayError>> {
     async move {
-        context
+        let route_health_key = candidate.route_health_key.clone();
+        let (_, key_health_key) = super::route_health_keys(
+            &candidate.upstream,
+            &candidate.key_fingerprint,
+            &route_health_key.runtime_model_slug,
+            candidate.protocol,
+        );
+        let route_health_permit = match context
+            .state
+            .reserve_route_health(&route_health_key, &key_health_key)
+            .await
+        {
+            crate::state::RouteAvailability::Ready(permit) => {
+                std::sync::Arc::new(tokio::sync::Mutex::new(Some(permit)))
+            }
+            crate::state::RouteAvailability::Cooling { retry_after, .. }
+            | crate::state::RouteAvailability::HalfOpenBusy { retry_after, .. } => {
+                return Err(GatewayError::upstream_temporary_unavailable(
+                    format!("hedged route cooling for {}s", retry_after.as_secs()),
+                    "upstream_hedge_route_cooling",
+                ));
+            }
+        };
+        if let Err(error) = context
             .state
             .try_reserve_upstream_hedge(&candidate.upstream, &context.model)
             .await
-            .map_err(|error| {
-                GatewayError::upstream_temporary_unavailable(
-                    error.message,
-                    "upstream_hedge_capacity_unavailable",
-                )
-            })?;
-        let upstream_request_guard =
-            UpstreamRequestGuard::new(context.state.clone(), candidate.upstream.id.clone());
+        {
+            super::finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled).await;
+            return Err(GatewayError::upstream_temporary_unavailable(
+                error.message,
+                "upstream_hedge_capacity_unavailable",
+            ));
+        }
+        let upstream_request_guard = UpstreamRequestReservation::new(UpstreamRequestGuard::new(
+            context.state.clone(),
+            candidate.upstream.id.clone(),
+        ));
         let completion = StreamCompletionContext {
             state: context.state.clone(),
-            upstream_id: candidate.upstream.id.clone(),
+            route_health_key: route_health_key.clone(),
+            route_attempts: context.route_attempts.clone(),
+            route_health_permit,
             upstream_request_guard: upstream_request_guard.clone(),
             downstream_concurrency_guard: context.downstream_concurrency_guard.clone(),
             hedge_control: Some(control.clone()),
@@ -716,7 +737,10 @@ fn send_route_hedge_attempt(
             context.user_agent.as_deref(),
             false,
             global_context_profile.as_ref(),
-            Some(completion),
+            Some(completion.clone()),
+            upstream_request_guard.clone(),
+            context.route_attempts.clone(),
+            route_health_key.clone(),
             context.response_history_context,
             None,
             Some(control.clone()),
@@ -725,10 +749,49 @@ fn send_route_hedge_attempt(
             &mut stream_only_recovery_leader,
             &mut stream_only_recovery_identity,
         )
-        .await?;
+        .await;
+        let result = match result {
+            Ok(result) => {
+                if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
+                    completion.mark_success().await;
+                }
+                result
+            }
+            Err(error) => {
+                super::finish_route_health_permit(
+                    &completion.route_health_permit,
+                    super::route_health_outcome(&error),
+                )
+                .await;
+                if !context.route_attempts.should_attempt(&route_health_key) {
+                    super::record_route_attempt(
+                        &context.state,
+                        &context.route_attempts,
+                        &route_health_key,
+                        &context.capability_snapshot,
+                        &context.requested_features,
+                        context.inference_strength.as_deref(),
+                        &context.model,
+                        &candidate.upstream,
+                        &candidate.key_fingerprint,
+                        &route_health_key.runtime_model_slug,
+                        candidate.protocol,
+                        &error,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         drop(upstream_request_guard);
         Ok(RouteHedgeReady {
             result: Box::new(result),
+            route_id: anonymous_route_id(
+                &route_health_key.upstream_id,
+                &route_health_key.key_fingerprint,
+                &route_health_key.runtime_model_slug,
+                route_health_key.protocol,
+            ),
         })
     }
     .boxed()
@@ -800,7 +863,12 @@ async fn send_hedge_stream_attempt(
     Ok(HedgeStreamReady {
         reader,
         reservation: Some(reservation),
-        key_prefix: key_prefix(&api_key),
+        route_id: anonymous_route_id(
+            &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &api_key),
+            &request_model,
+            WireProtocol::from(upstream_protocol),
+        ),
     })
 }
 
@@ -837,7 +905,12 @@ async fn prefetch_stream_with_hedges(
     type HedgeFuture =
         futures_util::future::BoxFuture<'static, (u32, Result<HedgeWinnerReady, GatewayError>)>;
     let mut attempts = futures_stream::FuturesUnordered::<HedgeFuture>::new();
-    let primary_key_prefix = key_prefix(primary_api_key);
+    let primary_route_id = anonymous_route_id(
+        &upstream.id,
+        &upstream_key_fingerprint(&upstream.id, primary_api_key),
+        request_model,
+        WireProtocol::from(upstream_protocol),
+    );
     attempts.push(
         async move {
             (
@@ -848,7 +921,7 @@ async fn prefetch_stream_with_hedges(
                         HedgeWinnerReady::Stream(Box::new(HedgeStreamReady {
                             reader,
                             reservation: None,
-                            key_prefix: primary_key_prefix,
+                            route_id: primary_route_id,
                         }))
                     }),
             )
@@ -900,7 +973,7 @@ async fn prefetch_stream_with_hedges(
                                     hedge_winner_upstream_id = %upstream.id,
                                     selected_upstream_id = %upstream.id,
                                     hedge_winner_attempt = attempt_index,
-                                    hedge_winner_key_prefix = %ready.key_prefix,
+                                    route_id = %ready.route_id,
                                     hedge_extra_attempts_launched = launched_extra_attempts,
                                     hedge_losers_cancelled = attempts.len(),
                                     first_usable_output_latency_ms = started.elapsed().as_millis() as u64,
@@ -914,6 +987,7 @@ async fn prefetch_stream_with_hedges(
                                     hedge_enabled = state.config.upstream_hedge_enabled,
                                     hedge_winner_upstream_id = %ready.result.selected_upstream_id,
                                     selected_upstream_id = %ready.result.selected_upstream_id,
+                                    route_id = %ready.route_id,
                                     hedge_winner_attempt = attempt_index,
                                     hedge_extra_attempts_launched = launched_extra_attempts,
                                     hedge_losers_cancelled = attempts.len(),
@@ -974,7 +1048,12 @@ async fn prefetch_stream_with_hedges(
                         request_id,
                         selected_upstream_id = %candidate.upstream.id,
                         hedge_attempt = attempt_index,
-                        hedge_key_prefix = %key_prefix(&candidate.api_key),
+                        route_id = %anonymous_route_id(
+                            &candidate.route_health_key.upstream_id,
+                            &candidate.route_health_key.key_fingerprint,
+                            &candidate.route_health_key.runtime_model_slug,
+                            candidate.route_health_key.protocol,
+                        ),
                         "launching slow first-output route hedge"
                     );
                     let future = send_route_hedge_attempt(context, candidate, control);
@@ -993,7 +1072,12 @@ async fn prefetch_stream_with_hedges(
                         request_id,
                         selected_upstream_id = %upstream.id,
                         hedge_attempt = attempt_index,
-                        hedge_key_prefix = %key_prefix(&api_key),
+                        route_id = %anonymous_route_id(
+                            &upstream.id,
+                            &upstream_key_fingerprint(&upstream.id, &api_key),
+                            request_model,
+                            WireProtocol::from(upstream_protocol),
+                        ),
                         "launching slow first-output key hedge"
                     );
                     let future = send_hedge_stream_attempt(HedgeStreamAttempt {
@@ -1052,6 +1136,9 @@ pub(super) async fn send_to_upstream(
     chat_fallback_requested: bool,
     global_context_profile: Option<&GlobalContextProfile>,
     stream_completion_context: Option<StreamCompletionContext>,
+    upstream_request_guard: UpstreamRequestReservation,
+    route_attempts: RequestRouteAttempts,
+    route_health_key: RouteHealthKey,
     mut response_history_context: Option<ResponseHistoryContext>,
     active_request_guard: Option<&mut ActiveGatewayRequestGuard>,
     hedge_control: Option<HedgeAttemptControl>,
@@ -1060,6 +1147,8 @@ pub(super) async fn send_to_upstream(
     stream_only_recovery_leader: &mut Option<StreamOnlyRecoveryLeader>,
     stream_only_recovery_identity: &mut Option<(DialectProfileKey, String)>,
 ) -> Result<DispatchResult, GatewayError> {
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+    let runtime_capability_hints = state.runtime_capability_hints_snapshot();
     let mut active_capability_snapshot = capability_snapshot.clone();
     let mut resolved_capabilities = resolved_capabilities.cloned();
     let mut attempt_mode = attempt_mode;
@@ -1110,6 +1199,7 @@ pub(super) async fn send_to_upstream(
             profile_fingerprint: AppState::route_configuration_fingerprint_with_snapshot(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -1281,11 +1371,12 @@ pub(super) async fn send_to_upstream(
     }
 
     if final_upstream_model != selected_upstream_model {
-        let fallback_profile_key = DialectProfileKey {
-            upstream_id: upstream.id.clone(),
-            runtime_model_slug: final_upstream_model.clone(),
-            protocol: WireProtocol::from(upstream_protocol),
-        };
+        let fallback_profile_key = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            final_upstream_model.clone(),
+            WireProtocol::from(upstream_protocol),
+        );
         if !active_capability_snapshot
             .profiles
             .contains_key(&fallback_profile_key)
@@ -1307,13 +1398,16 @@ pub(super) async fn send_to_upstream(
                 })),
             ));
         }
-        resolved_capabilities = resolve_route_capabilities_with_snapshot(
+        resolved_capabilities = resolve_route_capabilities_with_runtime_hints(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,
             requested_features,
+            &runtime_capability_hints,
+            inference_strength,
         );
         if resolved_capabilities.is_none() {
             return Err(GatewayError::classified(
@@ -1353,6 +1447,7 @@ pub(super) async fn send_to_upstream(
         let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,
@@ -1363,11 +1458,12 @@ pub(super) async fn send_to_upstream(
                 "upstream_invalid_response",
             )
         })?;
-        let profile_key = DialectProfileKey {
-            upstream_id: upstream.id.clone(),
-            runtime_model_slug: final_upstream_model.clone(),
-            protocol: WireProtocol::from(upstream_protocol),
-        };
+        let profile_key = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            final_upstream_model.clone(),
+            WireProtocol::from(upstream_protocol),
+        );
         match begin_stream_only_recovery(
             state,
             profile_key.clone(),
@@ -1383,13 +1479,16 @@ pub(super) async fn send_to_upstream(
                 stream_only_recovery.final_attempt = true;
                 let fresh = state.capability_snapshot();
                 active_capability_snapshot = (*fresh).clone();
-                resolved_capabilities = resolve_route_capabilities_with_snapshot(
+                resolved_capabilities = resolve_route_capabilities_with_runtime_hints(
                     &active_capability_snapshot,
                     upstream,
+                    &key_fingerprint,
                     request_model,
                     &final_upstream_model,
                     upstream_protocol,
                     requested_features,
+                    &runtime_capability_hints,
+                    inference_strength,
                 );
                 attempt_mode = select_upstream_attempt_mode(false, resolved_capabilities.as_ref());
             }
@@ -1402,6 +1501,7 @@ pub(super) async fn send_to_upstream(
         let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,
@@ -1412,11 +1512,12 @@ pub(super) async fn send_to_upstream(
                 "gateway_response_history_invalid",
             )
         })?;
-        let profile_key = DialectProfileKey {
-            upstream_id: upstream.id.clone(),
-            runtime_model_slug: final_upstream_model.clone(),
-            protocol: WireProtocol::from(upstream_protocol),
-        };
+        let profile_key = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            final_upstream_model.clone(),
+            WireProtocol::from(upstream_protocol),
+        );
         let profile_reasoning_carrier = active_capability_snapshot
             .profiles
             .get(&profile_key)
@@ -1470,6 +1571,7 @@ pub(super) async fn send_to_upstream(
             profile_fingerprint: AppState::route_configuration_fingerprint_with_snapshot(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -1614,6 +1716,7 @@ pub(super) async fn send_to_upstream(
         }
     }
     let response = loop {
+        route_attempts.record_physical_attempt(route_health_key.clone());
         let send_future = state
             .client_for_url(&url)
             .post(url.clone())
@@ -1673,7 +1776,6 @@ pub(super) async fn send_to_upstream(
         let headers = response.headers().clone();
         let error_body = response.bytes().await.unwrap_or_default();
         let error_text = String::from_utf8_lossy(&error_body).to_string();
-        let raw_upstream_error_message = extract_upstream_error_message(&error_text);
         let upstream_error_code = extract_upstream_error_code(&error_text);
 
         if !stream_only_recovery.consumed && !dialect_retry_attempted {
@@ -1691,12 +1793,22 @@ pub(super) async fn send_to_upstream(
                     upstream_body = corrected_body;
                     dialect_retry_attempted = true;
                     dialect_retry_count = 1;
+                    upstream_request_guard
+                        .reserve_next(state, upstream, model)
+                        .await?;
                     continue;
                 }
             }
         }
 
-        // Classify the upstream response to determine how to handle it
+        let classified_feedback = classify_upstream_response(UpstreamFeedbackInput {
+            status: status.as_u16(),
+            headers: &headers,
+            body: Some(&error_text),
+            target_model: Some(&final_upstream_model),
+        });
+        // Retain the legacy summary label for log compatibility while routing
+        // decisions use the precise Key-route classification above.
         let feedback = UpstreamFeedbackClassification::from_response(
             status.as_u16(),
             &headers,
@@ -1704,17 +1816,8 @@ pub(super) async fn send_to_upstream(
         );
         // Log-facing excerpt: full diagnostic context (status, classification,
         // upstream code, message) for operators reading the server log.
-        let error_excerpt = safe_upstream_error_summary(
-            status,
-            upstream_error_code,
-            feedback,
-            &raw_upstream_error_message,
-        );
-        // Client-facing message: the upstream's real error text when available.
-        // Falls back to
-        // a status-based hint when the upstream body had no parseable message.
-        let upstream_error_message =
-            upstream_client_message(status, feedback, &raw_upstream_error_message);
+        let error_excerpt = safe_upstream_error_summary(status, upstream_error_code, feedback);
+        let upstream_error_message = upstream_client_message(status);
 
         tracing::warn!(
             request_id = %request_id,
@@ -1776,6 +1879,7 @@ pub(super) async fn send_to_upstream(
             let _ = maybe_queue_dialect_error_probe(
                 state,
                 &upstream.id,
+                &key_fingerprint,
                 normalized_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -1807,6 +1911,9 @@ pub(super) async fn send_to_upstream(
                         reduced_cap,
                         "context limit hit; retrying once with reduced output token cap"
                     );
+                    upstream_request_guard
+                        .reserve_next(state, upstream, model)
+                        .await?;
                     continue;
                 }
             }
@@ -1818,105 +1925,10 @@ pub(super) async fn send_to_upstream(
             ), status));
         }
 
-        if matches!(status.as_u16(), 401 | 403) {
-            return Err(GatewayError::upstream_auth_error(
-                upstream_error_message.clone(),
-                status,
-            ));
-        }
-
-        if matches!(
-            feedback,
-            UpstreamFeedbackClassification::ProtocolUnsupported
-        ) {
-            return Err(GatewayError::upstream_temporary_unavailable(
-                upstream_error_message.clone(),
-                "upstream_protocol_unsupported",
-            ));
-        }
-
-        // When the upstream HTTP status is 5xx, the upstream itself is failing.
-        // A nested 4xx inner_code in the body (e.g. 400 "bad request") does not mean
-        // the *gateway* client request was bad; treat as temporary so we try another upstream.
-        let upstream_is_server_error = status.is_server_error();
-
-        if let Some(inner_code) = upstream_error_code {
-            if (400..=499).contains(&inner_code) {
-                if upstream_is_server_error {
-                    return Err(GatewayError::upstream_temporary_unavailable(
-                        upstream_error_message.clone(),
-                        "upstream_temporary_unavailable",
-                    ));
-                }
-
-                if inner_code == 429 {
-                    let retry_after_seconds = parse_retry_after_seconds(
-                        &headers,
-                        state.config.upstream_rate_limit_default_retry_seconds,
-                    );
-                    return Err(GatewayError::TooManyRequests {
-                        message: upstream_error_message.clone(),
-                        retry_after_seconds: Some(retry_after_seconds),
-                    });
-                }
-                return Err(GatewayError::upstream_bad_request(
-                    if upstream_error_message.is_empty() {
-                        format!("upstream rejected request with status {inner_code}")
-                    } else {
-                        upstream_error_message
-                    },
-                    status,
-                ));
-            }
-        }
-
-        // Handle feedback-based decisions
-        match feedback {
-            UpstreamFeedbackClassification::RateLimited => {
-                let retry_after_seconds = parse_retry_after_seconds(
-                    &headers,
-                    state.config.upstream_rate_limit_default_retry_seconds,
-                );
-                return Err(GatewayError::TooManyRequests {
-                    message: upstream_error_message.clone(),
-                    retry_after_seconds: Some(retry_after_seconds),
-                });
-            }
-            UpstreamFeedbackClassification::ConcurrencyFull => {
-                return Err(GatewayError::ConcurrencyFull {
-                    message: upstream_error_message.clone(),
-                    retry_after_seconds: None,
-                });
-            }
-            UpstreamFeedbackClassification::ProviderBusy
-            | UpstreamFeedbackClassification::TemporaryUnavailable => {
-                // Return error to allow outer loop to try next upstream
-                return Err(GatewayError::upstream_temporary_unavailable(
-                    upstream_error_message.clone(),
-                    "upstream_temporary_unavailable",
-                ));
-            }
-            UpstreamFeedbackClassification::ProtocolUnsupported => {
-                // Protocol not supported, return error to try next upstream
-                return Err(GatewayError::upstream_temporary_unavailable(
-                    upstream_error_message.clone(),
-                    "upstream_protocol_unsupported",
-                ));
-            }
-            UpstreamFeedbackClassification::Unknown => {
-                // Unknown error - pass through client errors (4xx) as BadRequest,
-                // server errors (5xx) as Upstream. The upstream_error_message
-                // already contains a clear, client-facing description.
-                if status.is_client_error() {
-                    return Err(GatewayError::upstream_bad_request(
-                        upstream_error_message.clone(),
-                        status,
-                    ));
-                } else {
-                    return Err(GatewayError::Upstream(upstream_error_message.clone()));
-                }
-            }
-        }
+        return Err(GatewayError::from_classified_upstream_failure(
+            classified_feedback,
+            upstream_error_message,
+        ));
     };
 
     let applied_effort_control = applied_claude_effort_control_evidence(
@@ -1977,6 +1989,7 @@ pub(super) async fn send_to_upstream(
             build_compatibility_usage_metadata(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -2012,6 +2025,7 @@ pub(super) async fn send_to_upstream(
             usage_log_context: None,
             selected_upstream_id: upstream.id.clone(),
             selected_upstream_name: upstream.name.clone(),
+            selected_upstream_key_fingerprint: key_fingerprint.clone(),
             selected_upstream_protocol: upstream_protocol,
         });
     }
@@ -2049,6 +2063,7 @@ pub(super) async fn send_to_upstream(
                             downstream_concurrency_guard: completion
                                 .downstream_concurrency_guard
                                 .clone(),
+                            route_attempts: route_attempts.clone(),
                             response_history_context: response_history_context.clone(),
                             stream_only_recovery_request_safe,
                         });
@@ -2166,6 +2181,7 @@ pub(super) async fn send_to_upstream(
             build_compatibility_usage_metadata(
                 &active_capability_snapshot,
                 upstream,
+                &key_fingerprint,
                 request_model,
                 &final_upstream_model,
                 upstream_protocol,
@@ -2208,6 +2224,7 @@ pub(super) async fn send_to_upstream(
             usage_log_context: None,
             selected_upstream_id: upstream.id.clone(),
             selected_upstream_name: upstream.name.clone(),
+            selected_upstream_key_fingerprint: key_fingerprint.clone(),
             selected_upstream_protocol: upstream_protocol,
         });
     }
@@ -2261,6 +2278,7 @@ pub(super) async fn send_to_upstream(
         build_compatibility_usage_metadata(
             &active_capability_snapshot,
             upstream,
+            &key_fingerprint,
             request_model,
             &final_upstream_model,
             upstream_protocol,
@@ -2296,6 +2314,7 @@ pub(super) async fn send_to_upstream(
         usage_log_context: None,
         selected_upstream_id: upstream.id.clone(),
         selected_upstream_name: upstream.name.clone(),
+        selected_upstream_key_fingerprint: key_fingerprint,
         selected_upstream_protocol: upstream_protocol,
     })
 }

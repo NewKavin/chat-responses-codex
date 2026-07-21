@@ -16,18 +16,21 @@ use chat_responses_codex::capabilities::{
     Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
     WireProtocol,
 };
+use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     build_key_qualification_decision, confirmed_level, qualify_model_on_upstream, unix_seconds,
     ApiKeyModelConfig, AppConfig, AppState, DownstreamConfig, KeyQualificationDecision,
     ModelQualificationCategory, ModelQualificationLevel, PersistedState, QualificationObservation,
-    StateStore, StoreFuture, UpstreamConfig, UpstreamQualificationDecision,
+    RouteFailureClass, RouteHealthKey, StateStore, StoreFuture, UpstreamConfig,
+    UpstreamQualificationDecision,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Barrier};
@@ -483,6 +486,15 @@ async fn qualify_models_admin_can_select_upstreams_without_applying() {
         .unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert!(payload["summary"]["retained_models"].as_u64().unwrap() > 0);
+    let evidence = payload["upstreams"][0]["evidence"]
+        .as_array()
+        .expect("qualification evidence array");
+    assert!(!evidence.is_empty());
+    assert!(evidence.iter().all(|item| item["route_id"]
+        .as_str()
+        .is_some_and(|route_id| route_id.starts_with("route_") && route_id.len() == 22)));
+    assert!(!payload.to_string().contains("key_prefix"));
+    assert!(!payload.to_string().contains("secret-k"));
     assert!(!payload.to_string().contains("secret-key"));
     assert!(!payload.to_string().contains(&mock));
     assert_eq!(
@@ -593,6 +605,10 @@ async fn qualification_decision_uses_exact_current_profile_for_full_level() {
     };
     let state = create_test_state_with_upstreams(vec![upstream.clone()]);
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
+            &upstream.id,
+            &upstream.api_key,
+        ),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "chat-ok".to_string(),
         protocol: WireProtocol::ChatCompletions,
@@ -600,6 +616,7 @@ async fn qualification_decision_uses_exact_current_profile_for_full_level() {
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "chat-ok",
             "chat-ok",
             UpstreamProtocol::ChatCompletions,
@@ -755,6 +772,77 @@ async fn test_upstreams_list_returns_all_upstreams() {
     assert_eq!(upstreams[0]["active"], true);
     assert_eq!(upstreams[1]["id"], "upstream-2");
     assert_eq!(upstreams[1]["active"], false);
+}
+
+#[tokio::test]
+async fn test_upstreams_list_route_health_is_aggregate_and_secret_free() {
+    let key_a = "upstream-secret-a";
+    let key_b = "upstream-secret-b";
+    let upstream = UpstreamConfig {
+        id: "upstream-safe-health".to_string(),
+        name: "Safe Health".to_string(),
+        base_url: "https://api.example.invalid".to_string(),
+        api_key: key_a.to_string(),
+        api_keys: vec![key_b.to_string()],
+        api_key_models: vec![
+            ApiKeyModelConfig {
+                api_key: key_a.to_string(),
+                supported_models: vec!["glm-5.2".to_string()],
+            },
+            ApiKeyModelConfig {
+                api_key: key_b.to_string(),
+                supported_models: vec!["glm-5.2".to_string()],
+            },
+        ],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["glm-5.2".to_string()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = create_test_state_with_upstreams(vec![upstream]);
+    let cooling_fingerprint = upstream_key_fingerprint("upstream-safe-health", key_a);
+    state
+        .observe_route_failure(
+            &RouteHealthKey {
+                upstream_id: "upstream-safe-health".to_string(),
+                key_fingerprint: cooling_fingerprint.clone(),
+                runtime_model_slug: "glm-5.2".to_string(),
+                protocol: WireProtocol::ChatCompletions,
+            },
+            RouteFailureClass::CapacityUnavailable,
+            Some(Duration::from_secs(90)),
+        )
+        .await;
+
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let upstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    let route_health = &upstreams[0]["route_health"];
+
+    assert_eq!(route_health["healthy_routes"], 1);
+    assert_eq!(route_health["cooldown_routes"], 1);
+    assert_eq!(route_health["half_open_routes"], 0);
+    assert!(route_health["earliest_retry_after_seconds"].is_number());
+    assert_eq!(route_health["failure_classes"]["capacity_unavailable"], 1);
+    let serialized = route_health.to_string();
+    assert!(!serialized.contains(key_a));
+    assert!(!serialized.contains(key_b));
+    assert!(!serialized.contains(&cooling_fingerprint));
+    assert!(!serialized.contains("key_prefix"));
 }
 
 #[tokio::test]
@@ -2201,6 +2289,292 @@ async fn test_admin_discover_upstream_models_merges_models_concurrently_across_k
 }
 
 #[tokio::test]
+async fn test_admin_discovery_results_are_indexed_redacted_and_deduplicated() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests_clone = requests.clone();
+
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(move |headers: axum::http::HeaderMap| {
+            let requests = requests_clone.clone();
+            async move {
+                requests.fetch_add(1, Ordering::SeqCst);
+                let auth = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if auth == "Bearer middle-key-secret" {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": {"message": "provider-body-secret"}
+                        })),
+                    )
+                } else {
+                    (StatusCode::OK, Json(json!({"data": [{"id": "glm-5.2"}]})))
+                }
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "base_url": format!("http://{}", address),
+        "keys": ["submitted-key-secret", "middle-key-secret", " submitted-key-secret "]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    let results = result["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["key_index"], 0);
+    assert_eq!(results[1]["key_index"], 1);
+    assert_eq!(results[2]["key_index"], 2);
+    assert_eq!(results[0]["model_list"], json!(["glm-5.2"]));
+    assert_eq!(results[2]["model_list"], json!(["glm-5.2"]));
+    assert!(results[1]["error"].is_string());
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+    let serialized = result.to_string();
+    assert!(!serialized.contains("key_prefix"));
+    assert!(!serialized.contains("provider-body-secret"));
+    assert!(!serialized.contains("submitted-key-secret"));
+}
+
+#[tokio::test]
+async fn test_admin_discovery_empty_success_is_reported_as_indexed_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(|| async { (StatusCode::OK, Json(json!({"data": []}))) }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "base_url": format!("http://{}", address),
+        "keys": ["empty-key-secret"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["failed"], 1);
+    assert_eq!(result["results"].as_array().unwrap().len(), 1);
+    assert_eq!(result["results"][0]["key_index"], 0);
+    assert!(result["results"][0]["error"].is_string());
+    assert!(!result.to_string().contains("empty-key-secret"));
+}
+
+#[tokio::test]
+async fn test_batch_discovery_results_store_failed_keys_as_empty_mappings() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(|headers: axum::http::HeaderMap| async move {
+            let auth = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if auth == "Bearer failed-key-secret" {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": {"message": "batch-provider-secret"}})),
+                )
+            } else {
+                (StatusCode::OK, Json(json!({"data": [{"id": "glm-5.2"}]})))
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "name": "Indexed Batch",
+        "base_url": format!("http://{}", address),
+        "keys": ["good-key-secret", "failed-key-secret"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["created"], 1);
+    assert_eq!(result["keys_count"], 2);
+    assert_eq!(result["failed"], 1);
+    assert_eq!(result["results"][0]["key_index"], 0);
+    assert_eq!(result["results"][1]["key_index"], 1);
+    assert!(!result.to_string().contains("key_prefix"));
+    assert!(!result.to_string().contains("batch-provider-secret"));
+    assert!(!result.to_string().contains("good-key-secret"));
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.name == "Indexed Batch")
+        .unwrap();
+    assert_eq!(
+        upstream.available_keys(),
+        vec!["good-key-secret", "failed-key-secret"]
+    );
+    assert_eq!(
+        upstream
+            .api_key_models
+            .iter()
+            .find(|mapping| mapping.api_key == "good-key-secret")
+            .unwrap()
+            .supported_models,
+        vec!["glm-5.2"]
+    );
+    assert_eq!(
+        upstream
+            .api_key_models
+            .iter()
+            .find(|mapping| mapping.api_key == "failed-key-secret")
+            .unwrap()
+            .supported_models,
+        Vec::<String>::new()
+    );
+    assert_eq!(upstream.supported_models, vec!["glm-5.2"]);
+}
+
+#[tokio::test]
+async fn test_batch_discovery_results_all_failed_still_create_authoritative_empty_mappings() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(|| async {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": {"message": "all-failed-provider-secret"}})),
+            )
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "name": "All Failed Batch",
+        "base_url": format!("http://{}", address),
+        "keys": ["failed-a-secret", "failed-b-secret"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["created"], 1);
+    assert_eq!(result["keys_count"], 2);
+    assert_eq!(result["failed"], 2);
+    assert!(!result.to_string().contains("all-failed-provider-secret"));
+    assert!(!result.to_string().contains("failed-a-secret"));
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.name == "All Failed Batch")
+        .unwrap();
+    assert_eq!(upstream.api_key_models.len(), 2);
+    assert!(upstream
+        .api_key_models
+        .iter()
+        .all(|mapping| mapping.supported_models.is_empty()));
+    assert!(upstream.supported_models.is_empty());
+    assert!(upstream.keys_for_model("glm-5.2").is_empty());
+}
+
+#[tokio::test]
 async fn test_admin_discover_upstream_models_reports_all_failures() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -2495,7 +2869,16 @@ async fn test_upstreams_update_merges_api_keys() {
 
 #[tokio::test]
 async fn test_upstreams_update_merges_api_key_models() {
-    let state = create_test_state();
+    let state = create_test_state_with_upstreams(vec![UpstreamConfig {
+        id: "upstream-1".to_string(),
+        name: "Test Upstream".to_string(),
+        base_url: "https://api.example.com".to_string(),
+        api_key: "sk-key-a".to_string(),
+        api_keys: vec!["sk-key-b".to_string()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        active: true,
+        ..Default::default()
+    }]);
     let app = chat_responses_codex::server::build_router(state.clone());
     let token = get_admin_token(&app, "admin", "admin").await;
 
@@ -2880,8 +3263,9 @@ async fn test_update_replace_mode_syncs_legacy_api_key_field() {
 }
 
 /// Reproduces the admin UI flow where an editor removes one key from the
-/// multiline field, clicks "获取模型", and then saves. The fetch call refreshes
-/// only `supported_models`; `api_key_models` stays stale until save.
+/// multiline field, clicks "获取模型", and then saves. A replacement aggregate
+/// must not erase the exact current-key mapping when discovery did not return a
+/// matching per-key result.
 #[tokio::test]
 async fn test_update_replace_mode_prunes_stale_api_key_models_after_model_discovery() {
     let existing = vec![UpstreamConfig {
@@ -2963,17 +3347,20 @@ async fn test_update_replace_mode_prunes_stale_api_key_models_after_model_discov
         "stale key-c mapping should be pruned, got {:?}",
         upstream.api_key_models
     );
+    assert_eq!(upstream.supported_models, vec!["gpt-4".to_string()]);
+    assert!(upstream.keys_for_model("gpt-4.1-mini").is_empty());
     assert_eq!(
-        upstream.supported_models,
-        vec!["gpt-4".to_string(), "gpt-4.1-mini".to_string()],
-        "supported_models should keep the freshly discovered list even when api_key_models is stale"
-    );
-    let mut keys_for_new_model = upstream.keys_for_model("gpt-4.1-mini");
-    keys_for_new_model.sort();
-    assert_eq!(
-        keys_for_new_model,
-        vec!["key-a".to_string(), "key-b".to_string()],
-        "freshly discovered models must stay routable after replace-mode save"
+        upstream.api_key_models,
+        vec![
+            ApiKeyModelConfig {
+                api_key: "key-a".to_string(),
+                supported_models: vec!["gpt-4".to_string()],
+            },
+            ApiKeyModelConfig {
+                api_key: "key-b".to_string(),
+                supported_models: vec!["gpt-4".to_string()],
+            },
+        ]
     );
 }
 

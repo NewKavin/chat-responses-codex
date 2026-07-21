@@ -463,7 +463,7 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
             announcement: None,
             global_context_profiles: std::collections::HashMap::new(),
         },
-        state_path,
+        state_path.clone(),
         AppConfig::default(),
     );
 
@@ -511,6 +511,10 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
         Some("Bearer upstream-secret")
     );
     assert_eq!(captured.request_body.unwrap()["stream"], true);
+    assert!(
+        !state_path.exists(),
+        "stream success must not persist legacy upstream health"
+    );
 }
 
 #[tokio::test]
@@ -2840,8 +2844,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
     .expect("429 cooldown test should not wait for retry-after")
     .expect("429 cooldown test request should complete");
 
-    // Should get 429 from upstream
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let snapshots = state.upstream_runtime_snapshots().await;
     let snapshot = snapshots.get("up-1").unwrap();
@@ -2962,27 +2965,20 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
     };
 
     let first = app.clone().oneshot(request()).await.unwrap();
-    assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
     let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
     let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
-    let first_error = first_payload["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(first_error.contains("rate limit"));
+    assert_eq!(first_payload["error"]["code"], "upstream_routes_exhausted");
 
     let second = app.oneshot(request()).await.unwrap();
-    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
     let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
     let second_payload: Value = serde_json::from_slice(&second_body).unwrap();
     let second_error = second_payload["error"]["message"]
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(
-        second_error.contains("rate limit"),
-        "unexpected second error: {second_error}"
-    );
+    assert_eq!(second_payload["error"]["code"], "upstream_routes_exhausted");
     assert!(
         !second_error.contains("downstream per-minute request limit exceeded"),
         "downstream request window should not be poisoned by upstream 429"
@@ -3138,7 +3134,7 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
     );
 
     let second = app.oneshot(request()).await.unwrap();
-    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         state.get_affinity_upstream("down-1", "gpt-4.1-mini"),
         None,
@@ -3262,7 +3258,7 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
 }
 
 #[tokio::test]
-async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() {
+async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -3378,15 +3374,16 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains("upstream server error"),
-        "unexpected gateway body: {body}"
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["class_counts"]["transient_server"],
+        1
     );
 }
 
 #[tokio::test]
-async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_requests() {
+async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -3502,11 +3499,19 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("30")
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains("upstream server error"),
-        "unexpected gateway body: {body}"
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["class_counts"]["transient_server"],
+        1
     );
 }
 
@@ -4131,7 +4136,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
         .iter()
         .find(|upstream| upstream.id == "up-1")
         .expect("upstream should still exist");
-    assert_eq!(upstream.failure_count, 3);
+    assert_eq!(upstream.failure_count, 0);
     let runtime = state.upstream_runtime_snapshots().await;
     assert_eq!(
         runtime
@@ -4143,7 +4148,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
 }
 
 #[tokio::test]
-async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
+async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let upstream_hits = Arc::new(AtomicUsize::new(0));
@@ -4329,7 +4334,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
         .iter()
         .find(|upstream| upstream.id == "up-1")
         .expect("upstream should still exist");
-    assert_eq!(upstream.failure_count, 3);
+    assert_eq!(upstream.failure_count, 0);
     assert_eq!(
         state
             .upstream_runtime_snapshots()
@@ -4361,7 +4366,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        3
+        0
     );
     assert_eq!(
         state
@@ -4407,6 +4412,12 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
     .await
     .expect("terminal upstream request should start");
     state.mark_upstream_rate_limited("up-1", 60).await;
+    let cooldown_before_terminal = state
+        .upstream_runtime_snapshots()
+        .await
+        .get("up-1")
+        .expect("upstream runtime should exist")
+        .cooldown_until;
     release_headers.notify_one();
     to_bytes(response.into_body(), usize::MAX)
         .await
@@ -4420,7 +4431,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        0
+        3
     );
     assert_eq!(
         state
@@ -4429,9 +4440,10 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
-        0
+        cooldown_before_terminal
     );
 
+    state.mark_upstream_success("up-1").await.unwrap();
     for _ in 0..3 {
         state.mark_upstream_failure("up-1").await.unwrap();
     }
@@ -4465,6 +4477,12 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
     .await
     .expect("immediate JSON upstream request should start");
     state.mark_upstream_rate_limited("up-1", 60).await;
+    let cooldown_before_json = state
+        .upstream_runtime_snapshots()
+        .await
+        .get("up-1")
+        .expect("upstream runtime should exist")
+        .cooldown_until;
     release_headers.notify_one();
     to_bytes(response.into_body(), usize::MAX)
         .await
@@ -4478,7 +4496,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        0
+        3
     );
     assert_eq!(
         state
@@ -4487,7 +4505,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
-        0
+        cooldown_before_json
     );
 }
 
@@ -5553,7 +5571,7 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
             announcement: None,
             global_context_profiles: std::collections::HashMap::new(),
         },
-        state_path,
+        state_path.clone(),
         config,
     );
 
@@ -5622,6 +5640,10 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
             .contains("idle timeout waiting for SSE"),
         "unexpected idle timeout message: {:?}",
         log.error_message
+    );
+    assert!(
+        !state_path.exists(),
+        "stream failure must not persist legacy upstream health"
     );
 }
 

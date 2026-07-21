@@ -5,6 +5,7 @@
 ## Operating Model
 
 - Run one active gateway instance per PostgreSQL database.
+- Exact route health is process-local; run one active gateway instance per database.
 - Keep PostgreSQL on a private network or managed service. Do not publish it directly to the public internet.
 - Mount or provision durable storage for PostgreSQL so keys, upstreams, downstreams, and usage logs survive restarts.
 - Place a reverse proxy or load balancer in front if the service is exposed outside a trusted network.
@@ -52,13 +53,15 @@ into the route-key-deduplicating probe scheduler.
 Keep the keepalive interval below the idle timeout so the gateway can emit
 heartbeats before the idle watchdog fires.
 
-`UPSTREAM_RATE_LIMIT_*` handles ordinary 429 retries. `UPSTREAM_CONCURRENCY_RETRY_*`
-handles 429s that come from upstream concurrency saturation, where the account is
-alive but temporarily out of slots. `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS`
-controls the initial wait, which then grows exponentially with deterministic jitter.
-`UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS` caps the total per-request wait.
-`UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER` stretches that budget
-when only one active upstream supports the requested model.
+Real upstream 429 responses cool the exact route and switch to another candidate
+without sleeping inside the request. The route-health state preserves the full
+`Retry-After`; it is not capped before a terminal response is returned.
+UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.
+UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.
+UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.
+UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.
+These fields remain parsed for backward-compatible configuration only. The
+`UPSTREAM_CONCURRENCY_RETRY_*` fields do not override this provider-429 behavior.
 
 `UPSTREAM_HEDGE_DELAY_MS` controls when a slow-first-output request launches its
 first extra attempt. `UPSTREAM_HEDGE_INTERVAL_MS` spaces later extra attempts,
@@ -86,10 +89,41 @@ the gateway keeps per host before opening new sockets.
 fresh model-probe snapshot. Keep it separate from `DASHBOARD_CACHE_TTL_SECONDS`,
 which controls how long the backend reuses the cached probe result before
 calling upstreams again.
-`UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` is deprecated: the background auto-sync
-loop was removed. Per-key model mappings are now refreshed only when an admin
-explicitly triggers "获取模型" (discover-models). The field is retained for
-backward compatibility and has no effect.
+`UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` controls background model-key
+synchronization and defaults to `900` seconds. Set to 0 to disable background model-key synchronization.
+
+## Multi-Key Route Resilience And Upgrade
+
+Each key under an upstream account has a separate persisted model mapping. A
+successful discovery returning no models is an authoritative empty mapping: the
+key supports no models and does not inherit the upstream-level list. After an
+upgrade, deployments with empty persisted `supported_models` must complete one
+successful explicit discovery, or one complete background legacy discovery,
+before `/v1/models` advertises those models. `/v1/models` reads only the
+persisted model catalog.
+
+Runtime health is deliberately separate from capability persistence. A generic
+upstream 5xx retries the same exact route once before another route is selected.
+An upstream 429 switches candidates without sleeping inside the request and
+stores the full `Retry-After` on the exact route. Automatic replay reuses the
+same idempotency identifier, but remains at-least-once when the provider does not
+honor an idempotency header, so retries can duplicate inference or provider-side
+storage.
+
+The runtime route health resets on restart and fails open for the next request.
+It does not change the persisted model catalog and is never consulted by
+`/v1/models`. Because cooldown and half-open state are not shared, multiple
+active gateway replicas against one database are unsupported.
+
+Stable client outcomes:
+
+| HTTP / code | Operator action |
+|-------------|-----------------|
+| 503 `upstream_routes_exhausted` | Routes are temporary or cooling; retry using `Retry-After` |
+| 502 `upstream_credentials_exhausted` | Every eligible key has a credential, balance, or billing failure |
+| 502 `upstream_model_unsupported` | Every attempted route rejected the requested model |
+| 400 `capability_not_supported` | No route can preserve an explicitly required feature |
+| 502 `upstream_protocol_unsupported` | No route supports the requested endpoint or protocol |
 
 ## Build The Image
 

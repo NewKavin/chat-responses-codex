@@ -1,7 +1,8 @@
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DEFAULT_UPSTREAM_HEDGE_DELAY_MS, DEFAULT_UPSTREAM_HEDGE_ENABLED,
-    DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS, DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+    AppConfig, AppState, ModelKeySyncService, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+    DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
 };
 use chrono::{FixedOffset, Utc};
 use std::env;
@@ -105,8 +106,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_model_key_sync_interval_seconds: env_u64(
             "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
             900,
-        )
-        .max(1),
+        ),
         dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
         capability_probe_queue_capacity: env_usize("CAPABILITY_PROBE_QUEUE_CAPACITY", 256).max(1),
@@ -198,6 +198,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     state.maybe_attach_redis().await;
     chat_responses_codex::server::CapabilityProbeService::spawn(state.clone());
+    ModelKeySyncService::spawn(state.clone());
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,
@@ -380,11 +381,26 @@ impl Write for TeeWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_hedge_delay_ms;
+    use super::{env_u64, normalize_hedge_delay_ms};
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn hedge_delay_and_interval_are_at_least_one_millisecond() {
         assert_eq!(normalize_hedge_delay_ms(0), 1);
         assert_eq!(normalize_hedge_delay_ms(7), 7);
+    }
+
+    #[test]
+    fn model_key_sync_interval_preserves_zero_as_the_kill_switch() {
+        let _guard = env_lock();
+        env::set_var("TEST_MODEL_KEY_SYNC_INTERVAL", "0");
+        assert_eq!(env_u64("TEST_MODEL_KEY_SYNC_INTERVAL", 900), 0);
+        env::remove_var("TEST_MODEL_KEY_SYNC_INTERVAL");
     }
 }

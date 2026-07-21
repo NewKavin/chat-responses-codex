@@ -58,7 +58,7 @@ impl ModelQualificationCategory {
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelQualificationEvidence {
     pub upstream_id: String,
-    pub key_prefix: String,
+    pub route_id: String,
     pub model: String,
     pub protocol: UpstreamProtocol,
     pub level: ModelQualificationLevel,

@@ -564,6 +564,7 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
             ("MiniMax2.7-Long", "fallback_effort", "fallback-maximum"),
         ] {
             let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+                key_fingerprint: upstream_model_key_fingerprint(&upstream, runtime_model),
                 upstream_id: upstream.id.clone(),
                 runtime_model_slug: runtime_model.into(),
                 protocol: WireProtocol::ChatCompletions,
@@ -572,6 +573,7 @@ async fn context_budget_can_switch_to_larger_context_model_within_same_group() {
             profile.configuration_fingerprint = state
                 .route_configuration_fingerprint(
                     &upstream,
+                    &profile.key.key_fingerprint,
                     "MiniMax2.7",
                     runtime_model,
                     UpstreamProtocol::ChatCompletions,

@@ -247,7 +247,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
 }
 
 #[tokio::test]
-async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window() {
+async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_cooldown() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -343,17 +343,17 @@ async fn upstream_rate_limited_high_cost_model_retries_after_the_cooldown_window
         .unwrap()
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
 
     let hits = hits.lock().unwrap().clone();
-    assert_eq!(hits, vec!["up-a".to_string(), "up-a".to_string()]);
+    assert_eq!(hits, vec!["up-a".to_string()]);
 }
 
 #[tokio::test]
-async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the_cooldown_window() {
+async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cooldown() {
     let hits = Arc::new(Mutex::new(Vec::<String>::new()));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -443,17 +443,17 @@ async fn upstream_rate_limited_single_candidate_low_cost_model_retries_after_the
         .unwrap()
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
 
     let hits = hits.lock().unwrap().clone();
-    assert_eq!(hits, vec!["up-a".to_string(), "up-a".to_string()]);
+    assert_eq!(hits, vec!["up-a".to_string()]);
 }
 
 #[tokio::test]
-async fn upstream_concurrency_full_429_retries_with_configured_attempts() {
+async fn upstream_concurrency_full_429_does_not_retry_in_place() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -597,15 +597,15 @@ async fn upstream_concurrency_full_429_retries_with_configured_attempts() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
-    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn upstream_concurrency_full_retries_same_key_before_switching_keys() {
+async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -685,8 +685,8 @@ async fn upstream_concurrency_full_retries_same_key_before_switching_keys() {
                 id: "up-account".into(),
                 name: "primary-account".into(),
                 base_url: format!("http://{}", address),
-                api_key: "backup-secret".into(),
-                api_keys: vec!["primary-secret".into()],
+                api_key: "primary-secret".into(),
+                api_keys: vec!["backup-secret".into()],
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
@@ -766,11 +766,11 @@ async fn upstream_concurrency_full_retries_same_key_before_switching_keys() {
     let auth_headers = auth_headers.lock().unwrap().clone();
     assert_eq!(auth_headers.len(), 2);
     assert_eq!(auth_headers[0], "Bearer primary-secret");
-    assert_eq!(auth_headers[1], "Bearer primary-secret");
+    assert_eq!(auth_headers[1], "Bearer backup-secret");
 }
 
 #[tokio::test]
-async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_multiple_429s() {
+async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -911,9 +911,9 @@ async fn upstream_rate_limited_single_candidate_retries_until_recovery_after_mul
         .unwrap()
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
-    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }

@@ -1265,20 +1265,120 @@ fn chat_stream_canonicalizer_stabilizes_sparse_identity_and_terminal_alias() {
 }
 
 #[test]
-fn chat_stream_canonicalizer_rejects_unknown_or_contradictory_terminal() {
+fn chat_stream_canonicalizer_rejects_unknown_terminal() {
     let mut unknown = ChatStreamCanonicalizer::new("id", "model", 1);
     assert!(unknown
         .push(json!({
             "choices": [{"delta": {"content": "x"}, "finish_reason": "provider_done"}]
         }))
         .is_err());
+}
 
-    let mut contradictory = ChatStreamCanonicalizer::new("id", "model", 1);
-    assert!(contradictory
+#[test]
+fn chat_stream_canonicalizer_normalizes_minimax_tool_stop_terminal() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("id", "MiniMax-M2.7", 1);
+    canonicalizer
         .push(json!({
-            "choices": [{"delta": {"content": "x", "tool_calls": [{"index": 0}]}, "finish_reason": "stop"}]
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "I should use the tool"},
+                "finish_reason": null
+            }]
         }))
-        .is_err());
+        .unwrap();
+
+    let terminal = canonicalizer
+        .push(json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"}
+                    }]
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .unwrap();
+
+    assert_eq!(terminal[0]["choices"][0]["finish_reason"], "tool_calls");
+    assert!(canonicalizer.finish_after_done().unwrap().is_empty());
+}
+
+#[test]
+fn chat_stream_canonicalizer_tracks_terminal_semantics_per_choice() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("id", "MiniMax-M2.7", 1);
+    let terminal = canonicalizer
+        .push(json!({
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "exec_command", "arguments": "{}"}
+                        }]
+                    },
+                    "finish_reason": "stop"
+                },
+                {
+                    "index": 1,
+                    "delta": {"content": "done"},
+                    "finish_reason": "stop"
+                }
+            ]
+        }))
+        .unwrap();
+
+    assert_eq!(terminal[0]["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(terminal[0]["choices"][1]["finish_reason"], "stop");
+    assert!(canonicalizer.finish_after_done().unwrap().is_empty());
+}
+
+#[test]
+fn chat_stream_canonicalizer_completes_each_unterminated_choice_after_done() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("id", "model", 1);
+    canonicalizer
+        .push(json!({
+            "choices": [
+                {"index": 0, "delta": {"content": "first"}, "finish_reason": null},
+                {"index": 1, "delta": {"content": "second"}, "finish_reason": null}
+            ]
+        }))
+        .unwrap();
+    canonicalizer
+        .push(json!({
+            "choices": [
+                {"index": 0, "delta": {}, "finish_reason": "stop"}
+            ]
+        }))
+        .unwrap();
+
+    let completed = canonicalizer.finish_after_done().unwrap();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0]["choices"].as_array().unwrap().len(), 1);
+    assert_eq!(completed[0]["choices"][0]["index"], 1);
+    assert_eq!(completed[0]["choices"][0]["finish_reason"], "stop");
+}
+
+#[test]
+fn chat_stream_canonicalizer_rejects_eof_when_any_choice_lacks_terminal() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("id", "model", 1);
+    canonicalizer
+        .push(json!({
+            "choices": [
+                {"index": 0, "delta": {"content": "first"}, "finish_reason": "stop"},
+                {"index": 1, "delta": {"content": "second"}, "finish_reason": null}
+            ]
+        }))
+        .unwrap();
+
+    assert!(canonicalizer.finish().is_err());
 }
 
 #[test]

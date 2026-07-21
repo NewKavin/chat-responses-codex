@@ -1,13 +1,402 @@
 use super::*;
 use crate::capabilities::{
-    Capability, CapabilityRuntimeSnapshot, DialectProfileKey, EvidenceState, RequestedFeatures,
-    UpstreamDialectProfile, WireProtocol,
+    Capability, CapabilityHintKey, CapabilityRuntimeSnapshot, DialectProfileKey, EvidenceState,
+    RequestedFeatures, RuntimeCapabilityHints, UpstreamDialectProfile, WireProtocol,
 };
+use crate::state::PersistedState;
 use axum::body::to_bytes;
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicUsize;
 use tempfile::tempdir;
 use tower::ServiceExt;
+
+#[test]
+fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(503),
+        class: FailureClass::TransientServer,
+        retry_after: Some(Duration::from_secs(30)),
+    });
+    ledger.record_cooled(AttemptFailure {
+        route_id: "route-b".into(),
+        upstream_status: Some(429),
+        class: FailureClass::RateLimited,
+        retry_after: Some(Duration::from_secs(7)),
+    });
+
+    assert_eq!(
+        ledger.terminal_failure(),
+        TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(7)
+        }
+    );
+}
+
+#[test]
+fn route_attempts_groups_homogeneous_terminal_classes() {
+    for (class, expected) in [
+        (FailureClass::Credentials, TerminalFailure::Credentials),
+        (
+            FailureClass::ModelUnsupported,
+            TerminalFailure::ModelUnsupported,
+        ),
+        (
+            FailureClass::FeatureUnsupported,
+            TerminalFailure::CapabilityUnsupported,
+        ),
+        (
+            FailureClass::ProtocolUnsupported,
+            TerminalFailure::ProtocolUnsupported,
+        ),
+    ] {
+        let mut ledger = AttemptLedger::default();
+        ledger.record(AttemptFailure {
+            route_id: "route".into(),
+            upstream_status: Some(400),
+            class,
+            retry_after: None,
+        });
+        assert_eq!(ledger.terminal_failure(), expected);
+    }
+}
+
+#[test]
+fn route_attempts_reports_mixed_non_temporary_exhaustion() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(401),
+        class: FailureClass::Credentials,
+        retry_after: None,
+    });
+    ledger.record(AttemptFailure {
+        route_id: "route-b".into(),
+        upstream_status: Some(400),
+        class: FailureClass::ModelUnsupported,
+        retry_after: None,
+    });
+    assert_eq!(
+        ledger.terminal_failure(),
+        TerminalFailure::MixedRoutesExhausted
+    );
+}
+
+fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
+    let mut ledger = AttemptLedger::default();
+    for (index, class) in classes.iter().copied().enumerate() {
+        ledger.record(AttemptFailure {
+            route_id: format!("route-secret-{index}"),
+            upstream_status: Some(400),
+            class,
+            retry_after: class
+                .is_temporary()
+                .then(|| Duration::from_secs(11 + index as u64)),
+        });
+    }
+    terminal_route_failure_error(&ledger)
+}
+
+#[test]
+fn route_attempts_maps_terminal_failures_to_stable_errors() {
+    for (classes, expected_status, expected_code) in [
+        (
+            vec![FailureClass::TransientServer],
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_routes_exhausted",
+        ),
+        (
+            vec![FailureClass::Credentials],
+            StatusCode::BAD_GATEWAY,
+            "upstream_credentials_exhausted",
+        ),
+        (
+            vec![FailureClass::ModelUnsupported],
+            StatusCode::BAD_GATEWAY,
+            "upstream_model_unsupported",
+        ),
+        (
+            vec![FailureClass::FeatureUnsupported],
+            StatusCode::BAD_REQUEST,
+            "capability_not_supported",
+        ),
+        (
+            vec![FailureClass::ProtocolUnsupported],
+            StatusCode::BAD_GATEWAY,
+            "upstream_protocol_unsupported",
+        ),
+        (
+            vec![FailureClass::Credentials, FailureClass::ModelUnsupported],
+            StatusCode::BAD_GATEWAY,
+            "upstream_routes_exhausted",
+        ),
+    ] {
+        let error = terminal_error_for(&classes);
+        assert_eq!(error.status_code(), expected_status);
+        assert_eq!(error.error_code(), expected_code);
+    }
+}
+
+#[test]
+fn route_attempts_terminal_details_are_numeric_and_secret_free() {
+    let error = terminal_error_for(&[FailureClass::TransientServer, FailureClass::RateLimited]);
+    let details = error.safe_details();
+    assert_eq!(details["attempt_count"], 2);
+    assert_eq!(details["class_counts"]["transient_server"], 1);
+    assert_eq!(details["class_counts"]["rate_limited"], 1);
+    assert_eq!(details["retry_after_seconds"], 11);
+    let rendered = details.to_string();
+    for forbidden in ["route-secret", "fingerprint", "upstream body", "prompt"] {
+        assert!(
+            !rendered.contains(forbidden),
+            "leaked {forbidden}: {rendered}"
+        );
+    }
+}
+
+fn tracked_route(fingerprint: &str) -> RouteHealthKey {
+    RouteHealthKey {
+        upstream_id: "up-1".into(),
+        key_fingerprint: fingerprint.into(),
+        runtime_model_slug: "glm-5.2".into(),
+        protocol: WireProtocol::Responses,
+    }
+}
+
+fn tracked_aggregate() -> RouteSetAggregateKey {
+    RouteSetAggregateKey {
+        upstream_id: "up-1".into(),
+        runtime_model_slug: "glm-5.2".into(),
+        protocol: WireProtocol::Responses,
+    }
+}
+
+#[test]
+fn request_route_tracker_prevents_reselecting_a_physical_route() {
+    let mut tracker = RequestRouteTracker::default();
+    let route = tracked_route("fingerprint-a");
+
+    assert!(tracker.should_attempt(&route));
+    tracker.record_physical_attempt(route.clone());
+    assert!(!tracker.should_attempt(&route));
+}
+
+#[test]
+fn request_route_tracker_aggregates_once_only_after_every_eligible_route_failed() {
+    let mut tracker = RequestRouteTracker::default();
+    let aggregate = tracked_aggregate();
+    let route_a = tracked_route("fingerprint-a");
+    let route_b = tracked_route("fingerprint-b");
+    tracker.register_eligible(aggregate.clone(), route_a.clone());
+    tracker.register_eligible(aggregate.clone(), route_b.clone());
+
+    assert!(tracker.take_newly_exhausted().is_empty());
+
+    tracker.record_physical_attempt(route_a.clone());
+    tracker.record_failure(
+        &route_a,
+        FailureClass::TransientServer,
+        Some(Duration::from_secs(30)),
+    );
+    assert!(tracker.take_newly_exhausted().is_empty());
+
+    tracker.record_physical_attempt(route_b.clone());
+    assert!(tracker.take_newly_exhausted().is_empty());
+    tracker.record_failure(
+        &route_b,
+        FailureClass::RateLimited,
+        Some(Duration::from_secs(7)),
+    );
+
+    let observations = tracker.take_newly_exhausted();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].key, aggregate);
+    assert_eq!(observations[0].class, FailureClass::RateLimited);
+    assert_eq!(observations[0].retry_after, Some(Duration::from_secs(7)));
+    assert!(tracker.take_newly_exhausted().is_empty());
+}
+
+#[test]
+fn shared_request_route_attempts_unify_hedge_physical_attempts_and_failures() {
+    let attempts = RequestRouteAttempts::default();
+    let aggregate = tracked_aggregate();
+    let primary = tracked_route("fingerprint-a");
+    let hedge = tracked_route("fingerprint-b");
+    attempts.register_eligible(aggregate, primary.clone());
+    attempts.register_eligible(tracked_aggregate(), hedge.clone());
+
+    attempts.record_physical_attempt(primary.clone());
+    attempts.record_physical_attempt(hedge.clone());
+    assert!(!attempts.should_attempt(&primary));
+    assert!(!attempts.should_attempt(&hedge));
+
+    attempts.record_failure(
+        &primary,
+        FailureClass::TransientServer,
+        Some(Duration::from_secs(30)),
+    );
+    attempts.record_failure(
+        &hedge,
+        FailureClass::RateLimited,
+        Some(Duration::from_secs(7)),
+    );
+
+    let observations = attempts.take_newly_exhausted();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].class, FailureClass::RateLimited);
+    let ledger = attempts.ledger_snapshot();
+    assert_eq!(ledger.distinct_route_count(), 2);
+    assert_eq!(ledger.class_count(FailureClass::TransientServer), 1);
+    assert_eq!(ledger.class_count(FailureClass::RateLimited), 1);
+}
+
+fn stream_completion_fixture(
+    route: RouteHealthKey,
+    route_attempts: RequestRouteAttempts,
+    permit: RouteHealthPermit,
+    state: AppState,
+) -> StreamCompletionContext {
+    StreamCompletionContext {
+        state: state.clone(),
+        route_health_key: route,
+        route_attempts,
+        route_health_permit: Arc::new(TokioMutex::new(Some(permit))),
+        upstream_request_guard: UpstreamRequestReservation::new(UpstreamRequestGuard::new(
+            state.clone(),
+            "up-1".into(),
+        )),
+        downstream_concurrency_guard: DownstreamConcurrencyGuard::new(state, "down-1".into()),
+        hedge_control: None,
+    }
+}
+
+#[tokio::test]
+async fn stream_transport_failure_updates_only_its_exact_route_and_shared_aggregate() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let route = tracked_route("stream-failure");
+    let key = KeyHealthKey {
+        upstream_id: route.upstream_id.clone(),
+        key_fingerprint: route.key_fingerprint.clone(),
+    };
+    let permit = match state.reserve_route_health(&route, &key).await {
+        RouteAvailability::Ready(permit) => permit,
+        availability => panic!("unexpected route availability: {availability:?}"),
+    };
+    let attempts = RequestRouteAttempts::default();
+    attempts.register_eligible(tracked_aggregate(), route.clone());
+    attempts.record_physical_attempt(route.clone());
+    let completion =
+        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone());
+
+    completion.mark_failure().await;
+
+    let route_health = state.route_health_snapshot(&route).await.unwrap();
+    assert_eq!(route_health.consecutive_failures, 1);
+    assert_eq!(
+        route_health.last_failure_class,
+        Some(FailureClass::Transport)
+    );
+    let aggregate_health = state
+        .route_set_health_snapshot(&tracked_aggregate())
+        .await
+        .unwrap();
+    assert_eq!(aggregate_health.consecutive_failures, 1);
+    assert_eq!(
+        attempts
+            .ledger_snapshot()
+            .class_count(FailureClass::Transport),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stream_cancellation_releases_exact_route_without_recording_failure() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let route = tracked_route("stream-cancelled");
+    let key = KeyHealthKey {
+        upstream_id: route.upstream_id.clone(),
+        key_fingerprint: route.key_fingerprint.clone(),
+    };
+    let permit = match state.reserve_route_health(&route, &key).await {
+        RouteAvailability::Ready(permit) => permit,
+        availability => panic!("unexpected route availability: {availability:?}"),
+    };
+    let attempts = RequestRouteAttempts::default();
+    attempts.register_eligible(tracked_aggregate(), route.clone());
+    attempts.record_physical_attempt(route.clone());
+    let completion =
+        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone());
+
+    completion.mark_cancelled().await;
+
+    if let Some(route_health) = state.route_health_snapshot(&route).await {
+        assert_eq!(route_health.consecutive_failures, 0);
+        assert_eq!(route_health.last_failure_class, None);
+    }
+    assert!(attempts.ledger_snapshot().is_empty());
+    assert!(state
+        .route_set_health_snapshot(&tracked_aggregate())
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn route_attempts_preserves_openai_and_anthropic_error_envelopes() {
+    let openai = terminal_error_for(&[FailureClass::Credentials]).into_response();
+    assert_eq!(openai.status(), StatusCode::BAD_GATEWAY);
+    let openai_payload: Value =
+        serde_json::from_slice(&to_bytes(openai.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        openai_payload["error"]["code"],
+        "upstream_credentials_exhausted"
+    );
+    assert_eq!(openai_payload["error"]["details"]["attempt_count"], 1);
+
+    let anthropic =
+        terminal_error_for(&[FailureClass::ProtocolUnsupported]).into_anthropic_response();
+    assert_eq!(anthropic.status(), StatusCode::BAD_GATEWAY);
+    let anthropic_payload: Value =
+        serde_json::from_slice(&to_bytes(anthropic.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(anthropic_payload["type"], "error");
+    assert_eq!(
+        anthropic_payload["error"]["code"],
+        "upstream_protocol_unsupported"
+    );
+    assert_eq!(
+        anthropic_payload["error"]["details"]["class_counts"]["protocol_unsupported"],
+        1
+    );
+}
+
+#[test]
+fn route_attempts_converts_classified_upstream_feedback_before_aggregation() {
+    let error = GatewayError::from_classified_upstream_failure(
+        crate::upstream_feedback::ClassifiedUpstreamFailure {
+            class: FailureClass::ModelUnsupported,
+            upstream_status: Some(400),
+            retry_after: None,
+        },
+        "provider model rejection",
+    );
+    assert_eq!(error.status_code(), StatusCode::BAD_GATEWAY);
+    assert_eq!(error.error_code(), "upstream_model_unsupported");
+    assert_eq!(
+        error.route_failure_class(),
+        Some(FailureClass::ModelUnsupported)
+    );
+}
 
 fn resolved_stream_capabilities(
     text_stream_source: CapabilitySource,
@@ -78,11 +467,11 @@ fn gateway_global_test_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 fn stream_only_unit_profile_key(index: usize) -> DialectProfileKey {
-    DialectProfileKey {
-        upstream_id: format!("unit-up-{index}"),
-        runtime_model_slug: format!("Unit/Route-{index}"),
-        protocol: WireProtocol::ChatCompletions,
-    }
+    DialectProfileKey::legacy(
+        format!("unit-up-{index}"),
+        format!("Unit/Route-{index}"),
+        WireProtocol::ChatCompletions,
+    )
 }
 
 #[test]
@@ -345,17 +734,20 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
         active: true,
         ..Default::default()
     };
-    let key = DialectProfileKey {
-        upstream_id: upstream.id.clone(),
-        runtime_model_slug: "opaque".into(),
-        protocol: WireProtocol::ChatCompletions,
-    };
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
     let mut captured_snapshot = CapabilityRuntimeSnapshot::default();
     let mut captured_profile = UpstreamDialectProfile::unknown(key.clone());
     captured_profile.configuration_fingerprint =
         AppState::route_configuration_fingerprint_with_snapshot(
             &captured_snapshot,
             &upstream,
+            &key_fingerprint,
             "opaque",
             "opaque",
             UpstreamProtocol::ChatCompletions,
@@ -388,7 +780,11 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
         .capabilities
         .insert(Capability::ReasoningOutput, EvidenceState::Rejected);
     let cached = cache
-        .get(&(WireProtocol::ChatCompletions, upstream.id.clone()))
+        .get(&(
+            WireProtocol::ChatCompletions,
+            upstream.id.clone(),
+            key_fingerprint,
+        ))
         .unwrap();
     assert!(cached.eligible);
     assert_eq!(cached.optional_misses, 0);
@@ -399,6 +795,117 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
     assert_eq!(
         hot_updated_snapshot.profiles[&key].capabilities[&Capability::ReasoningOutput],
         EvidenceState::Rejected
+    );
+}
+
+#[test]
+fn request_route_capability_cache_overlays_value_and_protocol_hints_exactly() {
+    let upstream = UpstreamConfig {
+        id: "up-runtime-hint".into(),
+        base_url: "https://unit.invalid".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["opaque".into()],
+        active: true,
+        ..Default::default()
+    };
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let profile_key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
+    let mut snapshot = CapabilityRuntimeSnapshot::default();
+    let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+        &snapshot,
+        &upstream,
+        &key_fingerprint,
+        "opaque",
+        "opaque",
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let mut profile = UpstreamDialectProfile::unknown(profile_key.clone());
+    profile.configuration_fingerprint = configuration_fingerprint.clone();
+    profile
+        .capabilities
+        .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+    snapshot.profiles.insert(profile_key.clone(), profile);
+    let requested = RequestedFeatures {
+        optional: BTreeSet::from([Capability::ReasoningOutput]),
+        ..RequestedFeatures::default()
+    };
+
+    let mut hints = RuntimeCapabilityHints::new(8, Duration::from_secs(900));
+    hints.insert(
+        CapabilityHintKey::feature(
+            profile_key.clone(),
+            Capability::ReasoningOutput,
+            Some("xhigh".into()),
+        ),
+        configuration_fingerprint.clone(),
+    );
+    let value_snapshot = hints.snapshot();
+    let xhigh = build_request_route_capability_cache_with_hints(
+        &snapshot,
+        std::slice::from_ref(&upstream),
+        "opaque",
+        EndpointKind::ChatCompletions,
+        &requested,
+        &value_snapshot,
+        Some("xhigh"),
+    );
+    assert!(
+        !xhigh
+            .get(&(
+                WireProtocol::ChatCompletions,
+                upstream.id.clone(),
+                key_fingerprint.clone(),
+            ))
+            .unwrap()
+            .eligible
+    );
+
+    let plain = build_request_route_capability_cache_with_hints(
+        &snapshot,
+        std::slice::from_ref(&upstream),
+        "opaque",
+        EndpointKind::ChatCompletions,
+        &requested,
+        &value_snapshot,
+        None,
+    );
+    assert!(
+        plain
+            .get(&(
+                WireProtocol::ChatCompletions,
+                upstream.id.clone(),
+                key_fingerprint.clone(),
+            ))
+            .unwrap()
+            .eligible
+    );
+
+    hints.insert(
+        CapabilityHintKey::protocol(profile_key),
+        configuration_fingerprint,
+    );
+    let protocol_snapshot = hints.snapshot();
+    let protocol_blocked = build_request_route_capability_cache_with_hints(
+        &snapshot,
+        std::slice::from_ref(&upstream),
+        "opaque",
+        EndpointKind::ChatCompletions,
+        &requested,
+        &protocol_snapshot,
+        None,
+    );
+    assert!(
+        !protocol_blocked
+            .get(&(WireProtocol::ChatCompletions, upstream.id, key_fingerprint,))
+            .unwrap()
+            .eligible
     );
 }
 
@@ -792,7 +1299,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        3
+        0
     );
     assert_eq!(
         state
@@ -845,45 +1352,30 @@ fn safe_upstream_body_diagnostics_do_not_include_payload_values() {
 }
 
 #[test]
-fn safe_upstream_error_summary_includes_truncated_upstream_message() {
-    // A structured upstream error message (e.g. "This token has no access to
-    // model X") is valuable diagnostic information for the downstream client.
-    // It should be included in the summary so users can understand the real
-    // cause of the failure.
+fn safe_upstream_error_summary_excludes_upstream_message() {
     let upstream_message = "This token has no access to model deepseek-v4-pro";
     let summary = safe_upstream_error_summary(
         StatusCode::BAD_REQUEST,
         Some(400),
         UpstreamFeedbackClassification::Unknown,
-        upstream_message,
     );
 
     assert!(summary.contains("status 400"));
     assert!(summary.contains("upstream code 400"));
-    assert!(
-        summary.contains(upstream_message),
-        "safe summary should include the upstream error message: {summary}"
-    );
+    assert!(!summary.contains(upstream_message));
 }
 
 #[test]
-fn safe_upstream_error_summary_truncates_long_upstream_message() {
-    // An oversized upstream message (which might echo request content) must be
-    // truncated so it cannot flood logs or leak large prompt payloads.
+fn safe_upstream_error_summary_excludes_long_upstream_message() {
     let long_message = "SECRET_PROMPT_BODY_SHOULD_NOT_LEAK".repeat(50);
     let summary = safe_upstream_error_summary(
         StatusCode::BAD_REQUEST,
         Some(400),
         UpstreamFeedbackClassification::Unknown,
-        &long_message,
     );
 
     assert!(summary.contains("status 400"));
-    // The summary should be bounded — not contain the full oversized message.
-    assert!(
-        summary.len() < long_message.len(),
-        "safe summary must truncate oversized upstream messages: {summary}"
-    );
+    assert!(!summary.contains(&long_message));
 }
 
 #[test]

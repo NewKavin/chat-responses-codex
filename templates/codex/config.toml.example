@@ -1,7 +1,8 @@
 # Point Codex at the gateway, not at the upstream vendors directly.
 # `model` and `review_model` must match the selected exposed slug exactly.
 # Keep model-catalog.json next to this file; Codex resolves the path relative to ~/.codex/config.toml.
-# Render the live catalog from `/v1/models?client_version=0.144.4` before use.
+# Render the complete downstream allowlist from `/v1/models?client_version=0.144.6` before use.
+# Do not add upstream IDs, route fingerprints, or cloned model entries to this client config.
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"

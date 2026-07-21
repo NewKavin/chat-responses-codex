@@ -388,6 +388,7 @@ impl Default for CapabilityConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteIdentity {
     pub upstream_id: String,
+    pub key_fingerprint: String,
     pub exposed_model_slug: String,
     pub runtime_model_slug: String,
     pub protocol: WireProtocol,
@@ -398,17 +399,42 @@ pub struct RouteIdentity {
 #[serde(deny_unknown_fields)]
 pub struct DialectProfileKey {
     pub upstream_id: String,
+    #[serde(default)]
+    pub key_fingerprint: String,
     pub runtime_model_slug: String,
     pub protocol: WireProtocol,
 }
 
 impl DialectProfileKey {
-    pub fn from_route(route: &RouteIdentity) -> Self {
+    pub fn for_key(
+        upstream_id: impl Into<String>,
+        key_fingerprint: impl Into<String>,
+        runtime_model_slug: impl Into<String>,
+        protocol: WireProtocol,
+    ) -> Self {
         Self {
-            upstream_id: route.upstream_id.clone(),
-            runtime_model_slug: route.runtime_model_slug.clone(),
-            protocol: route.protocol,
+            upstream_id: upstream_id.into(),
+            key_fingerprint: key_fingerprint.into(),
+            runtime_model_slug: runtime_model_slug.into(),
+            protocol,
         }
+    }
+
+    pub fn legacy(
+        upstream_id: impl Into<String>,
+        runtime_model_slug: impl Into<String>,
+        protocol: WireProtocol,
+    ) -> Self {
+        Self::for_key(upstream_id, "", runtime_model_slug, protocol)
+    }
+
+    pub fn from_route(route: &RouteIdentity) -> Self {
+        Self::for_key(
+            route.upstream_id.clone(),
+            route.key_fingerprint.clone(),
+            route.runtime_model_slug.clone(),
+            route.protocol,
+        )
     }
 }
 

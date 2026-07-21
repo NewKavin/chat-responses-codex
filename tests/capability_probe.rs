@@ -45,6 +45,7 @@ fn matching_expectation_adds_https_image_case_to_probe_plan() {
         });
     let compiled = Arc::new(configuration.compile().unwrap());
     let route = RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "up-vision".into(),
         exposed_model_slug: "public-vision".into(),
         runtime_model_slug: "opaque/vision-model".into(),
@@ -85,6 +86,7 @@ fn responses_image_expectation_probes_https_and_data_url_inputs() {
         });
     let compiled = configuration.compile().unwrap();
     let route = RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "up-vision".into(),
         exposed_model_slug: "public-vision".into(),
         runtime_model_slug: "opaque/vision".into(),
@@ -141,6 +143,7 @@ fn matching_policy_adds_declared_candidates_and_extensions_to_probe_plan() {
     .compile()
     .unwrap();
     let route = RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         exposed_model_slug: "public".into(),
         runtime_model_slug: "lab/opaque".into(),
@@ -207,6 +210,7 @@ fn queued_probe_preserves_exposed_model_for_fixture_selection() {
         });
     let compiled = Arc::new(configuration.compile().unwrap());
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-vision".into(),
         runtime_model_slug: "opaque/runtime-vision".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -563,12 +567,20 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
         let fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &chat_responses_codex::keys::upstream_key_fingerprint(
+                    &upstream.id,
+                    &upstream.api_key,
+                ),
                 "periodic-model",
                 "periodic-model",
                 UpstreamProtocol::ChatCompletions,
             )
             .unwrap();
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
+                &upstream.id,
+                &upstream.api_key,
+            ),
             upstream_id: upstream.id.clone(),
             runtime_model_slug: "periodic-model".into(),
             protocol: WireProtocol::ChatCompletions,
@@ -591,6 +603,259 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
         })
         .await
         .expect("expired profile should be re-probed by the periodic reconciler");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
+    with_proxy_env_cleared(|| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let requests_clone = requests.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let requests = requests_clone.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let authorization = parts
+                        .headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let payload: Value =
+                        serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push((authorization.clone(), payload.clone()));
+                    if authorization == "Bearer key-a" && payload["reasoning_effort"] == "xhigh" {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({
+                                "error": {"message": "reasoning_effort xhigh is unsupported"}
+                            })),
+                        )
+                            .into_response()
+                    } else {
+                        (StatusCode::OK, axum::Json(text_response("ok"))).into_response()
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let model = "glm-5.2";
+        let upstream = UpstreamConfig {
+            id: "per-key-probe".into(),
+            name: "per-key-probe".into(),
+            base_url: format!("http://{address}"),
+            api_key: "key-a".into(),
+            api_keys: vec!["key-b".into()],
+            api_key_models: vec![
+                chat_responses_codex::state::ApiKeyModelConfig {
+                    api_key: "key-a".into(),
+                    supported_models: vec![model.into()],
+                },
+                chat_responses_codex::state::ApiKeyModelConfig {
+                    api_key: "key-b".into(),
+                    supported_models: vec![model.into()],
+                },
+            ],
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![model.into()],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![upstream.clone()],
+                downstreams: vec![DownstreamConfig {
+                    id: "per-key-downstream".into(),
+                    name: "per-key-downstream".into(),
+                    hash: "unused".into(),
+                    plaintext_key: None,
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec![model.into()],
+                    rate_limit_enabled: false,
+                    per_minute_limit: 60,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: Vec::new(),
+                    expires_at: None,
+                    active: true,
+                }],
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig::default(),
+        );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                policies: vec![CapabilityPolicy {
+                    id: "per-key-reasoning-controls".into(),
+                    probe_candidates: ProbeCandidates {
+                        reasoning_controls: std::collections::BTreeMap::from([(
+                            "reasoning_effort".into(),
+                            vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                        )]),
+                        ..ProbeCandidates::default()
+                    },
+                    ..CapabilityPolicy::default()
+                }],
+                ..CapabilityConfiguration::default()
+            })
+            .await
+            .unwrap();
+
+        let jobs = state
+            .reconcile_dialect_profiles(1_700_000_000)
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_ne!(jobs[0].key.key_fingerprint, jobs[1].key.key_fingerprint);
+        let _service = CapabilityProbeService::spawn(state.clone());
+
+        let key_a = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-a"),
+            model,
+            WireProtocol::ChatCompletions,
+        );
+        let key_b = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-b"),
+            model,
+            WireProtocol::ChatCompletions,
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = state.capability_snapshot();
+                if snapshot.profiles.contains_key(&key_a) && snapshot.profiles.contains_key(&key_b)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both key routes should finish probing");
+
+        let snapshot = state.capability_snapshot();
+        assert_eq!(
+            snapshot.profiles[&key_a].reasoning_controls["reasoning_effort"],
+            vec!["low", "medium", "high"]
+        );
+        assert!(
+            snapshot.profiles[&key_b].reasoning_controls["reasoning_effort"]
+                .contains(&"xhigh".to_string())
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|(authorization, _)| authorization == "Bearer key-a"));
+        assert!(requests
+            .iter()
+            .any(|(authorization, _)| authorization == "Bearer key-b"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_per_key_probe_job_redaction_hides_keyed_identity_in_tracing() {
+    with_proxy_env_cleared(|| async move {
+        let capture = TracingCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let mock = ProbeMock::chat(|_| text_response("must not be called")).await;
+        let model = "glm-5.2";
+        let upstream = UpstreamConfig {
+            id: "stale-key-probe".into(),
+            name: "stale-key-probe".into(),
+            base_url: mock.base_url.clone(),
+            api_key: "key-a".into(),
+            supported_models: vec![model.into()],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![upstream.clone()],
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig::default(),
+        );
+        let key_a_fingerprint =
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, "key-a");
+        let stale_job = state
+            .build_capability_probe_job(
+                &upstream.id,
+                &key_a_fingerprint,
+                model,
+                model,
+                UpstreamProtocol::ChatCompletions,
+                ProbeReason::Manual,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let configuration_fingerprint = stale_job.configuration.configuration_fingerprint.clone();
+        let route_id = chat_responses_codex::keys::anonymous_route_id(
+            &upstream.id,
+            &key_a_fingerprint,
+            model,
+            WireProtocol::ChatCompletions,
+        );
+        state
+            .update_upstream(
+                &upstream.id,
+                UpstreamConfig {
+                    api_key: "key-b".into(),
+                    ..upstream.clone()
+                },
+            )
+            .await
+            .unwrap();
+
+        let _service = CapabilityProbeService::spawn(state.clone());
+        assert!(state.queue_capability_probe(stale_job));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(mock.request_count(), 0);
+        assert!(state.capability_snapshot().profiles.is_empty());
+
+        let trace = capture.contents();
+        assert!(trace.contains(&format!("route_id={route_id}")), "{trace}");
+        assert!(trace.contains("capability probe queued"), "{trace}");
+        assert!(trace.contains("capability probe completed"), "{trace}");
+        for secret in [
+            "key-a",
+            key_a_fingerprint.as_str(),
+            configuration_fingerprint.as_str(),
+            "key_fingerprint",
+            "configuration_fingerprint",
+        ] {
+            assert!(
+                !trace.contains(secret),
+                "probe trace leaked {secret}: {trace}"
+            );
+        }
     })
     .await;
 }
@@ -703,6 +968,70 @@ async fn run_responses_nonstream_probe(response_body: Value) -> ProbeOutcome {
     .unwrap()
 }
 
+async fn run_responses_tool_continuation_probe(response_body: Value) -> ProbeOutcome {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = Arc::new(response_body);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let response_body = response_body.clone();
+            async move { axum::Json((*response_body).clone()) }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "opaque/responses-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Responses,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: None,
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .unwrap()
+}
+
+async fn run_responses_function_tools_probe(response_body: Value) -> ProbeOutcome {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = Arc::new(response_body);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let response_body = response_body.clone();
+            async move { axum::Json((*response_body).clone()) }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "opaque/responses-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Responses,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::FunctionTools],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .unwrap()
+}
+
 async fn run_oversized_stream_probe(
     protocol: WireProtocol,
 ) -> (Result<ProbeOutcome, std::io::Error>, usize, usize) {
@@ -804,6 +1133,7 @@ async fn candidate_and_extension_probe_evidence_is_persisted_in_profile() {
     )
     .await;
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "probe-upstream".into(),
         runtime_model_slug: "probe-model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1528,12 +1858,160 @@ async fn forced_tool_plain_text_is_not_positive_tool_evidence() {
     let outcome = run_probe_against(&mock, CapabilityProbePlan::agent_core()).await;
     assert_eq!(
         outcome.capability(Capability::FunctionTools),
+        EvidenceState::Unobserved
+    );
+    assert_eq!(
+        outcome.capability(Capability::ForcedToolChoice),
         EvidenceState::Rejected
     );
     assert!(outcome
         .evidence_codes()
         .contains("forced_tool_not_selected"));
     assert!(saw_forced_tool.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn missing_auto_tool_call_does_not_reject_tool_continuation() {
+    let mock = ProbeMock::chat(|_| text_response("tool call not selected")).await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: None,
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::ToolContinuation),
+        EvidenceState::Unobserved
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("tool_continuation_missing_call"));
+}
+
+#[tokio::test]
+async fn chat_tool_call_without_id_rejects_tool_continuation() {
+    let mock = ProbeMock::chat(|_| {
+        let mut response = tool_call_response(
+            "call_probe",
+            "gateway_compat_probe",
+            r#"{"nonce":"n-17"}"#,
+            None,
+        );
+        response["choices"][0]["message"]["tool_calls"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("id");
+        response
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: None,
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::ToolContinuation),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("tool_continuation_invalid_call"));
+}
+
+#[tokio::test]
+async fn responses_tool_call_without_call_id_rejects_tool_continuation() {
+    let outcome = run_responses_tool_continuation_probe(json!({
+        "id": "resp-probe",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "id": "fc-probe",
+            "name": "gateway_compat_probe",
+            "arguments": "{\"nonce\":\"n-17\"}",
+            "status": "completed"
+        }]
+    }))
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::ToolContinuation),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("tool_continuation_invalid_call"));
+}
+
+#[tokio::test]
+async fn chat_function_tool_with_empty_id_is_rejected() {
+    let mock = ProbeMock::chat(|_| {
+        tool_call_response("", "gateway_compat_probe", r#"{"nonce":"n-17"}"#, None)
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::FunctionTools],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::FunctionTools),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("function_tools_invalid_call"));
+}
+
+#[tokio::test]
+async fn responses_function_tool_with_empty_call_id_is_rejected() {
+    let outcome = run_responses_function_tools_probe(json!({
+        "id": "resp-probe",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "id": "fc-probe",
+            "call_id": "",
+            "name": "gateway_compat_probe",
+            "arguments": "{\"nonce\":\"n-17\"}",
+            "status": "completed"
+        }]
+    }))
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::FunctionTools),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("function_tools_invalid_call"));
 }
 
 #[tokio::test]
@@ -2015,6 +2493,7 @@ async fn normal_gateway_request_never_launches_a_probe() {
         let state_path = tempdir.path().join("state.json");
         let downstream_key = generate_downstream_key("gw");
         let key = DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "up-1".into(),
             runtime_model_slug: "gpt-4.1-mini".into(),
             protocol: WireProtocol::ChatCompletions,

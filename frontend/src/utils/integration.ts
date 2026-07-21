@@ -55,6 +55,34 @@ type IntegrationConfigInput = {
 
 const gatewayProviderId = 'gateway'
 const jsonStringify = (value: unknown) => JSON.stringify(value, null, 2)
+const internalCodexCatalogFields = new Set([
+  'gateway_catalog_witness',
+  'upstream_id',
+  'route_id',
+  'runtime_model_slug',
+  'profile_key',
+  'configuration_id',
+  'configuration_fingerprint',
+  'key_fingerprint',
+  'fingerprint'
+])
+
+const sanitizeCodexCatalogValue = (value: JsonValue): JsonValue => {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeCodexCatalogValue)
+  }
+  if (typeof value !== 'object' || value === null) {
+    return value
+  }
+
+  const sanitized: { [key: string]: JsonValue } = {}
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (!internalCodexCatalogFields.has(key)) {
+      sanitized[key] = sanitizeCodexCatalogValue(nestedValue)
+    }
+  }
+  return sanitized
+}
 
 const normalizeSlug = (value: unknown) => {
   if (typeof value !== 'string') return ''
@@ -223,10 +251,10 @@ export const buildIntegrationCatalogViewState = ({
     portalModelStats
   )
   const allowedModelSlugs = new Set(
-    modelAllowlist.map(normalizeSlug).filter(Boolean)
+    modelAllowlist.map(normalizeModelMatchKey).filter(Boolean)
   )
   const allModelSlugs = allowedModelSlugs.size
-    ? rankedLiveModelSlugs.filter(slug => allowedModelSlugs.has(slug))
+    ? rankedLiveModelSlugs.filter(slug => allowedModelSlugs.has(normalizeModelMatchKey(slug)))
     : rankedLiveModelSlugs
 
   if (allModelSlugs.length === 0) {
@@ -250,7 +278,10 @@ export const buildCodexModelCatalogJson = (catalog?: CodexCatalogResponse) => {
   if (catalog.models.length === 0) {
     throw new Error('live Codex catalog is empty')
   }
-  return `${jsonStringify(catalog)}\n`
+  const sanitizedCatalog = {
+    models: catalog.models.map(model => sanitizeCodexCatalogValue(model))
+  }
+  return `${jsonStringify(sanitizedCatalog)}\n`
 }
 
 export const buildCodexConfigToml = (input: CodexConfigInput) => {

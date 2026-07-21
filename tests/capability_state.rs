@@ -1,6 +1,8 @@
 use chat_responses_codex::capabilities::*;
+use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::server::{probe_plan_for_job, CoreProbeCase};
 use chat_responses_codex::state::{AppConfig, AppState, FreekeySyncItem, PersistedState};
+use chat_responses_codex::state::{DownstreamConfig, UpstreamConfig};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -19,6 +21,7 @@ fn single_probe_job(batch: ProbeJobBatch) -> ProbeJob {
 fn blocker_probe_batch() -> ProbeJobBatch {
     ProbeJobBatch::single(ProbeJob {
         key: DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "blocker-upstream".into(),
             runtime_model_slug: "Lab/Blocker".into(),
             protocol: WireProtocol::ChatCompletions,
@@ -217,6 +220,7 @@ async fn disabled_capability_probe_configuration_rejects_jobs_and_reconciliation
     assert!(state
         .build_capability_probe_job(
             &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &upstream.api_key),
             "Lab/Disabled",
             "Lab/Disabled",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -232,6 +236,58 @@ async fn disabled_capability_probe_configuration_rejects_jobs_and_reconciliation
         .is_empty());
     assert!(!state.queue_capability_probe(single_probe_job(blocker_probe_batch())));
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn targeted_probe_job_is_bound_to_the_requested_key_fingerprint() {
+    let dir = tempdir().unwrap();
+    let upstream = UpstreamConfig {
+        id: "up-targeted-key".into(),
+        name: "targeted-key".into(),
+        base_url: "https://targeted-key.example/v1".into(),
+        api_key: "key-a".into(),
+        api_keys: vec!["key-b".into()],
+        api_key_models: vec![
+            chat_responses_codex::state::ApiKeyModelConfig {
+                api_key: "key-a".into(),
+                supported_models: vec!["glm-5.2".into()],
+            },
+            chat_responses_codex::state::ApiKeyModelConfig {
+                api_key: "key-b".into(),
+                supported_models: vec!["glm-5.2".into()],
+            },
+        ],
+        protocol: chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        protocols: vec![chat_responses_codex::routing::UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["glm-5.2".into()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream.clone()],
+            downstreams: vec![startup_downstream()],
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let key_b_fingerprint = upstream_key_fingerprint(&upstream.id, "key-b");
+
+    let job = state
+        .build_capability_probe_job(
+            &upstream.id,
+            &key_b_fingerprint,
+            "glm-5.2",
+            "glm-5.2",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+            ProbeReason::Manual,
+        )
+        .await
+        .unwrap()
+        .expect("the requested key route should produce a probe job");
+
+    assert_eq!(job.key.key_fingerprint, key_b_fingerprint);
 }
 
 #[tokio::test]
@@ -256,6 +312,7 @@ async fn probe_job_rejects_same_revision_when_immutable_configuration_changes() 
     let job = state
         .build_capability_probe_job(
             &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &upstream.api_key),
             "Lab/Binding",
             "Lab/Binding",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -337,6 +394,7 @@ async fn queued_probe_plan_keeps_configuration_snapshot_after_import() {
     let job = state
         .build_capability_probe_job(
             &upstream.id,
+            &upstream_key_fingerprint(&upstream.id, &upstream.api_key),
             "Lab/Plan",
             "Lab/Plan",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -416,16 +474,34 @@ async fn queued_probe_plan_keeps_configuration_snapshot_after_import() {
 async fn profile_round_trip_uses_exact_case_sensitive_key() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
-    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
-    let key = DialectProfileKey {
-        upstream_id: "up-1".into(),
-        runtime_model_slug: "Lab/Case-Sensitive".into(),
-        protocol: WireProtocol::ChatCompletions,
-    };
-    state
-        .upsert_dialect_profile(UpstreamDialectProfile::unknown(key.clone()))
-        .await
+    let upstream = learning_upstream("up-1", "Lab/Case-Sensitive");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream.clone()],
+            ..PersistedState::default()
+        },
+        &path,
+        AppConfig::default(),
+    );
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "Lab/Case-Sensitive",
+        WireProtocol::ChatCompletions,
+    );
+    let mut profile = UpstreamDialectProfile::unknown(key.clone());
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            &upstream,
+            &key_fingerprint,
+            "Lab/Case-Sensitive",
+            "Lab/Case-Sensitive",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
+    state.upsert_dialect_profile(profile).await.unwrap();
+    state.persist().await.unwrap();
     let loaded = AppState::load_from_path(&path, AppConfig::default())
         .await
         .unwrap();
@@ -435,6 +511,265 @@ async fn profile_round_trip_uses_exact_case_sensitive_key() {
         .profiles
         .keys()
         .any(|candidate| candidate.runtime_model_slug == "lab/case-sensitive"));
+}
+
+#[tokio::test]
+async fn file_roundtrips_two_key_profiles_for_the_same_model_protocol() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let upstream = startup_keyed_upstream(&[("key-a", &["glm-5.2"]), ("key-b", &["glm-5.2"])]);
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream.clone()],
+            ..PersistedState::default()
+        },
+        &path,
+        AppConfig::default(),
+    );
+    for api_key in ["key-a", "key-b"] {
+        let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+        let key = DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            "glm-5.2",
+            WireProtocol::Responses,
+        );
+        let fingerprint = state
+            .route_configuration_fingerprint(
+                &upstream,
+                &key_fingerprint,
+                "glm-5.2",
+                "glm-5.2",
+                chat_responses_codex::routing::UpstreamProtocol::Responses,
+            )
+            .unwrap();
+        let mut profile = UpstreamDialectProfile::unknown(key);
+        profile.configuration_fingerprint = fingerprint;
+        state.upsert_dialect_profile(profile).await.unwrap();
+    }
+    state.persist().await.unwrap();
+
+    let loaded = AppState::load_from_path(&path, AppConfig::default())
+        .await
+        .unwrap();
+    let snapshot = loaded.capability_snapshot();
+    let profiles = &snapshot.profiles;
+    assert!(profiles.contains_key(&DialectProfileKey::for_key(
+        upstream.id.clone(),
+        upstream_key_fingerprint(&upstream.id, "key-a"),
+        "glm-5.2",
+        WireProtocol::Responses,
+    )));
+    assert!(profiles.contains_key(&DialectProfileKey::for_key(
+        upstream.id.clone(),
+        upstream_key_fingerprint(&upstream.id, "key-b"),
+        "glm-5.2",
+        WireProtocol::Responses,
+    )));
+}
+
+#[test]
+fn keyed_route_fingerprints_are_isolated_from_each_other() {
+    let dir = tempdir().unwrap();
+    let upstream = startup_keyed_upstream(&[("key-a", &["glm-5.2"]), ("key-b", &["glm-5.2"])]);
+    let state = AppState::new(
+        PersistedState::default(),
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let legacy = state
+        .legacy_route_configuration_fingerprint(
+            &upstream,
+            "glm-5.2",
+            "glm-5.2",
+            chat_responses_codex::routing::UpstreamProtocol::Responses,
+        )
+        .unwrap();
+    let a = state
+        .route_configuration_fingerprint(
+            &upstream,
+            &upstream_key_fingerprint(&upstream.id, "key-a"),
+            "glm-5.2",
+            "glm-5.2",
+            chat_responses_codex::routing::UpstreamProtocol::Responses,
+        )
+        .unwrap();
+    let b = state
+        .route_configuration_fingerprint(
+            &upstream,
+            &upstream_key_fingerprint(&upstream.id, "key-b"),
+            "glm-5.2",
+            "glm-5.2",
+            chat_responses_codex::routing::UpstreamProtocol::Responses,
+        )
+        .unwrap();
+    assert_ne!(a, b);
+    assert_ne!(a, legacy);
+    assert_ne!(b, legacy);
+}
+
+#[test]
+fn legacy_profile_key_without_fingerprint_deserializes_as_legacy() {
+    let value = json!({
+        "key": {
+            "upstream_id": "up-legacy",
+            "runtime_model_slug": "glm-5.2",
+            "protocol": "responses"
+        },
+        "configuration_fingerprint": "legacy-fingerprint",
+        "probe_schema_version": DIALECT_PROBE_SCHEMA_VERSION,
+        "state": "unknown",
+        "capabilities": {},
+        "token_limit_field": null,
+        "reasoning_carrier": null,
+        "correction_rules": [],
+        "reasoning_controls": {},
+        "extension_evidence": {},
+        "last_attempt_at": null,
+        "last_success_at": null,
+        "last_operational_failure": null,
+        "evidence_codes": [],
+        "http_status": null,
+        "event_types": []
+    });
+
+    let profile: UpstreamDialectProfile = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        profile.key,
+        DialectProfileKey::legacy("up-legacy", "glm-5.2", WireProtocol::Responses,)
+    );
+}
+
+fn startup_keyed_upstream(keys: &[(&str, &[&str])]) -> UpstreamConfig {
+    let (first_key, _) = keys.first().copied().expect("at least one key");
+    UpstreamConfig {
+        id: "up-startup".into(),
+        name: "startup fixture".into(),
+        base_url: "https://startup.example/v1".into(),
+        api_key: first_key.into(),
+        api_keys: keys.iter().skip(1).map(|(key, _)| (*key).into()).collect(),
+        api_key_models: keys
+            .iter()
+            .map(
+                |(key, models)| chat_responses_codex::state::ApiKeyModelConfig {
+                    api_key: (*key).into(),
+                    supported_models: models.iter().map(|model| (*model).into()).collect(),
+                },
+            )
+            .collect(),
+        protocol: chat_responses_codex::routing::UpstreamProtocol::Responses,
+        protocols: vec![chat_responses_codex::routing::UpstreamProtocol::Responses],
+        supported_models: vec!["stale-model".into()],
+        active: true,
+        ..UpstreamConfig::default()
+    }
+}
+
+fn startup_downstream() -> DownstreamConfig {
+    DownstreamConfig {
+        id: "down-startup".into(),
+        name: "startup downstream".into(),
+        model_allowlist: vec!["glm-5.2".into()],
+        active: true,
+        ..serde_json::from_value(json!({
+            "name": "startup downstream",
+            "active": true
+        }))
+        .expect("default downstream fields")
+    }
+}
+
+async fn write_legacy_startup_fixture(
+    path: &std::path::Path,
+    upstream: UpstreamConfig,
+) -> DialectProfileKey {
+    let seed = AppState::new(PersistedState::default(), path, AppConfig::default());
+    let legacy_fingerprint = seed
+        .legacy_route_configuration_fingerprint(
+            &upstream,
+            "glm-5.2",
+            "glm-5.2",
+            chat_responses_codex::routing::UpstreamProtocol::Responses,
+        )
+        .unwrap();
+    let key = DialectProfileKey::legacy(upstream.id.clone(), "glm-5.2", WireProtocol::Responses);
+    let mut profile = UpstreamDialectProfile::unknown(key.clone());
+    profile.configuration_fingerprint = legacy_fingerprint;
+    let document = CapabilityStateDocument {
+        profiles: std::iter::once((key.clone(), profile)).collect(),
+        ..CapabilityStateDocument::default()
+    };
+    let state = PersistedState {
+        upstreams: vec![upstream],
+        downstreams: vec![startup_downstream()],
+        ..PersistedState::default()
+    };
+    tokio::fs::write(path, serde_json::to_vec(&state).unwrap())
+        .await
+        .unwrap();
+    let sidecar = path.with_file_name(format!(
+        "{}.capabilities.json",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    tokio::fs::write(sidecar, serde_json::to_vec(&document).unwrap())
+        .await
+        .unwrap();
+    key
+}
+
+#[tokio::test]
+async fn single_key_startup_rebinds_a_current_legacy_profile() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let upstream = startup_keyed_upstream(&[("key-a", &["glm-5.2"])]);
+    let legacy_key = write_legacy_startup_fixture(&path, upstream.clone()).await;
+
+    let loaded = AppState::load_from_path(&path, AppConfig::default())
+        .await
+        .unwrap();
+    let expected_key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        upstream_key_fingerprint(&upstream.id, "key-a"),
+        "glm-5.2",
+        WireProtocol::Responses,
+    );
+    let snapshot = loaded.capability_snapshot();
+    assert!(snapshot.profiles.contains_key(&expected_key));
+    assert!(!snapshot.profiles.contains_key(&legacy_key));
+
+    let persisted = tokio::fs::read_to_string(path.with_file_name("state.json.capabilities.json"))
+        .await
+        .unwrap();
+    assert!(persisted.contains(&expected_key.key_fingerprint));
+    assert!(!persisted.contains("\"key_fingerprint\":\"\""));
+}
+
+#[tokio::test]
+async fn multi_key_startup_discards_ambiguous_legacy_evidence_and_queues_both_keys() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let upstream = startup_keyed_upstream(&[("key-a", &["glm-5.2"]), ("key-b", &["glm-5.2"])]);
+    let legacy_key = write_legacy_startup_fixture(&path, upstream.clone()).await;
+
+    let loaded = AppState::load_from_path(&path, AppConfig::default())
+        .await
+        .unwrap();
+    assert!(loaded.capability_snapshot().profiles.is_empty());
+    let jobs = loaded
+        .reconcile_dialect_profiles(1_700_000_000)
+        .await
+        .unwrap();
+    let fingerprints = jobs
+        .iter()
+        .map(|job| job.key.key_fingerprint.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(fingerprints.len(), 2);
+    assert!(fingerprints.contains(&upstream_key_fingerprint(&upstream.id, "key-a")));
+    assert!(fingerprints.contains(&upstream_key_fingerprint(&upstream.id, "key-b")));
+    assert!(!loaded
+        .capability_snapshot()
+        .profiles
+        .contains_key(&legacy_key));
 }
 
 fn stream_only_profile(key: DialectProfileKey, fingerprint: &str) -> UpstreamDialectProfile {
@@ -474,6 +809,7 @@ async fn stream_only_learning_and_configuration_replace_do_not_lose_updates() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
         upstream_id: "up-learning".into(),
         runtime_model_slug: "Lab/Atomic".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -481,6 +817,7 @@ async fn stream_only_learning_and_configuration_replace_do_not_lose_updates() {
     let fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &key.key_fingerprint,
             "Lab/Atomic",
             "Lab/Atomic",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -531,6 +868,7 @@ async fn stream_only_learning_reloads_latest_sidecar_before_single_publish() {
         AppConfig::default(),
     );
     let target_key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint("up-learning", "secret"),
         upstream_id: "up-learning".into(),
         runtime_model_slug: "Lab/Target".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -538,6 +876,7 @@ async fn stream_only_learning_reloads_latest_sidecar_before_single_publish() {
     let fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &target_key.key_fingerprint,
             "Lab/Target",
             "Lab/Target",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -560,6 +899,7 @@ async fn stream_only_learning_reloads_latest_sidecar_before_single_publish() {
         .await
         .unwrap();
     let unrelated_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-unrelated".into(),
         runtime_model_slug: "Lab/Unrelated".into(),
         protocol: WireProtocol::Responses,
@@ -602,7 +942,9 @@ async fn stream_only_learning_rejects_fingerprint_and_schema_mismatches() {
         &path,
         AppConfig::default(),
     );
+    state.persist().await.unwrap();
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
         upstream_id: "up-learning".into(),
         runtime_model_slug: "Lab/Stale".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -610,6 +952,7 @@ async fn stream_only_learning_rejects_fingerprint_and_schema_mismatches() {
     let current_fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &key.key_fingerprint,
             "Lab/Stale",
             "Lab/Stale",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -664,6 +1007,7 @@ async fn stream_only_learning_rejects_fingerprint_stale_against_latest_configura
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "Lab/Changed".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -671,6 +1015,7 @@ async fn stream_only_learning_rejects_fingerprint_stale_against_latest_configura
     let observed_fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &key.key_fingerprint,
             "Lab/Changed",
             "Lab/Changed",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -741,6 +1086,7 @@ async fn stream_only_learning_does_not_recreate_a_deleted_upstream_profile() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "Lab/Deleted".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -748,6 +1094,7 @@ async fn stream_only_learning_does_not_recreate_a_deleted_upstream_profile() {
     let fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &key.key_fingerprint,
             "Lab/Deleted",
             "Lab/Deleted",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -783,6 +1130,7 @@ async fn removing_upstream_clears_capability_profiles_for_that_upstream() {
         .await
         .unwrap();
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "Lab/Case-Sensitive".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -900,6 +1248,53 @@ async fn updating_upstream_queues_capability_probe_jobs_for_active_routes() {
 }
 
 #[tokio::test]
+async fn updating_upstream_clears_legacy_failure_count() {
+    let dir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+                id: "up-health-reset".into(),
+                name: "before update".into(),
+                base_url: "https://health-reset.example/v1".into(),
+                api_key: "fixture-secret".into(),
+                supported_models: vec!["Lab/Health-Reset".into()],
+                active: false,
+                failure_count: 3,
+                ..Default::default()
+            }],
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    state
+        .mark_upstream_failure("up-health-reset")
+        .await
+        .unwrap();
+    assert_eq!(state.snapshot().await.upstreams[0].failure_count, 1);
+
+    state
+        .update_upstream(
+            "up-health-reset",
+            chat_responses_codex::state::UpstreamConfig {
+                id: "ignored".into(),
+                name: "after update".into(),
+                base_url: "https://health-reset.example/v1".into(),
+                api_key: "fixture-secret".into(),
+                supported_models: vec!["Lab/Health-Reset".into()],
+                active: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let upstream = state.snapshot().await.upstreams.remove(0);
+    assert_eq!(upstream.failure_count, 0);
+}
+
+#[tokio::test]
 async fn inserting_upstream_does_not_wait_for_full_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
@@ -932,7 +1327,9 @@ async fn inserting_upstream_does_not_wait_for_full_probe_queue() {
         .expect("configuration persistence must not wait for probe queue capacity")
         .unwrap()
         .unwrap();
-    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
+    let blocker = receiver
+        .try_recv()
+        .expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"
@@ -999,7 +1396,9 @@ async fn updating_upstream_does_not_wait_for_full_probe_queue() {
         .expect("configuration persistence must not wait for probe queue capacity")
         .unwrap()
         .unwrap();
-    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
+    let blocker = receiver
+        .try_recv()
+        .expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"
@@ -1229,7 +1628,7 @@ async fn inserting_same_upstream_id_with_different_configuration_is_rejected() {
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams.len(), 1);
     assert_eq!(snapshot.upstreams[0].name, "original");
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
 }
 
 #[tokio::test]
@@ -1368,6 +1767,7 @@ async fn freekey_sync_does_not_requeue_current_route_profile() {
     let fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &first_job.key.key_fingerprint,
             "Lab/Managed-Model",
             "Lab/Managed-Model",
             chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
@@ -1434,7 +1834,9 @@ async fn freekey_sync_does_not_wait_for_full_probe_queue() {
     .expect("configuration persistence must not wait for probe queue capacity")
     .unwrap();
     assert_eq!(summary.created, 2);
-    let blocker = receiver.try_recv().expect("the blocker batch should remain queued");
+    let blocker = receiver
+        .try_recv()
+        .expect("the blocker batch should remain queued");
     assert_eq!(
         single_probe_job(blocker).key.upstream_id,
         "blocker-upstream"

@@ -24,6 +24,28 @@ describe('admin ui structure', () => {
     expect(board).not.toContain('summary-card')
   })
 
+  it('uses anonymous route ids for model probe channels', () => {
+    const board = source('components/ModelProbeBoard.vue')
+    const charts = source('utils/modelProbeCharts.ts')
+
+    expect(board).toContain('channel.route_id')
+    expect(board).not.toContain('channel.key_prefix')
+    expect(charts).toContain('route_id')
+    expect(charts).not.toContain('key_prefix')
+  })
+
+  it('uses anonymous route ids for capability profile actions', () => {
+    const api = source('api/admin.ts')
+    const types = source('types/index.ts')
+    const center = source('components/TroubleshootingCenter.vue')
+    const page = source('views/admin/Troubleshooting.vue')
+
+    for (const contents of [api, types, center, page]) {
+      expect(contents).toContain('route_id')
+      expect(contents).not.toContain('key_fingerprint')
+    }
+  })
+
   it('uses the responsive upstream management workbench', () => {
     const page = source('views/admin/Upstreams.vue')
 
@@ -43,6 +65,13 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('setInterval')
     expect(page).not.toContain('startAutoRefresh')
     expect(page).not.toContain('onUnmounted')
+  })
+
+  it('labels indexed model discovery results without key prefixes', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('Key #${item.key_index + 1}')
+    expect(page).not.toContain('item.key_prefix')
   })
 
   it('uses the responsive downstream management workbench', () => {

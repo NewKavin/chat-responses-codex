@@ -14,7 +14,7 @@ describe('modelProbeCharts', () => {
       {
         upstream_id: 'up-2',
         upstream_name: 'Beta',
-        key_prefix: 'beta',
+        route_id: 'route_beta',
         status: 'offline',
         latency_ms: 200,
         model_count: 0,
@@ -25,7 +25,7 @@ describe('modelProbeCharts', () => {
       {
         upstream_id: 'up-1',
         upstream_name: 'Alpha',
-        key_prefix: 'alpha',
+        route_id: 'route_alpha',
         status: 'healthy',
         latency_ms: 100,
         model_count: 2,
@@ -36,7 +36,7 @@ describe('modelProbeCharts', () => {
       {
         upstream_id: 'up-3',
         upstream_name: 'Gamma',
-        key_prefix: 'gamma',
+        route_id: 'route_gamma',
         status: 'healthy',
         latency_ms: 90,
         model_count: 1,
@@ -69,7 +69,7 @@ describe('model probe filtering', () => {
     {
       upstream_id: 'up-1',
       upstream_name: 'Alpha',
-      key_prefix: 'ak-alpha',
+      route_id: 'route_alpha',
       status: 'healthy',
       latency_ms: 100,
       model_count: 2,
@@ -80,7 +80,7 @@ describe('model probe filtering', () => {
     {
       upstream_id: 'up-2',
       upstream_name: 'Beta',
-      key_prefix: 'bk-beta',
+      route_id: 'route_beta',
       status: 'offline',
       latency_ms: 0,
       model_count: 0,
@@ -105,7 +105,7 @@ describe('model probe filtering', () => {
       {
         upstream_id: 'up-1',
         upstream_name: 'Alpha',
-        key_prefix: 'ak-alpha',
+        route_id: 'route_alpha',
         status: 'healthy',
         latency_ms: 100,
         model_count: 1,
@@ -116,7 +116,7 @@ describe('model probe filtering', () => {
       {
         upstream_id: 'up-2',
         upstream_name: 'Beta',
-        key_prefix: 'bk-beta',
+        route_id: 'route_beta',
         status: 'unknown',
         latency_ms: 0,
         model_count: 0,

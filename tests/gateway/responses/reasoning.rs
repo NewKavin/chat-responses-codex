@@ -167,6 +167,7 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
     let snapshot = state.snapshot().await;
     let upstream = &snapshot.upstreams[0];
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(upstream, "gpt-4.1-mini"),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "gpt-4.1-mini".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -175,6 +176,7 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(
             upstream,
+            &profile.key.key_fingerprint,
             "gpt-4.1-mini",
             "gpt-4.1-mini",
             UpstreamProtocol::ChatCompletions,
@@ -477,6 +479,7 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
             .find(|upstream| upstream.id == upstream_id)
             .unwrap();
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(upstream, model),
             upstream_id: upstream_id.into(),
             runtime_model_slug: model.into(),
             protocol: WireProtocol::Responses,
@@ -485,7 +488,13 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
         profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
         profile.reasoning_carrier = Some(ReasoningCarrier::ResponsesReasoningItem);
         profile.configuration_fingerprint = state
-            .route_configuration_fingerprint(upstream, model, model, UpstreamProtocol::Responses)
+            .route_configuration_fingerprint(
+                upstream,
+                &profile.key.key_fingerprint,
+                model,
+                model,
+                UpstreamProtocol::Responses,
+            )
             .unwrap();
         for capability in [
             Capability::TextInput,
@@ -563,7 +572,7 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
         .unwrap();
 
     assert!(continuation_response.status().is_server_error());
-    assert_eq!(exact_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(exact_hits.load(Ordering::SeqCst), 3);
     assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
 }
 
@@ -704,10 +713,17 @@ async fn responses_continuation_keeps_chat_profile_when_responses_becomes_eligib
 
     let fingerprint_for = |protocol| {
         state
-            .route_configuration_fingerprint(&upstream, model, model, protocol)
+            .route_configuration_fingerprint(
+                &upstream,
+                &upstream_model_key_fingerprint(&upstream, model),
+                model,
+                model,
+                protocol,
+            )
             .unwrap()
     };
     let mut chat_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -731,6 +747,7 @@ async fn responses_continuation_keeps_chat_profile_when_responses_becomes_eligib
     state.upsert_dialect_profile(chat_profile).await.unwrap();
 
     let responses_key = DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::Responses,
@@ -937,6 +954,7 @@ async fn responses_continuation_rejects_same_profile_key_after_fingerprint_drift
     );
 
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::Responses,
@@ -944,7 +962,13 @@ async fn responses_continuation_rejects_same_profile_key_after_fingerprint_drift
     profile.state = DialectProfileState::Verified;
     profile.reasoning_carrier = Some(ReasoningCarrier::ResponsesReasoningItem);
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::Responses)
+        .route_configuration_fingerprint(
+            &upstream,
+            &profile.key.key_fingerprint,
+            model,
+            model,
+            UpstreamProtocol::Responses,
+        )
         .unwrap();
     for capability in [
         Capability::TextInput,
@@ -1144,13 +1168,20 @@ async fn responses_continuation_rejects_same_profile_key_after_probe_or_fingerpr
     );
 
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::Responses,
     });
     profile.state = DialectProfileState::Verified;
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::Responses)
+        .route_configuration_fingerprint(
+            &upstream,
+            &profile.key.key_fingerprint,
+            model,
+            model,
+            UpstreamProtocol::Responses,
+        )
         .unwrap();
     profile
         .capabilities
@@ -1334,13 +1365,20 @@ async fn responses_continuation_rejects_deleted_exact_profile_before_dispatch() 
     );
 
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::Responses,
     });
     profile.state = DialectProfileState::Verified;
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::Responses)
+        .route_configuration_fingerprint(
+            &upstream,
+            &profile.key.key_fingerprint,
+            model,
+            model,
+            UpstreamProtocol::Responses,
+        )
         .unwrap();
     profile
         .capabilities

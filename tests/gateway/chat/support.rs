@@ -100,6 +100,7 @@ pub(super) async fn capture_single_chat_request(
     );
 
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: model.to_string(),
         protocol: WireProtocol::ChatCompletions,

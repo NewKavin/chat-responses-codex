@@ -252,7 +252,7 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
     .expect("rate-limit cooldown diagnostic request should not wait for retry-after")
     .expect("rate-limit cooldown diagnostic request should complete");
 
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     // Check that runtime state shows cooldown
     let snapshots = state.upstream_runtime_snapshots().await;

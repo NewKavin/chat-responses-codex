@@ -194,6 +194,7 @@ impl StreamOnlyHarness {
         }
 
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "up-stream-only".into(),
             runtime_model_slug: MODEL.into(),
             protocol: WireProtocol::from(protocol),

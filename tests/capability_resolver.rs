@@ -4,6 +4,7 @@ use chat_responses_codex::capabilities::*;
 
 fn route(protocol: WireProtocol) -> RouteIdentity {
     RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "relay-17".to_owned(),
         exposed_model_slug: "opaque-public-name".to_owned(),
         runtime_model_slug: "opaque-runtime-name".to_owned(),
@@ -121,7 +122,7 @@ fn legacy_strip_flag_cannot_remove_required_continuation_state() {
 
 #[test]
 fn capability_all_and_messages_baseline_are_complete_and_conservative() {
-    assert_eq!(DIALECT_PROBE_SCHEMA_VERSION, 10);
+    assert_eq!(DIALECT_PROBE_SCHEMA_VERSION, 11);
     assert_eq!(
         Capability::ALL,
         [
@@ -228,6 +229,7 @@ fn unknown_profile_has_stable_empty_serializable_state() {
 fn continuation_capabilities_require_an_exact_profile_key_match() {
     let route = route(WireProtocol::ChatCompletions);
     let foreign_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "relay-elsewhere".to_owned(),
         runtime_model_slug: route.runtime_model_slug.clone(),
         protocol: route.protocol,
@@ -422,6 +424,7 @@ fn later_capability_override_wins_and_required_rejection_fails_closed() {
 fn mismatched_profile_is_ignored_for_all_route_scoped_evidence() {
     let route = route(WireProtocol::Responses);
     let foreign_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "another-relay".to_owned(),
         runtime_model_slug: route.runtime_model_slug.clone(),
         protocol: route.protocol,
@@ -1138,6 +1141,7 @@ fn only_exact_chat_continuation_can_supply_a_required_reasoning_carrier() {
     let foreign = RequestedFeatures {
         required: BTreeSet::from([Capability::ReasoningReplay]),
         continuation_profile: Some(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "another-relay".to_owned(),
             runtime_model_slug: route.runtime_model_slug.clone(),
             protocol: route.protocol,
@@ -1216,6 +1220,7 @@ fn profile_fidelity_controls_provisional_and_native_preference() {
         );
 
         let mut foreign = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: "foreign-relay".to_owned(),
             runtime_model_slug: route.runtime_model_slug.clone(),
             protocol: route.protocol,

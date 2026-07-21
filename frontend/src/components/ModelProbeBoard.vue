@@ -151,7 +151,7 @@
         </div>
         <article
           v-for="channel in sortedChannels"
-          :key="`${channel.upstream_id}-${channel.key_prefix}`"
+          :key="channel.route_id"
           class="channel-card"
         >
           <div class="channel-card__top">

@@ -17,6 +17,7 @@ use crate::capabilities::{
     ProbeQueueState, ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField,
     UpstreamDialectProfile, WireProtocol,
 };
+use crate::keys::upstream_key_fingerprint;
 use crate::protocol::stream_aggregate::{SseEvent, MAX_STREAM_AGGREGATE_TOTAL_BYTES};
 use crate::protocol::{
     ProtocolError, StreamAggregateResult, StreamResponseAggregator, UpstreamStreamErrorKind,
@@ -196,6 +197,7 @@ pub fn probe_plan_for_job(job: &ProbeJob) -> ProbePlan {
         .unwrap_or_else(|| job.key.runtime_model_slug.clone());
     let mut route = RouteIdentity {
         upstream_id: job.key.upstream_id.clone(),
+        key_fingerprint: job.key.key_fingerprint.clone(),
         exposed_model_slug: primary_exposed_model,
         runtime_model_slug: job.key.runtime_model_slug.clone(),
         protocol: job.key.protocol,
@@ -212,6 +214,7 @@ pub fn probe_plan_for_job(job: &ProbeJob) -> ProbePlan {
         .find_map(|exposed_model_slug| {
             let mut alias_route = RouteIdentity {
                 upstream_id: job.key.upstream_id.clone(),
+                key_fingerprint: job.key.key_fingerprint.clone(),
                 exposed_model_slug: exposed_model_slug.clone(),
                 runtime_model_slug: job.key.runtime_model_slug.clone(),
                 protocol: job.key.protocol,
@@ -275,11 +278,12 @@ pub async fn run_probe_plan_for_model_for_test(
     plan: CapabilityProbePlan,
     timeout_seconds: u64,
 ) -> io::Result<ProbeOutcome> {
-    let key = DialectProfileKey {
-        upstream_id: "probe-upstream".to_owned(),
-        runtime_model_slug: runtime_model_slug.to_owned(),
-        protocol: plan.protocol,
-    };
+    let key = DialectProfileKey::for_key(
+        "probe-upstream",
+        upstream_key_fingerprint("probe-upstream", api_key),
+        runtime_model_slug,
+        plan.protocol,
+    );
     let client = Client::builder().build().expect("probe test client");
     ProbeExecutor {
         client,
@@ -391,6 +395,7 @@ impl CapabilityProbeService {
 pub async fn maybe_queue_dialect_error_probe(
     state: &AppState,
     upstream_id: &str,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
@@ -434,6 +439,7 @@ pub async fn maybe_queue_dialect_error_probe(
     state
         .build_capability_probe_job(
             upstream_id,
+            key_fingerprint,
             exposed_model_slug,
             runtime_model_slug,
             protocol,
@@ -461,11 +467,19 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         return Ok(());
     }
     let plan = probe_plan_for_job(job);
-    let api_key = upstream
-        .keys_for_model(&job.key.runtime_model_slug)
+    let mapped_keys = upstream.keys_for_model(&job.key.runtime_model_slug);
+    let matching_keys = upstream
+        .available_keys()
         .into_iter()
-        .next()
-        .unwrap_or_else(|| upstream.api_key.clone());
+        .filter(|api_key| {
+            mapped_keys.iter().any(|mapped| mapped == api_key)
+                && upstream_key_fingerprint(&upstream.id, api_key) == job.key.key_fingerprint
+        })
+        .collect::<Vec<_>>();
+    let [api_key] = matching_keys.as_slice() else {
+        return Ok(());
+    };
+    let api_key = api_key.clone();
     let outcome = ProbeExecutor {
         client: state.client_for_url(&upstream.base_url),
         base_url: upstream.base_url.clone(),
@@ -489,6 +503,7 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         .unwrap_or_else(|| UpstreamDialectProfile::unknown(job.key.clone()));
     profile.configuration_fingerprint = job.configuration.configuration_fingerprint.clone();
     profile.probe_schema_version = job.configuration.probe_schema_version;
+    let mut conclusive_capabilities = None;
     match outcome {
         ProbeOutcome::OperationalFailure {
             code,
@@ -516,6 +531,7 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
             http_status,
             attempted_at,
         } => {
+            conclusive_capabilities = Some(capabilities.keys().copied().collect::<BTreeSet<_>>());
             apply_probe_outcome(
                 &mut profile,
                 ProbeOutcome::Conclusive {
@@ -533,9 +549,18 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
             );
         }
     }
-    let _ = state
+    let applied = state
         .upsert_dialect_profile_if_probe_current(profile, &job.configuration)
         .await?;
+    if applied {
+        if let Some(capabilities) = conclusive_capabilities {
+            state.clear_runtime_capability_hints_after_probe(
+                &job.key,
+                &job.configuration.configuration_fingerprint,
+                &capabilities,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -735,15 +760,17 @@ impl ProbeExecutor {
                     let Some(call) = response.body["output"].as_array().and_then(|output| {
                         output.iter().find(|item| item["type"] == "function_call")
                     }) else {
-                        return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "function_tools_missing_call".into(),
+                        return Ok(ProbeCaseVerdict::Unobserved {
+                            operational_code: "function_tools_missing_call".into(),
                             http_status: Some(response.status.as_u16()),
                         });
                     };
                     let arguments = call["arguments"].as_str().unwrap_or_default();
                     let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
                     return if call["name"] == "gateway_compat_probe"
-                        && call["call_id"].is_string()
+                        && call["call_id"]
+                            .as_str()
+                            .is_some_and(|call_id| !call_id.is_empty())
                         && parsed["nonce"] == nonce
                     {
                         Ok(ProbeCaseVerdict::Supported {
@@ -788,15 +815,17 @@ impl ProbeExecutor {
                     .as_array()
                     .and_then(|calls| calls.first())
                 else {
-                    return Ok(ProbeCaseVerdict::Rejected {
-                        evidence_code: "function_tools_missing_call".into(),
+                    return Ok(ProbeCaseVerdict::Unobserved {
+                        operational_code: "function_tools_missing_call".into(),
                         http_status: Some(response.status.as_u16()),
                     });
                 };
                 let arguments = call["function"]["arguments"].as_str().unwrap_or_default();
                 let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
                 if call["function"]["name"] == "gateway_compat_probe"
-                    && call["id"].is_string()
+                    && call["id"]
+                        .as_str()
+                        .is_some_and(|call_id| !call_id.is_empty())
                     && parsed["nonce"] == nonce
                 {
                     Ok(ProbeCaseVerdict::Supported {
@@ -937,23 +966,23 @@ impl ProbeExecutor {
                         });
                     }
                     let Some(output) = first.body["output"].as_array() else {
-                        return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "tool_continuation_missing_call".into(),
+                        return Ok(ProbeCaseVerdict::Unobserved {
+                            operational_code: "tool_continuation_missing_call".into(),
                             http_status: Some(first.status.as_u16()),
                         });
                     };
                     let Some(call) = output.iter().find(|item| item["type"] == "function_call")
                     else {
-                        return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "tool_continuation_missing_call".into(),
+                        return Ok(ProbeCaseVerdict::Unobserved {
+                            operational_code: "tool_continuation_missing_call".into(),
                             http_status: Some(first.status.as_u16()),
                         });
                     };
                     let arguments = call["arguments"].as_str().unwrap_or_default();
                     let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
-                    let Some(call_id) = call["call_id"].as_str() else {
+                    let Some(call_id) = call["call_id"].as_str().filter(|id| !id.is_empty()) else {
                         return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "tool_continuation_missing_call".into(),
+                            evidence_code: "tool_continuation_invalid_call".into(),
                             http_status: Some(first.status.as_u16()),
                         });
                     };
@@ -1047,8 +1076,8 @@ impl ProbeExecutor {
                     .as_array()
                     .and_then(|calls| calls.first())
                 else {
-                    return Ok(ProbeCaseVerdict::Rejected {
-                        evidence_code: "tool_continuation_missing_call".into(),
+                    return Ok(ProbeCaseVerdict::Unobserved {
+                        operational_code: "tool_continuation_missing_call".into(),
                         http_status: Some(first.status.as_u16()),
                     });
                 };
@@ -1060,9 +1089,9 @@ impl ProbeExecutor {
                         http_status: Some(first.status.as_u16()),
                     });
                 }
-                let Some(call_id) = call["id"].as_str() else {
+                let Some(call_id) = call["id"].as_str().filter(|id| !id.is_empty()) else {
                     return Ok(ProbeCaseVerdict::Rejected {
-                        evidence_code: "tool_continuation_missing_call".into(),
+                        evidence_code: "tool_continuation_invalid_call".into(),
                         http_status: Some(first.status.as_u16()),
                     });
                 };

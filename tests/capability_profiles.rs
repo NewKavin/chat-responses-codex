@@ -9,6 +9,7 @@ fn verified_profile(
     protocol: WireProtocol,
 ) -> UpstreamDialectProfile {
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: upstream_id.into(),
         runtime_model_slug: runtime_model_slug.into(),
         protocol,
@@ -53,6 +54,7 @@ fn route_fingerprint_changes_for_every_dialect_input() {
 #[test]
 fn operational_probe_failure_does_not_erase_verified_evidence() {
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "u".into(),
         runtime_model_slug: "m".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -102,6 +104,7 @@ fn direct_success_with_complete_agent_profile_is_full() {
 #[test]
 fn usable_text_with_partial_profile_is_adapted_not_unusable() {
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up".into(),
         runtime_model_slug: "opaque".into(),
         protocol: WireProtocol::ChatCompletions,

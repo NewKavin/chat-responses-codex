@@ -1864,3 +1864,55 @@ Expected: the first three searches return no request-path or public DTO matches,
 rtk git add .env.example docker-compose.yml README.md DEPLOYMENT.md tests/templates.rs tests/docker.rs
 rtk git commit -m "docs: describe multi-key route resilience"
 ```
+
+## Task 15: Make The Portal Codex Catalog Complete And Route-Agnostic
+
+**Files:**
+- Modify: `src/server/gateway.rs`
+- Modify: `src/server/gateway/capability_routing.rs`
+- Modify: `tests/gateway/capability_routing.rs`
+- Modify: `frontend/src/utils/integration.ts`
+- Modify: `frontend/src/views/portal/Integration.vue`
+- Modify: `frontend/tests/utils/integration.spec.ts`
+- Modify: `frontend/tests/views/portal-integration.spec.ts`
+- Modify: `docs/codex-integration-guide.md`
+- Modify: `tests/templates.rs`
+
+- [ ] **Step 1: Write failing catalog and routing regressions**
+
+Add tests proving that a non-empty downstream allowlist is the complete Codex authorization set even when one authorized slug is temporarily absent from every active upstream `route_models()`. Preserve every distinct live upstream slug and casing for case-insensitive matches, including independently routable case variants. Use the first allowlist spelling for unmatched models, deduplicate only allowlist-only entries case-insensitively, and generate conservative metadata for entries without a witness.
+
+Assert the default gateway catalog and frontend-generated `model-catalog.json` contain no `gateway_catalog_witness`, `upstream_id`, `profile_key`, `configuration_id`, or fingerprint. Give the frontend fixture a legacy witness field so the compatibility redaction is exercised.
+
+Replace tests that pin new Codex requests to the catalog witness/superset. A new FunctionTools or reasoning request must use the normally highest-ranked route among every route that actually satisfies `requested_features`, including a route with a different upstream or supported protocol. Keep the existing continuation exact-profile tests unchanged.
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```bash
+rtk cargo test --locked --offline --test gateway capability_routing -- --nocapture
+rtk cargo test --locked --offline --test templates codex -- --nocapture
+cd frontend
+rtk npm test -- tests/utils/integration.spec.ts tests/views/portal-integration.spec.ts
+```
+
+Expected: the unmatched allowlist model is omitted, witness diagnostics are serialized, frontend preserves them, and new requests remain constrained to the catalog-selected profile/protocol.
+
+- [ ] **Step 3: Implement the authoritative clean catalog**
+
+When `model_allowlist` is non-empty, retain every distinct active live slug whose normalized key is authorized, then synthesize the first configured spelling for each normalized allowlist key with no live match. When it is empty, use active upstream persisted route models. Continue selecting a deterministic internal witness only to calculate public capability and context metadata, falling back conservatively when none exists.
+
+Remove `gateway_catalog_witness` from the public model JSON. In `buildCodexModelCatalogJson()`, clone the catalog while deleting a legacy witness property from every model before serialization. Do not add user-visible upstream IDs or configuration fingerprints elsewhere.
+
+- [ ] **Step 4: Remove catalog constraints from new request routing**
+
+Delete `codex_catalog_allowed_profiles` and its protocol narrowing branch. Keep `route_profile_constraint_active` and `route_matches_profile_constraint` only for exact or migrated legacy continuation profiles. Every new request continues through `route.eligible`, requested capability resolution, runtime hints, NativeFileId protocol validation, health filtering, admission control and normal ranking. Remove `is_compatible_catalog_superset` and tests that only encode the deleted new-request constraint if it has no remaining caller.
+
+- [ ] **Step 5: Update portal and operator guidance**
+
+Explain that all currently authorized models are included automatically. For an allowlist change, refresh the portal and replace the complete `model-catalog.json`; do not clone another model entry or configure `upstream_id`, fingerprint, profile key or capability fields. Models already present in the catalog only require selecting the slug in a new session; `config.toml` does not need to be recopied unless its selected default model changes.
+
+- [ ] **Step 6: Verify focused and complete suites**
+
+Run focused catalog, routing, continuation, frontend and template tests first. Then run `cargo fmt`, `git diff --check`, the locked offline Rust workspace, frontend tests and frontend build. Search the generated catalog code and guide for public witness/upstream/fingerprint leakage while allowing explicitly documented statements that those are internal and must not be configured.

@@ -28,6 +28,42 @@ pub use std::time::Duration;
 pub use tempfile::tempdir;
 pub use tower::ServiceExt;
 
+#[derive(Clone, Default)]
+pub(crate) struct TracingCapture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl TracingCapture {
+    pub(crate) fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+    }
+}
+
+pub(crate) struct TracingCaptureWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for TracingCaptureWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for TracingCapture {
+    type Writer = TracingCaptureWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        TracingCaptureWriter {
+            bytes: self.bytes.clone(),
+        }
+    }
+}
+
 pub(crate) fn generate_downstream_key(prefix: &str) -> GeneratedDownstreamKey {
     let plaintext = format!("{prefix}-{}", uuid::Uuid::new_v4().simple());
     let salt = format!("test-{}", uuid::Uuid::new_v4().simple());
@@ -38,6 +74,14 @@ pub(crate) fn generate_downstream_key(prefix: &str) -> GeneratedDownstreamKey {
         plaintext,
         hash: format!("{salt}:{:016x}", hasher.finish()),
     }
+}
+
+pub(crate) fn upstream_model_key_fingerprint(upstream: &UpstreamConfig, model: &str) -> String {
+    upstream
+        .keys_for_model(model)
+        .first()
+        .map(|api_key| chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, api_key))
+        .unwrap_or_default()
 }
 
 const PROXY_ENV_VARS: &[&str] = &[
@@ -91,8 +135,15 @@ pub(crate) async fn stamp_current_dialect_profile(
         .iter()
         .find(|upstream| upstream.id == upstream_id)
         .unwrap();
+    profile.key.key_fingerprint = upstream_model_key_fingerprint(upstream, exposed_model);
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(upstream, exposed_model, &runtime_model_slug, protocol)
+        .route_configuration_fingerprint(
+            upstream,
+            &profile.key.key_fingerprint,
+            exposed_model,
+            &runtime_model_slug,
+            protocol,
+        )
         .unwrap();
     profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
 }

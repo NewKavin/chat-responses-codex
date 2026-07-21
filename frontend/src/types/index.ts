@@ -66,6 +66,13 @@ export interface ApiKeyModelConfig {
   supported_models: string[]
 }
 
+export interface KeyModelDiscoveryResult {
+  key_index: number
+  models?: number
+  model_list?: string[]
+  error?: string
+}
+
 export interface UpstreamConfig {
   id: string
   name: string
@@ -284,7 +291,7 @@ export interface ModelProbeSummary {
 export interface ModelProbeChannel {
   upstream_id: string
   upstream_name: string
-  key_prefix: string
+  route_id: string
   status: 'healthy' | 'offline' | 'degraded' | string
   latency_ms: number
   model_count: number
@@ -322,7 +329,7 @@ export type ModelQualificationCategory =
 
 export interface ModelQualificationEvidence {
   upstream_id: string
-  key_prefix: string
+  route_id: string
   model: string
   protocol: 'ChatCompletions' | 'Responses'
   level: ModelQualificationLevel
@@ -531,6 +538,7 @@ export interface CapabilityConfigurationDocument {
 
 export interface DialectProfileKey {
   upstream_id: string
+  route_id: string
   runtime_model_slug: string
   protocol: 'chat_completions' | 'responses'
 }

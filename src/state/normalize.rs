@@ -1,7 +1,7 @@
 use super::types::*;
 use crate::routing::UpstreamProtocol;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn parse_upstream_protocol(value: &str) -> UpstreamProtocol {
     match value {
@@ -49,24 +49,58 @@ fn normalized_string_list(values: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn normalized_api_key_models(values: Vec<ApiKeyModelConfig>) -> Vec<ApiKeyModelConfig> {
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
+fn normalized_current_keys(api_key: &str, api_keys: &[String]) -> Vec<String> {
+    normalized_string_list(
+        std::iter::once(api_key.to_string())
+            .chain(api_keys.iter().cloned())
+            .collect(),
+    )
+}
+
+fn normalized_api_key_models(
+    values: Vec<ApiKeyModelConfig>,
+    current_keys: &[String],
+) -> Vec<ApiKeyModelConfig> {
+    let current_key_set = current_keys.iter().cloned().collect::<HashSet<_>>();
+    let mut positions = HashMap::<String, usize>::new();
+    let mut normalized: Vec<ApiKeyModelConfig> = Vec::new();
     for mut value in values {
         let api_key = value.api_key.trim().to_string();
-        if api_key.is_empty() || !seen.insert(api_key.clone()) {
+        if api_key.is_empty() || !current_key_set.contains(&api_key) {
             continue;
         }
         let supported_models = normalized_string_list(std::mem::take(&mut value.supported_models));
-        if supported_models.is_empty() {
-            continue;
+        if let Some(index) = positions.get(&api_key).copied() {
+            let mut merged = std::mem::take(&mut normalized[index].supported_models);
+            merged.extend(supported_models);
+            normalized[index].supported_models = normalized_string_list(merged);
+        } else {
+            positions.insert(api_key.clone(), normalized.len());
+            normalized.push(ApiKeyModelConfig {
+                api_key,
+                supported_models,
+            });
         }
-        normalized.push(ApiKeyModelConfig {
-            api_key,
-            supported_models,
-        });
+    }
+
+    for api_key in current_keys {
+        if !positions.contains_key(api_key) {
+            normalized.push(ApiKeyModelConfig {
+                api_key: api_key.clone(),
+                supported_models: Vec::new(),
+            });
+        }
     }
     normalized
+}
+
+fn derive_supported_models(key_models: &[ApiKeyModelConfig]) -> Vec<String> {
+    normalized_string_list(
+        key_models
+            .iter()
+            .flat_map(|mapping| mapping.supported_models.iter().cloned())
+            .collect(),
+    )
 }
 
 fn normalized_model_request_costs(
@@ -227,6 +261,9 @@ impl UpstreamConfig {
     }
 
     pub fn normalize_for_storage(&mut self) {
+        self.failure_count = 0;
+        let authoritative_key_models = !self.api_key_models.is_empty();
+        let api_key_models = std::mem::take(&mut self.api_key_models);
         let normalized_protocols = dedup_protocols(std::mem::take(&mut self.protocols));
         self.protocols = if normalized_protocols.is_empty() {
             vec![self.protocol]
@@ -238,22 +275,16 @@ impl UpstreamConfig {
             .first()
             .copied()
             .unwrap_or(UpstreamProtocol::ChatCompletions);
+        self.api_key = self.api_key.trim().to_string();
         self.api_keys = normalized_string_list(std::mem::take(&mut self.api_keys));
-        self.api_key_models = normalized_api_key_models(std::mem::take(&mut self.api_key_models));
-        self.supported_models = normalized_string_list(std::mem::take(&mut self.supported_models));
-        if !self.api_key_models.is_empty() {
-            let mut seen = self
-                .supported_models
-                .iter()
-                .cloned()
-                .collect::<HashSet<_>>();
-            for mapping in &self.api_key_models {
-                for model in &mapping.supported_models {
-                    if seen.insert(model.clone()) {
-                        self.supported_models.push(model.clone());
-                    }
-                }
-            }
+        let current_keys = normalized_current_keys(&self.api_key, &self.api_keys);
+        if authoritative_key_models {
+            self.api_key_models = normalized_api_key_models(api_key_models, &current_keys);
+            self.supported_models = derive_supported_models(&self.api_key_models);
+        } else {
+            self.api_key_models.clear();
+            self.supported_models =
+                normalized_string_list(std::mem::take(&mut self.supported_models));
         }
         self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
         self.model_request_costs =
@@ -312,34 +343,21 @@ impl UpstreamConfig {
     }
 
     pub fn available_keys(&self) -> Vec<String> {
-        let mut keys = Vec::new();
-        let mut seen = HashSet::new();
-        for key in self
-            .api_keys
-            .iter()
-            .chain(std::iter::once(&self.api_key))
-            .chain(self.api_key_models.iter().map(|item| &item.api_key))
-        {
-            let key = key.trim();
-            if key.is_empty() {
-                continue;
-            }
-            let key = key.to_string();
-            if seen.insert(key.clone()) {
-                keys.push(key);
-            }
-        }
-        keys
+        normalized_current_keys(&self.api_key, &self.api_keys)
     }
 
     pub fn keys_for_model(&self, model: &str) -> Vec<String> {
         let model = model.trim();
-        if model.is_empty() || self.api_key_models.is_empty() {
+        if self.api_key_models.is_empty() {
             return self.available_keys();
+        }
+        if model.is_empty() {
+            return Vec::new();
         }
 
         let mut keys = Vec::new();
         let mut seen = HashSet::new();
+        let current_keys = self.available_keys().into_iter().collect::<HashSet<_>>();
         for mapping in &self.api_key_models {
             if !mapping
                 .supported_models
@@ -350,7 +368,7 @@ impl UpstreamConfig {
             }
 
             let key = mapping.api_key.trim();
-            if key.is_empty() {
+            if key.is_empty() || !current_keys.contains(key) {
                 continue;
             }
             let key = key.to_string();

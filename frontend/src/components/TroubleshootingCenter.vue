@@ -170,7 +170,7 @@
               <el-button
                 size="small"
                 text
-                @click="runManualProbe(row.upstream_id, row.runtime_model_slug, row.protocol)"
+                @click="runManualProbe(row.upstream_id, row.key.route_id, row.runtime_model_slug, row.protocol)"
               >
                 手动探测
               </el-button>
@@ -289,11 +289,13 @@ const props = defineProps<{
   loadDialectProfiles?: () => Promise<DialectProfileSummary[]>
   getResolvedCapabilities?: (payload: {
     upstream_id: string
+    route_id: string
     model: string
     protocol: 'chat_completions' | 'responses'
   }) => Promise<ResolvedCapabilitiesResponse>
   queueDialectProbe?: (payload: {
     upstream_id: string
+    route_id: string
     runtime_model_slug: string
     protocol: 'chat_completions' | 'responses'
   }) => Promise<{ queued?: boolean }>
@@ -490,6 +492,7 @@ const loadResolved = async (profile: DialectProfileSummary) => {
   try {
     selectedResolved.value = await props.getResolvedCapabilities({
       upstream_id: profile.key.upstream_id,
+      route_id: profile.key.route_id,
       model: profile.key.runtime_model_slug,
       protocol: profile.key.protocol
     })
@@ -501,11 +504,12 @@ const loadResolved = async (profile: DialectProfileSummary) => {
 
 const runManualProbe = async (
   upstream_id: string,
+  route_id: string,
   runtime_model_slug: string,
   protocol: 'chat_completions' | 'responses'
 ) => {
   if (!props.queueDialectProbe) return
-  const result = await props.queueDialectProbe({ upstream_id, runtime_model_slug, protocol })
+  const result = await props.queueDialectProbe({ upstream_id, route_id, runtime_model_slug, protocol })
   ElMessage.success(result.queued ? '探测任务已入队' : '当前探测队列不可用')
 }
 

@@ -12,7 +12,7 @@ use chat_responses_codex::capabilities::{
     EvidenceState, HttpsImageFixture, ReasoningCarrier, SemanticPolicy, UpstreamDialectProfile,
     WireProtocol,
 };
-use chat_responses_codex::keys::generate_downstream_key;
+use chat_responses_codex::keys::{generate_downstream_key, upstream_key_fingerprint};
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
@@ -195,6 +195,7 @@ async fn app_with_reasoning_capable_upstream(
         .await
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "GLM-5.1".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -203,6 +204,7 @@ async fn app_with_reasoning_capable_upstream(
     profile.configuration_fingerprint = app_state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "GLM-5.1",
             "GLM-5.1",
             UpstreamProtocol::ChatCompletions,
@@ -310,6 +312,7 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
         .await
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "vision-model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -318,6 +321,7 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
     profile.configuration_fingerprint = state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "vision-model",
             "vision-model",
             UpstreamProtocol::ChatCompletions,
@@ -590,6 +594,7 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
         .unwrap();
     let upstream = app_state.upstreams().await.into_iter().next().unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint(&upstream.id, &upstream.api_key),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: "GLM-5.1".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -598,6 +603,7 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
     profile.configuration_fingerprint = app_state
         .route_configuration_fingerprint(
             &upstream,
+            &profile.key.key_fingerprint,
             "GLM-5.1",
             "GLM-5.1",
             UpstreamProtocol::ChatCompletions,
@@ -1358,10 +1364,7 @@ async fn portal_troubleshooting_routes_are_not_registered() {
     let (app, _, _) = app_with_model_state();
     for (method, uri) in [
         (Method::POST, "/api/portal/troubleshooting/run"),
-        (
-            Method::GET,
-            "/api/portal/troubleshooting/active-requests",
-        ),
+        (Method::GET, "/api/portal/troubleshooting/active-requests"),
     ] {
         let response = app
             .clone()
@@ -1774,6 +1777,7 @@ async fn compatibility_matrix_marks_schema_mismatched_profile_as_stale() {
     let capture = Arc::new(Mutex::new(Vec::<CapturedDiagnosticRequest>::new()));
     let fixture = matrix_fixture_with_expectation(spawn_diagnostic_upstream(capture).await).await;
     let key = DialectProfileKey {
+        key_fingerprint: upstream_key_fingerprint("upstream-1", "upstream-key"),
         upstream_id: "upstream-1".into(),
         runtime_model_slug: "GLM-5.1".into(),
         protocol: WireProtocol::ChatCompletions,

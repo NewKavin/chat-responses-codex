@@ -132,7 +132,13 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
         AppConfig::default(),
     );
 
+    let configured_upstreams = state.snapshot().await.upstreams;
+    let witness_upstream = configured_upstreams
+        .iter()
+        .find(|upstream| upstream.id == "priority-low")
+        .unwrap();
     let witness_key = DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(witness_upstream, model_slug),
         upstream_id: "priority-low".into(),
         runtime_model_slug: model_slug.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -154,14 +160,10 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     witness
         .capabilities
         .insert(Capability::ParallelToolCalls, EvidenceState::Supported);
-    let configured_upstreams = state.snapshot().await.upstreams;
-    let witness_upstream = configured_upstreams
-        .iter()
-        .find(|upstream| upstream.id == "priority-low")
-        .unwrap();
     witness.configuration_fingerprint = state
         .route_configuration_fingerprint(
             witness_upstream,
+            &witness.key.key_fingerprint,
             model_slug,
             model_slug,
             UpstreamProtocol::ChatCompletions,
@@ -169,7 +171,12 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
         .unwrap();
     state.upsert_dialect_profile(witness).await.unwrap();
 
+    let weaker_upstream = configured_upstreams
+        .iter()
+        .find(|upstream| upstream.id == "priority-high")
+        .unwrap();
     let weaker_key = DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(weaker_upstream, model_slug),
         upstream_id: "priority-high".into(),
         runtime_model_slug: model_slug.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -182,13 +189,10 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     weaker
         .capabilities
         .insert(Capability::TextStream, EvidenceState::Supported);
-    let weaker_upstream = configured_upstreams
-        .iter()
-        .find(|upstream| upstream.id == "priority-high")
-        .unwrap();
     weaker.configuration_fingerprint = state
         .route_configuration_fingerprint(
             weaker_upstream,
+            &weaker.key.key_fingerprint,
             model_slug,
             model_slug,
             UpstreamProtocol::ChatCompletions,
@@ -242,12 +246,5 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["experimental_supported_tools"], json!([]));
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     assert_eq!(model["web_search_tool_type"], "text");
-    assert_eq!(
-        model["gateway_catalog_witness"]["upstream_id"],
-        "priority-low"
-    );
-    assert_eq!(
-        model["gateway_catalog_witness"]["profile_state"],
-        "verified"
-    );
+    assert!(model.get("gateway_catalog_witness").is_none());
 }

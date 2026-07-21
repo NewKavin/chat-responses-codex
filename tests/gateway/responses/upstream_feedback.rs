@@ -275,8 +275,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
     .expect("429 cooldown test should not wait for retry-after")
     .expect("429 cooldown test request should complete");
 
-    // Should get 429 from upstream
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let snapshots = state.upstream_runtime_snapshots().await;
     let snapshot = snapshots.get("up-1").unwrap();
@@ -397,27 +396,20 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
     };
 
     let first = app.clone().oneshot(request()).await.unwrap();
-    assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
     let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
     let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
-    let first_error = first_payload["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(first_error.contains("rate limit"));
+    assert_eq!(first_payload["error"]["code"], "upstream_routes_exhausted");
 
     let second = app.oneshot(request()).await.unwrap();
-    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
     let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
     let second_payload: Value = serde_json::from_slice(&second_body).unwrap();
     let second_error = second_payload["error"]["message"]
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(
-        second_error.contains("rate limit"),
-        "unexpected second error: {second_error}"
-    );
+    assert_eq!(second_payload["error"]["code"], "upstream_routes_exhausted");
     assert!(
         !second_error.contains("downstream per-minute request limit exceeded"),
         "downstream request window should not be poisoned by upstream 429"
@@ -573,7 +565,7 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
     );
 
     let second = app.oneshot(request()).await.unwrap();
-    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         state.get_affinity_upstream("down-1", "gpt-4.1-mini"),
         None,
@@ -696,8 +688,11 @@ async fn generic_400_is_not_treated_as_concurrency_full() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
-async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() {
+#[tokio::test(flavor = "current_thread")]
+async fn route_failure_observability_separates_upstream_500_from_downstream_503() {
+    use chat_responses_codex::capabilities::WireProtocol;
+    use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
+
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -713,11 +708,11 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
                 HeaderValue::from_static("application/json"),
             );
             (
-                StatusCode::BAD_GATEWAY,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 headers,
                 axum::Json(json!({
                     "error": {
-                        "message": "expecting, delimiter: line 1 column 78 (char 77)",
+                        "message": "raw-provider-error-secret",
                         "type": "badrequesterror",
                         "param": null,
                         "code": 400
@@ -783,10 +778,22 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
             global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
-        AppConfig::default(),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
+    let capture = TracingCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(capture.clone())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("gateway test process must install tracing only once");
 
     let response = app
         .clone()
@@ -802,7 +809,15 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
                 .body(Body::from(
                     json!({
                         "model": "gpt-4",
-                        "messages": [{"role": "user", "content": "Hello"}]
+                        "messages": [{"role": "user", "content": "prompt-secret"}],
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "description": "tool-argument-secret",
+                                "parameters": {"type": "object"}
+                            }
+                        }]
                     })
                     .to_string(),
                 ))
@@ -811,19 +826,59 @@ async fn upstream_5xx_with_nested_bad_request_code_is_returned_as_bad_request() 
         .await
         .unwrap();
 
-    // 5xx + nested 4xx: now returns 503 (TemporaryUpstreamUnavailable)
-    // so the outer loop tries the next upstream.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains("upstream server error"),
-        "unexpected gateway body: {body}"
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["class_counts"]["transient_server"],
+        1
     );
+
+    let usage_logs = state.usage_logs().await;
+    let usage_log = usage_logs
+        .last()
+        .expect("failed request must write usage log");
+    assert_eq!(usage_log.status_code, 503);
+    assert_eq!(
+        usage_log.error_category.as_deref(),
+        Some("upstream_routes_exhausted")
+    );
+    let usage_summary = usage_log.error_message.as_deref().unwrap_or_default();
+    assert!(!usage_summary.contains("raw-provider-error-secret"));
+    assert!(!usage_summary.contains("prompt-secret"));
+    assert!(!usage_summary.contains("tool-argument-secret"));
+
+    let key_fingerprint = upstream_key_fingerprint("up-1", "upstream-secret");
+    let route_id = anonymous_route_id(
+        "up-1",
+        &key_fingerprint,
+        "gpt-4",
+        WireProtocol::ChatCompletions,
+    );
+    let trace = capture.contents();
+    assert!(trace.contains("upstream_status=500"), "{trace}");
+    assert!(trace.contains("downstream_status=503"), "{trace}");
+    assert!(trace.contains(&format!("route_id={route_id}")), "{trace}");
+    assert!(trace.contains("failure_class=transient_server"), "{trace}");
+    assert!(trace.contains("route_action=routes_exhausted"), "{trace}");
+    assert!(trace.contains("same_route_retry=true"), "{trace}");
+    assert!(trace.contains("cooldown_seconds="), "{trace}");
+    assert!(trace.contains("remaining_candidates=0"), "{trace}");
+    for secret in [
+        "upstream-secret",
+        key_fingerprint.as_str(),
+        "key_prefix",
+        "prompt-secret",
+        "tool-argument-secret",
+        "raw-provider-error-secret",
+    ] {
+        assert!(!trace.contains(secret), "trace leaked {secret}: {trace}");
+    }
 }
 
 #[tokio::test]
-async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_requests() {
+async fn upstream_5xx_with_nested_rate_limit_code_remains_transient() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -938,14 +993,20 @@ async fn upstream_5xx_with_nested_rate_limit_code_is_returned_as_too_many_reques
         .await
         .unwrap();
 
-    // 5xx + nested 429: now returns 503 (TemporaryUpstreamUnavailable)
-    // so the outer loop tries the next upstream.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("30")
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains("upstream server error"),
-        "unexpected gateway body: {body}"
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(
+        payload["error"]["details"]["class_counts"]["transient_server"],
+        1
     );
 }
 

@@ -1,10 +1,11 @@
 use super::admin::*;
-use super::concurrency_retry;
 use super::portal::*;
 use crate::capabilities::{
-    Capability, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey, EvidenceState,
-    RequestedFeatures, ResolvedCapabilities, WireProtocol,
+    Capability, CapabilityHintKey, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey,
+    EvidenceState, ProbeReason, RequestedFeatures, ResolvedCapabilities,
+    RuntimeCapabilityHintSnapshot, WireProtocol,
 };
+use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::{
     chat_request_to_responses_payload_with_context,
     chat_response_to_responses_payload_with_tool_registry, responses_response_to_chat_payload,
@@ -16,7 +17,9 @@ use crate::protocol::{
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, ActiveGatewayRequestStart, AppConfig,
-    AppState, CompatibilityUsageMetadata, GlobalContextProfile, UpstreamConfig, UsageLog,
+    AppState, CompatibilityUsageMetadata, GlobalContextProfile, KeyHealthKey, RouteAvailability,
+    RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteSetAggregateKey, UpstreamConfig,
+    UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -38,7 +41,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
 use tokio::time::Instant as TokioInstant;
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
@@ -54,6 +57,7 @@ mod context;
 mod dialect_retry;
 mod errors;
 mod responses_fallback;
+mod route_attempts;
 mod stream;
 pub(super) mod thinking_signature;
 mod troubleshooting;
@@ -67,6 +71,7 @@ use compat::*;
 use context::*;
 use errors::*;
 use responses_fallback::*;
+use route_attempts::*;
 use stream::*;
 use troubleshooting::*;
 use upstream::*;
@@ -111,58 +116,371 @@ struct RouteCapabilityEvaluation {
     resolved: Option<ResolvedCapabilities>,
 }
 
+#[cfg(test)]
 fn build_request_route_capability_cache(
     snapshot: &CapabilityRuntimeSnapshot,
     upstreams: &[UpstreamConfig],
     model: &str,
     endpoint: EndpointKind,
     requested: &RequestedFeatures,
-) -> BTreeMap<(WireProtocol, String), RouteCapabilityEvaluation> {
-    upstreams
+) -> BTreeMap<(WireProtocol, String, String), RouteCapabilityEvaluation> {
+    build_request_route_capability_cache_with_hints(
+        snapshot,
+        upstreams,
+        model,
+        endpoint,
+        requested,
+        &RuntimeCapabilityHintSnapshot::default(),
+        None,
+    )
+}
+
+fn build_request_route_capability_cache_with_hints(
+    snapshot: &CapabilityRuntimeSnapshot,
+    upstreams: &[UpstreamConfig],
+    model: &str,
+    endpoint: EndpointKind,
+    requested: &RequestedFeatures,
+    runtime_hints: &RuntimeCapabilityHintSnapshot,
+    requested_value: Option<&str>,
+) -> BTreeMap<(WireProtocol, String, String), RouteCapabilityEvaluation> {
+    let mut cache = BTreeMap::new();
+    for upstream in upstreams
         .iter()
-        .flat_map(|upstream| {
-            upstream
-                .supported_protocols()
-                .into_iter()
-                .map(move |protocol| (upstream, protocol))
+        .filter(|upstream| upstream.active && upstream.supports_model(model))
+    {
+        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            continue;
+        };
+        for api_key in route_api_keys(upstream, &runtime_model_slug) {
+            let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+            for protocol in upstream.supported_protocols() {
+                let resolved = resolve_route_capabilities_with_runtime_hints(
+                    snapshot,
+                    upstream,
+                    &key_fingerprint,
+                    model,
+                    &runtime_model_slug,
+                    protocol,
+                    requested,
+                    runtime_hints,
+                    requested_value,
+                );
+                let native_file_route_is_valid =
+                    !requested.required.contains(&Capability::NativeFileId)
+                        || protocol == endpoint.native_protocol();
+                let eligible = native_file_route_is_valid && resolved.is_some();
+                let optional_misses =
+                    resolved
+                        .as_ref()
+                        .map_or(requested.optional.len(), |resolved| {
+                            requested
+                                .optional
+                                .iter()
+                                .filter(|capability| !resolved.supports(**capability))
+                                .count()
+                        });
+                cache.insert(
+                    (
+                        WireProtocol::from(protocol),
+                        upstream.id.clone(),
+                        key_fingerprint.clone(),
+                    ),
+                    RouteCapabilityEvaluation {
+                        eligible,
+                        optional_misses,
+                        resolved,
+                    },
+                );
+            }
+        }
+    }
+    cache
+}
+
+fn route_api_keys(upstream: &UpstreamConfig, model: &str) -> Vec<String> {
+    let keys = upstream.keys_for_model(model);
+    if keys.is_empty() && upstream.api_key_models.is_empty() {
+        vec![upstream.api_key.clone()]
+    } else {
+        keys
+    }
+}
+
+fn route_key_fingerprint(upstream: &UpstreamConfig, api_key: &str) -> String {
+    upstream_key_fingerprint(&upstream.id, api_key)
+}
+
+fn runtime_hint_capability(
+    requested: &RequestedFeatures,
+    requested_value: Option<&str>,
+) -> Option<(Capability, Option<String>)> {
+    if let Some(value) = requested_value {
+        return Some((Capability::ReasoningOutput, Some(value.to_string())));
+    }
+    const PRIORITY: [Capability; 18] = [
+        Capability::ReasoningStream,
+        Capability::TextStream,
+        Capability::ReasoningReplay,
+        Capability::ReasoningOutput,
+        Capability::IndexedToolArgumentStream,
+        Capability::UsageStream,
+        Capability::ForcedToolChoice,
+        Capability::ParallelToolCalls,
+        Capability::ToolContinuation,
+        Capability::NamespaceTools,
+        Capability::CustomTools,
+        Capability::HostedTools,
+        Capability::FunctionTools,
+        Capability::StructuredOutput,
+        Capability::NativeFileId,
+        Capability::ImageDetail,
+        Capability::ImageDataUrl,
+        Capability::ImageHttps,
+    ];
+    PRIORITY
+        .into_iter()
+        .find(|capability| {
+            requested.required.contains(capability) || requested.optional.contains(capability)
         })
-        .map(|(upstream, protocol)| {
-            let resolved = upstream
-                .resolved_model_name(model)
-                .filter(|_| upstream.active && upstream.supports_model(model))
-                .and_then(|runtime_model_slug| {
-                    resolve_route_capabilities_with_snapshot(
-                        snapshot,
-                        upstream,
-                        model,
-                        &runtime_model_slug,
-                        protocol,
-                        requested,
-                    )
-                });
-            let native_file_route_is_valid =
-                !requested.required.contains(&Capability::NativeFileId)
-                    || protocol == endpoint.native_protocol();
-            let eligible = native_file_route_is_valid && resolved.is_some();
-            let optional_misses = resolved
-                .as_ref()
-                .map_or(requested.optional.len(), |resolved| {
-                    requested
-                        .optional
-                        .iter()
-                        .filter(|capability| !resolved.supports(**capability))
-                        .count()
-                });
-            (
-                (WireProtocol::from(protocol), upstream.id.clone()),
-                RouteCapabilityEvaluation {
-                    eligible,
-                    optional_misses,
-                    resolved,
-                },
-            )
-        })
-        .collect()
+        .map(|capability| (capability, None))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_runtime_capability_failure_hint(
+    state: &AppState,
+    capability_snapshot: &CapabilityRuntimeSnapshot,
+    requested: &RequestedFeatures,
+    requested_value: Option<&str>,
+    exposed_model_slug: &str,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+    class: FailureClass,
+) {
+    let profile = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug,
+        WireProtocol::from(protocol),
+    );
+    let key = match class {
+        FailureClass::FeatureUnsupported => {
+            let Some((capability, value)) = runtime_hint_capability(requested, requested_value)
+            else {
+                return;
+            };
+            CapabilityHintKey::feature(profile, capability, value)
+        }
+        FailureClass::ProtocolUnsupported => CapabilityHintKey::protocol(profile),
+        _ => return,
+    };
+    let Ok(configuration_fingerprint) = AppState::route_configuration_fingerprint_with_snapshot(
+        capability_snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+    ) else {
+        return;
+    };
+    if !state.insert_runtime_capability_hint(key, configuration_fingerprint) {
+        return;
+    }
+    if let Ok(Some(job)) = state
+        .build_capability_probe_job(
+            &upstream.id,
+            key_fingerprint,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+            ProbeReason::DialectError,
+        )
+        .await
+    {
+        state.queue_capability_probe(job);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clear_runtime_capability_hints_for_success(
+    state: &AppState,
+    capability_snapshot: &CapabilityRuntimeSnapshot,
+    requested: &RequestedFeatures,
+    requested_value: Option<&str>,
+    exposed_model_slug: &str,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+) {
+    let Ok(configuration_fingerprint) = AppState::route_configuration_fingerprint_with_snapshot(
+        capability_snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+    ) else {
+        return;
+    };
+    let profile = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug,
+        WireProtocol::from(protocol),
+    );
+    let mut capabilities = requested.required.clone();
+    capabilities.extend(requested.optional.iter().copied());
+    if requested_value.is_some() {
+        capabilities.insert(Capability::ReasoningOutput);
+    }
+    state.clear_runtime_capability_hints_for_success(
+        &profile,
+        &configuration_fingerprint,
+        &capabilities,
+        requested_value,
+        true,
+    );
+}
+
+async fn record_route_attempt(
+    state: &AppState,
+    route_attempts: &RequestRouteAttempts,
+    route_health_key: &RouteHealthKey,
+    capability_snapshot: &CapabilityRuntimeSnapshot,
+    requested: &RequestedFeatures,
+    requested_value: Option<&str>,
+    exposed_model_slug: &str,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+    error: &GatewayError,
+) {
+    let Some(class) = error.route_failure_class() else {
+        return;
+    };
+    if class == FailureClass::RequestRejected {
+        return;
+    }
+    if class == FailureClass::ModelUnsupported {
+        state.submit_targeted_model_discovery(&upstream.id, key_fingerprint, runtime_model_slug);
+    }
+    apply_runtime_capability_failure_hint(
+        state,
+        capability_snapshot,
+        requested,
+        requested_value,
+        exposed_model_slug,
+        upstream,
+        key_fingerprint,
+        runtime_model_slug,
+        protocol,
+        class,
+    )
+    .await;
+    let retry_after = error.retry_after_seconds().map(Duration::from_secs);
+    route_attempts.record_failure_with_status(
+        route_health_key,
+        class,
+        retry_after,
+        error.upstream_status(),
+    );
+    for observation in route_attempts.take_newly_exhausted() {
+        state
+            .observe_route_set_failure(&observation.key, observation.class, observation.retry_after)
+            .await;
+    }
+}
+
+fn route_set_aggregate_key(
+    upstream: &UpstreamConfig,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+) -> RouteSetAggregateKey {
+    RouteSetAggregateKey {
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: runtime_model_slug.to_string(),
+        protocol: WireProtocol::from(protocol),
+    }
+}
+
+fn route_health_keys(
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+) -> (RouteHealthKey, KeyHealthKey) {
+    (
+        RouteHealthKey {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: key_fingerprint.to_string(),
+            runtime_model_slug: runtime_model_slug.to_string(),
+            protocol: WireProtocol::from(protocol),
+        },
+        KeyHealthKey {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: key_fingerprint.to_string(),
+        },
+    )
+}
+
+fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
+    let retry_after = error.retry_after_seconds().map(Duration::from_secs);
+    match error.route_failure_class() {
+        Some(class @ (FailureClass::Credentials | FailureClass::KeyQuota)) => retry_after
+            .map(|retry_after| RouteOutcome::KeyFailureWithRetry { class, retry_after })
+            .unwrap_or(RouteOutcome::KeyFailure(class)),
+        Some(FailureClass::RequestRejected) => RouteOutcome::Success,
+        Some(class) => retry_after
+            .map(|retry_after| RouteOutcome::RouteFailureWithRetry { class, retry_after })
+            .unwrap_or(RouteOutcome::RouteFailure(class)),
+        None => RouteOutcome::Cancelled,
+    }
+}
+
+fn should_retry_same_route_once(error: &GatewayError) -> bool {
+    matches!(
+        error.route_failure_class(),
+        Some(FailureClass::TransientServer | FailureClass::Transport)
+    ) && (error.status_code().is_server_error()
+        || error.error_category() == "upstream_timeout"
+        || error.error_category() == "upstream_network_error")
+}
+
+async fn finish_route_health_permit(
+    permit: &Arc<TokioMutex<Option<RouteHealthPermit>>>,
+    outcome: RouteOutcome,
+) {
+    let permit = permit.lock().await.take();
+    if let Some(permit) = permit {
+        permit.finish(outcome).await;
+    }
+}
+
+fn record_cooled_route_attempt(
+    route_attempts: &RequestRouteAttempts,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+    class: FailureClass,
+    retry_after: Duration,
+) {
+    route_attempts.record_cooled(AttemptFailure {
+        route_id: anonymous_route_id(
+            &upstream.id,
+            key_fingerprint,
+            runtime_model_slug,
+            WireProtocol::from(protocol),
+        ),
+        upstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+        class,
+        retry_after: Some(retry_after.max(Duration::from_secs(1))),
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -208,6 +526,8 @@ enum UpstreamAttemptMode {
 struct RouteHedgeCandidate {
     upstream: UpstreamConfig,
     api_key: String,
+    key_fingerprint: String,
+    route_health_key: RouteHealthKey,
     protocol: UpstreamProtocol,
     resolved_capabilities: Option<ResolvedCapabilities>,
 }
@@ -539,6 +859,7 @@ struct DispatchResult {
     usage_log_context: Option<GatewayUsageLogContext>,
     selected_upstream_id: String,
     selected_upstream_name: String,
+    selected_upstream_key_fingerprint: String,
     selected_upstream_protocol: UpstreamProtocol,
 }
 
@@ -723,15 +1044,6 @@ impl StreamTimeouts {
             idle_timeout: Duration::from_secs(config.upstream_stream_idle_timeout_seconds.max(1)),
             max_duration: Duration::from_secs(config.upstream_stream_max_duration_seconds.max(1)),
         }
-    }
-}
-
-fn key_prefix(key: &str) -> String {
-    let key = key.trim();
-    if key.len() <= 8 {
-        key.to_string()
-    } else {
-        format!("{}...", &key[..8])
     }
 }
 
@@ -1466,6 +1778,68 @@ fn codex_reasoning_metadata(resolved: &ResolvedCapabilities) -> CodexReasoningMe
     }
 }
 
+fn codex_conservative_reasoning_metadata() -> CodexReasoningMetadata {
+    CodexReasoningMetadata {
+        supported_levels: vec![json!({
+            "effort": "none",
+            "description": "Do not request a configurable reasoning effort"
+        })],
+        default_level: Value::String("none".into()),
+        supports_summaries: false,
+    }
+}
+
+fn codex_catalog_context_window(upstreams: &[UpstreamConfig], model: &str) -> Option<i64> {
+    upstreams
+        .iter()
+        .filter(|upstream| upstream.active && upstream.supports_model(model))
+        .filter_map(|upstream| upstream.context_config_for_model(model))
+        .map(|config| i64::from(config.context_limit))
+        .max()
+}
+
+fn codex_exposed_models(upstreams: &[UpstreamConfig], allowlist: &[String]) -> Vec<String> {
+    if allowlist.is_empty() {
+        return upstreams
+            .iter()
+            .filter(|upstream| upstream.active)
+            .flat_map(UpstreamConfig::route_models)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+    }
+
+    let mut allowed_slugs = BTreeMap::new();
+    for allowed in allowlist {
+        let slug = allowed.trim();
+        if !slug.is_empty() {
+            allowed_slugs
+                .entry(slug.to_ascii_lowercase())
+                .or_insert_with(|| slug.to_owned());
+        }
+    }
+    let mut matched_allowlist_keys = BTreeSet::new();
+    let mut exposed = upstreams
+        .iter()
+        .filter(|upstream| upstream.active)
+        .flat_map(UpstreamConfig::route_models)
+        .filter_map(|slug| {
+            let match_key = slug.trim().to_ascii_lowercase();
+            if match_key.is_empty() || !allowed_slugs.contains_key(&match_key) {
+                return None;
+            }
+            matched_allowlist_keys.insert(match_key);
+            Some(slug)
+        })
+        .collect::<BTreeSet<_>>();
+    for (match_key, slug) in allowed_slugs {
+        if !matched_allowlist_keys.contains(&match_key) {
+            exposed.insert(slug);
+        }
+    }
+    exposed.into_iter().collect()
+}
+
 /// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
 ///
 /// Each model entry includes `context_window` (from the upstream's
@@ -1477,33 +1851,30 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
     };
     let snapshot = state.routing_snapshot().await;
 
-    let mut exposed_models = std::collections::BTreeSet::new();
-    for upstream in snapshot.upstreams.iter().filter(|u| u.active) {
-        let upstream_models = if upstream.route_models().is_empty() {
-            // Models discovered via endpoint probe have no known context window.
-            upstream.supported_models.clone()
-        } else {
-            upstream.route_models()
-        };
-        for model in upstream_models {
-            if downstream.model_allowlist.is_empty()
-                || portal_model_is_allowed(&downstream.model_allowlist, &model)
-            {
-                exposed_models.insert(model);
-            }
-        }
-    }
-
-    let model_infos = exposed_models
+    let model_infos = codex_exposed_models(&snapshot.upstreams, &downstream.model_allowlist)
         .into_iter()
-        .filter_map(|slug| {
-            let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug)?;
-            let context_window = witness
-                .capabilities
-                .context_window
-                .and_then(|limit| i64::try_from(limit).ok());
-            let reasoning = codex_reasoning_metadata(&witness.capabilities);
-            Some(json!({
+        .map(|slug| {
+            let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug);
+            let capabilities = witness.as_ref().map(|entry| &entry.capabilities);
+            let context_window = capabilities
+                .and_then(|capabilities| {
+                    capabilities
+                        .context_window
+                        .and_then(|limit| i64::try_from(limit).ok())
+                })
+                .or_else(|| codex_catalog_context_window(&snapshot.upstreams, &slug));
+            let reasoning = capabilities
+                .map(codex_reasoning_metadata)
+                .unwrap_or_else(codex_conservative_reasoning_metadata);
+            let supports_custom_tools = capabilities
+                .is_some_and(|capabilities| capabilities.supports(Capability::CustomTools));
+            let supports_parallel_tool_calls = capabilities
+                .is_some_and(|capabilities| capabilities.supports(Capability::ParallelToolCalls));
+            let supports_images = capabilities.is_some_and(|capabilities| {
+                capabilities.supports(Capability::ImageHttps)
+                    && capabilities.supports(Capability::ImageDataUrl)
+            });
+            json!({
                 "slug": slug,
                 "display_name": slug,
                 "description": null,
@@ -1522,8 +1893,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "supports_reasoning_summaries": reasoning.supports_summaries,
                 "default_reasoning_summary": "auto",
                 "support_verbosity": false,
-                "apply_patch_tool_type": witness.capabilities.supports(Capability::CustomTools).then_some("freeform"),
-                "supports_parallel_tool_calls": witness.capabilities.supports(Capability::ParallelToolCalls),
+                "apply_patch_tool_type": supports_custom_tools.then_some("freeform"),
+                "supports_parallel_tool_calls": supports_parallel_tool_calls,
                 "supports_image_detail_original": false,
                 "context_window": context_window,
                 "max_context_window": context_window,
@@ -1531,9 +1902,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "additional_speed_tiers": [],
                 "service_tiers": [],
                 "experimental_supported_tools": [],
-                "input_modalities": if witness.capabilities.supports(Capability::ImageHttps) && witness.capabilities.supports(Capability::ImageDataUrl) { json!(["text", "image"]) } else { json!(["text"]) },
-                "gateway_catalog_witness": witness.diagnostic(),
-            }))
+                "input_modalities": if supports_images { json!(["text", "image"]) } else { json!(["text"]) },
+            })
         })
         .collect::<Vec<_>>();
 
@@ -1785,10 +2155,54 @@ impl UpstreamRequestGuard {
 }
 
 #[derive(Clone)]
+struct UpstreamRequestReservation {
+    guard: Arc<TokioMutex<Option<UpstreamRequestGuard>>>,
+}
+
+impl UpstreamRequestReservation {
+    fn new(guard: UpstreamRequestGuard) -> Self {
+        Self {
+            guard: Arc::new(TokioMutex::new(Some(guard))),
+        }
+    }
+
+    async fn release(&self) {
+        let guard = self.guard.lock().await.take();
+        if let Some(guard) = guard {
+            guard.release().await;
+        }
+    }
+
+    async fn reserve_next(
+        &self,
+        state: &AppState,
+        upstream: &UpstreamConfig,
+        model: &str,
+    ) -> Result<(), GatewayError> {
+        self.release().await;
+        state
+            .try_reserve_upstream_request(upstream, model)
+            .await
+            .map_err(|_| {
+                GatewayError::Upstream(
+                    "failed to reserve capacity for an internal upstream retry".into(),
+                )
+            })?;
+        *self.guard.lock().await = Some(UpstreamRequestGuard::new(
+            state.clone(),
+            upstream.id.clone(),
+        ));
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
 struct StreamCompletionContext {
     state: AppState,
-    upstream_id: String,
-    upstream_request_guard: UpstreamRequestGuard,
+    route_health_key: RouteHealthKey,
+    route_attempts: RequestRouteAttempts,
+    route_health_permit: Arc<TokioMutex<Option<RouteHealthPermit>>>,
+    upstream_request_guard: UpstreamRequestReservation,
     downstream_concurrency_guard: DownstreamConcurrencyGuard,
     hedge_control: Option<HedgeAttemptControl>,
 }
@@ -1808,17 +2222,30 @@ impl StreamCompletionContext {
     }
 
     async fn mark_success(&self) {
-        self.state
-            .mark_upstream_success(&self.upstream_id)
-            .await
-            .ok();
+        finish_route_health_permit(&self.route_health_permit, RouteOutcome::Success).await;
     }
 
     async fn mark_failure(&self) {
-        self.state
-            .mark_upstream_failure(&self.upstream_id)
-            .await
-            .ok();
+        finish_route_health_permit(
+            &self.route_health_permit,
+            RouteOutcome::UncertainRouteFailure(FailureClass::Transport),
+        )
+        .await;
+        self.route_attempts
+            .record_failure(&self.route_health_key, FailureClass::Transport, None);
+        for observation in self.route_attempts.take_newly_exhausted() {
+            self.state
+                .observe_route_set_failure(
+                    &observation.key,
+                    observation.class,
+                    observation.retry_after,
+                )
+                .await;
+        }
+    }
+
+    async fn mark_cancelled(&self) {
+        finish_route_health_permit(&self.route_health_permit, RouteOutcome::Cancelled).await;
     }
 }
 
@@ -2553,7 +2980,7 @@ async fn finalize_stream_error(
     status: StatusCode,
     error_category: &'static str,
     error_message: String,
-    mark_upstream_failure: bool,
+    attribute_route_failure: bool,
 ) {
     let hedge_loser = completion_context
         .as_ref()
@@ -2564,10 +2991,13 @@ async fn finalize_stream_error(
     if let Some(context) = completion_context {
         context.release_all().await;
         if hedge_loser {
+            context.mark_cancelled().await;
             return;
         }
-        if mark_upstream_failure {
+        if attribute_route_failure {
             context.mark_failure().await;
+        } else {
+            context.mark_cancelled().await;
         }
     }
 
@@ -2591,7 +3021,7 @@ async fn finalize_stream_interruption(
     error_message: String,
 ) {
     let (status, error_category) = classify_stream_failure(&error_message);
-    let mark_upstream_failure = status != StatusCode::from_u16(499).expect("valid status code");
+    let attribute_route_failure = status != StatusCode::from_u16(499).expect("valid status code");
     finalize_stream_error(
         completion_context,
         log_context,
@@ -2599,7 +3029,7 @@ async fn finalize_stream_interruption(
         status,
         error_category,
         error_message,
-        mark_upstream_failure,
+        attribute_route_failure,
     )
     .await;
 }
@@ -2647,6 +3077,7 @@ fn spawn_stream_normal_completion_cleanup(
             if hedge_loser {
                 if let Some(context) = completion_context {
                     context.release_all().await;
+                    context.mark_cancelled().await;
                 }
                 return;
             }
@@ -3265,7 +3696,6 @@ async fn process_gateway_request_inner(
     }
 
     let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
-    let now = unix_seconds();
     let exact_continuation = response_history_context
         .as_ref()
         .map(ResponseHistoryContext::exact_continuation_state)
@@ -3321,119 +3751,78 @@ async fn process_gateway_request_inner(
             "cached gateway continuation probe schema has changed",
         ));
     }
-    let route_capability_cache = build_request_route_capability_cache(
+    let runtime_capability_hints = state.runtime_capability_hints_snapshot();
+    let route_capability_cache = build_request_route_capability_cache_with_hints(
         &capability_snapshot,
         &routing_snapshot.upstreams,
         model,
         endpoint,
         &requested_features,
+        &runtime_capability_hints,
+        inference_strength.as_deref(),
     );
-    let route_capability = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
-        route_capability_cache.get(&(WireProtocol::from(protocol), upstream.id.clone()))
-    };
-    let legacy_continuation_profile = if let Some(upstream_id) =
-        legacy_continuation_upstream_id.as_deref()
-    {
-        let eligible_profiles = routing_snapshot
-            .upstreams
-            .iter()
-            .filter(|upstream| {
+    let route_capability =
+        |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
+            route_capability_cache.get(&(
+                WireProtocol::from(protocol),
+                upstream.id.clone(),
+                key_fingerprint.to_string(),
+            ))
+        };
+    let legacy_continuation_profile =
+        if let Some(upstream_id) = legacy_continuation_upstream_id.as_deref() {
+            let mut eligible_profiles = Vec::new();
+            for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
                 upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
-            })
-            .flat_map(|upstream| {
-                upstream
-                    .supported_protocols()
-                    .into_iter()
-                    .filter(|protocol| {
-                        route_capability(upstream, *protocol).is_some_and(|route| route.eligible)
-                    })
-                    .filter_map(|protocol| {
-                        upstream
-                            .resolved_model_name(model)
-                            .map(|runtime_model_slug| DialectProfileKey {
-                                upstream_id: upstream.id.clone(),
-                                runtime_model_slug,
-                                protocol: WireProtocol::from(protocol),
-                            })
-                    })
-            })
-            .collect::<Vec<_>>();
-        if eligible_profiles.len() != 1 {
-            return Err(response_history_invalid(
-                "cached legacy gateway continuation does not identify exactly one eligible profile",
-            ));
-        }
-        eligible_profiles.into_iter().next()
-    } else {
-        None
-    };
-    let codex_catalog_allowed_profiles = (endpoint == EndpointKind::Responses
-        && client_family == "codex"
-        && exact_continuation.is_none()
-        && legacy_continuation_upstream_id.is_none()
-        && (!requested_features.required.is_empty() || inference_strength.is_some()))
-    .then(|| {
-        let witness = select_catalog_witness_entry(&state, &routing_snapshot.upstreams, model)?;
-        let mut allowed = BTreeSet::from([witness.profile_key.clone()]);
-        let witness_transition =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, witness.profile_key.protocol);
-        for upstream in routing_snapshot
-            .upstreams
-            .iter()
-            .filter(|upstream| upstream.active && upstream.supports_model(model))
-        {
-            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
-                continue;
-            };
-            for protocol in upstream.supported_protocols() {
-                let Some(candidate) =
-                    route_capability(upstream, protocol).and_then(|route| route.resolved.as_ref())
-                else {
+            }) {
+                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                     continue;
                 };
-                let candidate_transition = ProtocolTransitionIdentity::new(
-                    WireProtocol::Responses,
-                    WireProtocol::from(protocol),
-                );
-                if is_compatible_catalog_superset(
-                    candidate,
-                    &witness.capabilities,
-                    candidate_transition,
-                    witness_transition,
-                ) {
-                    allowed.insert(DialectProfileKey {
-                        upstream_id: upstream.id.clone(),
-                        runtime_model_slug: runtime_model_slug.clone(),
-                        protocol: WireProtocol::from(protocol),
-                    });
+                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    for protocol in upstream.supported_protocols() {
+                        if route_capability(upstream, &key_fingerprint, protocol)
+                            .is_some_and(|route| route.eligible)
+                        {
+                            eligible_profiles.push(DialectProfileKey::for_key(
+                                upstream.id.clone(),
+                                key_fingerprint.clone(),
+                                runtime_model_slug.clone(),
+                                WireProtocol::from(protocol),
+                            ));
+                        }
+                    }
                 }
             }
-        }
-        Some(allowed)
-    })
-    .flatten();
+            if eligible_profiles.len() != 1 {
+                return Err(response_history_invalid(
+                "cached legacy gateway continuation does not identify exactly one eligible profile",
+            ));
+            }
+            eligible_profiles.into_iter().next()
+        } else {
+            None
+        };
     let continuation_profile_key = exact_continuation
         .as_ref()
         .map(|continuation| continuation.profile_key().clone())
         .or(legacy_continuation_profile);
-    let route_profile_constraint_active =
-        continuation_profile_key.is_some() || codex_catalog_allowed_profiles.is_some();
+    let route_profile_constraint_active = continuation_profile_key.is_some();
     let route_matches_profile_constraint =
-        |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
+        |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
+            let Some(profile_key) = continuation_profile_key.as_ref() else {
+                return true;
+            };
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 return false;
             };
-            let candidate_key = DialectProfileKey {
-                upstream_id: upstream.id.clone(),
+            let candidate_key = DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_fingerprint,
                 runtime_model_slug,
-                protocol: WireProtocol::from(protocol),
-            };
-            if let Some(profile_key) = continuation_profile_key.as_ref() {
-                return candidate_key == *profile_key;
-            }
-            codex_catalog_allowed_profiles
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&candidate_key))
+                WireProtocol::from(protocol),
+            );
+            candidate_key == *profile_key
         };
     let claude_replay_route = claude_thinking_replay_route(
         &state,
@@ -3477,24 +3866,36 @@ async fn process_gateway_request_inner(
     }
     let required_route_available = if route_profile_constraint_active {
         routing_snapshot.upstreams.iter().any(|upstream| {
-            upstream.supported_protocols().into_iter().any(|protocol| {
-                upstream.active
-                    && upstream.supports_model(model)
-                    && route_matches_profile_constraint(upstream, protocol)
-                    && route_capability(upstream, protocol).is_some_and(|route| route.eligible)
-            })
+            if !upstream.active || !upstream.supports_model(model) {
+                return false;
+            }
+            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                return false;
+            };
+            route_api_keys(upstream, &runtime_model_slug)
+                .into_iter()
+                .any(|api_key| {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    upstream.supported_protocols().into_iter().any(|protocol| {
+                        route_matches_profile_constraint(upstream, &key_fingerprint, protocol)
+                            && route_capability(upstream, &key_fingerprint, protocol)
+                                .is_some_and(|route| route.eligible)
+                    })
+                })
         })
     } else {
         match &claude_replay_route {
             ClaudeThinkingReplayRoute::Pinned {
                 upstream_id,
+                key_fingerprint,
                 protocol,
             } => routing_snapshot.upstreams.iter().any(|upstream| {
                 upstream.active
                     && upstream.id == *upstream_id
                     && upstream.supports_model(model)
                     && upstream.supports_protocol(*protocol)
-                    && route_capability(upstream, *protocol).is_some_and(|route| route.eligible)
+                    && route_capability(upstream, key_fingerprint, *protocol)
+                        .is_some_and(|route| route.eligible)
             }),
             ClaudeThinkingReplayRoute::NoReplay => {
                 let has_configured_route = routing_snapshot
@@ -3503,11 +3904,20 @@ async fn process_gateway_request_inner(
                     .any(|upstream| upstream.active && upstream.supports_model(model));
                 !has_configured_route
                     || routing_snapshot.upstreams.iter().any(|upstream| {
-                        upstream.active
-                            && upstream.supports_model(model)
-                            && upstream.supported_protocols().into_iter().any(|protocol| {
-                                route_capability(upstream, protocol)
-                                    .is_some_and(|route| route.eligible)
+                        if !upstream.active || !upstream.supports_model(model) {
+                            return false;
+                        }
+                        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                            return false;
+                        };
+                        route_api_keys(upstream, &runtime_model_slug)
+                            .into_iter()
+                            .any(|api_key| {
+                                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                                upstream.supported_protocols().into_iter().any(|protocol| {
+                                    route_capability(upstream, &key_fingerprint, protocol)
+                                        .is_some_and(|route| route.eligible)
+                                })
                             })
                     })
             }
@@ -3560,17 +3970,6 @@ async fn process_gateway_request_inner(
             WireProtocol::Responses => vec![UpstreamProtocol::Responses],
             WireProtocol::Messages => Vec::new(),
         }
-    } else if let Some(allowed) = codex_catalog_allowed_profiles.as_ref() {
-        allowed
-            .iter()
-            .next()
-            .and_then(|profile_key| match profile_key.protocol {
-                WireProtocol::ChatCompletions => Some(UpstreamProtocol::ChatCompletions),
-                WireProtocol::Responses => Some(UpstreamProtocol::Responses),
-                WireProtocol::Messages => None,
-            })
-            .into_iter()
-            .collect()
     } else {
         match &claude_replay_route {
             ClaudeThinkingReplayRoute::Pinned { protocol, .. } => vec![*protocol],
@@ -3588,20 +3987,36 @@ async fn process_gateway_request_inner(
             ClaudeThinkingReplayRoute::InvalidOrUnavailable => unreachable!(),
         }
     };
-    let route_is_candidate = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
-        upstream.active
-            && upstream.supports_protocol(protocol)
-            && upstream.supports_model(model)
-            && route_matches_profile_constraint(upstream, protocol)
-            && (matches!(&claude_replay_route, ClaudeThinkingReplayRoute::NoReplay)
-                || matches!(
-                    &claude_replay_route,
-                    ClaudeThinkingReplayRoute::Pinned {
-                        upstream_id,
-                        protocol: replay_protocol,
-                    } if upstream.id == *upstream_id && protocol == *replay_protocol
-                ))
-            && route_capability(upstream, protocol).is_some_and(|route| route.eligible)
+    let route_is_candidate =
+        |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
+            upstream.active
+                && upstream.supports_protocol(protocol)
+                && upstream.supports_model(model)
+                && route_matches_profile_constraint(upstream, key_fingerprint, protocol)
+                && (matches!(&claude_replay_route, ClaudeThinkingReplayRoute::NoReplay)
+                    || matches!(
+                        &claude_replay_route,
+                        ClaudeThinkingReplayRoute::Pinned {
+                            upstream_id,
+                            key_fingerprint: replay_key_fingerprint,
+                            protocol: replay_protocol,
+                        } if upstream.id == *upstream_id
+                            && key_fingerprint == replay_key_fingerprint
+                            && protocol == *replay_protocol
+                    ))
+                && route_capability(upstream, key_fingerprint, protocol)
+                    .is_some_and(|route| route.eligible)
+        };
+    let upstream_has_candidate_route = |upstream: &UpstreamConfig, protocol: UpstreamProtocol| {
+        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            return false;
+        };
+        route_api_keys(upstream, &runtime_model_slug)
+            .into_iter()
+            .any(|api_key| {
+                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                route_is_candidate(upstream, &key_fingerprint, protocol)
+            })
     };
     let candidate_passes = if requested_features.optional.is_empty() {
         candidate_protocols
@@ -3610,21 +4025,23 @@ async fn process_gateway_request_inner(
             .map(|protocol| (None, protocol))
             .collect::<Vec<_>>()
     } else {
-        let miss_tiers = candidate_protocols
-            .iter()
-            .copied()
-            .flat_map(|protocol| {
-                let route_is_candidate = &route_is_candidate;
-                let route_capability = &route_capability;
-                routing_snapshot
-                    .upstreams
-                    .iter()
-                    .filter(move |upstream| route_is_candidate(upstream, protocol))
-                    .filter_map(move |upstream| {
-                        route_capability(upstream, protocol).map(|route| route.optional_misses)
-                    })
-            })
-            .collect::<std::collections::BTreeSet<_>>();
+        let mut miss_tiers = std::collections::BTreeSet::new();
+        for protocol in candidate_protocols.iter().copied() {
+            for upstream in &routing_snapshot.upstreams {
+                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                    continue;
+                };
+                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    if route_is_candidate(upstream, &key_fingerprint, protocol) {
+                        if let Some(route) = route_capability(upstream, &key_fingerprint, protocol)
+                        {
+                            miss_tiers.insert(route.optional_misses);
+                        }
+                    }
+                }
+            }
+        }
         miss_tiers
             .into_iter()
             .flat_map(|misses| {
@@ -3635,6 +4052,26 @@ async fn process_gateway_request_inner(
             })
             .collect::<Vec<_>>()
     };
+    let request_route_attempts = RequestRouteAttempts::default();
+    for protocol in candidate_protocols.iter().copied() {
+        for upstream in &routing_snapshot.upstreams {
+            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                continue;
+            };
+            for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                if !route_is_candidate(upstream, &key_fingerprint, protocol) {
+                    continue;
+                }
+                let (route_health_key, _) =
+                    route_health_keys(upstream, &key_fingerprint, &runtime_model_slug, protocol);
+                request_route_attempts.register_eligible(
+                    route_set_aggregate_key(upstream, &runtime_model_slug, protocol),
+                    route_health_key,
+                );
+            }
+        }
+    }
     tracing::debug!(
         request_id = %request_id,
         downstream_key_id = %downstream.id,
@@ -3675,16 +4112,29 @@ async fn process_gateway_request_inner(
     } else {
         None
     };
+    let mut any_same_route_retry = false;
 
     'candidate_passes: for (optional_miss_tier, protocol) in candidate_passes {
+        let upstream_optional_misses = |upstream: &UpstreamConfig| {
+            let runtime_model_slug = upstream.resolved_model_name(model)?;
+            route_api_keys(upstream, &runtime_model_slug)
+                .into_iter()
+                .filter_map(|api_key| {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    route_is_candidate(upstream, &key_fingerprint, protocol)
+                        .then(|| route_capability(upstream, &key_fingerprint, protocol))
+                        .flatten()
+                        .map(|route| route.optional_misses)
+                })
+                .min()
+        };
         let mut upstreams = routing_snapshot
             .upstreams
             .iter()
-            .filter(|upstream| route_is_candidate(upstream, protocol))
+            .filter(|upstream| upstream_has_candidate_route(upstream, protocol))
             .filter(|upstream| {
                 optional_miss_tier.is_none_or(|misses| {
-                    route_capability(upstream, protocol)
-                        .is_some_and(|route| route.optional_misses == misses)
+                    upstream_optional_misses(upstream).is_some_and(|candidate| candidate == misses)
                 })
             })
             .cloned()
@@ -3719,8 +4169,8 @@ async fn process_gateway_request_inner(
             let minute_pressure = runtime.minute_cost + request_cost;
             let five_hour_pressure = runtime.five_hour_cost + request_cost;
             (
-                runtime.is_in_cooldown(now),
-                runtime.cooldown_remaining(now),
+                false,
+                0,
                 runtime.in_flight,
                 minute_pressure as u64 * 1_000 / upstream.requests_per_minute.max(1) as u64,
                 five_hour_pressure as u64 * 1_000 / upstream.request_quota_requests.max(1) as u64,
@@ -3732,9 +4182,7 @@ async fn process_gateway_request_inner(
             .map(|upstream| {
                 (
                     upstream.id.clone(),
-                    route_capability(upstream, protocol)
-                        .map(|route| route.optional_misses)
-                        .unwrap_or(requested_features.optional.len()),
+                    upstream_optional_misses(upstream).unwrap_or(requested_features.optional.len()),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -3754,7 +4202,6 @@ async fn process_gateway_request_inner(
                 in_flight,
                 minute_pressure,
                 five_hour_pressure,
-                upstream.failure_count,
                 Reverse(upstream.priority),
                 upstream.id.clone(),
             )
@@ -3861,7 +4308,6 @@ async fn process_gateway_request_inner(
                 in_flight,
                 minute_pressure,
                 five_hour_pressure,
-                upstream.failure_count,
             )
         };
         if upstreams.len() > 1 {
@@ -3901,17 +4347,15 @@ async fn process_gateway_request_inner(
                 let minute_cost = runtime.minute_cost + request_cost;
                 let five_hour_cost = runtime.five_hour_cost + request_cost;
                 format!(
-                    "{}|{}|{:?}|in_flight={}|cooldown_remaining={}|minute_cost={}/{}|five_hour_cost={}/{}|failure_count={}|request_cost={}|protect_premium_quota={}|premium_match={}",
+                    "{}|{}|{:?}|in_flight={}|minute_cost={}/{}|five_hour_cost={}/{}|request_cost={}|protect_premium_quota={}|premium_match={}",
                     upstream.id,
                     upstream.name,
                     protocol,
                     runtime.in_flight,
-                    runtime.cooldown_remaining(now),
                     minute_cost,
                     upstream.requests_per_minute,
                     five_hour_cost,
                     upstream.request_quota_requests,
-                    upstream.failure_count,
                     request_cost,
                     upstream.protect_premium_quota,
                     upstream.is_premium_model_request(model)
@@ -3919,14 +4363,6 @@ async fn process_gateway_request_inner(
             })
             .collect::<Vec<_>>();
         let upstreams_for_retry = upstreams.clone();
-        let concurrency_retry_is_exclusive =
-            concurrency_retry::is_exclusive_model(upstreams_for_retry.len());
-        let concurrency_retry_budget_ms = concurrency_retry::concurrency_retry_budget_ms(
-            &state.config,
-            concurrency_retry_is_exclusive,
-        );
-        let concurrency_retry_budget_seconds =
-            concurrency_retry_budget_ms.saturating_add(999) / 1000;
         tracing::debug!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -3946,28 +4382,42 @@ async fn process_gateway_request_inner(
             let request_cost = upstream.request_cost_for_model(model);
             let minute_cost = runtime.minute_cost + request_cost;
             let five_hour_cost = runtime.five_hour_cost + request_cost;
-            let candidate_keys = upstream.keys_for_model(model);
-            let candidate_keys = if candidate_keys.is_empty() {
-                if upstream.api_key_models.is_empty() {
-                    vec![upstream.api_key.clone()]
-                } else {
-                    tracing::debug!(
-                        request_id = %request_id,
-                        downstream_key_id = %downstream.id,
-                        path = %request_path,
-                        original_model = %model,
-                        normalized_model = %normalized_model,
-                        selected_upstream_id = %upstream.id,
-                        selected_upstream_name = %upstream.name,
-                        selected_upstream_protocol = ?protocol,
-                        api_key_model_count = upstream.api_key_models.len(),
-                        "upstream has no mapped key for requested model; skipping"
-                    );
-                    continue;
-                }
-            } else {
-                candidate_keys
+            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                continue;
             };
+            let candidate_keys = route_api_keys(&upstream, &runtime_model_slug)
+                .into_iter()
+                .filter(|api_key| {
+                    let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                    let (route_health_key, _) = route_health_keys(
+                        &upstream,
+                        &key_fingerprint,
+                        &runtime_model_slug,
+                        protocol,
+                    );
+                    request_route_attempts.should_attempt(&route_health_key)
+                        && route_is_candidate(&upstream, &key_fingerprint, protocol)
+                        && optional_miss_tier.is_none_or(|misses| {
+                            route_capability(&upstream, &key_fingerprint, protocol)
+                                .is_some_and(|route| route.optional_misses == misses)
+                        })
+                })
+                .collect::<Vec<_>>();
+            if candidate_keys.is_empty() {
+                tracing::debug!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream.id,
+                    path = %request_path,
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    selected_upstream_id = %upstream.id,
+                    selected_upstream_name = %upstream.name,
+                    selected_upstream_protocol = ?protocol,
+                    api_key_model_count = upstream.api_key_models.len(),
+                    "upstream has no eligible mapped key route for requested model; skipping"
+                );
+                continue;
+            }
             tracing::info!(
                 request_id = %request_id,
                 downstream_key_id = %downstream.id,
@@ -3979,13 +4429,11 @@ async fn process_gateway_request_inner(
                 selected_upstream_protocol = ?protocol,
                 stream = request_stream,
                 in_flight = runtime.in_flight,
-                cooldown_remaining = runtime.cooldown_remaining(now),
                 request_cost,
                 minute_cost,
                 minute_quota = upstream.requests_per_minute,
                 five_hour_cost,
                 five_hour_quota = upstream.request_quota_requests,
-                failure_count = upstream.failure_count,
                 candidate_key_count = candidate_keys.len(),
                 "considering upstream candidate"
             );
@@ -3994,11 +4442,46 @@ async fn process_gateway_request_inner(
             let mut stream_only_recovery_identity = None;
             let mut stream_only_recovery = StreamOnlyRecoveryState::default();
             for (key_index, api_key) in candidate_keys.iter().enumerate() {
-                let mut concurrency_retry_attempts_used = 0u32;
-                let mut rate_limit_retry_attempts_used = 0u32;
+                let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                let (route_health_key, key_health_key) =
+                    route_health_keys(&upstream, &key_fingerprint, &runtime_model_slug, protocol);
+                let route_id = anonymous_route_id(
+                    &upstream.id,
+                    &key_fingerprint,
+                    &runtime_model_slug,
+                    WireProtocol::from(protocol),
+                );
+                if !request_route_attempts.should_attempt(&route_health_key) {
+                    continue;
+                }
+                let route_health_permit = match state
+                    .reserve_route_health(&route_health_key, &key_health_key)
+                    .await
+                {
+                    RouteAvailability::Ready(permit) => Arc::new(TokioMutex::new(Some(permit))),
+                    RouteAvailability::Cooling { class, retry_after }
+                    | RouteAvailability::HalfOpenBusy { class, retry_after } => {
+                        record_cooled_route_attempt(
+                            &request_route_attempts,
+                            &upstream,
+                            &key_fingerprint,
+                            &runtime_model_slug,
+                            protocol,
+                            class,
+                            retry_after,
+                        );
+                        last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
+                            "all eligible upstream routes are temporarily unavailable".into(),
+                        ));
+                        last_failure_upstream =
+                            Some((upstream.id.clone(), Some(upstream.name.clone())));
+                        continue;
+                    }
+                };
+                let mut same_route_retry_attempted = false;
                 let candidate_capability_snapshot = (*capability_snapshot).clone();
-                let resolved_route =
-                    route_capability(&upstream, protocol).and_then(|route| route.resolved.clone());
+                let resolved_route = route_capability(&upstream, &key_fingerprint, protocol)
+                    .and_then(|route| route.resolved.clone());
                 let mut attempt_mode = if stream_only_recovery.consumed {
                     UpstreamAttemptMode::Json
                 } else {
@@ -4010,14 +4493,16 @@ async fn process_gateway_request_inner(
                         .await
                         .is_err()
                     {
+                        finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled)
+                            .await;
                         last_error = Some(GatewayError::Upstream(
                             "failed to reserve upstream request capacity".into(),
                         ));
                         break;
                     }
-                    let upstream_request_guard =
-                        UpstreamRequestGuard::new(state.clone(), upstream.id.clone());
-
+                    let upstream_request_guard = UpstreamRequestReservation::new(
+                        UpstreamRequestGuard::new(state.clone(), upstream.id.clone()),
+                    );
                     tracing::info!(
                         request_id = %request_id,
                         downstream_key_id = %downstream.id,
@@ -4026,7 +4511,7 @@ async fn process_gateway_request_inner(
                         normalized_model = %normalized_model,
                         selected_upstream_id = %upstream.id,
                         selected_upstream_protocol = ?protocol,
-                        selected_upstream_key_prefix = %key_prefix(api_key),
+                        route_id = %route_id,
                         upstream_attempt_mode = attempt_mode.as_str(),
                         request_cost,
                         "reserved upstream capacity"
@@ -4041,7 +4526,9 @@ async fn process_gateway_request_inner(
                         .needs_stream_completion_context()
                         .then(|| StreamCompletionContext {
                             state: state.clone(),
-                            upstream_id: upstream.id.clone(),
+                            route_health_key: route_health_key.clone(),
+                            route_attempts: request_route_attempts.clone(),
+                            route_health_permit: route_health_permit.clone(),
                             upstream_request_guard: upstream_request_guard.clone(),
                             downstream_concurrency_guard: downstream_concurrency_guard.clone(),
                             hedge_control: None,
@@ -4158,26 +4645,85 @@ async fn process_gateway_request_inner(
                         && attempt_mode == UpstreamAttemptMode::SsePassThrough
                         && chat_fallback_stage.is_none()
                     {
-                        upstreams_for_retry
+                        let mut candidates = candidate_keys[key_index + 1..]
                             .iter()
-                            .skip(upstream_index + 1)
-                            .filter_map(|candidate| {
-                                let keys = candidate.keys_for_model(model);
-                                let api_key = keys.first().cloned().or_else(|| {
-                                    candidate
-                                        .api_key_models
-                                        .is_empty()
-                                        .then(|| candidate.api_key.clone())
-                                })?;
-                                Some(RouteHedgeCandidate {
-                                    upstream: candidate.clone(),
-                                    api_key,
+                            .filter_map(|api_key| {
+                                let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                                let (route_health_key, _) = route_health_keys(
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
                                     protocol,
-                                    resolved_capabilities: route_capability(candidate, protocol)
-                                        .and_then(|route| route.resolved.clone()),
+                                );
+                                if !request_route_attempts.should_attempt(&route_health_key) {
+                                    return None;
+                                }
+                                let route =
+                                    route_capability(&upstream, &key_fingerprint, protocol)?;
+                                Some(RouteHedgeCandidate {
+                                    upstream: upstream.clone(),
+                                    api_key: api_key.clone(),
+                                    key_fingerprint: key_fingerprint.clone(),
+                                    route_health_key,
+                                    protocol,
+                                    resolved_capabilities: route.resolved.clone(),
                                 })
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        candidates.extend(
+                            upstreams_for_retry
+                                .iter()
+                                .skip(upstream_index + 1)
+                                .filter_map(|candidate| {
+                                    let runtime_model_slug =
+                                        candidate.resolved_model_name(model)?;
+                                    route_api_keys(candidate, &runtime_model_slug)
+                                        .into_iter()
+                                        .find_map(|api_key| {
+                                            let key_fingerprint =
+                                                route_key_fingerprint(candidate, &api_key);
+                                            let (route_health_key, _) = route_health_keys(
+                                                candidate,
+                                                &key_fingerprint,
+                                                &runtime_model_slug,
+                                                protocol,
+                                            );
+                                            if !route_is_candidate(
+                                                candidate,
+                                                &key_fingerprint,
+                                                protocol,
+                                            ) || !request_route_attempts
+                                                .should_attempt(&route_health_key)
+                                                || optional_miss_tier.is_some_and(|misses| {
+                                                    route_capability(
+                                                        candidate,
+                                                        &key_fingerprint,
+                                                        protocol,
+                                                    )
+                                                    .is_none_or(|route| {
+                                                        route.optional_misses != misses
+                                                    })
+                                                })
+                                            {
+                                                return None;
+                                            }
+                                            let route = route_capability(
+                                                candidate,
+                                                &key_fingerprint,
+                                                protocol,
+                                            )?;
+                                            Some(RouteHedgeCandidate {
+                                                upstream: candidate.clone(),
+                                                api_key,
+                                                key_fingerprint,
+                                                route_health_key,
+                                                protocol,
+                                                resolved_capabilities: route.resolved.clone(),
+                                            })
+                                        })
+                                }),
+                        );
+                        candidates
                     } else {
                         Vec::new()
                     };
@@ -4186,7 +4732,7 @@ async fn process_gateway_request_inner(
                         &state,
                         &upstream,
                         api_key,
-                        &candidate_keys[key_index + 1..],
+                        &[],
                         &route_hedge_candidates,
                         resolved_route.as_ref(),
                         &candidate_capability_snapshot,
@@ -4207,6 +4753,9 @@ async fn process_gateway_request_inner(
                         chat_only_responses_fallback,
                         global_context_profile.as_ref(),
                         stream_completion_context.clone(),
+                        upstream_request_guard.clone(),
+                        request_route_attempts.clone(),
+                        route_health_key.clone(),
                         dispatch_response_history_context.clone(),
                         Some(&mut active_request_guard),
                         None,
@@ -4236,6 +4785,8 @@ async fn process_gateway_request_inner(
                         && !stream_only_recovery.consumed
                     {
                         stream_only_recovery.consumed = true;
+                        same_route_retry_attempted = true;
+                        any_same_route_retry = true;
                         attempt_mode = UpstreamAttemptMode::SseAggregate;
                         continue;
                     }
@@ -4245,6 +4796,16 @@ async fn process_gateway_request_inner(
                             let selected_upstream_id = result.selected_upstream_id.clone();
                             let selected_upstream_name = result.selected_upstream_name.clone();
                             let selected_upstream_protocol = result.selected_upstream_protocol;
+                            let primary_route = selected_upstream_id == upstream.id
+                                && result.selected_upstream_key_fingerprint == key_fingerprint
+                                && selected_upstream_protocol == protocol;
+                            if !primary_route {
+                                finish_route_health_permit(
+                                    &route_health_permit,
+                                    RouteOutcome::Cancelled,
+                                )
+                                .await;
+                            }
                             if selected_upstream_id != upstream.id {
                                 upstream_request_guard.release().await;
                             }
@@ -4292,6 +4853,7 @@ async fn process_gateway_request_inner(
                                     &mut result.response_headers,
                                     &selected_upstream_id,
                                     &selected_upstream_name,
+                                    &result.selected_upstream_key_fingerprint,
                                     selected_upstream_protocol,
                                     protocol_transition_label(endpoint, selected_upstream_protocol),
                                     chat_fallback_stage.map(ChatFallbackStage::as_str),
@@ -4331,10 +4893,34 @@ async fn process_gateway_request_inner(
                                 );
                             }
                             if matches!(result.usage_log_timing, UsageLogTiming::Immediate) {
-                                state
-                                    .mark_upstream_success(&selected_upstream_id)
-                                    .await
-                                    .ok();
+                                if let Some(selected_upstream) = routing_snapshot
+                                    .upstreams
+                                    .iter()
+                                    .find(|candidate| candidate.id == selected_upstream_id)
+                                {
+                                    if let Some(selected_runtime_model) =
+                                        selected_upstream.resolved_model_name(model)
+                                    {
+                                        clear_runtime_capability_hints_for_success(
+                                            &state,
+                                            &capability_snapshot,
+                                            &requested_features,
+                                            inference_strength.as_deref(),
+                                            model,
+                                            selected_upstream,
+                                            &result.selected_upstream_key_fingerprint,
+                                            &selected_runtime_model,
+                                            selected_upstream_protocol,
+                                        );
+                                    }
+                                }
+                                if primary_route {
+                                    finish_route_health_permit(
+                                        &route_health_permit,
+                                        RouteOutcome::Success,
+                                    )
+                                    .await;
+                                }
                             }
                             if use_routing_affinity {
                                 state.set_affinity_upstream(
@@ -4389,10 +4975,60 @@ async fn process_gateway_request_inner(
                             return Ok(result);
                         }
                         Err(error)
+                            if !same_route_retry_attempted
+                                && !stream_only_recovery.final_attempt
+                                && should_retry_same_route_once(&error) =>
+                        {
+                            same_route_retry_attempted = true;
+                            any_same_route_retry = true;
+                            tracing::info!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                route_id = %route_id,
+                                upstream_status = error.upstream_status().unwrap_or_default(),
+                                downstream_status = error.status_code().as_u16(),
+                                failure_class = %error.route_failure_class().map(FailureClass::as_str).unwrap_or("unclassified"),
+                                route_action = %"same_route_retry",
+                                same_route_retry = true,
+                                cooldown_seconds = 0,
+                                remaining_candidates = candidate_keys.len().saturating_sub(key_index + 1),
+                                retry_delay_ms = 300,
+                                error_category = %error.error_category(),
+                                "retrying transient upstream failure on the same route"
+                            );
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            continue;
+                        }
+                        Err(error)
                             if key_index + 1 < candidate_keys.len()
                                 && !stream_only_recovery.final_attempt
                                 && should_try_next_key(&error) =>
                         {
+                            finish_route_health_permit(
+                                &route_health_permit,
+                                route_health_outcome(&error),
+                            )
+                            .await;
+                            record_route_attempt(
+                                &state,
+                                &request_route_attempts,
+                                &route_health_key,
+                                &capability_snapshot,
+                                &requested_features,
+                                inference_strength.as_deref(),
+                                model,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &error,
+                            )
+                            .await;
                             tracing::warn!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
@@ -4402,8 +5038,8 @@ async fn process_gateway_request_inner(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
+                                route_id = %route_id,
+                                error_category = %error.error_category(),
                                 "upstream key failed; trying next key"
                             );
                             last_error = Some(error);
@@ -4415,30 +5051,7 @@ async fn process_gateway_request_inner(
                             message,
                             retry_after_seconds,
                         }) => {
-                            let theoretical_backoff_ms =
-                                concurrency_retry::concurrency_retry_base_delay_ms(
-                                    &state.config,
-                                    concurrency_retry_attempts_used,
-                                );
-                            let theoretical_retry_after_seconds =
-                                theoretical_backoff_ms.saturating_add(999) / 1000;
-                            let retry_plan = concurrency_retry::plan_concurrency_retry(
-                                &state.config,
-                                concurrency_retry_attempts_used,
-                                started.elapsed().as_millis() as u64,
-                                concurrency_retry_is_exclusive,
-                                &request_id,
-                                &upstream.id,
-                                model,
-                            );
-                            let retry_after_seconds = retry_after_seconds
-                                .unwrap_or_else(|| {
-                                    retry_plan
-                                        .as_ref()
-                                        .map(|plan| plan.retry_after_seconds)
-                                        .unwrap_or(theoretical_retry_after_seconds)
-                                })
-                                .max(1);
+                            let retry_after_seconds = retry_after_seconds.unwrap_or(15).max(1);
                             tracing::warn!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
@@ -4448,12 +5061,9 @@ async fn process_gateway_request_inner(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %message,
+                                route_id = %route_id,
                                 retry_after_seconds,
-                                model_is_exclusive = concurrency_retry_is_exclusive,
-                                concurrency_retry_budget_seconds,
-                                "upstream concurrency full"
+                                "upstream concurrency/capacity response; moving to another route"
                             );
                             if state.config.routing_affinity_enabled {
                                 state.clear_affinity_upstream(&downstream.id, normalized_model);
@@ -4461,10 +5071,7 @@ async fn process_gateway_request_inner(
                             state
                                 .mark_upstream_concurrency_full(
                                     &upstream.id,
-                                    retry_plan
-                                        .as_ref()
-                                        .map(|plan| plan.sleep_ms)
-                                        .unwrap_or(theoretical_backoff_ms),
+                                    retry_after_seconds.saturating_mul(1_000),
                                 )
                                 .await;
                             last_error = Some(GatewayError::ConcurrencyFull {
@@ -4474,33 +5081,40 @@ async fn process_gateway_request_inner(
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
 
-                            if let Some(plan) =
-                                retry_plan.filter(|_| !stream_only_recovery.consumed)
-                            {
-                                concurrency_retry_attempts_used =
-                                    concurrency_retry_attempts_used.saturating_add(1);
-                                tracing::info!(
-                                    request_id = %request_id,
-                                    downstream_key_id = %downstream.id,
-                                    path = %request_path,
-                                    original_model = %model,
-                                    normalized_model = %normalized_model,
-                                    selected_upstream_id = %upstream.id,
-                                    selected_upstream_name = %upstream.name,
-                                    selected_upstream_protocol = ?protocol,
-                                    selected_upstream_key_prefix = %key_prefix(api_key),
-                                    retry_after_seconds,
-                                    concurrency_retry_attempts_used,
-                                    concurrency_retry_attempts_limit = state
-                                        .config
-                                        .upstream_concurrency_retry_attempts,
-                                    model_is_exclusive = concurrency_retry_is_exclusive,
-                                    concurrency_retry_budget_seconds,
-                                    "waiting for upstream concurrency slot before retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(plan.sleep_ms)).await;
-                                continue;
-                            }
+                            record_route_attempt(
+                                &state,
+                                &request_route_attempts,
+                                &route_health_key,
+                                &capability_snapshot,
+                                &requested_features,
+                                inference_strength.as_deref(),
+                                model,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &GatewayError::ConcurrencyFull {
+                                    message: String::new(),
+                                    retry_after_seconds: Some(retry_after_seconds),
+                                },
+                            )
+                            .await;
+                            finish_route_health_permit(
+                                &route_health_permit,
+                                if stream_only_recovery.consumed {
+                                    // The aggregate stream probe is an internal capability
+                                    // recovery attempt.  A provider-side concurrency response
+                                    // describes the probe mode, not the JSON route, so do not
+                                    // quarantine the exact route for the next request.
+                                    RouteOutcome::Cancelled
+                                } else {
+                                    RouteOutcome::RouteFailureWithRetry {
+                                        class: FailureClass::CapacityUnavailable,
+                                        retry_after: Duration::from_secs(retry_after_seconds),
+                                    }
+                                },
+                            )
+                            .await;
 
                             break;
                         }
@@ -4523,10 +5137,9 @@ async fn process_gateway_request_inner(
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_name = %upstream.name,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %message,
+                                route_id = %route_id,
                                 retry_after_seconds,
-                                "upstream rate limited"
+                                "upstream rate limited; moving to another route"
                             );
                             if state.config.routing_affinity_enabled {
                                 state.clear_affinity_upstream(&downstream.id, normalized_model);
@@ -4541,69 +5154,128 @@ async fn process_gateway_request_inner(
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
 
-                            // Check if there's an alternative upstream that:
-                            // 1. Is not the current upstream
-                            // 2. Supports the current model
-                            // 3. Is not in cooldown
-                            let has_available_alternative =
-                                upstreams_for_retry.iter().any(|candidate| {
-                                    candidate.id != upstream.id
-                                        && candidate.supports_model(model)
-                                        && upstream_runtime_snapshots
-                                            .get(&candidate.id)
-                                            .map(|runtime| !runtime.is_in_cooldown(now))
-                                            .unwrap_or(true)
-                                });
-                            // Retry conditions:
-                            // 1. No alternative upstream that supports this model AND not in cooldown
-                            // 2. Force retry enabled (allows waiting even when Retry-After > max_retry_after_seconds)
-                            // 3. OR Retry-After is within acceptable bounds
-                            // This ensures single-model upstreams get proper retry behavior
-                            let can_force_retry = state
-                                .config
-                                .upstream_rate_limit_force_retry_enabled
-                                && retry_after_seconds
-                                    <= state.config.upstream_rate_limit_retry_window_seconds.max(1);
-                            let within_retry_bounds = retry_after_seconds
-                                <= state
-                                    .config
-                                    .upstream_rate_limit_max_retry_after_seconds
-                                    .max(1);
+                            record_route_attempt(
+                                &state,
+                                &request_route_attempts,
+                                &route_health_key,
+                                &capability_snapshot,
+                                &requested_features,
+                                inference_strength.as_deref(),
+                                model,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &GatewayError::TooManyRequests {
+                                    message: String::new(),
+                                    retry_after_seconds: Some(retry_after_seconds),
+                                },
+                            )
+                            .await;
+                            finish_route_health_permit(
+                                &route_health_permit,
+                                if stream_only_recovery.consumed {
+                                    RouteOutcome::Cancelled
+                                } else {
+                                    RouteOutcome::RouteFailureWithRetry {
+                                        class: FailureClass::RateLimited,
+                                        retry_after: Duration::from_secs(retry_after_seconds),
+                                    }
+                                },
+                            )
+                            .await;
 
-                            if !stream_only_recovery.consumed
-                                && !has_available_alternative
-                                && rate_limit_retry_attempts_used
-                                    < state.config.upstream_rate_limit_retry_attempts.max(1)
-                                && (can_force_retry || within_retry_bounds)
-                            {
-                                rate_limit_retry_attempts_used =
-                                    rate_limit_retry_attempts_used.saturating_add(1);
-                                tracing::info!(
+                            break;
+                        }
+                        Err(error @ GatewayError::BadRequest(_)) => {
+                            finish_route_health_permit(&route_health_permit, RouteOutcome::Success)
+                                .await;
+                            maybe_record_chat_fallback_stage_failure(
+                                &state,
+                                &downstream.id,
+                                client_family,
+                                normalized_model,
+                                &upstream.id,
+                                chat_fallback_stage,
+                                &error,
+                            );
+                            tracing::warn!(
+                                request_id = %request_id,
+                                downstream_key_id = %downstream.id,
+                                path = %request_path,
+                                original_model = %model,
+                                normalized_model = %normalized_model,
+                                selected_upstream_id = %upstream.id,
+                                selected_upstream_protocol = ?protocol,
+                                route_id = %route_id,
+                                error_category = %error.error_category(),
+                                "upstream rejected request payload"
+                            );
+                            last_error = Some(error);
+                            last_failure_upstream =
+                                Some((upstream.id.clone(), Some(upstream.name.clone())));
+                            break 'candidate_passes;
+                        }
+                        Err(error)
+                            if error.status_code() == StatusCode::BAD_REQUEST
+                                && !(attempt_mode == UpstreamAttemptMode::SsePassThrough
+                                    && should_retry_without_stream(&error)) =>
+                        {
+                            let class = error.route_failure_class();
+                            if class == Some(FailureClass::RequestRejected) {
+                                finish_route_health_permit(
+                                    &route_health_permit,
+                                    RouteOutcome::Success,
+                                )
+                                .await;
+                                maybe_record_chat_fallback_stage_failure(
+                                    &state,
+                                    &downstream.id,
+                                    client_family,
+                                    normalized_model,
+                                    &upstream.id,
+                                    chat_fallback_stage,
+                                    &error,
+                                );
+                                tracing::warn!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
                                     path = %request_path,
                                     original_model = %model,
                                     normalized_model = %normalized_model,
                                     selected_upstream_id = %upstream.id,
-                                    selected_upstream_name = %upstream.name,
                                     selected_upstream_protocol = ?protocol,
-                                    selected_upstream_key_prefix = %key_prefix(api_key),
-                                    retry_after_seconds,
-                                    rate_limit_retry_attempts_used,
-                                    rate_limit_retry_attempts_limit = state
-                                        .config
-                                        .upstream_rate_limit_retry_attempts,
-                                    force_retry_enabled = state.config.upstream_rate_limit_force_retry_enabled,
-                                    has_available_alternative = has_available_alternative,
-                                    "waiting for upstream rate limit cooldown before retrying (no alternative upstream supports this model)"
+                                    route_id = %route_id,
+                                    error_category = %error.error_category(),
+                                    "upstream rejected request payload"
                                 );
-                                tokio::time::sleep(Duration::from_secs(retry_after_seconds)).await;
-                                continue;
+                                last_error = Some(error);
+                                last_failure_upstream =
+                                    Some((upstream.id.clone(), Some(upstream.name.clone())));
+                                break 'candidate_passes;
                             }
-
-                            break;
-                        }
-                        Err(error @ GatewayError::BadRequest(_)) => {
+                            if class.is_some() {
+                                finish_route_health_permit(
+                                    &route_health_permit,
+                                    route_health_outcome(&error),
+                                )
+                                .await;
+                                record_route_attempt(
+                                    &state,
+                                    &request_route_attempts,
+                                    &route_health_key,
+                                    &capability_snapshot,
+                                    &requested_features,
+                                    inference_strength.as_deref(),
+                                    model,
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                    &error,
+                                )
+                                .await;
+                            }
                             maybe_record_chat_fallback_stage_failure(
                                 &state,
                                 &downstream.id,
@@ -4621,35 +5293,7 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
-                                "upstream rejected request payload"
-                            );
-                            last_error = Some(error);
-                            last_failure_upstream =
-                                Some((upstream.id.clone(), Some(upstream.name.clone())));
-                            break;
-                        }
-                        Err(error) if error.status_code() == StatusCode::BAD_REQUEST => {
-                            maybe_record_chat_fallback_stage_failure(
-                                &state,
-                                &downstream.id,
-                                client_family,
-                                normalized_model,
-                                &upstream.id,
-                                chat_fallback_stage,
-                                &error,
-                            );
-                            tracing::warn!(
-                                request_id = %request_id,
-                                downstream_key_id = %downstream.id,
-                                path = %request_path,
-                                original_model = %model,
-                                normalized_model = %normalized_model,
-                                selected_upstream_id = %upstream.id,
-                                selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
+                                route_id = %route_id,
                                 error_category = %error.error_category(),
                                 "upstream rejected request payload"
                             );
@@ -4662,6 +5306,11 @@ async fn process_gateway_request_inner(
                             if attempt_mode == UpstreamAttemptMode::SsePassThrough
                                 && should_retry_without_stream(&error) =>
                         {
+                            finish_route_health_permit(
+                                &route_health_permit,
+                                route_health_outcome(&error),
+                            )
+                            .await;
                             tracing::debug!(
                                 request_id = %request_id,
                                 downstream_key_id = %downstream.id,
@@ -4670,13 +5319,14 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
+                                route_id = %route_id,
                                 upstream_attempt_mode = attempt_mode.as_str(),
-                                error = %error,
                                 error_category = %error.error_category(),
                                 stream_to_json_recovery = true,
                                 "streaming upstream attempt failed; retrying without stream"
                             );
+                            same_route_retry_attempted = true;
+                            any_same_route_retry = true;
                             attempt_mode = UpstreamAttemptMode::Json;
                             continue;
                         }
@@ -4689,11 +5339,33 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %message,
+                                route_id = %route_id,
                                 "upstream temporarily unavailable, trying next candidate"
                             );
-                            state.mark_upstream_failure(&upstream.id).await.ok();
+                            finish_route_health_permit(
+                                &route_health_permit,
+                                if stream_only_recovery.consumed {
+                                    RouteOutcome::Cancelled
+                                } else {
+                                    RouteOutcome::RouteFailure(FailureClass::TransientServer)
+                                },
+                            )
+                            .await;
+                            record_route_attempt(
+                                &state,
+                                &request_route_attempts,
+                                &route_health_key,
+                                &capability_snapshot,
+                                &requested_features,
+                                inference_strength.as_deref(),
+                                model,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &GatewayError::TemporaryUpstreamUnavailable(message.clone()),
+                            )
+                            .await;
                             last_error = Some(GatewayError::TemporaryUpstreamUnavailable(message));
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -4708,11 +5380,30 @@ async fn process_gateway_request_inner(
                                 normalized_model = %normalized_model,
                                 selected_upstream_id = %upstream.id,
                                 selected_upstream_protocol = ?protocol,
-                                selected_upstream_key_prefix = %key_prefix(api_key),
-                                error = %error,
+                                route_id = %route_id,
+                                error_category = %error.error_category(),
                                 "upstream request failed"
                             );
-                            state.mark_upstream_failure(&upstream.id).await.ok();
+                            finish_route_health_permit(
+                                &route_health_permit,
+                                route_health_outcome(&error),
+                            )
+                            .await;
+                            record_route_attempt(
+                                &state,
+                                &request_route_attempts,
+                                &route_health_key,
+                                &capability_snapshot,
+                                &requested_features,
+                                inference_strength.as_deref(),
+                                model,
+                                &upstream,
+                                &key_fingerprint,
+                                &runtime_model_slug,
+                                protocol,
+                                &error,
+                            )
+                            .await;
                             last_error = Some(error);
                             last_failure_upstream =
                                 Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -4727,7 +5418,30 @@ async fn process_gateway_request_inner(
         }
     }
 
-    if let Some(error) = last_error {
+    if let Some(last_route_error) = last_error {
+        let attempt_ledger = request_route_attempts.ledger_snapshot();
+        let fallback_upstream_status = last_route_error.upstream_status();
+        let fallback_failure_class = last_route_error.route_failure_class();
+        let should_aggregate = !attempt_ledger.is_empty()
+            && (attempt_ledger.distinct_route_count() > 1
+                || matches!(
+                    last_route_error.route_failure_class(),
+                    Some(
+                        FailureClass::CapacityUnavailable
+                            | FailureClass::TransientServer
+                            | FailureClass::RateLimited
+                            | FailureClass::KeyQuota
+                            | FailureClass::Credentials
+                            | FailureClass::ModelUnsupported
+                            | FailureClass::FeatureUnsupported
+                            | FailureClass::ProtocolUnsupported
+                    )
+                ));
+        let error = if should_aggregate {
+            terminal_route_failure_error(&attempt_ledger)
+        } else {
+            last_route_error
+        };
         let (upstream_id, upstream_name) = last_failure_upstream
             .as_ref()
             .map(|(id, name)| (id.as_str(), name.as_deref()))
@@ -4760,6 +5474,31 @@ async fn process_gateway_request_inner(
         }
         downstream_concurrency_guard.release();
         active_request_guard.fail_and_finish(error.error_category());
+        let terminal_observation = attempt_ledger.terminal_observation();
+        let upstream_status = terminal_observation
+            .as_ref()
+            .and_then(|failure| failure.upstream_status)
+            .or(fallback_upstream_status)
+            .unwrap_or_default();
+        let failure_class = terminal_observation
+            .as_ref()
+            .map(|failure| failure.class.as_str())
+            .or_else(|| fallback_failure_class.map(FailureClass::as_str))
+            .unwrap_or("unclassified");
+        let cooldown_seconds = terminal_observation
+            .as_ref()
+            .and_then(|failure| failure.retry_after)
+            .map(|duration| {
+                duration
+                    .as_secs()
+                    .saturating_add(u64::from(duration.subsec_nanos() > 0))
+            })
+            .or_else(|| error.retry_after_seconds())
+            .unwrap_or_default();
+        let route_id = terminal_observation
+            .as_ref()
+            .map(|failure| failure.route_id.as_str())
+            .unwrap_or("route_unknown");
         tracing::error!(
             request_id = %request_id,
             downstream_key_id = %downstream.id,
@@ -4767,7 +5506,15 @@ async fn process_gateway_request_inner(
             original_model = %model,
             normalized_model = %normalized_model,
             endpoint = %request_path,
-            error = %error,
+            route_id = %route_id,
+            upstream_status,
+            downstream_status = error.status_code().as_u16(),
+            failure_class = %failure_class,
+            route_action = %"routes_exhausted",
+            same_route_retry = any_same_route_retry,
+            cooldown_seconds,
+            remaining_candidates = 0,
+            error_category = %error.error_category(),
             "request failed after exhausting upstream candidates"
         );
         return Err(error);

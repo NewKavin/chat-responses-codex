@@ -27,6 +27,7 @@ fn policy(id: &str, runtime_model_glob: &str, context_window: u64) -> Capability
 
 fn route(runtime_model_slug: &str) -> RouteIdentity {
     RouteIdentity {
+        key_fingerprint: String::new(),
         upstream_id: "up-random".to_owned(),
         exposed_model_slug: "public-alias".to_owned(),
         runtime_model_slug: runtime_model_slug.to_owned(),

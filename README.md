@@ -143,6 +143,7 @@ docker compose up -d --build
 
 - 单个 PostgreSQL 数据库只跑一个活跃网关实例。
 - 目前不建议把多个网关副本同时挂到同一个数据库上。
+- 精确路由健康状态保存在进程内，多副本不会共享冷却和半开状态。
 - `STATE_PATH` 仅用于不设置 `DATABASE_URL` 的文件兼容模式。
 
 ### 协议转换思路
@@ -170,7 +171,7 @@ flowchart LR
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`：后台登录账号。
 - `APP_NAME`：页面和日志中的应用名。
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`：模型探测页自动刷新间隔，单位秒。
-- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：已废弃（后台自动同步循环已移除，模型映射仅在"获取模型"时刷新）。保留该字段仅为向后兼容。
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：后台模型-key 映射同步间隔，默认 `900` 秒；设为 `0` 可禁用后台同步。
 - `DASHBOARD_CACHE_TTL_SECONDS`：后端复用模型探测快照的缓存时间，单位秒。
 - `UPSTREAM_HEDGE_ENABLED`：是否为长时间没有首个可用输出的流式请求启用竞争尝试。
 - `UPSTREAM_HEDGE_DELAY_MS`：发起第一个额外竞争尝试前的等待时间，默认 `12000` 毫秒。
@@ -184,6 +185,24 @@ flowchart LR
 前者控制页面多久重新请求一次，后者控制后端多久自动刷新模型-key 映射，
 再后面的缓存 TTL 控制服务端多久复用同一份探测结果。
 三者刻意分开，避免把 UI 刷新节奏、上游探测成本和缓存命中周期绑死在一起。
+
+### 多 Key 精确路由与故障语义
+
+一个上游账号可以配置多个 Key，每个 Key 的模型集合分别持久化并参与精确路由。一次成功发现得到的空集合是权威空映射，表示该 Key 当前不支持任何模型；它不会回退到账号级模型列表。缺少持久模型映射的旧部署需要先执行一次成功的“获取模型”，或者让后台旧数据发现完整成功一次，之后 `/v1/models` 才会发布这些模型。
+
+`/v1/models` 只读取持久化模型目录，不读取运行时健康状态。精确路由健康状态只保存在当前进程：重启会清空冷却/半开记录并以 fail-open 方式重新尝试，但不会新增或删除目录模型。因此，共享同一数据库时只支持一个活跃网关实例。
+
+请求失败时使用有界切路：普通上游 5xx 在同一精确路由最多重试一次；429 不在请求内等待，而是保存上游完整的 `Retry-After`、冷却该路由并立即尝试下一条候选路由。自动重放复用同一个幂等标识，但如果供应商不支持该幂等头，交付语义仍是 at-least-once，可能产生重复推理或供应商侧存储。
+
+稳定客户端结果：
+
+| HTTP / code | 含义 |
+|-------------|------|
+| 503 `upstream_routes_exhausted` | 候选路由暂时冷却或不可用；客户端按 `Retry-After` 重试 |
+| 502 `upstream_credentials_exhausted` | 所有候选 Key 均发生凭证、余额或计费失败 |
+| 502 `upstream_model_unsupported` | 所有已尝试路由均拒绝该模型 |
+| 400 `capability_not_supported` | 没有路由能保留客户端明确要求的能力 |
+| 502 `upstream_protocol_unsupported` | 没有路由支持请求端点或协议 |
 
 配置原则：
 
@@ -392,6 +411,7 @@ Operational constraint:
 
 - Run only one active gateway instance per PostgreSQL database.
 - Do not run multiple active replicas against the same database yet.
+- Exact route health is held in process, so replicas do not share cooldown or half-open state.
 - Use `STATE_PATH` only when `DATABASE_URL` is unset and you want file-backed compatibility mode.
 
 ### How Protocol Conversion Works
@@ -418,6 +438,8 @@ Common environment variables:
 - `LOG_PATH`: runtime log path.
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`: admin login.
 - `APP_NAME`: application name shown in the UI and logs.
+- `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`: browser model-probe refresh interval in seconds.
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`: background model-key synchronization interval; defaults to `900`, and `0` disables it.
 - `USAGE_LOG_ROTATION_MAX_BYTES`: file-backed log rotation threshold.
 - `USAGE_LOG_ARCHIVE_MAX_FILES`: maximum number of log archive files.
 - `RUST_LOG`: optional log level filter.
@@ -428,6 +450,24 @@ Configuration model:
 - Upstream settings define which models are reachable and how to call them.
 - Downstream settings define who can use the gateway, what they can see, and how fast they can go.
 - Logs and portal pages define what operators can observe.
+
+### Multi-Key Route Resilience
+
+Each key under one upstream account has its own persisted model mapping and is scheduled as an exact route. A successful discovery that returns no models is an authoritative empty mapping: that key supports no models and does not inherit the account-level list. As an upgrade step, a deployment with empty persisted `supported_models` must complete one explicit discovery, or one full background legacy discovery, before `/v1/models` advertises those models. The endpoint reads only the persisted model catalog.
+
+Runtime failures never rewrite capability data. A generic upstream 5xx retries the same exact route once before moving on. An upstream 429 switches routes without sleeping inside the request, stores the full `Retry-After` as route cooldown, and returns it when temporary route exhaustion is final. Automatic replay reuses the same idempotency identifier, but delivery remains at-least-once when a provider ignores or does not support the idempotency header; duplicate inference or provider-side storage is still possible.
+
+Exact route health is process-local; run one active gateway instance per database. The runtime route health resets on restart and fails open on the next request. It does not change the persisted model catalog, so restart and temporary provider failures do not add or remove models from `/v1/models`.
+
+Stable client outcomes:
+
+| HTTP / code | Meaning |
+|-------------|---------|
+| 503 `upstream_routes_exhausted` | Routes are temporarily unavailable or cooling; retry using `Retry-After` |
+| 502 `upstream_credentials_exhausted` | Every eligible key failed credentials, balance, or billing checks |
+| 502 `upstream_model_unsupported` | Every attempted route rejected the requested model |
+| 400 `capability_not_supported` | No route can preserve an explicitly required capability |
+| 502 `upstream_protocol_unsupported` | No route supports the requested endpoint or protocol |
 
 ### Product Design
 

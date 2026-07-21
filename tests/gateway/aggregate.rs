@@ -131,6 +131,7 @@ impl ContextFallbackHarness {
             (FALLBACK_MODEL, fallback_nonstream),
         ] {
             let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+                key_fingerprint: upstream_model_key_fingerprint(&upstream, runtime_model),
                 upstream_id: UPSTREAM_ID.into(),
                 runtime_model_slug: runtime_model.into(),
                 protocol: WireProtocol::Responses,
@@ -139,6 +140,7 @@ impl ContextFallbackHarness {
             profile.configuration_fingerprint = state
                 .route_configuration_fingerprint(
                     &upstream,
+                    &profile.key.key_fingerprint,
                     MODEL,
                     runtime_model,
                     UpstreamProtocol::Responses,
@@ -308,27 +310,38 @@ impl AggregateHarness {
             tempdir.path().join("state.json"),
             config,
         );
-        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
-            upstream_id: UPSTREAM_ID.into(),
-            runtime_model_slug: MODEL.into(),
-            protocol: WireProtocol::Responses,
-        });
-        profile.state = DialectProfileState::Verified;
-        profile.configuration_fingerprint = state
-            .route_configuration_fingerprint(&upstream, MODEL, MODEL, UpstreamProtocol::Responses)
-            .unwrap();
-        if matches!(&script, AggregateScript::RecoverThenPending) {
-            assert!(profile.capabilities.is_empty());
-        } else {
-            profile
-                .capabilities
-                .insert(Capability::NonStreamingResponse, EvidenceState::Rejected);
-            profile
-                .capabilities
-                .insert(Capability::TextStream, EvidenceState::Supported);
-            assert_eq!(profile.capabilities.len(), 2);
+        for api_key in upstream.keys_for_model(MODEL) {
+            let key_fingerprint =
+                chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &api_key);
+            let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+                key_fingerprint,
+                upstream_id: UPSTREAM_ID.into(),
+                runtime_model_slug: MODEL.into(),
+                protocol: WireProtocol::Responses,
+            });
+            profile.state = DialectProfileState::Verified;
+            profile.configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    &profile.key.key_fingerprint,
+                    MODEL,
+                    MODEL,
+                    UpstreamProtocol::Responses,
+                )
+                .unwrap();
+            if matches!(&script, AggregateScript::RecoverThenPending) {
+                assert!(profile.capabilities.is_empty());
+            } else {
+                profile
+                    .capabilities
+                    .insert(Capability::NonStreamingResponse, EvidenceState::Rejected);
+                profile
+                    .capabilities
+                    .insert(Capability::TextStream, EvidenceState::Supported);
+                assert_eq!(profile.capabilities.len(), 2);
+            }
+            state.upsert_dialect_profile(profile).await.unwrap();
         }
-        state.upsert_dialect_profile(profile).await.unwrap();
 
         Self {
             app: build_router(state.clone()),
@@ -881,12 +894,19 @@ async fn aggregate_learned_singleflight_follower_uses_actual_mode_for_cancellati
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: MODEL.into(),
         protocol: WireProtocol::Responses,
     });
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, MODEL, MODEL, UpstreamProtocol::Responses)
+        .route_configuration_fingerprint(
+            &upstream,
+            &profile.key.key_fingerprint,
+            MODEL,
+            MODEL,
+            UpstreamProtocol::Responses,
+        )
         .unwrap();
     state.upsert_dialect_profile(profile).await.unwrap();
 
@@ -942,6 +962,7 @@ async fn aggregate_learned_singleflight_follower_uses_actual_mode_for_cancellati
     let learned_profile = learned
         .profiles
         .get(&DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: MODEL.into(),
             protocol: WireProtocol::Responses,
@@ -1153,7 +1174,7 @@ async fn aggregate_cancellation_rearms_after_retryable_first_key_error() {
 
     harness.assert_cleanup().await;
     let snapshot = harness.state.snapshot().await;
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
     assert_eq!(
         harness
             .state
@@ -1229,7 +1250,7 @@ async fn aggregate_cancellation_arms_after_json_to_sse_recovery() {
         "failed empty-response recovery must not be stored"
     );
     let snapshot = harness.state.snapshot().await;
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
     assert_eq!(
         harness
             .state
@@ -1292,7 +1313,7 @@ async fn aggregate_future_cancellation_cleans_up_and_logs_once_without_changing_
 
     harness.assert_cleanup().await;
     let snapshot = harness.state.snapshot().await;
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
     assert_eq!(
         harness
             .state

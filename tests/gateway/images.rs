@@ -96,6 +96,7 @@ async fn downstream_chat_image_detail_is_downgraded_when_route_lacks_it() {
     );
 
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -280,6 +281,7 @@ async fn downstream_responses_image_detail_is_downgraded_when_route_lacks_it() {
     );
 
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::Responses,
@@ -440,6 +442,7 @@ async fn downstream_chat_file_id_requires_native_file_capability_before_routing(
     );
 
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,

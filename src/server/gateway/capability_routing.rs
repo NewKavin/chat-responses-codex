@@ -1,8 +1,10 @@
 use crate::capabilities::{
     Capability, CapabilityResolver, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey,
     DialectProfileState, ReasoningCarrier, RequestedFeatures, ResolutionInput,
-    ResolvedCapabilities, RouteIdentity, SemanticPolicy, WireProtocol,
+    ResolvedCapabilities, RouteIdentity, RuntimeCapabilityHintSnapshot, SemanticPolicy,
+    WireProtocol,
 };
+use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
 use crate::state::{AppState, UpstreamConfig};
 use serde_json::Value;
@@ -131,10 +133,12 @@ impl GatewayContinuationState {
     pub(super) fn matches_route(
         &self,
         upstream: &UpstreamConfig,
+        key_fingerprint: &str,
         exposed_model: &str,
         protocol: UpstreamProtocol,
     ) -> bool {
         self.profile_key.upstream_id == upstream.id
+            && self.profile_key.key_fingerprint == key_fingerprint
             && self.profile_key.protocol == WireProtocol::from(protocol)
             && upstream.resolved_model_name(exposed_model).as_deref()
                 == Some(self.profile_key.runtime_model_slug.as_str())
@@ -147,17 +151,29 @@ impl GatewayContinuationState {
         exposed_model: &str,
     ) -> bool {
         upstreams.iter().any(|upstream| {
-            upstream.supported_protocols().into_iter().any(|protocol| {
-                self.matches_route(upstream, exposed_model, protocol)
-                    && AppState::route_configuration_fingerprint_with_snapshot(
-                        snapshot,
-                        upstream,
-                        exposed_model,
-                        &self.profile_key.runtime_model_slug,
-                        protocol,
-                    )
-                    .is_ok_and(|fingerprint| fingerprint == self.configuration_fingerprint())
-            })
+            let Some(runtime_model_slug) = upstream.resolved_model_name(exposed_model) else {
+                return false;
+            };
+            upstream
+                .keys_for_model(&runtime_model_slug)
+                .into_iter()
+                .any(|api_key| {
+                    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+                    upstream.supported_protocols().into_iter().any(|protocol| {
+                        self.matches_route(upstream, &key_fingerprint, exposed_model, protocol)
+                            && AppState::route_configuration_fingerprint_with_snapshot(
+                                snapshot,
+                                upstream,
+                                &key_fingerprint,
+                                exposed_model,
+                                &self.profile_key.runtime_model_slug,
+                                protocol,
+                            )
+                            .is_ok_and(|fingerprint| {
+                                fingerprint == self.configuration_fingerprint()
+                            })
+                    })
+                })
         })
     }
 
@@ -268,6 +284,7 @@ pub(super) enum ClaudeThinkingReplayRoute {
     NoReplay,
     Pinned {
         upstream_id: String,
+        key_fingerprint: String,
         protocol: UpstreamProtocol,
     },
     InvalidOrUnavailable,
@@ -367,50 +384,57 @@ pub(super) fn claude_thinking_replay_route(
         let Some(runtime_model_slug) = upstream.resolved_model_name(exposed_model_slug) else {
             continue;
         };
-        for protocol in upstream.supported_protocols() {
-            let Ok(profile_fingerprint) = AppState::route_configuration_fingerprint_with_snapshot(
-                snapshot,
-                upstream,
-                exposed_model_slug,
-                &runtime_model_slug,
-                protocol,
-            ) else {
-                continue;
-            };
-            let protocol_label = wire_protocol_label(protocol.into());
-            let matches = replay_blocks.iter().all(|block| {
-                let call_ids = block
-                    .call_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>();
-                let input = super::thinking_signature::ThinkingSignatureInput {
-                    thinking: &block.thinking,
-                    model: &runtime_model_slug,
-                    upstream_id: &upstream.id,
-                    protocol: protocol_label,
-                    profile_fingerprint: &profile_fingerprint,
-                    call_ids: &call_ids,
+        for api_key in upstream.keys_for_model(&runtime_model_slug) {
+            let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+            for protocol in upstream.supported_protocols() {
+                let Ok(profile_fingerprint) =
+                    AppState::route_configuration_fingerprint_with_snapshot(
+                        snapshot,
+                        upstream,
+                        &key_fingerprint,
+                        exposed_model_slug,
+                        &runtime_model_slug,
+                        protocol,
+                    )
+                else {
+                    continue;
                 };
-                super::thinking_signature::verify_thinking(
-                    state.config.jwt_secret.as_bytes(),
-                    &input,
-                    &block.signature,
-                )
-            });
-            if !matches {
-                continue;
+                let protocol_label = wire_protocol_label(protocol.into());
+                let matches = replay_blocks.iter().all(|block| {
+                    let call_ids = block
+                        .call_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>();
+                    let input = super::thinking_signature::ThinkingSignatureInput {
+                        thinking: &block.thinking,
+                        model: &runtime_model_slug,
+                        upstream_id: &upstream.id,
+                        protocol: protocol_label,
+                        profile_fingerprint: &profile_fingerprint,
+                        call_ids: &call_ids,
+                    };
+                    super::thinking_signature::verify_thinking(
+                        state.config.jwt_secret.as_bytes(),
+                        &input,
+                        &block.signature,
+                    )
+                });
+                if !matches {
+                    continue;
+                }
+                if matched_route.is_some() {
+                    return ClaudeThinkingReplayRoute::InvalidOrUnavailable;
+                }
+                matched_route = Some((upstream.id.clone(), key_fingerprint.clone(), protocol));
             }
-            if matched_route.is_some() {
-                return ClaudeThinkingReplayRoute::InvalidOrUnavailable;
-            }
-            matched_route = Some((upstream.id.clone(), protocol));
         }
     }
     matched_route
         .map(
-            |(upstream_id, protocol)| ClaudeThinkingReplayRoute::Pinned {
+            |(upstream_id, key_fingerprint, protocol)| ClaudeThinkingReplayRoute::Pinned {
                 upstream_id,
+                key_fingerprint,
                 protocol,
             },
         )
@@ -420,13 +444,39 @@ pub(super) fn claude_thinking_replay_route(
 pub(super) fn resolve_route_capabilities_with_snapshot(
     snapshot: &CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
     requested: &RequestedFeatures,
 ) -> Option<ResolvedCapabilities> {
+    resolve_route_capabilities_with_runtime_hints(
+        snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+        requested,
+        &RuntimeCapabilityHintSnapshot::default(),
+        None,
+    )
+}
+
+pub(super) fn resolve_route_capabilities_with_runtime_hints(
+    snapshot: &CapabilityRuntimeSnapshot,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    exposed_model_slug: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+    requested: &RequestedFeatures,
+    runtime_hints: &RuntimeCapabilityHintSnapshot,
+    requested_value: Option<&str>,
+) -> Option<ResolvedCapabilities> {
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
+        key_fingerprint: key_fingerprint.to_string(),
         exposed_model_slug: exposed_model_slug.to_string(),
         runtime_model_slug: runtime_model_slug.to_string(),
         protocol: protocol.into(),
@@ -439,6 +489,7 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
     let effective_profile = exact_route_effective_profile(
         snapshot,
         upstream,
+        key_fingerprint,
         exposed_model_slug,
         runtime_model_slug,
         protocol,
@@ -453,7 +504,7 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
             semantic: semantic_or_empty(&semantic),
             route_overrides: &route_overrides,
             policy_extensions: &policy_extensions,
-            profile: effective_profile.profile,
+            profile: effective_profile,
             strip_nonstandard_chat_fields: upstream.strip_nonstandard_chat_fields,
         })
         .ok()?;
@@ -479,36 +530,65 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
                 .insert("max_output_tokens".into(), CapabilitySource::Override);
         }
     }
+    let profile = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug,
+        protocol.into(),
+    );
+    let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+        snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+    )
+    .ok()?;
+    if runtime_hints.blocks_protocol(&profile, &configuration_fingerprint) {
+        return None;
+    }
+    for (capability, value) in
+        runtime_hints.blocked_features(&profile, &configuration_fingerprint, requested_value)
+    {
+        if value.is_some() || requested.required.contains(&capability) {
+            return None;
+        }
+        resolved.values.insert(
+            capability,
+            crate::capabilities::ResolvedCapability {
+                state: crate::capabilities::EvidenceState::Rejected,
+                source: CapabilitySource::Probe,
+            },
+        );
+    }
     Some(resolved)
-}
-
-struct ExactRouteEffectiveProfile<'a> {
-    key: DialectProfileKey,
-    configuration_fingerprint: Option<String>,
-    profile: Option<&'a crate::capabilities::UpstreamDialectProfile>,
 }
 
 fn exact_route_effective_profile<'a>(
     snapshot: &'a CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
+    key_fingerprint: &str,
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
-) -> ExactRouteEffectiveProfile<'a> {
-    let key = DialectProfileKey {
-        upstream_id: upstream.id.clone(),
-        runtime_model_slug: runtime_model_slug.to_owned(),
-        protocol: protocol.into(),
-    };
+) -> Option<&'a crate::capabilities::UpstreamDialectProfile> {
+    let key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug,
+        protocol.into(),
+    );
     let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         snapshot,
         upstream,
+        key_fingerprint,
         exposed_model_slug,
         runtime_model_slug,
         protocol,
     )
     .ok();
-    let profile = configuration_fingerprint
+    configuration_fingerprint
         .as_deref()
         .and_then(|fingerprint| {
             snapshot.profiles.get(&key).filter(|profile| {
@@ -517,12 +597,7 @@ fn exact_route_effective_profile<'a>(
                     && profile.probe_schema_version
                         == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
             })
-        });
-    ExactRouteEffectiveProfile {
-        key,
-        configuration_fingerprint,
-        profile,
-    }
+        })
 }
 
 fn adapt_requested_features_for_protocol(
@@ -540,73 +615,8 @@ fn adapt_requested_features_for_protocol(
     adapted
 }
 
-#[allow(dead_code)]
-pub(super) fn select_catalog_witness(
-    state: &AppState,
-    upstreams: &[UpstreamConfig],
-    model: &str,
-) -> Option<serde_json::Value> {
-    select_catalog_witness_entry(state, upstreams, model).map(|entry| entry.diagnostic())
-}
-
 pub(super) struct CatalogWitnessEntry {
-    pub profile_key: DialectProfileKey,
-    pub configuration_fingerprint: Option<String>,
-    pub profile_state: DialectProfileState,
-    pub probe_schema_version: u32,
-    pub profile_rank: u8,
-    pub executable_capability_count: usize,
-    pub native_protocol_fidelity: u8,
-    pub upstream_priority: u32,
-    pub upstream_failure_count: u32,
     pub capabilities: ResolvedCapabilities,
-}
-
-pub(super) fn is_compatible_catalog_superset(
-    candidate: &ResolvedCapabilities,
-    witness: &ResolvedCapabilities,
-    candidate_transition: ProtocolTransitionIdentity,
-    witness_transition: ProtocolTransitionIdentity,
-) -> bool {
-    let advertises_reasoning_efforts = witness.supports(Capability::ReasoningOutput)
-        && witness.reasoning_control_field.is_some()
-        && !witness.effort_map.is_empty();
-    let preserves_reasoning_efforts = !advertises_reasoning_efforts
-        || (candidate.reasoning_control_field.is_some()
-            && witness
-                .effort_map
-                .keys()
-                .all(|effort| candidate.effort_map.contains_key(effort)));
-
-    candidate.profile_state == DialectProfileState::Verified
-        && candidate_transition == witness_transition
-        && candidate.reasoning_carrier == witness.reasoning_carrier
-        && preserves_reasoning_efforts
-        && witness.values.iter().all(|(capability, resolved)| {
-            resolved.state != crate::capabilities::EvidenceState::Supported
-                || candidate.supports(*capability)
-        })
-}
-
-impl CatalogWitnessEntry {
-    pub fn diagnostic(&self) -> serde_json::Value {
-        serde_json::json!({
-            "upstream_id": self.profile_key.upstream_id,
-            "runtime_model_slug": self.profile_key.runtime_model_slug,
-            "protocol": wire_protocol_label(self.profile_key.protocol),
-            "profile_key": self.profile_key,
-            "configuration_fingerprint": self.configuration_fingerprint,
-            "profile_state": profile_state_label(self.profile_state),
-            "probe_schema_version": self.probe_schema_version,
-            "rank": {
-                "profile": self.profile_rank,
-                "executable_capabilities": self.executable_capability_count,
-                "native_protocol_fidelity": self.native_protocol_fidelity,
-                "upstream_priority": self.upstream_priority,
-                "upstream_failure_count": self.upstream_failure_count,
-            },
-        })
-    }
 }
 
 pub(super) fn select_catalog_witness_entry(
@@ -615,102 +625,67 @@ pub(super) fn select_catalog_witness_entry(
     model: &str,
 ) -> Option<CatalogWitnessEntry> {
     let snapshot = state.capability_snapshot();
-    upstreams
+    let mut candidates = Vec::new();
+    for upstream in upstreams
         .iter()
         .filter(|upstream| upstream.active && upstream.supports_model(model))
-        .filter_map(|upstream| {
-            upstream
-                .resolved_model_name(model)
-                .map(|runtime_model_slug| (upstream, runtime_model_slug))
-        })
-        .flat_map(|(upstream, runtime_model_slug)| {
-            let snapshot = &snapshot;
-            upstream
-                .supported_protocols()
-                .into_iter()
-                .filter_map(move |protocol| {
-                    let effective_profile = exact_route_effective_profile(
-                        snapshot,
-                        upstream,
-                        model,
-                        &runtime_model_slug,
-                        protocol,
-                    );
-                    let resolved = resolve_route_capabilities_with_snapshot(
-                        snapshot,
-                        upstream,
-                        model,
-                        &runtime_model_slug,
-                        protocol,
-                        &RequestedFeatures::default(),
-                    )?;
-                    if resolved.profile_state == DialectProfileState::Unsupported {
-                        return None;
-                    }
-                    if !resolved.supports(Capability::FunctionTools)
-                        || !resolved.supports(Capability::ToolContinuation)
-                    {
-                        return None;
-                    }
-                    let rank = match resolved.profile_state {
-                        DialectProfileState::Verified => 3u8,
-                        DialectProfileState::Partial => 2u8,
-                        DialectProfileState::Unknown => 1u8,
-                        DialectProfileState::Unsupported => 0u8,
-                    };
-                    let supported = resolved
-                        .values
-                        .values()
-                        .filter(|value| {
-                            value.state == crate::capabilities::EvidenceState::Supported
-                        })
-                        .count();
-                    Some((
-                        rank,
-                        supported,
-                        u8::from(effective_profile.key.protocol == WireProtocol::Responses),
-                        upstream.priority,
-                        std::cmp::Reverse(upstream.failure_count),
-                        upstream.id.clone(),
-                        effective_profile.key,
-                        effective_profile.configuration_fingerprint,
-                        resolved,
-                    ))
-                })
-        })
+    {
+        let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+            continue;
+        };
+        for api_key in upstream.keys_for_model(&runtime_model_slug) {
+            let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+            for protocol in upstream.supported_protocols() {
+                let Some(resolved) = resolve_route_capabilities_with_snapshot(
+                    &snapshot,
+                    upstream,
+                    &key_fingerprint,
+                    model,
+                    &runtime_model_slug,
+                    protocol,
+                    &RequestedFeatures::default(),
+                ) else {
+                    continue;
+                };
+                if resolved.profile_state == DialectProfileState::Unsupported
+                    || !resolved.supports(Capability::FunctionTools)
+                    || !resolved.supports(Capability::ToolContinuation)
+                {
+                    continue;
+                }
+                let rank = match resolved.profile_state {
+                    DialectProfileState::Verified => 3u8,
+                    DialectProfileState::Partial => 2u8,
+                    DialectProfileState::Unknown => 1u8,
+                    DialectProfileState::Unsupported => 0u8,
+                };
+                let supported = resolved
+                    .values
+                    .values()
+                    .filter(|value| value.state == crate::capabilities::EvidenceState::Supported)
+                    .count();
+                candidates.push((
+                    rank,
+                    supported,
+                    u8::from(WireProtocol::from(protocol) == WireProtocol::Responses),
+                    upstream.priority,
+                    upstream.id.clone(),
+                    resolved,
+                ));
+            }
+        }
+    }
+    candidates
+        .into_iter()
         .max_by(|left, right| {
             left.0
                 .cmp(&right.0)
                 .then(left.1.cmp(&right.1))
                 .then(left.2.cmp(&right.2))
                 .then(left.3.cmp(&right.3))
-                .then(left.4.cmp(&right.4))
-                .then_with(|| right.5.cmp(&left.5))
+                .then_with(|| right.4.cmp(&left.4))
         })
-        .map(
-            |(
-                rank,
-                supported,
-                native_fidelity,
-                priority,
-                failure_count,
-                _,
-                key,
-                configuration_fingerprint,
-                resolved,
-            )| CatalogWitnessEntry {
-                profile_key: key,
-                configuration_fingerprint,
-                profile_state: resolved.profile_state,
-                probe_schema_version: crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
-                profile_rank: rank,
-                executable_capability_count: supported,
-                native_protocol_fidelity: native_fidelity,
-                upstream_priority: priority,
-                upstream_failure_count: failure_count.0,
-                capabilities: resolved,
-            },
-        )
+        .map(|(_, _, _, _, _, capabilities)| CatalogWitnessEntry { capabilities })
 }
 
 fn scan_responses_images(body: &Value, required: &mut BTreeSet<Capability>) {
@@ -977,15 +952,6 @@ fn wire_protocol_label(protocol: WireProtocol) -> &'static str {
     }
 }
 
-fn profile_state_label(state: DialectProfileState) -> &'static str {
-    match state {
-        DialectProfileState::Verified => "verified",
-        DialectProfileState::Partial => "partial",
-        DialectProfileState::Unsupported => "unsupported",
-        DialectProfileState::Unknown => "unknown",
-    }
-}
-
 fn semantic_or_empty(semantic: &SemanticPolicy) -> &SemanticPolicy {
     semantic
 }
@@ -995,120 +961,43 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn verified_capabilities(reasoning_carrier: ReasoningCarrier) -> ResolvedCapabilities {
-        ResolvedCapabilities {
-            values: std::collections::BTreeMap::from([(
-                Capability::FunctionTools,
-                crate::capabilities::ResolvedCapability {
-                    state: crate::capabilities::EvidenceState::Supported,
-                    source: CapabilitySource::Probe,
-                },
-            )]),
-            token_limit_field: crate::capabilities::TokenLimitField::Omit,
-            reasoning_mode: crate::capabilities::ReasoningMode::Off,
-            reasoning_carrier,
-            correction_rules: Vec::new(),
-            reasoning_control_field: None,
-            effort_map: std::collections::BTreeMap::new(),
-            omit_sampling_fields: BTreeSet::new(),
-            context_window: None,
-            max_output_tokens: None,
-            omit_optional_extensions: false,
-            profile_state: DialectProfileState::Verified,
-            provisional: false,
-            native_preferred: true,
-            adapters: BTreeSet::new(),
-            request_extensions: Vec::new(),
-            field_sources: std::collections::BTreeMap::new(),
-        }
-    }
-
     #[test]
-    fn catalog_superset_requires_matching_explicit_protocol_transition() {
-        let witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
-        let candidate = witness.clone();
-        let responses_to_chat =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
-        let responses_to_responses =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::Responses);
-
-        assert!(is_compatible_catalog_superset(
-            &candidate,
-            &witness,
-            responses_to_chat,
-            responses_to_chat,
-        ));
-        assert!(!is_compatible_catalog_superset(
-            &candidate,
-            &witness,
-            responses_to_responses,
-            responses_to_chat,
-        ));
-    }
-
-    #[test]
-    fn catalog_superset_preserves_every_advertised_reasoning_effort() {
-        let transition =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
-        let mut witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
-        witness.values.insert(
-            Capability::ReasoningOutput,
-            crate::capabilities::ResolvedCapability {
-                state: crate::capabilities::EvidenceState::Supported,
-                source: CapabilitySource::Probe,
-            },
+    fn continuation_route_requires_the_exact_key_fingerprint() {
+        let upstream = UpstreamConfig {
+            id: "continuation-key-route".into(),
+            api_key: "key-a".into(),
+            api_keys: vec!["key-b".into()],
+            supported_models: vec!["opaque".into()],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let key_b = upstream_key_fingerprint(&upstream.id, "key-b");
+        let continuation = GatewayContinuationState::new(
+            DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_b.clone(),
+                "opaque",
+                WireProtocol::ChatCompletions,
+            ),
+            "fingerprint".into(),
+            None,
+            BTreeSet::new(),
+            WireProtocol::ChatCompletions,
+            WireProtocol::ChatCompletions,
+            None,
         );
-        witness.reasoning_control_field = Some("reasoning_effort".into());
-        witness.effort_map = std::collections::BTreeMap::from([
-            ("high".into(), "witness-high".into()),
-            ("medium".into(), "witness-medium".into()),
-        ]);
-
-        let mut compatible = witness.clone();
-        compatible.reasoning_control_field = Some("thinking_level".into());
-        compatible.effort_map = std::collections::BTreeMap::from([
-            ("high".into(), "candidate-maximum".into()),
-            ("medium".into(), "candidate-balanced".into()),
-        ]);
-        assert!(is_compatible_catalog_superset(
-            &compatible,
-            &witness,
-            transition,
-            transition,
+        let key_a = upstream_key_fingerprint(&upstream.id, "key-a");
+        assert!(!continuation.matches_route(
+            &upstream,
+            &key_a,
+            "opaque",
+            UpstreamProtocol::ChatCompletions,
         ));
-
-        compatible.effort_map.remove("high");
-        assert!(!is_compatible_catalog_superset(
-            &compatible,
-            &witness,
-            transition,
-            transition,
-        ));
-
-        compatible.reasoning_control_field = None;
-        compatible.effort_map = witness.effort_map.clone();
-        assert!(!is_compatible_catalog_superset(
-            &compatible,
-            &witness,
-            transition,
-            transition,
-        ));
-    }
-
-    #[test]
-    fn catalog_superset_ignores_unadvertised_reasoning_efforts() {
-        let transition =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
-        let mut witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
-        witness.reasoning_control_field = Some("reasoning_effort".into());
-        witness.effort_map =
-            std::collections::BTreeMap::from([("high".into(), "witness-high".into())]);
-
-        let mut candidate = witness.clone();
-        candidate.reasoning_control_field = None;
-        candidate.effort_map.clear();
-        assert!(is_compatible_catalog_superset(
-            &candidate, &witness, transition, transition,
+        assert!(continuation.matches_route(
+            &upstream,
+            &key_b,
+            "opaque",
+            UpstreamProtocol::ChatCompletions,
         ));
     }
 

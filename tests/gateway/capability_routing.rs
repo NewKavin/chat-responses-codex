@@ -197,9 +197,16 @@ async fn put_catalog_profile_for_protocol(
     capabilities: &[(Capability, EvidenceState)],
 ) -> String {
     let configuration_fingerprint = state
-        .route_configuration_fingerprint(upstream, model, model, protocol)
+        .route_configuration_fingerprint(
+            upstream,
+            &upstream_model_key_fingerprint(upstream, model),
+            model,
+            model,
+            protocol,
+        )
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.to_owned(),
         protocol: protocol.into(),
@@ -231,8 +238,15 @@ async fn stamp_current_profile(
         .iter()
         .find(|upstream| upstream.id == upstream_id)
         .unwrap();
+    profile.key.key_fingerprint = upstream_model_key_fingerprint(upstream, exposed_model);
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(upstream, exposed_model, &runtime_model_slug, protocol)
+        .route_configuration_fingerprint(
+            upstream,
+            &profile.key.key_fingerprint,
+            exposed_model,
+            &runtime_model_slug,
+            protocol,
+        )
         .unwrap();
     profile.probe_schema_version = DIALECT_PROBE_SCHEMA_VERSION;
 }
@@ -259,6 +273,68 @@ async fn get_models(state: AppState, secret: &str, codex: bool) -> Value {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn persisted_catalog_never_probes_an_upstream_when_the_catalog_is_empty() {
+    let model_requests = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_requests_for_handler = model_requests.clone();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(move || {
+            let model_requests = model_requests_for_handler.clone();
+            async move {
+                model_requests.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "object": "list",
+                    "data": [{"id": "live-only-model", "object": "model"}]
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let mut upstream = catalog_upstream("empty-persisted-catalog", &[]);
+    upstream.base_url = format!("http://{address}");
+    let (_tempdir, state, secret) = catalog_state(vec![upstream], Vec::new());
+
+    let standard = get_models(state.clone(), &secret, false).await;
+    assert_eq!(standard["data"], json!([]));
+    let codex = get_models(state, &secret, true).await;
+    assert_eq!(codex["models"], json!([]));
+    assert_eq!(model_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn persisted_catalog_stays_stable_while_a_route_is_in_cooldown() {
+    let model = "stable-catalog-model";
+    let upstream = catalog_upstream("stable-catalog-route", &[model]);
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    let before = get_models(state.clone(), &secret, false).await;
+
+    let route = chat_responses_codex::state::RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
+            &upstream.id,
+            &upstream.api_key,
+        ),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    state
+        .observe_route_failure(
+            &route,
+            chat_responses_codex::state::RouteFailureClass::CapacityUnavailable,
+            None,
+        )
+        .await;
+
+    let after = get_models(state, &secret, false).await;
+    assert_eq!(after, before);
 }
 
 #[derive(Clone, Copy)]
@@ -305,9 +381,16 @@ async fn assert_stale_profile_is_not_authoritative(mismatch: StaleProfileMismatc
     upstream.base_url = format!("http://{address}");
     let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
     let current_fingerprint = state
-        .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &upstream,
+            &upstream_model_key_fingerprint(&upstream, model),
+            model,
+            model,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -371,18 +454,11 @@ async fn assert_stale_profile_is_not_authoritative(mismatch: StaleProfileMismatc
         .iter()
         .find(|entry| entry["slug"] == model)
         .unwrap();
-    let diagnostic = &catalog_model["gateway_catalog_witness"];
-
     assert_eq!(dispatch_status, StatusCode::BAD_REQUEST);
     assert_eq!(dispatch_hits, 0);
     assert_eq!(catalog_model["input_modalities"], json!(["text"]));
     assert_eq!(catalog_model["supports_parallel_tool_calls"], false);
-    assert_eq!(diagnostic["profile_state"], "unknown");
-    assert_eq!(diagnostic["configuration_fingerprint"], current_fingerprint);
-    assert_eq!(
-        diagnostic["probe_schema_version"],
-        DIALECT_PROBE_SCHEMA_VERSION
-    );
+    assert!(catalog_model.get("gateway_catalog_witness").is_none());
 }
 
 #[tokio::test]
@@ -396,7 +472,7 @@ async fn schema_mismatch_profile_is_ignored_by_routing_and_catalog() {
 }
 
 #[tokio::test]
-async fn codex_catalog_requires_function_tools_and_tool_continuation_only_for_codex() {
+async fn codex_catalog_keeps_configured_models_without_tool_capability_witness() {
     let without_functions = "arbitrary/no-functions";
     let without_continuation = "arbitrary/no-continuation";
     let upstream = catalog_upstream(
@@ -431,7 +507,27 @@ async fn codex_catalog_requires_function_tools_and_tool_continuation_only_for_co
     .await;
 
     let codex = get_models(state.clone(), &secret, true).await;
-    assert_eq!(codex["models"], json!([]));
+    let models = codex["models"].as_array().expect("models array");
+    let ids = models
+        .iter()
+        .map(|model| model["slug"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from([without_functions, without_continuation])
+    );
+    for model in models {
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([{
+                "effort": "none",
+                "description": "Do not request a configurable reasoning effort"
+            }])
+        );
+        assert_eq!(model["supports_parallel_tool_calls"], false);
+        assert_eq!(model["apply_patch_tool_type"], Value::Null);
+        assert!(model.get("gateway_catalog_witness").is_none());
+    }
 
     let standard = get_models(state, &secret, false).await;
     let ids = standard["data"]
@@ -444,6 +540,43 @@ async fn codex_catalog_requires_function_tools_and_tool_continuation_only_for_co
         ids,
         std::collections::BTreeSet::from([without_functions, without_continuation])
     );
+}
+
+#[tokio::test]
+async fn codex_catalog_uses_the_complete_nonempty_downstream_allowlist() {
+    let live_model = "MiniMax/MiniMax-M2.7";
+    let alternate_live_casing = "minimax/minimax-m2.7";
+    let allowlist_only_model = "ZhipuAI/GLM-5.1";
+    let upstream = catalog_upstream("partial-live-catalog", &[live_model, alternate_live_casing]);
+    let (_tempdir, state, secret) = catalog_state(
+        vec![upstream],
+        vec![
+            "minimax/minimax-m2.7".into(),
+            allowlist_only_model.into(),
+            "zhipuai/glm-5.1".into(),
+        ],
+    );
+
+    let catalog = get_models(state, &secret, true).await;
+    let models = catalog["models"].as_array().expect("models array");
+    let slugs = models
+        .iter()
+        .map(|model| model["slug"].as_str().expect("model slug"))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        slugs,
+        std::collections::BTreeSet::from(
+            [live_model, alternate_live_casing, allowlist_only_model,]
+        )
+    );
+    let conservative = models
+        .iter()
+        .find(|model| model["slug"] == allowlist_only_model)
+        .expect("allowlist-only model");
+    assert_eq!(conservative["default_reasoning_level"], "none");
+    assert_eq!(conservative["supports_parallel_tool_calls"], false);
+    assert_eq!(conservative["input_modalities"], json!(["text"]));
 }
 
 #[tokio::test]
@@ -619,9 +752,16 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
         .await
         .unwrap();
     let configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, model, model, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &upstream,
+            &upstream_model_key_fingerprint(&upstream, model),
+            model,
+            model,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
         upstream_id: upstream.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -659,6 +799,200 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
         ])
     );
     assert_eq!(model["default_reasoning_level"], "medium");
+}
+
+#[tokio::test]
+async fn codex_catalog_uses_the_key_with_verified_model_capabilities() {
+    let model = "arbitrary/per-key-reasoning";
+    let mut upstream = catalog_upstream("per-key-reasoning-route", &[model]);
+    upstream.api_keys = vec!["key-b".into()];
+    upstream.api_key_models = vec![
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-a".into(),
+            supported_models: vec![model.into()],
+        },
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-b".into(),
+            supported_models: vec![model.into()],
+        },
+    ];
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+
+    let put_profile = |api_key: &str, profile_state: DialectProfileState, efforts: &[&str]| {
+        let state = state.clone();
+        let upstream = upstream.clone();
+        let api_key = api_key.to_string();
+        let efforts = efforts
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect::<Vec<_>>();
+        async move {
+            let key_fingerprint =
+                chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &api_key);
+            let configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    &key_fingerprint,
+                    model,
+                    model,
+                    UpstreamProtocol::ChatCompletions,
+                )
+                .unwrap();
+            let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+                upstream.id.clone(),
+                key_fingerprint,
+                model,
+                WireProtocol::ChatCompletions,
+            ));
+            profile.configuration_fingerprint = configuration_fingerprint;
+            profile.state = profile_state;
+            profile
+                .capabilities
+                .insert(Capability::FunctionTools, EvidenceState::Supported);
+            profile
+                .capabilities
+                .insert(Capability::ToolContinuation, EvidenceState::Supported);
+            profile
+                .capabilities
+                .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+            if api_key == "key-b" {
+                profile
+                    .capabilities
+                    .insert(Capability::ParallelToolCalls, EvidenceState::Supported);
+            }
+            profile
+                .reasoning_controls
+                .insert("reasoning_effort".into(), efforts);
+            state.upsert_dialect_profile(profile).await.unwrap();
+        }
+    };
+
+    put_profile("key-a", DialectProfileState::Partial, &["low", "medium"]).await;
+    put_profile(
+        "key-b",
+        DialectProfileState::Verified,
+        &["low", "medium", "xhigh"],
+    )
+    .await;
+
+    let catalog = get_models(state, &secret, true).await;
+    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
+}
+
+#[tokio::test]
+async fn gateway_selects_the_key_route_that_supports_required_capabilities() {
+    let authorizations = Arc::new(Mutex::new(Vec::<String>::new()));
+    let authorizations_clone = authorizations.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let authorizations = authorizations_clone.clone();
+            async move {
+                let authorization = request
+                    .headers()
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                authorizations.lock().unwrap().push(authorization);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-per-key-route",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "glm-5.2",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let model = "glm-5.2";
+    let mut upstream = catalog_upstream("per-key-required-route", &[model]);
+    upstream.base_url = format!("http://{address}");
+    upstream.api_key = "key-a".into();
+    upstream.api_keys = vec!["key-b".into()];
+    upstream.api_key_models = vec![
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-a".into(),
+            supported_models: vec![model.into()],
+        },
+        chat_responses_codex::state::ApiKeyModelConfig {
+            api_key: "key-b".into(),
+            supported_models: vec![model.into()],
+        },
+    ];
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    for (api_key, tools) in [
+        ("key-a", EvidenceState::Rejected),
+        ("key-b", EvidenceState::Supported),
+    ] {
+        let key_fingerprint =
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, api_key);
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            model,
+            WireProtocol::ChatCompletions,
+        ));
+        profile.configuration_fingerprint = state
+            .route_configuration_fingerprint(
+                &upstream,
+                &key_fingerprint,
+                model,
+                model,
+                UpstreamProtocol::ChatCompletions,
+            )
+            .unwrap();
+        profile.state = DialectProfileState::Verified;
+        profile
+            .capabilities
+            .insert(Capability::FunctionTools, tools);
+        state.upsert_dialect_profile(profile).await.unwrap();
+    }
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "messages": [{"role": "user", "content": "use a tool"}],
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "description": "lookup",
+                                "parameters": {"type": "object", "properties": {}}
+                            }
+                        }],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(authorizations.lock().unwrap().as_slice(), ["Bearer key-b"]);
 }
 
 #[tokio::test]
@@ -708,16 +1042,12 @@ async fn codex_catalog_context_limits_come_only_from_the_selected_witness() {
 
     let catalog = get_models(state, &secret, true).await;
     let model = &catalog["models"][0];
-    assert_eq!(
-        model["gateway_catalog_witness"]["upstream_id"],
-        "z-selected-context"
-    );
     assert_eq!(model["context_window"], 222_222);
     assert_eq!(model["max_context_window"], 222_222);
 }
 
 #[tokio::test]
-async fn codex_catalog_omits_current_unsupported_route_but_standard_listing_keeps_model() {
+async fn codex_catalog_keeps_model_when_all_routes_are_unsupported() {
     let model = "arbitrary/unsupported-only";
     let upstream = catalog_upstream("unsupported-only-route", &[model]);
     let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
@@ -733,142 +1063,26 @@ async fn codex_catalog_omits_current_unsupported_route_but_standard_listing_keep
     let codex = get_models(state.clone(), &secret, true).await;
     let standard = get_models(state, &secret, false).await;
 
-    assert_eq!(codex["models"], json!([]));
+    let catalog_model = &codex["models"][0];
+    assert_eq!(catalog_model["slug"], model);
+    assert_eq!(
+        catalog_model["supported_reasoning_levels"],
+        json!([{
+            "effort": "none",
+            "description": "Do not request a configurable reasoning effort"
+        }])
+    );
+    assert!(catalog_model.get("gateway_catalog_witness").is_none());
     assert_eq!(standard["data"], json!([{"id": model, "object": "model"}]));
 }
 
 #[tokio::test]
-async fn codex_catalog_prefers_unknown_provisional_route_over_unsupported_profile() {
-    let model = "arbitrary/provisional-ranking";
-    let unsupported = catalog_upstream("a-unsupported", &[model]);
-    let provisional = catalog_upstream("z-provisional", &[model]);
-    let (_tempdir, state, secret) =
-        catalog_state(vec![unsupported.clone(), provisional], vec![model.into()]);
-    put_catalog_profile(
-        &state,
-        &unsupported,
-        model,
-        DialectProfileState::Unsupported,
-        &[],
-    )
-    .await;
-
-    let catalog = get_models(state, &secret, true).await;
-    let model = &catalog["models"][0];
-    assert_eq!(
-        model["gateway_catalog_witness"]["upstream_id"],
-        "z-provisional"
-    );
-    assert_eq!(model["gateway_catalog_witness"]["profile_state"], "unknown");
-}
-
-#[tokio::test]
-async fn codex_catalog_uses_configured_priority_for_equal_fidelity_witnesses() {
-    let model = "arbitrary/priority-ranking";
-    let mut low_priority = catalog_upstream("a-low-priority", &[model]);
-    low_priority.priority = 10;
-    let mut high_priority = catalog_upstream("z-high-priority", &[model]);
-    high_priority.priority = 90;
-    let (_tempdir, state, secret) = catalog_state(
-        vec![low_priority.clone(), high_priority.clone()],
-        vec![model.into()],
-    );
-    for upstream in [&low_priority, &high_priority] {
-        put_catalog_profile(
-            &state,
-            upstream,
-            model,
-            DialectProfileState::Verified,
-            &[
-                (Capability::FunctionTools, EvidenceState::Supported),
-                (Capability::ToolContinuation, EvidenceState::Supported),
-            ],
-        )
-        .await;
-    }
-
-    let catalog = get_models(state, &secret, true).await;
-    assert_eq!(
-        catalog["models"][0]["gateway_catalog_witness"]["upstream_id"],
-        "z-high-priority"
-    );
-}
-
-#[tokio::test]
-async fn codex_catalog_uses_configured_health_for_equal_fidelity_witnesses() {
-    let model = "arbitrary/health-ranking";
-    let mut unhealthy = catalog_upstream("a-unhealthy", &[model]);
-    unhealthy.priority = 50;
-    unhealthy.failure_count = 5;
-    let mut healthy = catalog_upstream("z-healthy", &[model]);
-    healthy.priority = 50;
-    healthy.failure_count = 0;
-    let (_tempdir, state, secret) =
-        catalog_state(vec![unhealthy.clone(), healthy.clone()], vec![model.into()]);
-    for upstream in [&unhealthy, &healthy] {
-        put_catalog_profile(
-            &state,
-            upstream,
-            model,
-            DialectProfileState::Verified,
-            &[
-                (Capability::FunctionTools, EvidenceState::Supported),
-                (Capability::ToolContinuation, EvidenceState::Supported),
-            ],
-        )
-        .await;
-    }
-
-    let catalog = get_models(state, &secret, true).await;
-    assert_eq!(
-        catalog["models"][0]["gateway_catalog_witness"]["upstream_id"],
-        "z-healthy"
-    );
-}
-
-#[tokio::test]
-async fn codex_catalog_uses_protocol_then_upstream_id_as_stable_tie_breaks() {
-    let model = "arbitrary/stable-tie-break";
-    let chat_a = catalog_upstream("a-chat", &[model]);
-    let mut responses_z = catalog_upstream("z-responses", &[model]);
-    responses_z.protocol = UpstreamProtocol::Responses;
-    responses_z.protocols = vec![UpstreamProtocol::Responses];
-    let (_tempdir, state, secret) = catalog_state(
-        vec![chat_a.clone(), responses_z.clone()],
-        vec![model.into()],
-    );
-    let function_loop = [
-        (Capability::FunctionTools, EvidenceState::Supported),
-        (Capability::ToolContinuation, EvidenceState::Supported),
-    ];
-    for (upstream, protocol) in [
-        (&chat_a, UpstreamProtocol::ChatCompletions),
-        (&responses_z, UpstreamProtocol::Responses),
-    ] {
-        put_catalog_profile_for_protocol(
-            &state,
-            upstream,
-            model,
-            protocol,
-            DialectProfileState::Verified,
-            &function_loop,
-        )
-        .await;
-    }
-
-    let catalog = get_models(state, &secret, true).await;
-    let witness = &catalog["models"][0]["gateway_catalog_witness"];
-    assert_eq!(witness["protocol"], "responses");
-    assert_eq!(witness["upstream_id"], "z-responses");
-}
-
-#[tokio::test]
-async fn codex_catalog_witness_diagnostic_identifies_the_exact_profile_without_secrets() {
+async fn codex_catalog_does_not_expose_internal_route_identity() {
     let model = "arbitrary/diagnostic-profile";
     let upstream = catalog_upstream("diagnostic-route", &[model]);
     let upstream_secret = upstream.api_key.clone();
     let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
-    let configuration_fingerprint = put_catalog_profile(
+    put_catalog_profile(
         &state,
         &upstream,
         model,
@@ -881,31 +1095,21 @@ async fn codex_catalog_witness_diagnostic_identifies_the_exact_profile_without_s
     .await;
 
     let catalog = get_models(state, &secret, true).await;
-    let diagnostic = &catalog["models"][0]["gateway_catalog_witness"];
-    assert_eq!(
-        diagnostic["profile_key"],
-        json!({
-            "upstream_id": "diagnostic-route",
-            "runtime_model_slug": model,
-            "protocol": "chat_completions"
-        })
-    );
-    assert_eq!(diagnostic["runtime_model_slug"], model);
-    assert_eq!(diagnostic["protocol"], "chat_completions");
-    assert_eq!(
-        diagnostic["configuration_fingerprint"],
-        configuration_fingerprint
-    );
-    assert_eq!(diagnostic["profile_state"], "verified");
-    assert_eq!(
-        diagnostic["probe_schema_version"],
-        DIALECT_PROBE_SCHEMA_VERSION
-    );
-    assert!(!diagnostic.to_string().contains(&upstream_secret));
+    let catalog_model = &catalog["models"][0];
+    let key_fingerprint = upstream_model_key_fingerprint(&upstream, model);
+    assert!(catalog_model.get("gateway_catalog_witness").is_none());
+    let serialized = catalog.to_string();
+    assert!(!serialized.contains(&upstream_secret));
+    assert!(!serialized.contains(&key_fingerprint));
+    assert!(!serialized.contains(&upstream.id));
+    assert!(!serialized.contains("profile_key"));
+    assert!(!serialized.contains("configuration_id"));
+    assert!(!serialized.contains("key_fingerprint"));
+    assert!(!serialized.contains("configuration_fingerprint"));
 }
 
 #[tokio::test]
-async fn codex_capability_request_is_constrained_to_catalog_witness_over_priority() {
+async fn codex_capability_request_uses_normal_priority_and_falls_back_across_upstreams() {
     let witness_hits = Arc::new(AtomicUsize::new(0));
     let superset_hits = Arc::new(AtomicUsize::new(0));
     let weaker_hits = Arc::new(AtomicUsize::new(0));
@@ -988,17 +1192,9 @@ async fn codex_capability_request_is_constrained_to_catalog_witness_over_priorit
             async move {
                 hits.fetch_add(1, Ordering::SeqCst);
                 (
-                    StatusCode::OK,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     axum::Json(json!({
-                        "id": "chatcmpl-weaker",
-                        "object": "chat.completion",
-                        "created": 1,
-                        "model": "arbitrary/codex-witness-dispatch",
-                        "choices": [{
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "weaker"},
-                            "finish_reason": "stop"
-                        }]
+                        "error": {"message": "no available channel for model arbitrary/codex-witness-dispatch under group free"}
                     })),
                 )
             }
@@ -1053,61 +1249,43 @@ async fn codex_capability_request_is_constrained_to_catalog_witness_over_priorit
     )
     .await;
 
-    let catalog = get_models(state.clone(), &secret, true).await;
-    assert_eq!(
-        catalog["models"][0]["gateway_catalog_witness"]["upstream_id"],
-        "catalog-witness"
-    );
-
-    let app = build_router(state.clone());
-    let make_request = || {
-        Request::builder()
-            .method("POST")
-            .uri("/v1/responses")
-            .header(
-                header::AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
-            )
-            .header("Content-Type", "application/json")
-            .header("User-Agent", "codex_cli_rs/0.144.1")
-            .body(Body::from(
-                json!({
-                    "model": model,
-                    "input": "use the tool",
-                    "tools": [{
-                        "type": "function",
-                        "name": "exec_command",
-                        "description": "Run a command",
-                        "parameters": {"type": "object"}
-                    }]
-                })
-                .to_string(),
-            ))
-            .unwrap()
-    };
-    let response = app.clone().oneshot(make_request()).await.unwrap();
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {secret}")).unwrap(),
+                )
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "codex_cli_rs/0.144.1")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "input": "use the tool",
+                        "tools": [{
+                            "type": "function",
+                            "name": "exec_command",
+                            "description": "Run a command",
+                            "parameters": {"type": "object"}
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(witness_hits.load(Ordering::SeqCst), 1);
     assert_eq!(superset_hits.load(Ordering::SeqCst), 0);
-    assert_eq!(weaker_hits.load(Ordering::SeqCst), 0);
-
-    for _ in 0..4 {
-        state
-            .try_reserve_upstream_request(&superset, model)
-            .await
-            .unwrap();
-        state.release_upstream_request(&superset.id).await;
-    }
-    let recovered = app.oneshot(make_request()).await.unwrap();
-    assert_eq!(recovered.status(), StatusCode::OK);
-    assert_eq!(witness_hits.load(Ordering::SeqCst), 2);
-    assert_eq!(superset_hits.load(Ordering::SeqCst), 1);
-    assert_eq!(weaker_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(weaker_hits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallback() {
+async fn codex_reasoning_effort_falls_back_to_any_route_that_resolves_the_request() {
     let witness_hits = Arc::new(AtomicUsize::new(0));
     let incompatible_hits = Arc::new(AtomicUsize::new(0));
     let model = "arbitrary/codex-effort-only-dispatch";
@@ -1210,9 +1388,16 @@ async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallb
         (Capability::ReasoningOutput, EvidenceState::Supported),
     ];
     let configuration_fingerprint = state
-        .route_configuration_fingerprint(&witness, model, model, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &witness,
+            &upstream_model_key_fingerprint(&witness, model),
+            model,
+            model,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     let mut witness_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&witness, model),
         upstream_id: witness.id.clone(),
         runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1236,10 +1421,6 @@ async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallb
     .await;
 
     let catalog = get_models(state.clone(), &secret, true).await;
-    assert_eq!(
-        catalog["models"][0]["gateway_catalog_witness"]["upstream_id"],
-        witness.id
-    );
     assert_eq!(catalog["models"][0]["default_reasoning_level"], "medium");
 
     let response = build_router(state)
@@ -1266,9 +1447,9 @@ async fn codex_reasoning_effort_without_tools_rejects_incompatible_catalog_fallb
         .await
         .unwrap();
 
-    assert_eq!(witness_hits.load(Ordering::SeqCst), 1);
-    assert_eq!(incompatible_hits.load(Ordering::SeqCst), 0);
-    assert!(response.status().is_server_error());
+    assert_eq!(witness_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(incompatible_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1388,6 +1569,7 @@ async fn required_image_never_routes_to_text_only_candidate() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "text-only".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1489,6 +1671,7 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
         AppConfig::default(),
     );
     let key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "text-only".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1613,6 +1796,7 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
         AppConfig::default(),
     );
     let witness_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "priority-low".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1635,6 +1819,7 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
     state.upsert_dialect_profile(witness).await.unwrap();
 
     let weaker_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "priority-high".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1670,10 +1855,6 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
     let payload: Value = serde_json::from_slice(&body).unwrap();
     let models = payload["models"].as_array().expect("models array");
     let model = &models[0];
-    assert_eq!(
-        model["gateway_catalog_witness"]["upstream_id"],
-        "priority-low"
-    );
     assert_eq!(model["input_modalities"], json!(["text"]));
     assert_eq!(model["supports_parallel_tool_calls"], true);
     assert_eq!(model["web_search_tool_type"], "text");
@@ -1747,6 +1928,7 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
         .unwrap();
 
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1789,7 +1971,6 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     let model = &payload["models"].as_array().expect("models array")[0];
-    assert_eq!(model["gateway_catalog_witness"]["upstream_id"], "up-1");
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     assert_eq!(model["supports_parallel_tool_calls"], true);
 }
@@ -1878,6 +2059,7 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
         .unwrap();
 
     let mut raw_strong = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "raw-strong".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1901,6 +2083,7 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
     state.upsert_dialect_profile(raw_strong).await.unwrap();
 
     let mut resolved_strong = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "resolved-strong".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1939,10 +2122,6 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     let model = &payload["models"].as_array().expect("models array")[0];
-    assert_eq!(
-        model["gateway_catalog_witness"]["upstream_id"],
-        "resolved-strong"
-    );
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     assert_eq!(model["supports_parallel_tool_calls"], true);
 }
@@ -1995,6 +2174,7 @@ async fn catalog_witness_considers_every_supported_protocol() {
     );
 
     let mut responses_profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "multi-protocol".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::Responses,
@@ -2036,21 +2216,12 @@ async fn catalog_witness_considers_every_supported_protocol() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
     let model = &payload["models"].as_array().expect("models array")[0];
-    assert_eq!(
-        model["gateway_catalog_witness"]["upstream_id"],
-        "multi-protocol"
-    );
-    assert_eq!(model["gateway_catalog_witness"]["protocol"], "responses");
-    assert_eq!(
-        model["gateway_catalog_witness"]["profile_state"],
-        "verified"
-    );
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     assert_eq!(model["supports_parallel_tool_calls"], true);
 }
 
 #[tokio::test]
-async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
+async fn codex_function_tool_request_falls_back_across_catalog_witness_protocols() {
     let responses_hits = Arc::new(AtomicUsize::new(0));
     let chat_hits = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
@@ -2066,16 +2237,9 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
             async move {
                 hits.fetch_add(1, Ordering::SeqCst);
                 (
-                    StatusCode::OK,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     axum::Json(json!({
-                        "id": "resp-weak",
-                        "object": "response",
-                        "output": [{
-                            "id": "msg-1",
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": "ok", "annotations": []}]
-                        }]
+                        "error": {"message": "no available channel for model"}
                     })),
                 )
             }
@@ -2172,6 +2336,7 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
     );
 
     let weak_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "responses-weak".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::Responses,
@@ -2185,13 +2350,16 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
     weak.capabilities
         .insert(Capability::NonStreamingResponse, EvidenceState::Supported);
     weak.capabilities
-        .insert(Capability::FunctionTools, EvidenceState::Rejected);
+        .insert(Capability::FunctionTools, EvidenceState::Supported);
     weak.capabilities
-        .insert(Capability::ForcedToolChoice, EvidenceState::Rejected);
+        .insert(Capability::ToolContinuation, EvidenceState::Supported);
+    weak.capabilities
+        .insert(Capability::ForcedToolChoice, EvidenceState::Supported);
     stamp_current_profile(&state, "opaque/model", &mut weak).await;
     state.upsert_dialect_profile(weak).await.unwrap();
 
     let strong_key = DialectProfileKey {
+        key_fingerprint: String::new(),
         upstream_id: "chat-strong".into(),
         runtime_model_slug: "opaque/model".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -2212,6 +2380,9 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
         .insert(Capability::FunctionTools, EvidenceState::Supported);
     strong
         .capabilities
+        .insert(Capability::ToolContinuation, EvidenceState::Supported);
+    strong
+        .capabilities
         .insert(Capability::ForcedToolChoice, EvidenceState::Supported);
     stamp_current_profile(&state, "opaque/model", &mut strong).await;
     state.upsert_dialect_profile(strong).await.unwrap();
@@ -2227,6 +2398,7 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
                     HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
                 )
                 .header("Content-Type", "application/json")
+                .header("User-Agent", "codex_cli_rs/0.144.6")
                 .body(Body::from(
                     json!({
                         "model": "opaque/model",
@@ -2247,7 +2419,7 @@ async fn function_tool_request_chooses_chat_route_over_weak_responses_route() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(responses_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(responses_hits.load(Ordering::SeqCst), 2);
     assert_eq!(chat_hits.load(Ordering::SeqCst), 1);
 }
 
@@ -2371,6 +2543,7 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
 
     for upstream_id in ["a-other", "z-prev"] {
         let key = DialectProfileKey {
+            key_fingerprint: String::new(),
             upstream_id: upstream_id.into(),
             runtime_model_slug: "opaque/model".into(),
             protocol: WireProtocol::Responses,
@@ -2456,6 +2629,10 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
         upgraded.request_state["_gateway_continuation"]["profile_key"],
         json!({
             "upstream_id": "z-prev",
+            "key_fingerprint": chat_responses_codex::keys::upstream_key_fingerprint(
+                "z-prev",
+                "responses-secret",
+            ),
             "runtime_model_slug": "opaque/model",
             "protocol": "responses"
         })

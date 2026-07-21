@@ -23,6 +23,7 @@ struct LearningHarness {
     app: Router,
     state: AppState,
     downstream_key: String,
+    key_fingerprint: String,
     hits: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<Value>>>,
 }
@@ -179,21 +180,36 @@ impl LearningHarness {
                 ..AppConfig::default()
             },
         );
-        let key = DialectProfileKey {
-            upstream_id: UPSTREAM_ID.into(),
-            runtime_model_slug: MODEL.into(),
-            protocol: WireProtocol::from(protocol),
-        };
-        let mut profile = UpstreamDialectProfile::unknown(key);
-        profile.configuration_fingerprint = state
-            .route_configuration_fingerprint(&upstream, MODEL, MODEL, protocol)
-            .unwrap();
-        state.upsert_dialect_profile(profile).await.unwrap();
+        for api_key in upstream.available_keys() {
+            let key = DialectProfileKey {
+                key_fingerprint: chat_responses_codex::keys::upstream_key_fingerprint(
+                    &upstream.id,
+                    &api_key,
+                ),
+                upstream_id: UPSTREAM_ID.into(),
+                runtime_model_slug: MODEL.into(),
+                protocol: WireProtocol::from(protocol),
+            };
+            let configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    &key.key_fingerprint,
+                    MODEL,
+                    MODEL,
+                    protocol,
+                )
+                .unwrap();
+            let mut profile = UpstreamDialectProfile::unknown(key);
+            profile.configuration_fingerprint = configuration_fingerprint.clone();
+            state.upsert_dialect_profile(profile).await.unwrap();
+        }
+        let key_fingerprint = upstream_model_key_fingerprint(&upstream, MODEL);
 
         Self {
             app: build_router(state.clone()),
             state,
             downstream_key: downstream_key.plaintext,
+            key_fingerprint,
             hits,
             requests,
         }
@@ -368,6 +384,7 @@ async fn stream_only_learning_recovers_explicit_zero_once_then_uses_learned_sse(
     assert_eq!(harness.stream_flags(), vec![false, true]);
 
     let key = DialectProfileKey {
+        key_fingerprint: harness.key_fingerprint.clone(),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: MODEL.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -409,6 +426,7 @@ async fn stream_only_learning_profileless_route_persists_exact_evidence() {
     let profile = snapshot
         .profiles
         .get(&DialectProfileKey {
+            key_fingerprint: harness.key_fingerprint.clone(),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: MODEL.into(),
             protocol: WireProtocol::ChatCompletions,
@@ -440,6 +458,7 @@ async fn stream_only_learning_responses_explicit_zero_recovers_and_learns() {
     assert_eq!(harness.stream_flags(), vec![false, true]);
 
     let key = DialectProfileKey {
+        key_fingerprint: harness.key_fingerprint.clone(),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: MODEL.into(),
         protocol: WireProtocol::Responses,
@@ -482,6 +501,7 @@ async fn stream_only_learning_failed_aggregate_does_not_change_evidence() {
         let profile = snapshot
             .profiles
             .get(&DialectProfileKey {
+                key_fingerprint: harness.key_fingerprint.clone(),
                 upstream_id: UPSTREAM_ID.into(),
                 runtime_model_slug: MODEL.into(),
                 protocol: WireProtocol::ChatCompletions,
@@ -495,7 +515,7 @@ async fn stream_only_learning_failed_aggregate_does_not_change_evidence() {
 }
 
 #[tokio::test]
-async fn stream_only_learning_pre_recovery_operational_retry_does_not_wait_on_itself() {
+async fn stream_only_learning_pre_recovery_429_returns_without_waiting() {
     let harness = LearningHarness::new_protocol_config(
         UpstreamProtocol::ChatCompletions,
         EmptyJsonUsage::ExplicitZero,
@@ -510,9 +530,9 @@ async fn stream_only_learning_pre_recovery_operational_retry_does_not_wait_on_it
     let response = tokio::time::timeout(Duration::from_secs(2), harness.send())
         .await
         .expect("operational retry must not wait on its own recovery leader");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(harness.stream_flags(), vec![false, false, true]);
-    assert_eq!(harness.hits.load(Ordering::SeqCst), 3);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(harness.stream_flags(), vec![false]);
+    assert_eq!(harness.hits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -553,6 +573,7 @@ async fn stream_only_learning_multi_key_healthy_json_after_failed_aggregate_does
     let profile = snapshot
         .profiles
         .get(&DialectProfileKey {
+            key_fingerprint: harness.key_fingerprint.clone(),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: MODEL.into(),
             protocol: WireProtocol::ChatCompletions,
@@ -609,6 +630,7 @@ async fn stream_only_learning_allows_ordinary_function_tools() {
 async fn stream_only_learning_chat_reasoning_replay_never_retries() {
     let harness = LearningHarness::new(EmptyJsonUsage::ExplicitZero, Duration::ZERO).await;
     let key = DialectProfileKey {
+        key_fingerprint: harness.key_fingerprint.clone(),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: MODEL.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -941,13 +963,20 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
         AppConfig::default(),
     );
     let profile_key = DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: MODEL.into(),
         protocol: WireProtocol::ChatCompletions,
     };
     let mut profile = UpstreamDialectProfile::unknown(profile_key.clone());
     profile.configuration_fingerprint = state
-        .route_configuration_fingerprint(&upstream, MODEL, MODEL, UpstreamProtocol::ChatCompletions)
+        .route_configuration_fingerprint(
+            &upstream,
+            &profile_key.key_fingerprint,
+            MODEL,
+            MODEL,
+            UpstreamProtocol::ChatCompletions,
+        )
         .unwrap();
     state.upsert_dialect_profile(profile).await.unwrap();
 
@@ -998,7 +1027,7 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
         .await
         .expect("follower must not hang")
         .unwrap();
-    assert_eq!(follower_response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(follower_response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     assert_eq!(
         requests.lock().unwrap().as_slice(),
@@ -1103,6 +1132,7 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
     );
     for runtime_model in [MODEL, OTHER_MODEL] {
         let key = DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, runtime_model),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: runtime_model.into(),
             protocol: WireProtocol::ChatCompletions,
@@ -1111,6 +1141,7 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &profile.key.key_fingerprint,
                 runtime_model,
                 runtime_model,
                 UpstreamProtocol::ChatCompletions,
@@ -1248,6 +1279,7 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
     );
     for runtime_model in [MODEL, FALLBACK_MODEL] {
         let key = DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, runtime_model),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: runtime_model.into(),
             protocol: WireProtocol::ChatCompletions,
@@ -1256,6 +1288,7 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &profile.key.key_fingerprint,
                 MODEL,
                 runtime_model,
                 UpstreamProtocol::ChatCompletions,
@@ -1301,6 +1334,7 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
     let source = snapshot
         .profiles
         .get(&DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: MODEL.into(),
             protocol: WireProtocol::ChatCompletions,
@@ -1309,6 +1343,7 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
     let fallback = snapshot
         .profiles
         .get(&DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, FALLBACK_MODEL),
             upstream_id: UPSTREAM_ID.into(),
             runtime_model_slug: FALLBACK_MODEL.into(),
             protocol: WireProtocol::ChatCompletions,
@@ -1434,11 +1469,13 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
         AppConfig::default(),
     );
     let source_key = DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, MODEL),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: MODEL.into(),
         protocol: WireProtocol::ChatCompletions,
     };
     let fallback_key = DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, FALLBACK_MODEL),
         upstream_id: UPSTREAM_ID.into(),
         runtime_model_slug: FALLBACK_MODEL.into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1448,6 +1485,7 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
         profile.configuration_fingerprint = state
             .route_configuration_fingerprint(
                 &upstream,
+                &key.key_fingerprint,
                 MODEL,
                 &key.runtime_model_slug,
                 UpstreamProtocol::ChatCompletions,
@@ -1462,6 +1500,33 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
                 .insert(Capability::TextStream, EvidenceState::Supported);
         }
         state.upsert_dialect_profile(profile).await.unwrap();
+    }
+    for api_key in upstream.available_keys().into_iter().skip(1) {
+        let key_fingerprint =
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &api_key);
+        for template in [&source_key, &fallback_key] {
+            let mut key = template.clone();
+            key.key_fingerprint = key_fingerprint.clone();
+            let mut profile = UpstreamDialectProfile::unknown(key.clone());
+            profile.configuration_fingerprint = state
+                .route_configuration_fingerprint(
+                    &upstream,
+                    &key.key_fingerprint,
+                    MODEL,
+                    &key.runtime_model_slug,
+                    UpstreamProtocol::ChatCompletions,
+                )
+                .unwrap();
+            if key.runtime_model_slug == MODEL {
+                profile
+                    .capabilities
+                    .insert(Capability::NonStreamingResponse, EvidenceState::Rejected);
+                profile
+                    .capabilities
+                    .insert(Capability::TextStream, EvidenceState::Supported);
+            }
+            state.upsert_dialect_profile(profile).await.unwrap();
+        }
     }
 
     let response = tokio::time::timeout(
