@@ -122,7 +122,7 @@ fn legacy_strip_flag_cannot_remove_required_continuation_state() {
 
 #[test]
 fn capability_all_and_messages_baseline_are_complete_and_conservative() {
-    assert_eq!(DIALECT_PROBE_SCHEMA_VERSION, 10);
+    assert_eq!(DIALECT_PROBE_SCHEMA_VERSION, 11);
     assert_eq!(
         Capability::ALL,
         [

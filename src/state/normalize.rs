@@ -261,6 +261,7 @@ impl UpstreamConfig {
     }
 
     pub fn normalize_for_storage(&mut self) {
+        self.failure_count = 0;
         let authoritative_key_models = !self.api_key_models.is_empty();
         let api_key_models = std::mem::take(&mut self.api_key_models);
         let normalized_protocols = dedup_protocols(std::mem::take(&mut self.protocols));

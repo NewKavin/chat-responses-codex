@@ -259,7 +259,6 @@ fn stream_completion_fixture(
 ) -> StreamCompletionContext {
     StreamCompletionContext {
         state: state.clone(),
-        upstream_id: route.upstream_id.clone(),
         route_health_key: route,
         route_attempts,
         route_health_permit: Arc::new(TokioMutex::new(Some(permit))),
@@ -1300,7 +1299,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        3
+        0
     );
     assert_eq!(
         state

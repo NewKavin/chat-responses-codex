@@ -1248,6 +1248,53 @@ async fn updating_upstream_queues_capability_probe_jobs_for_active_routes() {
 }
 
 #[tokio::test]
+async fn updating_upstream_clears_legacy_failure_count() {
+    let dir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+                id: "up-health-reset".into(),
+                name: "before update".into(),
+                base_url: "https://health-reset.example/v1".into(),
+                api_key: "fixture-secret".into(),
+                supported_models: vec!["Lab/Health-Reset".into()],
+                active: false,
+                failure_count: 3,
+                ..Default::default()
+            }],
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    state
+        .mark_upstream_failure("up-health-reset")
+        .await
+        .unwrap();
+    assert_eq!(state.snapshot().await.upstreams[0].failure_count, 1);
+
+    state
+        .update_upstream(
+            "up-health-reset",
+            chat_responses_codex::state::UpstreamConfig {
+                id: "ignored".into(),
+                name: "after update".into(),
+                base_url: "https://health-reset.example/v1".into(),
+                api_key: "fixture-secret".into(),
+                supported_models: vec!["Lab/Health-Reset".into()],
+                active: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let upstream = state.snapshot().await.upstreams.remove(0);
+    assert_eq!(upstream.failure_count, 0);
+}
+
+#[tokio::test]
 async fn inserting_upstream_does_not_wait_for_full_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
@@ -1581,7 +1628,7 @@ async fn inserting_same_upstream_id_with_different_configuration_is_rejected() {
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams.len(), 1);
     assert_eq!(snapshot.upstreams[0].name, "original");
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
 }
 
 #[tokio::test]

@@ -246,12 +246,5 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["experimental_supported_tools"], json!([]));
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
     assert_eq!(model["web_search_tool_type"], "text");
-    assert_eq!(
-        model["gateway_catalog_witness"]["upstream_id"],
-        "priority-low"
-    );
-    assert_eq!(
-        model["gateway_catalog_witness"]["profile_state"],
-        "verified"
-    );
+    assert!(model.get("gateway_catalog_witness").is_none());
 }

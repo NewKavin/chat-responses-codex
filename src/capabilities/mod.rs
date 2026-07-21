@@ -24,7 +24,7 @@ pub use runtime_hints::{
 pub use types::*;
 
 pub const CAPABILITY_SCHEMA_VERSION: u32 = 1;
-pub const DIALECT_PROBE_SCHEMA_VERSION: u32 = 10;
+pub const DIALECT_PROBE_SCHEMA_VERSION: u32 = 11;
 pub const MAX_CAPABILITY_COLLECTION_ENTRIES: usize = 1_024;
 pub const MAX_CAPABILITY_CONFIGURATION_BYTES: usize = 1_048_576;
 pub const MAX_CAPABILITY_EXTENSION_CASE_BYTES: usize = 16_384;

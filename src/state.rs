@@ -2599,9 +2599,7 @@ impl AppState {
                 let mut upstream = upstream;
                 upstream.id = upstream_id.to_string();
                 upstream.normalize_for_storage();
-                let failure_count = existing.failure_count;
                 *existing = upstream;
-                existing.failure_count = failure_count;
                 Ok(true)
             })
             .await?;

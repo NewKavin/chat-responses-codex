@@ -760,15 +760,17 @@ impl ProbeExecutor {
                     let Some(call) = response.body["output"].as_array().and_then(|output| {
                         output.iter().find(|item| item["type"] == "function_call")
                     }) else {
-                        return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "function_tools_missing_call".into(),
+                        return Ok(ProbeCaseVerdict::Unobserved {
+                            operational_code: "function_tools_missing_call".into(),
                             http_status: Some(response.status.as_u16()),
                         });
                     };
                     let arguments = call["arguments"].as_str().unwrap_or_default();
                     let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
                     return if call["name"] == "gateway_compat_probe"
-                        && call["call_id"].is_string()
+                        && call["call_id"]
+                            .as_str()
+                            .is_some_and(|call_id| !call_id.is_empty())
                         && parsed["nonce"] == nonce
                     {
                         Ok(ProbeCaseVerdict::Supported {
@@ -813,15 +815,17 @@ impl ProbeExecutor {
                     .as_array()
                     .and_then(|calls| calls.first())
                 else {
-                    return Ok(ProbeCaseVerdict::Rejected {
-                        evidence_code: "function_tools_missing_call".into(),
+                    return Ok(ProbeCaseVerdict::Unobserved {
+                        operational_code: "function_tools_missing_call".into(),
                         http_status: Some(response.status.as_u16()),
                     });
                 };
                 let arguments = call["function"]["arguments"].as_str().unwrap_or_default();
                 let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
                 if call["function"]["name"] == "gateway_compat_probe"
-                    && call["id"].is_string()
+                    && call["id"]
+                        .as_str()
+                        .is_some_and(|call_id| !call_id.is_empty())
                     && parsed["nonce"] == nonce
                 {
                     Ok(ProbeCaseVerdict::Supported {
@@ -962,23 +966,23 @@ impl ProbeExecutor {
                         });
                     }
                     let Some(output) = first.body["output"].as_array() else {
-                        return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "tool_continuation_missing_call".into(),
+                        return Ok(ProbeCaseVerdict::Unobserved {
+                            operational_code: "tool_continuation_missing_call".into(),
                             http_status: Some(first.status.as_u16()),
                         });
                     };
                     let Some(call) = output.iter().find(|item| item["type"] == "function_call")
                     else {
-                        return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "tool_continuation_missing_call".into(),
+                        return Ok(ProbeCaseVerdict::Unobserved {
+                            operational_code: "tool_continuation_missing_call".into(),
                             http_status: Some(first.status.as_u16()),
                         });
                     };
                     let arguments = call["arguments"].as_str().unwrap_or_default();
                     let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
-                    let Some(call_id) = call["call_id"].as_str() else {
+                    let Some(call_id) = call["call_id"].as_str().filter(|id| !id.is_empty()) else {
                         return Ok(ProbeCaseVerdict::Rejected {
-                            evidence_code: "tool_continuation_missing_call".into(),
+                            evidence_code: "tool_continuation_invalid_call".into(),
                             http_status: Some(first.status.as_u16()),
                         });
                     };
@@ -1072,8 +1076,8 @@ impl ProbeExecutor {
                     .as_array()
                     .and_then(|calls| calls.first())
                 else {
-                    return Ok(ProbeCaseVerdict::Rejected {
-                        evidence_code: "tool_continuation_missing_call".into(),
+                    return Ok(ProbeCaseVerdict::Unobserved {
+                        operational_code: "tool_continuation_missing_call".into(),
                         http_status: Some(first.status.as_u16()),
                     });
                 };
@@ -1085,9 +1089,9 @@ impl ProbeExecutor {
                         http_status: Some(first.status.as_u16()),
                     });
                 }
-                let Some(call_id) = call["id"].as_str() else {
+                let Some(call_id) = call["id"].as_str().filter(|id| !id.is_empty()) else {
                     return Ok(ProbeCaseVerdict::Rejected {
-                        evidence_code: "tool_continuation_missing_call".into(),
+                        evidence_code: "tool_continuation_invalid_call".into(),
                         http_status: Some(first.status.as_u16()),
                     });
                 };

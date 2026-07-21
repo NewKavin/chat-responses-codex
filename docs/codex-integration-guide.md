@@ -58,7 +58,7 @@ Codex catalog 必须从已配置的网关读取。下面的流程不会把下游
   trap 'rm -f "$catalog_tmp"; unset CHAT2RESPONSES_DOWNSTREAM_KEY' EXIT
   read -rsp 'Gateway downstream key: ' CHAT2RESPONSES_DOWNSTREAM_KEY
   printf '\n'
-  curl -fsS '<gateway_origin>/v1/models?client_version=0.144.4' \
+  curl -fsS '<gateway_origin>/v1/models?client_version=0.144.6' \
     -H "Authorization: Bearer ${CHAT2RESPONSES_DOWNSTREAM_KEY}" \
     > "$catalog_tmp"
   jq -e '(.models | type == "array") and (.models | length > 0)' \
@@ -67,7 +67,7 @@ Codex catalog 必须从已配置的网关读取。下面的流程不会把下游
 )
 ```
 
-这个响应中的能力字段来自网关选择的 live catalog witness。不要按模型名手写或补全工具、图像、推理等级等能力。
+这个响应已经覆盖当前下游白名单中的全部模型。能力字段由网关依据内部持久证据生成，响应不会下发 upstream、profile 或指纹身份。不要按模型名复制条目，也不要手写或补全工具、图像、推理等级等能力。
 
 ## 一把点亮版
 
@@ -311,6 +311,8 @@ Codex 请求网关时，实际发送的是：
 
 如果留空，一般表示不过滤模型，只要网关里可用就给。
 
+白名单非空时，它就是该下游 Codex 目录的权威模型全集。即使某个白名单模型暂时还没有 active upstream route，目录也会保留该 slug，并给出保守能力元数据；真正发请求前仍需保证至少一个 active upstream 的 `supported_models` 或 Key 映射包含该模型。白名单为空时，目录才回退到所有 active upstream 当前持久发布的模型。
+
 ## 第四步: 配置 Codex
 
 这是你本机上的配置，位置是：
@@ -371,6 +373,20 @@ web_search = "disabled"
 4. `model` 和 `model_slug` 不一致
 5. 模型名被手动转成小写，或者改成了别名
 
+如果模型已经在当前 `model-catalog.json` 中，只需把原始 slug 选为新会话模型；只有想改变
+Codex 启动时的默认模型时，才需要同步修改 `model` 和 `review_model`。不要复制其他模型条目
+再改 slug。
+
+后台新增或修改白名单后，刷新门户并替换完整的 `model-catalog.json`。`config.toml` 没有每个
+模型各自的 route 配置，不需要为新增模型复制整份文件。切换模型后要新建 Codex 会话；已有
+会话可能保存 `previous_response_id` 对应的精确 route、工具注册表和 continuation，不能安全地
+跨模型沿用。
+
+不需要配置 `upstream_id`、profile key 或任何 fingerprint。指纹是网关内部状态，由网关根据
+upstream、Key、runtime model、协议和 capability 配置自动计算、校验及刷新，既不会写入门户
+生成的目录，也不要求用户理解算法。同一 slug 由多个 upstream 支持时，新请求会在所有实际
+满足所需能力的 route 中按正常优先级、压力、配额和健康状态选择；客户端不绑定某个 upstream。
+
 ## 第五步: 配置 Codex 模型目录
 
 这个文件也在你本机上，位置由 `~/.codex/config.toml` 里的 `model_catalog_json` 指定。
@@ -384,13 +400,19 @@ web_search = "disabled"
 - 默认推理等级是什么
 - 是否支持工具调用、搜索、流式等
 
-这些字段必须来自 live catalog witness。不要手动声明搜索、工具、图像或推理能力；手写的乐观能力可能让 Codex 发出当前路由无法执行的请求。
+这些字段来自网关内部选择的持久能力证据，但内部 witness、upstream ID、profile key 和指纹
+不会进入文件。尚未形成可用证据时，网关仍会保留已授权模型，但只生成
+`reasoning = none`、无图片、无并行工具等保守元数据。不要手动声明搜索、工具、图像或
+推理能力；手写的乐观能力可能让 Codex 发出当前路由无法执行的请求。
 
 ### 5.2 为什么必须和网关一致
 
 Codex 会根据这个目录决定模型是否存在。
 
-如果目录、网关 `supported_models` 和上游 `/v1/models` 返回的 `id` 不完全一致，就会出问题。
+非空白名单决定目录包含哪些模型，active upstream 的 `supported_models` 和 Key 映射决定请求
+实际可以发往哪些 route。两者使用同一原始 slug；大小写不一致时目录保留 live upstream 的
+真实 casing，若多个仅大小写不同的 live slug 可独立路由则全部保留。目录里暂时只有保守条目的
+模型，在上游 route 配好之前不能完成推理请求。
 
 ### 5.3 你要改什么
 
@@ -400,7 +422,9 @@ Codex 会根据这个目录决定模型是否存在。
 jq -r '.models[].slug' ~/.codex/model-catalog.json
 ```
 
-把其中一个原始 slug 写入 `~/.codex/config.toml` 的 `model` 和 `review_model`。`model_catalog_json` 保持为 `model-catalog.json`；不要把 slug 转成小写、改成别名或手动编辑目录里的能力字段。
+把其中一个原始 slug 写入 `~/.codex/config.toml` 的 `model` 和 `review_model`。
+`model_catalog_json` 保持为 `model-catalog.json`；不要把 slug 转成小写、改成别名、复制其他
+模型条目，或手动添加 upstream、指纹和能力字段。白名单变化后重新获取并替换整份目录。
 
 ## 第六步: 如果你想直接用模板
 
@@ -411,7 +435,7 @@ jq -r '.models[].slug' ~/.codex/model-catalog.json
 3. 配好上游模型
 4. 配好下游 key
 5. 把 `templates/codex/config.toml.example` 复制到 `~/.codex/config.toml`
-6. 使用下游 key 从 live `/v1/models?client_version=0.144.4` 获取目录，验证 `.models` 非空后写入 `~/.codex/model-catalog.json`
+6. 使用下游 key 从 live `/v1/models?client_version=0.144.6` 获取目录，验证 `.models` 非空后写入 `~/.codex/model-catalog.json`
 7. 确认 `base_url` 是网关地址
 8. 确认 `model` 和 `review_model` 都是目录里真实存在的 slug
 
@@ -485,6 +509,17 @@ Codex 启动后选你在目录里写的模型，比如：
 
 - 检查 `model_catalog_json` 是否指向正确文件
    - 检查 `model = "..."` 是否和 `~/.codex/model-catalog.json` 里的 `slug` 完全一致
+
+### `gateway_protocol_capability_unsupported`
+
+如果详情是 `selected routes cannot preserve required capability FunctionTools`，表示网关检查了
+该模型当前所有合格的 upstream、Key 和协议 route，但没有任何一条能保留这次请求要求的工具
+能力。新请求不会再被某个 catalog witness 或 `upstream_id` 限死；同一模型的其他合格 upstream
+会正常参与 fallback。
+
+这不是让用户修改或复用 fingerprint 的提示。先确认各 upstream/Key 的模型映射包含该 slug，
+再对相应 route 执行 capability probe，并检查 FunctionTools 的证据和协议转换是否可用。如果是
+旧会话在上游、Key、协议或能力配置变化后继续请求，应新建 Codex 会话，让 continuation 重新建立。
 
 ### 3. `skill descriptions were shortened to fit the skills context budget`
 

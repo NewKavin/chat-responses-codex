@@ -192,6 +192,12 @@ fn codex_docs_mention_the_copy_ready_relative_catalog_path() {
     assert!(readme.contains("model_catalog_json"));
     assert!(deployment.contains(r#"model_catalog_json = "model-catalog.json""#));
     assert!(guide.contains(r#"model_catalog_json = "model-catalog.json""#));
+    assert!(guide.contains("白名单中的全部模型"));
+    assert!(guide.contains("替换完整的 `model-catalog.json`"));
+    assert!(guide.contains("不要复制其他模型条目"));
+    assert!(guide.contains("不需要配置 `upstream_id`"));
+    assert!(guide.contains("指纹是网关内部状态"));
+    assert!(guide.contains("新建 Codex 会话"));
     assert!(!readme.contains("Gitee"));
     assert!(!deployment.contains("Gitee"));
     assert!(!contributing.contains("Gitee"));
@@ -205,7 +211,7 @@ fn codex_integration_examples_document_multi_agent_validation() {
     let guide = fs::read_to_string("docs/codex-integration-guide.md").unwrap();
 
     for marker in [
-        "client_version=0.144.4",
+        "client_version=0.144.6",
         "cli_auth_credentials_store = \"file\"",
         "multi_agent = true",
         "[agents]",

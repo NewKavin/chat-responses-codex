@@ -7,7 +7,7 @@ use chat_responses_codex::capabilities::{
     Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
     WireProtocol,
 };
-use chat_responses_codex::keys::generate_downstream_key;
+use chat_responses_codex::keys::{generate_downstream_key, upstream_key_fingerprint};
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
@@ -583,7 +583,7 @@ async fn load_gateway_chat_path_with_twenty_way_concurrency() {
 
                 rate_limit_enabled: true,
 
-                max_concurrency: 10,
+                max_concurrency: CONCURRENCY as u32,
                 daily_token_limit: None,
                 monthly_token_limit: None,
                 request_quota_window_hours: None,
@@ -755,7 +755,7 @@ async fn load_gateway_first_meaningful_event_baseline() {
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
-        key_fingerprint: String::new(),
+        key_fingerprint: upstream_key_fingerprint("up-1", "upstream-secret"),
         upstream_id: "up-1".into(),
         runtime_model_slug: "gpt-4.1-mini".into(),
         protocol: WireProtocol::Responses,
@@ -947,7 +947,7 @@ async fn load_gateway_first_meaningful_event() {
         AppConfig::default(),
     );
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
-        key_fingerprint: String::new(),
+        key_fingerprint: upstream_key_fingerprint("up-1", "upstream-secret"),
         upstream_id: "up-1".into(),
         runtime_model_slug: "gpt-4.1-mini".into(),
         protocol: WireProtocol::Responses,

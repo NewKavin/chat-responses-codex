@@ -67,9 +67,8 @@ pub struct ChatStreamCanonicalizer {
     identity_locked: bool,
     choice_indices: Vec<Option<u64>>,
     terminal_indices: BTreeSet<u64>,
-    terminal_reason: Option<String>,
-    saw_output: bool,
-    saw_tool_call: bool,
+    saw_output_indices: BTreeSet<u64>,
+    saw_tool_call_indices: BTreeSet<u64>,
     usage: Option<Value>,
 }
 
@@ -82,9 +81,8 @@ impl ChatStreamCanonicalizer {
             identity_locked: false,
             choice_indices: Vec::new(),
             terminal_indices: BTreeSet::new(),
-            terminal_reason: None,
-            saw_output: false,
-            saw_tool_call: false,
+            saw_output_indices: BTreeSet::new(),
+            saw_tool_call_indices: BTreeSet::new(),
             usage: None,
         }
     }
@@ -157,35 +155,34 @@ impl ChatStreamCanonicalizer {
                     delta.remove(field);
                 }
             }
-            self.saw_output |= delta
+            if delta
                 .get("content")
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty())
                 || delta
                     .get("reasoning_content")
                     .and_then(Value::as_str)
-                    .is_some_and(|value| !value.is_empty());
-            self.saw_tool_call |= delta
+                    .is_some_and(|value| !value.is_empty())
+            {
+                self.saw_output_indices.insert(canonical_index);
+            }
+            if delta
                 .get("tool_calls")
                 .and_then(Value::as_array)
                 .is_some_and(|calls| !calls.is_empty())
                 || delta
                     .get("function_call")
-                    .is_some_and(|call| !call.is_null());
+                    .is_some_and(|call| !call.is_null())
+            {
+                self.saw_tool_call_indices.insert(canonical_index);
+            }
 
             let finish_reason = choice.entry("finish_reason").or_insert(Value::Null).clone();
             if !finish_reason.is_null() {
                 let finish_reason = finish_reason.as_str().ok_or_else(Self::invalid_stream)?;
-                let normalized = self.normalize_finish_reason(finish_reason)?;
+                let normalized = self.normalize_finish_reason(canonical_index, finish_reason)?;
                 if !self.terminal_indices.insert(canonical_index) {
                     return Err(Self::invalid_stream());
-                }
-                if let Some(previous) = self.terminal_reason.as_ref() {
-                    if previous != &normalized {
-                        return Err(Self::invalid_stream());
-                    }
-                } else {
-                    self.terminal_reason = Some(normalized.clone());
                 }
                 choice.insert("finish_reason".into(), Value::String(normalized));
             }
@@ -217,35 +214,45 @@ impl ChatStreamCanonicalizer {
 
     fn finish_inner(&mut self, allow_missing_terminal: bool) -> Result<Vec<Value>, ProtocolError> {
         let mut output = Vec::new();
-        if self.terminal_indices.is_empty() {
-            if !allow_missing_terminal {
-                return Err(Self::invalid_stream());
-            }
-            let reason = if self.saw_tool_call {
-                "tool_calls"
-            } else if self.saw_output {
-                "stop"
-            } else {
-                return Err(Self::invalid_stream());
-            };
-            let indices = if self.choice_indices.is_empty() {
-                vec![0]
-            } else {
-                self.choice_indices.iter().flatten().copied().collect()
-            };
-            let choices = indices
-                .into_iter()
-                .map(|index| {
-                    json!({
-                        "index": index,
-                        "delta": {},
-                        "finish_reason": reason,
-                    })
-                })
+        let indices = if self.choice_indices.is_empty() {
+            BTreeSet::from([0])
+        } else {
+            self.choice_indices.iter().flatten().copied().collect()
+        };
+        if !allow_missing_terminal
+            && (indices.is_empty() || indices.difference(&self.terminal_indices).next().is_some())
+        {
+            return Err(Self::invalid_stream());
+        }
+        if allow_missing_terminal {
+            let missing_choices = indices
+                .difference(&self.terminal_indices)
+                .copied()
                 .collect::<Vec<_>>();
-            output.push(self.envelope(choices));
-            self.terminal_reason = Some(reason.into());
-            self.terminal_indices = self.choice_indices.iter().flatten().copied().collect();
+            if !missing_choices.is_empty() {
+                let choices = missing_choices
+                    .into_iter()
+                    .map(|index| {
+                        let reason = if self.saw_tool_call_indices.contains(&index) {
+                            "tool_calls"
+                        } else if self.saw_output_indices.contains(&index) {
+                            "stop"
+                        } else {
+                            return Err(Self::invalid_stream());
+                        };
+                        Ok(json!({
+                            "index": index,
+                            "delta": {},
+                            "finish_reason": reason,
+                        }))
+                    })
+                    .collect::<Result<Vec<_>, ProtocolError>>()?;
+                for choice in &choices {
+                    let index = choice["index"].as_u64().ok_or_else(Self::invalid_stream)?;
+                    self.terminal_indices.insert(index);
+                }
+                output.push(self.envelope(choices));
+            }
         }
         if let Some(usage) = self.usage.take() {
             let mut event = self.envelope(Vec::new());
@@ -315,22 +322,21 @@ impl ChatStreamCanonicalizer {
         }
     }
 
-    fn normalize_finish_reason(&self, reason: &str) -> Result<String, ProtocolError> {
+    fn normalize_finish_reason(
+        &self,
+        choice_index: u64,
+        reason: &str,
+    ) -> Result<String, ProtocolError> {
         let normalized = match reason {
+            "stop" if self.saw_tool_call_indices.contains(&choice_index) => "tool_calls",
             "stop" | "length" | "content_filter" => reason,
-            "function_call" if self.saw_tool_call => "tool_calls",
-            "tool_calls" if self.saw_tool_call => "tool_calls",
-            "end_turn" if !self.saw_tool_call => "stop",
+            "function_call" if self.saw_tool_call_indices.contains(&choice_index) => "tool_calls",
+            "tool_calls" if self.saw_tool_call_indices.contains(&choice_index) => "tool_calls",
+            "end_turn" if !self.saw_tool_call_indices.contains(&choice_index) => "stop",
             "max_tokens" | "max_output_tokens" => "length",
-            "tool_use" if self.saw_tool_call => "tool_calls",
+            "tool_use" if self.saw_tool_call_indices.contains(&choice_index) => "tool_calls",
             _ => return Err(Self::invalid_stream()),
         };
-        if normalized == "stop" && self.saw_tool_call {
-            return Err(Self::invalid_stream());
-        }
-        if normalized == "function_call" && !self.saw_tool_call {
-            return Err(Self::invalid_stream());
-        }
         Ok(normalized.into())
     }
 

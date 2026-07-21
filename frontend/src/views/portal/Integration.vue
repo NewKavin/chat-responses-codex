@@ -182,6 +182,13 @@
               show-icon
               title="Codex 需要 3 个内容：`config.toml`、`model-catalog.json`，以及通过 `codex login --with-api-key` 写入的 `auth.json`。"
             />
+            <el-alert
+              class="section-alert"
+              type="warning"
+              :closable="false"
+              show-icon
+              title="门户会自动覆盖当前下游白名单中的全部模型。新增白名单后刷新本页并替换完整的 model-catalog.json；不要复制其他模型条目，也不需要配置 upstream_id 或指纹。已在目录中的模型只需新建 Codex 会话后选择。"
+            />
             <p class="codex-agent-limits">
               <code>max_threads</code> 表示并发代理线程，<code>max_depth</code> 表示嵌套委派深度；这些本地限制不覆盖网关 quota。
             </p>
@@ -209,10 +216,10 @@
                 <div>
                   <h4>步骤 2: 写入 `~/.codex/model-catalog.json`</h4>
                   <p>
-                    这个文件按门户统计排序，优先展示最近一个月最常用的模型。每个模型的
-                    <code>context_window</code> 字段直接取自网关上游配置，
+                    这个文件包含当前下游白名单中的完整模型目录，route 与能力元数据由网关生成。
+                    已配置的 <code>context_window</code> 会写入对应模型，
                     Codex 默认会在累计 token 达到该窗口的
-                    <strong>90%</strong> 时自动压缩历史，无需在 <code>config.toml</code>
+                    <strong>95%</strong> 时自动压缩历史，无需在 <code>config.toml</code>
                     再设全局阈值；切换模型时压缩点会跟着模型的实际窗口变。
                   </p>
                 </div>
@@ -643,7 +650,7 @@ const openAiCompatibleConfig = computed(() =>
 )
 
 const fetchGatewayCodexCatalog = async (key: string) => {
-  const response = await fetch(`${buildGatewayModelsEndpoint(gatewayBaseUrl.value)}?client_version=0.144.4`, {
+  const response = await fetch(`${buildGatewayModelsEndpoint(gatewayBaseUrl.value)}?client_version=0.144.6`, {
     headers: {
       Authorization: `Bearer ${key}`
     }

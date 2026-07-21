@@ -1778,6 +1778,68 @@ fn codex_reasoning_metadata(resolved: &ResolvedCapabilities) -> CodexReasoningMe
     }
 }
 
+fn codex_conservative_reasoning_metadata() -> CodexReasoningMetadata {
+    CodexReasoningMetadata {
+        supported_levels: vec![json!({
+            "effort": "none",
+            "description": "Do not request a configurable reasoning effort"
+        })],
+        default_level: Value::String("none".into()),
+        supports_summaries: false,
+    }
+}
+
+fn codex_catalog_context_window(upstreams: &[UpstreamConfig], model: &str) -> Option<i64> {
+    upstreams
+        .iter()
+        .filter(|upstream| upstream.active && upstream.supports_model(model))
+        .filter_map(|upstream| upstream.context_config_for_model(model))
+        .map(|config| i64::from(config.context_limit))
+        .max()
+}
+
+fn codex_exposed_models(upstreams: &[UpstreamConfig], allowlist: &[String]) -> Vec<String> {
+    if allowlist.is_empty() {
+        return upstreams
+            .iter()
+            .filter(|upstream| upstream.active)
+            .flat_map(UpstreamConfig::route_models)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+    }
+
+    let mut allowed_slugs = BTreeMap::new();
+    for allowed in allowlist {
+        let slug = allowed.trim();
+        if !slug.is_empty() {
+            allowed_slugs
+                .entry(slug.to_ascii_lowercase())
+                .or_insert_with(|| slug.to_owned());
+        }
+    }
+    let mut matched_allowlist_keys = BTreeSet::new();
+    let mut exposed = upstreams
+        .iter()
+        .filter(|upstream| upstream.active)
+        .flat_map(UpstreamConfig::route_models)
+        .filter_map(|slug| {
+            let match_key = slug.trim().to_ascii_lowercase();
+            if match_key.is_empty() || !allowed_slugs.contains_key(&match_key) {
+                return None;
+            }
+            matched_allowlist_keys.insert(match_key);
+            Some(slug)
+        })
+        .collect::<BTreeSet<_>>();
+    for (match_key, slug) in allowed_slugs {
+        if !matched_allowlist_keys.contains(&match_key) {
+            exposed.insert(slug);
+        }
+    }
+    exposed.into_iter().collect()
+}
+
 /// Build a Codex-compatible model catalog response (`{"models": [ModelInfo]}`).
 ///
 /// Each model entry includes `context_window` (from the upstream's
@@ -1789,27 +1851,30 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
     };
     let snapshot = state.routing_snapshot().await;
 
-    let mut exposed_models = std::collections::BTreeSet::new();
-    for upstream in snapshot.upstreams.iter().filter(|u| u.active) {
-        for model in upstream.route_models() {
-            if downstream.model_allowlist.is_empty()
-                || portal_model_is_allowed(&downstream.model_allowlist, &model)
-            {
-                exposed_models.insert(model);
-            }
-        }
-    }
-
-    let model_infos = exposed_models
+    let model_infos = codex_exposed_models(&snapshot.upstreams, &downstream.model_allowlist)
         .into_iter()
-        .filter_map(|slug| {
-            let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug)?;
-            let context_window = witness
-                .capabilities
-                .context_window
-                .and_then(|limit| i64::try_from(limit).ok());
-            let reasoning = codex_reasoning_metadata(&witness.capabilities);
-            Some(json!({
+        .map(|slug| {
+            let witness = select_catalog_witness_entry(state, &snapshot.upstreams, &slug);
+            let capabilities = witness.as_ref().map(|entry| &entry.capabilities);
+            let context_window = capabilities
+                .and_then(|capabilities| {
+                    capabilities
+                        .context_window
+                        .and_then(|limit| i64::try_from(limit).ok())
+                })
+                .or_else(|| codex_catalog_context_window(&snapshot.upstreams, &slug));
+            let reasoning = capabilities
+                .map(codex_reasoning_metadata)
+                .unwrap_or_else(codex_conservative_reasoning_metadata);
+            let supports_custom_tools = capabilities
+                .is_some_and(|capabilities| capabilities.supports(Capability::CustomTools));
+            let supports_parallel_tool_calls = capabilities
+                .is_some_and(|capabilities| capabilities.supports(Capability::ParallelToolCalls));
+            let supports_images = capabilities.is_some_and(|capabilities| {
+                capabilities.supports(Capability::ImageHttps)
+                    && capabilities.supports(Capability::ImageDataUrl)
+            });
+            json!({
                 "slug": slug,
                 "display_name": slug,
                 "description": null,
@@ -1828,8 +1893,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "supports_reasoning_summaries": reasoning.supports_summaries,
                 "default_reasoning_summary": "auto",
                 "support_verbosity": false,
-                "apply_patch_tool_type": witness.capabilities.supports(Capability::CustomTools).then_some("freeform"),
-                "supports_parallel_tool_calls": witness.capabilities.supports(Capability::ParallelToolCalls),
+                "apply_patch_tool_type": supports_custom_tools.then_some("freeform"),
+                "supports_parallel_tool_calls": supports_parallel_tool_calls,
                 "supports_image_detail_original": false,
                 "context_window": context_window,
                 "max_context_window": context_window,
@@ -1837,9 +1902,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "additional_speed_tiers": [],
                 "service_tiers": [],
                 "experimental_supported_tools": [],
-                "input_modalities": if witness.capabilities.supports(Capability::ImageHttps) && witness.capabilities.supports(Capability::ImageDataUrl) { json!(["text", "image"]) } else { json!(["text"]) },
-                "gateway_catalog_witness": witness.diagnostic(),
-            }))
+                "input_modalities": if supports_images { json!(["text", "image"]) } else { json!(["text"]) },
+            })
         })
         .collect::<Vec<_>>();
 
@@ -2135,7 +2199,6 @@ impl UpstreamRequestReservation {
 #[derive(Clone)]
 struct StreamCompletionContext {
     state: AppState,
-    upstream_id: String,
     route_health_key: RouteHealthKey,
     route_attempts: RequestRouteAttempts,
     route_health_permit: Arc<TokioMutex<Option<RouteHealthPermit>>>,
@@ -2160,13 +2223,6 @@ impl StreamCompletionContext {
 
     async fn mark_success(&self) {
         finish_route_health_permit(&self.route_health_permit, RouteOutcome::Success).await;
-        if let Err(error) = self.state.mark_upstream_success(&self.upstream_id).await {
-            tracing::warn!(
-                selected_upstream_id = %self.upstream_id,
-                error = %error,
-                "failed to reset legacy upstream failure count after stream success"
-            );
-        }
     }
 
     async fn mark_failure(&self) {
@@ -2185,13 +2241,6 @@ impl StreamCompletionContext {
                     observation.retry_after,
                 )
                 .await;
-        }
-        if let Err(error) = self.state.mark_upstream_failure(&self.upstream_id).await {
-            tracing::warn!(
-                selected_upstream_id = %self.upstream_id,
-                error = %error,
-                "failed to update legacy upstream failure count after stream failure"
-            );
         }
     }
 
@@ -2931,7 +2980,7 @@ async fn finalize_stream_error(
     status: StatusCode,
     error_category: &'static str,
     error_message: String,
-    mark_upstream_failure: bool,
+    attribute_route_failure: bool,
 ) {
     let hedge_loser = completion_context
         .as_ref()
@@ -2945,7 +2994,7 @@ async fn finalize_stream_error(
             context.mark_cancelled().await;
             return;
         }
-        if mark_upstream_failure {
+        if attribute_route_failure {
             context.mark_failure().await;
         } else {
             context.mark_cancelled().await;
@@ -2972,7 +3021,7 @@ async fn finalize_stream_interruption(
     error_message: String,
 ) {
     let (status, error_category) = classify_stream_failure(&error_message);
-    let mark_upstream_failure = status != StatusCode::from_u16(499).expect("valid status code");
+    let attribute_route_failure = status != StatusCode::from_u16(499).expect("valid status code");
     finalize_stream_error(
         completion_context,
         log_context,
@@ -2980,7 +3029,7 @@ async fn finalize_stream_interruption(
         status,
         error_category,
         error_message,
-        mark_upstream_failure,
+        attribute_route_failure,
     )
     .await;
 }
@@ -3754,63 +3803,16 @@ async fn process_gateway_request_inner(
         } else {
             None
         };
-    let codex_catalog_allowed_profiles = (endpoint == EndpointKind::Responses
-        && client_family == "codex"
-        && exact_continuation.is_none()
-        && legacy_continuation_upstream_id.is_none()
-        && (!requested_features.required.is_empty() || inference_strength.is_some()))
-    .then(|| {
-        let witness = select_catalog_witness_entry(&state, &routing_snapshot.upstreams, model)?;
-        let mut allowed = BTreeSet::from([witness.profile_key.clone()]);
-        let witness_transition =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, witness.profile_key.protocol);
-        for upstream in routing_snapshot
-            .upstreams
-            .iter()
-            .filter(|upstream| upstream.active && upstream.supports_model(model))
-        {
-            let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
-                continue;
-            };
-            for api_key in route_api_keys(upstream, &runtime_model_slug) {
-                let key_fingerprint = route_key_fingerprint(upstream, &api_key);
-                for protocol in upstream.supported_protocols() {
-                    let Some(candidate) = route_capability(upstream, &key_fingerprint, protocol)
-                        .and_then(|route| route.resolved.as_ref())
-                    else {
-                        continue;
-                    };
-                    let candidate_transition = ProtocolTransitionIdentity::new(
-                        WireProtocol::Responses,
-                        WireProtocol::from(protocol),
-                    );
-                    if is_compatible_catalog_superset(
-                        candidate,
-                        &witness.capabilities,
-                        candidate_transition,
-                        witness_transition,
-                    ) {
-                        allowed.insert(DialectProfileKey::for_key(
-                            upstream.id.clone(),
-                            key_fingerprint.clone(),
-                            runtime_model_slug.clone(),
-                            WireProtocol::from(protocol),
-                        ));
-                    }
-                }
-            }
-        }
-        Some(allowed)
-    })
-    .flatten();
     let continuation_profile_key = exact_continuation
         .as_ref()
         .map(|continuation| continuation.profile_key().clone())
         .or(legacy_continuation_profile);
-    let route_profile_constraint_active =
-        continuation_profile_key.is_some() || codex_catalog_allowed_profiles.is_some();
+    let route_profile_constraint_active = continuation_profile_key.is_some();
     let route_matches_profile_constraint =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
+            let Some(profile_key) = continuation_profile_key.as_ref() else {
+                return true;
+            };
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 return false;
             };
@@ -3820,12 +3822,7 @@ async fn process_gateway_request_inner(
                 runtime_model_slug,
                 WireProtocol::from(protocol),
             );
-            if let Some(profile_key) = continuation_profile_key.as_ref() {
-                return candidate_key == *profile_key;
-            }
-            codex_catalog_allowed_profiles
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&candidate_key))
+            candidate_key == *profile_key
         };
     let claude_replay_route = claude_thinking_replay_route(
         &state,
@@ -3973,17 +3970,6 @@ async fn process_gateway_request_inner(
             WireProtocol::Responses => vec![UpstreamProtocol::Responses],
             WireProtocol::Messages => Vec::new(),
         }
-    } else if let Some(allowed) = codex_catalog_allowed_profiles.as_ref() {
-        allowed
-            .iter()
-            .next()
-            .and_then(|profile_key| match profile_key.protocol {
-                WireProtocol::ChatCompletions => Some(UpstreamProtocol::ChatCompletions),
-                WireProtocol::Responses => Some(UpstreamProtocol::Responses),
-                WireProtocol::Messages => None,
-            })
-            .into_iter()
-            .collect()
     } else {
         match &claude_replay_route {
             ClaudeThinkingReplayRoute::Pinned { protocol, .. } => vec![*protocol],
@@ -4540,7 +4526,6 @@ async fn process_gateway_request_inner(
                         .needs_stream_completion_context()
                         .then(|| StreamCompletionContext {
                             state: state.clone(),
-                            upstream_id: upstream.id.clone(),
                             route_health_key: route_health_key.clone(),
                             route_attempts: request_route_attempts.clone(),
                             route_health_permit: route_health_permit.clone(),
@@ -4935,15 +4920,6 @@ async fn process_gateway_request_inner(
                                         RouteOutcome::Success,
                                     )
                                     .await;
-                                }
-                                if let Err(error) =
-                                    state.mark_upstream_success(&selected_upstream_id).await
-                                {
-                                    tracing::warn!(
-                                        selected_upstream_id = %selected_upstream_id,
-                                        error = %error,
-                                        "failed to reset legacy upstream failure count after immediate success"
-                                    );
                                 }
                             }
                             if use_routing_affinity {

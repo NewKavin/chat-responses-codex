@@ -165,6 +165,16 @@ Key 特有错误的处理：
 
 Codex catalog witness 继续从持久 capability evidence 选择，不读取 runtime cooldown。因此临时故障不会让 reasoning metadata 抖动。若目录广告了 `xhigh`，运行时必须只选择具有相同已验证能力的 Key；这些 Key 全部临时不可用时返回 503，而不是降级到不支持 `xhigh` 的 Key。
 
+### Codex 门户目录与请求路由解耦
+
+下游 `model_allowlist` 非空时，它是该下游 Codex 目录的权威授权集合，而不是对 active upstream 目录的简单交集。网关保留大小写不敏感匹配到的每个 distinct live slug 及其真实 casing；如果两个 live slug 只有大小写不同但可独立路由，两者都必须进入目录。暂时没有任何 live route 的 allowlist 项仍以白名单第一次出现的原始 slug 进入目录，并使用 `reasoning = none`、无图片、无并行工具等保守元数据；只有这类 allowlist-only 重复项才按大小写不敏感键去重。只有 allowlist 为空时，目录模型全集才回退到所有 active upstream 的持久 `route_models()`。这样新增白名单模型后，门户重新拉取一次完整目录即可覆盖全部授权模型，不需要从其他模型复制条目。
+
+默认 Codex `/v1/models` 和门户生成的 `model-catalog.json` 不得包含 `gateway_catalog_witness`、`upstream_id`、`profile_key`、`configuration_id` 或 configuration fingerprint。witness 仍是服务端选择稳定能力元数据的内部证据，但不是 Codex 用户配置，也不形成客户端可编辑的 route 身份。前端生成器还要防御性删除旧网关响应中的 `gateway_catalog_witness`，避免滚动升级时继续暴露内部诊断。
+
+catalog witness 不得约束无 continuation 的新请求。每个新请求都以实际 `requested_features`、runtime hints、模型映射、协议转换、route health、配额和正常 ranking 在所有合格 `(upstream, Key, model, protocol)` route 中选择；同一模型由多个 upstream 支持时，任何实际满足请求能力的 route 都可参与选择和 fallback。目录 witness 的协议、reasoning carrier 或 advertised effort 集合不能把请求预先收窄到一个 upstream/profile/protocol 子集。
+
+已有会话的 continuation 保持 fail-closed 精确绑定。其 upstream、Key 指纹、runtime model、协议、configuration fingerprint、probe schema、tool registry 和 adapter transition 必须继续匹配，不能借“多 upstream 可用”放宽。目录刷新不会让旧 continuation 跨模型或跨 route 迁移；切换模型时仍需新建 Codex 会话。
+
 ### 旧 profile 迁移
 
 序列化的 `DialectProfileKey` 为 `key_fingerprint` 增加向后兼容默认值，空字符串表示 legacy。新的 route configuration fingerprint 必须包含 `key_fingerprint`。加载旧 profile 时保留一条仅用于迁移校验的 legacy fingerprint 算法（不含 Key 身份）：

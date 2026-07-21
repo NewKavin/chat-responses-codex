@@ -968,6 +968,70 @@ async fn run_responses_nonstream_probe(response_body: Value) -> ProbeOutcome {
     .unwrap()
 }
 
+async fn run_responses_tool_continuation_probe(response_body: Value) -> ProbeOutcome {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = Arc::new(response_body);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let response_body = response_body.clone();
+            async move { axum::Json((*response_body).clone()) }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "opaque/responses-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Responses,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: None,
+                },
+            ],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .unwrap()
+}
+
+async fn run_responses_function_tools_probe(response_body: Value) -> ProbeOutcome {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let response_body = Arc::new(response_body);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let response_body = response_body.clone();
+            async move { axum::Json((*response_body).clone()) }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "opaque/responses-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Responses,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::FunctionTools],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .unwrap()
+}
+
 async fn run_oversized_stream_probe(
     protocol: WireProtocol,
 ) -> (Result<ProbeOutcome, std::io::Error>, usize, usize) {
@@ -1794,12 +1858,160 @@ async fn forced_tool_plain_text_is_not_positive_tool_evidence() {
     let outcome = run_probe_against(&mock, CapabilityProbePlan::agent_core()).await;
     assert_eq!(
         outcome.capability(Capability::FunctionTools),
+        EvidenceState::Unobserved
+    );
+    assert_eq!(
+        outcome.capability(Capability::ForcedToolChoice),
         EvidenceState::Rejected
     );
     assert!(outcome
         .evidence_codes()
         .contains("forced_tool_not_selected"));
     assert!(saw_forced_tool.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn missing_auto_tool_call_does_not_reject_tool_continuation() {
+    let mock = ProbeMock::chat(|_| text_response("tool call not selected")).await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: None,
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::ToolContinuation),
+        EvidenceState::Unobserved
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("tool_continuation_missing_call"));
+}
+
+#[tokio::test]
+async fn chat_tool_call_without_id_rejects_tool_continuation() {
+    let mock = ProbeMock::chat(|_| {
+        let mut response = tool_call_response(
+            "call_probe",
+            "gateway_compat_probe",
+            r#"{"nonce":"n-17"}"#,
+            None,
+        );
+        response["choices"][0]["message"]["tool_calls"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("id");
+        response
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: None,
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::ToolContinuation),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("tool_continuation_invalid_call"));
+}
+
+#[tokio::test]
+async fn responses_tool_call_without_call_id_rejects_tool_continuation() {
+    let outcome = run_responses_tool_continuation_probe(json!({
+        "id": "resp-probe",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "id": "fc-probe",
+            "name": "gateway_compat_probe",
+            "arguments": "{\"nonce\":\"n-17\"}",
+            "status": "completed"
+        }]
+    }))
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::ToolContinuation),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("tool_continuation_invalid_call"));
+}
+
+#[tokio::test]
+async fn chat_function_tool_with_empty_id_is_rejected() {
+    let mock = ProbeMock::chat(|_| {
+        tool_call_response("", "gateway_compat_probe", r#"{"nonce":"n-17"}"#, None)
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::FunctionTools],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::FunctionTools),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("function_tools_invalid_call"));
+}
+
+#[tokio::test]
+async fn responses_function_tool_with_empty_call_id_is_rejected() {
+    let outcome = run_responses_function_tools_probe(json!({
+        "id": "resp-probe",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "id": "fc-probe",
+            "call_id": "",
+            "name": "gateway_compat_probe",
+            "arguments": "{\"nonce\":\"n-17\"}",
+            "status": "completed"
+        }]
+    }))
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::FunctionTools),
+        EvidenceState::Rejected
+    );
+    assert!(outcome
+        .evidence_codes()
+        .contains("function_tools_invalid_call"));
 }
 
 #[tokio::test]

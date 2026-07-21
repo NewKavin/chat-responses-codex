@@ -216,6 +216,25 @@ describe('integration config generators', () => {
     expect(state.primaryModelReasoningEffort).toBe('medium')
   })
 
+  it('matches the downstream allowlist without changing live catalog casing', () => {
+    const state = buildIntegrationCatalogViewState({
+      catalog: {
+        models: [
+          {
+            slug: 'MiniMax/MiniMax-M2.7',
+            default_reasoning_level: 'none'
+          }
+        ]
+      },
+      modelAllowlist: ['minimax/minimax-m2.7'],
+      portalModelStats: []
+    })
+
+    expect(state.allModelSlugs).toEqual(['MiniMax/MiniMax-M2.7'])
+    expect(state.primaryModelSlug).toBe('MiniMax/MiniMax-M2.7')
+    expect(state.canGenerateConfigurationContent).toBe(true)
+  })
+
   it('uses none when the catalog default reasoning effort is absent', () => {
     const state = buildIntegrationCatalogViewState({
       catalog: { models: [{ slug: 'unknown/model', default_reasoning_level: null }] },
@@ -266,20 +285,47 @@ describe('integration config generators', () => {
     expect(yaml).not.toContain('key_env:')
   })
 
-  it('uses the live Codex catalog without inventing capabilities', () => {
+  it('uses live Codex capabilities without exposing legacy route diagnostics', () => {
     const live = {
+      upstream_id: 'top-level-internal-upstream',
+      configuration_fingerprint: 'top-level-internal-fingerprint',
       models: [
         {
           slug: 'opaque',
           input_modalities: ['text', 'image'],
           supports_parallel_tool_calls: false,
-          apply_patch_tool_type: null
+          apply_patch_tool_type: null,
+          gateway_catalog_witness: {
+            upstream_id: 'internal-upstream',
+            configuration_id: 'sha256:internal',
+            profile_key: { upstream_id: 'internal-upstream' }
+          },
+          upstream_id: 'model-level-internal-upstream',
+          metadata: {
+            safe_label: 'keep-me',
+            profile_key: { upstream_id: 'nested-internal-upstream' },
+            key_fingerprint: 'nested-internal-fingerprint'
+          }
         }
       ]
     }
 
     const emitted = JSON.parse(buildCodexModelCatalogJson(live as never))
-    expect(emitted).toEqual(live)
+    expect(emitted).toEqual({
+      models: [
+        {
+          slug: 'opaque',
+          input_modalities: ['text', 'image'],
+          supports_parallel_tool_calls: false,
+          apply_patch_tool_type: null,
+          metadata: { safe_label: 'keep-me' }
+        }
+      ]
+    })
+    expect(JSON.stringify(emitted)).not.toContain('upstream_id')
+    expect(JSON.stringify(emitted)).not.toContain('configuration_id')
+    expect(JSON.stringify(emitted)).not.toContain('profile_key')
+    expect(JSON.stringify(emitted)).not.toContain('fingerprint')
   })
 
   it('fails catalog generation when the live catalog is unavailable', () => {
@@ -372,7 +418,8 @@ describe('integration config generators', () => {
     }
 
     expect(codexGuide).not.toContain('client_version=0.144.0')
-    expect(codexGuide).toContain('client_version=0.144.4')
+    expect(codexGuide).not.toContain('client_version=0.144.4')
+    expect(codexGuide).toContain('client_version=0.144.6')
 
     const guideConfigExamples = [...codexGuide.matchAll(/```toml\n([\s\S]*?)```/g)]
       .map(match => match[1])

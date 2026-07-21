@@ -1174,7 +1174,7 @@ async fn aggregate_cancellation_rearms_after_retryable_first_key_error() {
 
     harness.assert_cleanup().await;
     let snapshot = harness.state.snapshot().await;
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
     assert_eq!(
         harness
             .state
@@ -1250,7 +1250,7 @@ async fn aggregate_cancellation_arms_after_json_to_sse_recovery() {
         "failed empty-response recovery must not be stored"
     );
     let snapshot = harness.state.snapshot().await;
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
     assert_eq!(
         harness
             .state
@@ -1313,7 +1313,7 @@ async fn aggregate_future_cancellation_cleans_up_and_logs_once_without_changing_
 
     harness.assert_cleanup().await;
     let snapshot = harness.state.snapshot().await;
-    assert_eq!(snapshot.upstreams[0].failure_count, 3);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
     assert_eq!(
         harness
             .state

@@ -88,6 +88,18 @@ fn legacy_mapping_falls_back_only_to_the_current_configured_keys() {
     assert_eq!(upstream.keys_for_model("unknown"), vec!["key-a", "key-b"]);
 }
 
+#[test]
+fn storage_normalization_clears_legacy_upstream_failure_count() {
+    let mut upstream = UpstreamConfig {
+        failure_count: 7,
+        ..UpstreamConfig::default()
+    };
+
+    upstream.normalize_for_storage();
+
+    assert_eq!(upstream.failure_count, 0);
+}
+
 #[tokio::test]
 async fn file_roundtrip_preserves_authoritative_empty_key_mapping() {
     let tempdir = tempdir().unwrap();

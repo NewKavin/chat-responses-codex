@@ -4,7 +4,7 @@ use crate::capabilities::{
     ResolvedCapabilities, RouteIdentity, RuntimeCapabilityHintSnapshot, SemanticPolicy,
     WireProtocol,
 };
-use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
+use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
 use crate::state::{AppState, UpstreamConfig};
 use serde_json::Value;
@@ -504,7 +504,7 @@ pub(super) fn resolve_route_capabilities_with_runtime_hints(
             semantic: semantic_or_empty(&semantic),
             route_overrides: &route_overrides,
             policy_extensions: &policy_extensions,
-            profile: effective_profile.profile,
+            profile: effective_profile,
             strip_nonstandard_chat_fields: upstream.strip_nonstandard_chat_fields,
         })
         .ok()?;
@@ -565,12 +565,6 @@ pub(super) fn resolve_route_capabilities_with_runtime_hints(
     Some(resolved)
 }
 
-struct ExactRouteEffectiveProfile<'a> {
-    key: DialectProfileKey,
-    configuration_fingerprint: Option<String>,
-    profile: Option<&'a crate::capabilities::UpstreamDialectProfile>,
-}
-
 fn exact_route_effective_profile<'a>(
     snapshot: &'a CapabilityRuntimeSnapshot,
     upstream: &UpstreamConfig,
@@ -578,7 +572,7 @@ fn exact_route_effective_profile<'a>(
     exposed_model_slug: &str,
     runtime_model_slug: &str,
     protocol: UpstreamProtocol,
-) -> ExactRouteEffectiveProfile<'a> {
+) -> Option<&'a crate::capabilities::UpstreamDialectProfile> {
     let key = DialectProfileKey::for_key(
         upstream.id.clone(),
         key_fingerprint,
@@ -594,7 +588,7 @@ fn exact_route_effective_profile<'a>(
         protocol,
     )
     .ok();
-    let profile = configuration_fingerprint
+    configuration_fingerprint
         .as_deref()
         .and_then(|fingerprint| {
             snapshot.profiles.get(&key).filter(|profile| {
@@ -603,12 +597,7 @@ fn exact_route_effective_profile<'a>(
                     && profile.probe_schema_version
                         == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
             })
-        });
-    ExactRouteEffectiveProfile {
-        key,
-        configuration_fingerprint,
-        profile,
-    }
+        })
 }
 
 fn adapt_requested_features_for_protocol(
@@ -626,89 +615,8 @@ fn adapt_requested_features_for_protocol(
     adapted
 }
 
-#[allow(dead_code)]
-pub(super) fn select_catalog_witness(
-    state: &AppState,
-    upstreams: &[UpstreamConfig],
-    model: &str,
-) -> Option<serde_json::Value> {
-    select_catalog_witness_entry(state, upstreams, model).map(|entry| entry.diagnostic())
-}
-
 pub(super) struct CatalogWitnessEntry {
-    pub profile_key: DialectProfileKey,
-    pub configuration_fingerprint: Option<String>,
-    pub profile_state: DialectProfileState,
-    pub probe_schema_version: u32,
-    pub profile_rank: u8,
-    pub executable_capability_count: usize,
-    pub native_protocol_fidelity: u8,
-    pub upstream_priority: u32,
-    pub upstream_failure_count: u32,
     pub capabilities: ResolvedCapabilities,
-}
-
-pub(super) fn is_compatible_catalog_superset(
-    candidate: &ResolvedCapabilities,
-    witness: &ResolvedCapabilities,
-    candidate_transition: ProtocolTransitionIdentity,
-    witness_transition: ProtocolTransitionIdentity,
-) -> bool {
-    let advertises_reasoning_efforts = witness.supports(Capability::ReasoningOutput)
-        && witness.reasoning_control_field.is_some()
-        && !witness.effort_map.is_empty();
-    let preserves_reasoning_efforts = !advertises_reasoning_efforts
-        || (candidate.reasoning_control_field.is_some()
-            && witness
-                .effort_map
-                .keys()
-                .all(|effort| candidate.effort_map.contains_key(effort)));
-
-    candidate.profile_state == DialectProfileState::Verified
-        && candidate_transition == witness_transition
-        && candidate.reasoning_carrier == witness.reasoning_carrier
-        && preserves_reasoning_efforts
-        && witness.values.iter().all(|(capability, resolved)| {
-            resolved.state != crate::capabilities::EvidenceState::Supported
-                || candidate.supports(*capability)
-        })
-}
-
-impl CatalogWitnessEntry {
-    pub fn diagnostic(&self) -> serde_json::Value {
-        let route_id = anonymous_route_id(
-            &self.profile_key.upstream_id,
-            &self.profile_key.key_fingerprint,
-            &self.profile_key.runtime_model_slug,
-            self.profile_key.protocol,
-        );
-        serde_json::json!({
-            "upstream_id": self.profile_key.upstream_id,
-            "runtime_model_slug": self.profile_key.runtime_model_slug,
-            "protocol": wire_protocol_label(self.profile_key.protocol),
-            "profile_key": {
-                "upstream_id": self.profile_key.upstream_id,
-                "route_id": route_id,
-                "runtime_model_slug": self.profile_key.runtime_model_slug,
-                "protocol": wire_protocol_label(self.profile_key.protocol),
-            },
-            "configuration_id": self.configuration_fingerprint.as_deref().and_then(safe_configuration_id),
-            "profile_state": profile_state_label(self.profile_state),
-            "probe_schema_version": self.probe_schema_version,
-            "rank": {
-                "profile": self.profile_rank,
-                "executable_capabilities": self.executable_capability_count,
-                "native_protocol_fidelity": self.native_protocol_fidelity,
-                "upstream_priority": self.upstream_priority,
-                "upstream_failure_count": self.upstream_failure_count,
-            },
-        })
-    }
-}
-
-fn safe_configuration_id(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| format!("sha256:{}", value.chars().take(16).collect::<String>()))
 }
 
 pub(super) fn select_catalog_witness_entry(
@@ -728,14 +636,6 @@ pub(super) fn select_catalog_witness_entry(
         for api_key in upstream.keys_for_model(&runtime_model_slug) {
             let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
             for protocol in upstream.supported_protocols() {
-                let effective_profile = exact_route_effective_profile(
-                    &snapshot,
-                    upstream,
-                    &key_fingerprint,
-                    model,
-                    &runtime_model_slug,
-                    protocol,
-                );
                 let Some(resolved) = resolve_route_capabilities_with_snapshot(
                     &snapshot,
                     upstream,
@@ -767,12 +667,9 @@ pub(super) fn select_catalog_witness_entry(
                 candidates.push((
                     rank,
                     supported,
-                    u8::from(effective_profile.key.protocol == WireProtocol::Responses),
+                    u8::from(WireProtocol::from(protocol) == WireProtocol::Responses),
                     upstream.priority,
-                    std::cmp::Reverse(upstream.failure_count),
                     upstream.id.clone(),
-                    effective_profile.key,
-                    effective_profile.configuration_fingerprint,
                     resolved,
                 ));
             }
@@ -786,33 +683,9 @@ pub(super) fn select_catalog_witness_entry(
                 .then(left.1.cmp(&right.1))
                 .then(left.2.cmp(&right.2))
                 .then(left.3.cmp(&right.3))
-                .then(left.4.cmp(&right.4))
-                .then_with(|| right.5.cmp(&left.5))
+                .then_with(|| right.4.cmp(&left.4))
         })
-        .map(
-            |(
-                rank,
-                supported,
-                native_fidelity,
-                priority,
-                failure_count,
-                _,
-                key,
-                configuration_fingerprint,
-                resolved,
-            )| CatalogWitnessEntry {
-                profile_key: key,
-                configuration_fingerprint,
-                profile_state: resolved.profile_state,
-                probe_schema_version: crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
-                profile_rank: rank,
-                executable_capability_count: supported,
-                native_protocol_fidelity: native_fidelity,
-                upstream_priority: priority,
-                upstream_failure_count: failure_count.0,
-                capabilities: resolved,
-            },
-        )
+        .map(|(_, _, _, _, _, capabilities)| CatalogWitnessEntry { capabilities })
 }
 
 fn scan_responses_images(body: &Value, required: &mut BTreeSet<Capability>) {
@@ -1079,15 +952,6 @@ fn wire_protocol_label(protocol: WireProtocol) -> &'static str {
     }
 }
 
-fn profile_state_label(state: DialectProfileState) -> &'static str {
-    match state {
-        DialectProfileState::Verified => "verified",
-        DialectProfileState::Partial => "partial",
-        DialectProfileState::Unsupported => "unsupported",
-        DialectProfileState::Unknown => "unknown",
-    }
-}
-
 fn semantic_or_empty(semantic: &SemanticPolicy) -> &SemanticPolicy {
     semantic
 }
@@ -1096,57 +960,6 @@ fn semantic_or_empty(semantic: &SemanticPolicy) -> &SemanticPolicy {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn verified_capabilities(reasoning_carrier: ReasoningCarrier) -> ResolvedCapabilities {
-        ResolvedCapabilities {
-            values: std::collections::BTreeMap::from([(
-                Capability::FunctionTools,
-                crate::capabilities::ResolvedCapability {
-                    state: crate::capabilities::EvidenceState::Supported,
-                    source: CapabilitySource::Probe,
-                },
-            )]),
-            token_limit_field: crate::capabilities::TokenLimitField::Omit,
-            reasoning_mode: crate::capabilities::ReasoningMode::Off,
-            reasoning_carrier,
-            correction_rules: Vec::new(),
-            reasoning_control_field: None,
-            effort_map: std::collections::BTreeMap::new(),
-            omit_sampling_fields: BTreeSet::new(),
-            context_window: None,
-            max_output_tokens: None,
-            omit_optional_extensions: false,
-            profile_state: DialectProfileState::Verified,
-            provisional: false,
-            native_preferred: true,
-            adapters: BTreeSet::new(),
-            request_extensions: Vec::new(),
-            field_sources: std::collections::BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn catalog_superset_requires_matching_explicit_protocol_transition() {
-        let witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
-        let candidate = witness.clone();
-        let responses_to_chat =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
-        let responses_to_responses =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::Responses);
-
-        assert!(is_compatible_catalog_superset(
-            &candidate,
-            &witness,
-            responses_to_chat,
-            responses_to_chat,
-        ));
-        assert!(!is_compatible_catalog_superset(
-            &candidate,
-            &witness,
-            responses_to_responses,
-            responses_to_chat,
-        ));
-    }
 
     #[test]
     fn continuation_route_requires_the_exact_key_fingerprint() {
@@ -1185,72 +998,6 @@ mod tests {
             &key_b,
             "opaque",
             UpstreamProtocol::ChatCompletions,
-        ));
-    }
-
-    #[test]
-    fn catalog_superset_preserves_every_advertised_reasoning_effort() {
-        let transition =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
-        let mut witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
-        witness.values.insert(
-            Capability::ReasoningOutput,
-            crate::capabilities::ResolvedCapability {
-                state: crate::capabilities::EvidenceState::Supported,
-                source: CapabilitySource::Probe,
-            },
-        );
-        witness.reasoning_control_field = Some("reasoning_effort".into());
-        witness.effort_map = std::collections::BTreeMap::from([
-            ("high".into(), "witness-high".into()),
-            ("medium".into(), "witness-medium".into()),
-        ]);
-
-        let mut compatible = witness.clone();
-        compatible.reasoning_control_field = Some("thinking_level".into());
-        compatible.effort_map = std::collections::BTreeMap::from([
-            ("high".into(), "candidate-maximum".into()),
-            ("medium".into(), "candidate-balanced".into()),
-        ]);
-        assert!(is_compatible_catalog_superset(
-            &compatible,
-            &witness,
-            transition,
-            transition,
-        ));
-
-        compatible.effort_map.remove("high");
-        assert!(!is_compatible_catalog_superset(
-            &compatible,
-            &witness,
-            transition,
-            transition,
-        ));
-
-        compatible.reasoning_control_field = None;
-        compatible.effort_map = witness.effort_map.clone();
-        assert!(!is_compatible_catalog_superset(
-            &compatible,
-            &witness,
-            transition,
-            transition,
-        ));
-    }
-
-    #[test]
-    fn catalog_superset_ignores_unadvertised_reasoning_efforts() {
-        let transition =
-            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::ChatCompletions);
-        let mut witness = verified_capabilities(ReasoningCarrier::ReasoningContent);
-        witness.reasoning_control_field = Some("reasoning_effort".into());
-        witness.effort_map =
-            std::collections::BTreeMap::from([("high".into(), "witness-high".into())]);
-
-        let mut candidate = witness.clone();
-        candidate.reasoning_control_field = None;
-        candidate.effort_map.clear();
-        assert!(is_compatible_catalog_superset(
-            &candidate, &witness, transition, transition,
         ));
     }
 

@@ -697,7 +697,6 @@ fn send_route_hedge_attempt(
         ));
         let completion = StreamCompletionContext {
             state: context.state.clone(),
-            upstream_id: candidate.upstream.id.clone(),
             route_health_key: route_health_key.clone(),
             route_attempts: context.route_attempts.clone(),
             route_health_permit,

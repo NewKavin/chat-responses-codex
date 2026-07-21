@@ -1335,6 +1335,7 @@ async fn generic_500_retries_the_same_key_route_once_before_fallback() {
         });
 
         let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
@@ -1380,7 +1381,7 @@ async fn generic_500_retries_the_same_key_route_once_before_fallback() {
                 }],
                 ..Default::default()
             },
-            tempdir.path().join("state.json"),
+            state_path.clone(),
             AppConfig::default(),
         );
         let response = build_router(state)
@@ -1410,6 +1411,10 @@ async fn generic_500_retries_the_same_key_route_once_before_fallback() {
         assert_eq!(
             attempts.lock().unwrap().as_slice(),
             &["Bearer key-a", "Bearer key-a"]
+        );
+        assert!(
+            !state_path.exists(),
+            "request retries and success must not persist legacy upstream health"
         );
     })
     .await;

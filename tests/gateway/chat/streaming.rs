@@ -463,7 +463,7 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
             announcement: None,
             global_context_profiles: std::collections::HashMap::new(),
         },
-        state_path,
+        state_path.clone(),
         AppConfig::default(),
     );
 
@@ -511,6 +511,10 @@ async fn downstream_chat_stream_is_proxied_as_event_stream() {
         Some("Bearer upstream-secret")
     );
     assert_eq!(captured.request_body.unwrap()["stream"], true);
+    assert!(
+        !state_path.exists(),
+        "stream success must not persist legacy upstream health"
+    );
 }
 
 #[tokio::test]
@@ -4132,7 +4136,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
         .iter()
         .find(|upstream| upstream.id == "up-1")
         .expect("upstream should still exist");
-    assert_eq!(upstream.failure_count, 3);
+    assert_eq!(upstream.failure_count, 0);
     let runtime = state.upstream_runtime_snapshots().await;
     assert_eq!(
         runtime
@@ -4144,7 +4148,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
 }
 
 #[tokio::test]
-async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
+async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let upstream_hits = Arc::new(AtomicUsize::new(0));
@@ -4330,7 +4334,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
         .iter()
         .find(|upstream| upstream.id == "up-1")
         .expect("upstream should still exist");
-    assert_eq!(upstream.failure_count, 3);
+    assert_eq!(upstream.failure_count, 0);
     assert_eq!(
         state
             .upstream_runtime_snapshots()
@@ -4362,7 +4366,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        3
+        0
     );
     assert_eq!(
         state
@@ -4408,6 +4412,12 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
     .await
     .expect("terminal upstream request should start");
     state.mark_upstream_rate_limited("up-1", 60).await;
+    let cooldown_before_terminal = state
+        .upstream_runtime_snapshots()
+        .await
+        .get("up-1")
+        .expect("upstream runtime should exist")
+        .cooldown_until;
     release_headers.notify_one();
     to_bytes(response.into_body(), usize::MAX)
         .await
@@ -4421,7 +4431,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        0
+        3
     );
     assert_eq!(
         state
@@ -4430,9 +4440,10 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
-        0
+        cooldown_before_terminal
     );
 
+    state.mark_upstream_success("up-1").await.unwrap();
     for _ in 0..3 {
         state.mark_upstream_failure("up-1").await.unwrap();
     }
@@ -4466,6 +4477,12 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
     .await
     .expect("immediate JSON upstream request should start");
     state.mark_upstream_rate_limited("up-1", 60).await;
+    let cooldown_before_json = state
+        .upstream_runtime_snapshots()
+        .await
+        .get("up-1")
+        .expect("upstream runtime should exist")
+        .cooldown_until;
     release_headers.notify_one();
     to_bytes(response.into_body(), usize::MAX)
         .await
@@ -4479,7 +4496,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .find(|upstream| upstream.id == "up-1")
             .expect("upstream should still exist")
             .failure_count,
-        0
+        3
     );
     assert_eq!(
         state
@@ -4488,7 +4505,7 @@ async fn stream_headers_and_client_cancel_do_not_clear_upstream_health() {
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
-        0
+        cooldown_before_json
     );
 }
 
@@ -5554,7 +5571,7 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
             announcement: None,
             global_context_profiles: std::collections::HashMap::new(),
         },
-        state_path,
+        state_path.clone(),
         config,
     );
 
@@ -5623,6 +5640,10 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
             .contains("idle timeout waiting for SSE"),
         "unexpected idle timeout message: {:?}",
         log.error_message
+    );
+    assert!(
+        !state_path.exists(),
+        "stream failure must not persist legacy upstream health"
     );
 }
 
