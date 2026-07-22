@@ -135,27 +135,6 @@ pub(super) fn parse_upstream_error_payload(error_text: &str) -> ParsedUpstreamEr
     parsed
 }
 
-#[cfg(test)]
-pub(super) fn extract_upstream_error_message(error_text: &str) -> String {
-    let parsed = parse_upstream_error_payload(error_text);
-
-    // Prefer the human-readable message field from the upstream error body.
-    // Only fall back to the code field when no message is present, because
-    // non-numeric codes such as "bad_response_status_code" carry no useful
-    // diagnostic information for the downstream client.
-    if let Some(message) = parsed.message.filter(|message| !message.trim().is_empty()) {
-        return message;
-    }
-
-    if let Some(code) = parsed.code.as_deref() {
-        if !code.is_empty() && code.parse::<u16>().is_err() {
-            return code.to_string();
-        }
-    }
-
-    error_text.to_string()
-}
-
 pub(super) fn extract_upstream_error_code(error_text: &str) -> Option<u16> {
     let payload = parse_upstream_error_payload(error_text);
     if let Some(code) = payload.code {
@@ -1271,8 +1250,12 @@ pub(super) async fn send_to_upstream(
                     "responses request downgraded to ChatCompletions"
                 );
             }
-            responses_request_to_chat_payload_with_fallback(body, &mut downgrade_codes)
-                .map_err(protocol_error_to_gateway)?
+            responses_request_to_chat_payload_with_fallback(
+                body,
+                resolved_capabilities.as_ref(),
+                &mut downgrade_codes,
+            )
+            .map_err(protocol_error_to_gateway)?
         }
     };
     let mut upstream_body = upstream_body;

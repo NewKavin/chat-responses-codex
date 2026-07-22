@@ -565,11 +565,7 @@ async fn upstream_concurrency_full_429_does_not_retry_in_place() {
             global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
-        AppConfig {
-            upstream_concurrency_retry_attempts: 2,
-            upstream_concurrency_retry_backoff_ms: 1,
-            ..AppConfig::default()
-        },
+        AppConfig::default(),
     );
 
     let app = build_router(state.clone());
@@ -730,11 +726,7 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
             global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
-        AppConfig {
-            upstream_concurrency_retry_attempts: 2,
-            upstream_concurrency_retry_backoff_ms: 1,
-            ..AppConfig::default()
-        },
+        AppConfig::default(),
     );
 
     let app = build_router(state);

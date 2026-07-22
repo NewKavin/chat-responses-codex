@@ -113,6 +113,7 @@ impl EndpointKind {
 struct RouteCapabilityEvaluation {
     eligible: bool,
     optional_misses: usize,
+    failed_capability: Option<Capability>,
     resolved: Option<ResolvedCapabilities>,
 }
 
@@ -155,7 +156,8 @@ fn build_request_route_capability_cache_with_hints(
         for api_key in route_api_keys(upstream, &runtime_model_slug) {
             let key_fingerprint = route_key_fingerprint(upstream, &api_key);
             for protocol in upstream.supported_protocols() {
-                let resolved = resolve_route_capabilities_with_runtime_hints(
+                let route_requested = adapt_requested_features_for_protocol(requested, protocol);
+                let evaluation = evaluate_route_capabilities_with_runtime_hints(
                     snapshot,
                     upstream,
                     &key_fingerprint,
@@ -166,15 +168,23 @@ fn build_request_route_capability_cache_with_hints(
                     runtime_hints,
                     requested_value,
                 );
+                let (resolved, mut failed_capability) = match evaluation {
+                    RouteCapabilityResolution::Resolved(resolved) => (Some(resolved), None),
+                    RouteCapabilityResolution::Rejected(error) => (None, Some(error.capability)),
+                    RouteCapabilityResolution::Unavailable => (None, None),
+                };
                 let native_file_route_is_valid =
                     !requested.required.contains(&Capability::NativeFileId)
                         || protocol == endpoint.native_protocol();
+                if !native_file_route_is_valid {
+                    failed_capability = Some(Capability::NativeFileId);
+                }
                 let eligible = native_file_route_is_valid && resolved.is_some();
                 let optional_misses =
                     resolved
                         .as_ref()
-                        .map_or(requested.optional.len(), |resolved| {
-                            requested
+                        .map_or(route_requested.optional.len(), |resolved| {
+                            route_requested
                                 .optional
                                 .iter()
                                 .filter(|capability| !resolved.supports(**capability))
@@ -189,6 +199,7 @@ fn build_request_route_capability_cache_with_hints(
                     RouteCapabilityEvaluation {
                         eligible,
                         optional_misses,
+                        failed_capability,
                         resolved,
                     },
                 );
@@ -3925,9 +3936,44 @@ async fn process_gateway_request_inner(
         }
     };
     if !required_route_available {
-        let capability_name = required_capabilities
-            .iter()
-            .next()
+        let constrained_failure = continuation_profile_key
+            .as_ref()
+            .and_then(|profile| {
+                route_capability_cache.get(&(
+                    profile.protocol,
+                    profile.upstream_id.clone(),
+                    profile.key_fingerprint.clone(),
+                ))
+            })
+            .and_then(|route| route.failed_capability)
+            .or_else(|| match &claude_replay_route {
+                ClaudeThinkingReplayRoute::Pinned {
+                    upstream_id,
+                    key_fingerprint,
+                    protocol,
+                } => route_capability_cache
+                    .get(&(
+                        WireProtocol::from(*protocol),
+                        upstream_id.clone(),
+                        key_fingerprint.clone(),
+                    ))
+                    .and_then(|route| route.failed_capability),
+                ClaudeThinkingReplayRoute::NoReplay
+                | ClaudeThinkingReplayRoute::InvalidOrUnavailable => None,
+            });
+        let capability_name = constrained_failure
+            .or_else(|| {
+                (!route_profile_constraint_active
+                    && matches!(claude_replay_route, ClaudeThinkingReplayRoute::NoReplay))
+                .then(|| {
+                    route_capability_cache
+                        .values()
+                        .filter_map(|route| route.failed_capability)
+                        .next()
+                })
+                .flatten()
+            })
+            .or_else(|| required_capabilities.iter().next().copied())
             .map(|capability| format!("{capability:?}"))
             .unwrap_or_else(|| "Unknown".to_string());
         let error = GatewayError::classified(

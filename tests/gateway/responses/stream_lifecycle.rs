@@ -464,7 +464,7 @@ async fn stream_interruption_marks_interrupted_not_success() {
 }
 
 #[tokio::test]
-async fn invalid_translated_sse_returns_structured_protocol_error_not_499() {
+async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -478,16 +478,33 @@ async fn invalid_translated_sse_returns_structured_protocol_error_not_499() {
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/event-stream"),
             );
+            let first = stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    concat!(
+                        "data: {\"id\":\"chatcmpl-valid\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",",
+                        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"one\"},\"finish_reason\":null}]",
+                        "}\n\n",
+                    )
+                    .as_bytes(),
+                ))
+            });
+            let invalid = stream::once(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    concat!(
+                        "data: {\"id\":\"chatcmpl-invalid\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",",
+                        "\"choices\":[",
+                        "{\"index\":0,\"delta\":{\"content\":\"two\"},\"finish_reason\":null},",
+                        "{\"index\":1,\"delta\":{\"content\":\"three\"},\"finish_reason\":null}",
+                        "]}\n\n",
+                    )
+                    .as_bytes(),
+                ))
+            });
             (
                 StatusCode::OK,
                 headers,
-                concat!(
-                    "data: {\"id\":\"chatcmpl-invalid\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",",
-                    "\"choices\":[",
-                    "{\"index\":0,\"delta\":{\"content\":\"one\"},\"finish_reason\":null},",
-                    "{\"index\":1,\"delta\":{\"content\":\"two\"},\"finish_reason\":null}",
-                    "]}\n\n",
-                ),
+                Body::from_stream(first.chain(invalid)),
             )
         }),
     );
@@ -567,8 +584,42 @@ async fn invalid_translated_sse_returns_structured_protocol_error_not_499() {
         .await
         .expect("translation failure should be returned as a structured SSE error");
     let body = String::from_utf8_lossy(&body);
-    assert!(body.contains("\"category\":\"upstream_protocol_translation_failed\""));
+    let failed_position = body
+        .find("event: response.failed")
+        .expect("Responses stream failures must include response.failed");
+    let typed_error_position = body
+        .find("event: error")
+        .expect("Responses stream failures must retain the typed error event");
+    let done_position = body
+        .find("data: [DONE]")
+        .expect("Responses stream failures must terminate with [DONE]");
+    assert!(failed_position < typed_error_position);
+    assert!(typed_error_position < done_position);
+    assert!(body.contains("\"type\":\"response.failed\""));
+    assert!(body.contains("\"status\":\"failed\""));
+    assert!(body.contains("\"object\":\"response\""));
+    assert!(body.contains("\"output\":[]"));
+    assert!(body.contains("\"usage\":null"));
+    assert!(body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"upstream SSE stream reported failure\"}"));
+    assert!(body.contains("\"sequence_number\":4"));
+    assert!(body.contains("event: error"), "unexpected SSE body: {body}");
+    assert!(
+        body.contains("\"type\":\"error\""),
+        "unexpected SSE body: {body}"
+    );
+    assert!(
+        body.contains("\"code\":\"upstream_stream_error_event\""),
+        "unexpected SSE body: {body}"
+    );
+    assert!(body.contains("\"message\":\"upstream SSE stream reported failure\""));
+    assert!(body.contains("\"param\":null"));
+    assert!(body.contains("\"delta\":\"one\""));
+    assert!(body.contains("\"sequence_number\":5"));
+    assert!(body.contains("\"category\":\"upstream_stream_error_event\""));
+    assert!(!body.contains("data: {\"error\":"));
     assert!(body.contains("data: [DONE]"));
+    assert!(!body.contains("upstream-secret"));
+    assert!(!body.contains("up-1"));
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
     let mut downstream = state.snapshot().await.downstreams[0].clone();
@@ -587,7 +638,7 @@ async fn invalid_translated_sse_returns_structured_protocol_error_not_499() {
     assert_eq!(log.status_code, StatusCode::BAD_GATEWAY.as_u16());
     assert_eq!(
         log.error_category.as_deref(),
-        Some("upstream_protocol_translation_failed")
+        Some("upstream_stream_error_event")
     );
 }
 

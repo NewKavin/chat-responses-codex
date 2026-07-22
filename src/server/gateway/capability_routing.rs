@@ -1,8 +1,8 @@
 use crate::capabilities::{
-    Capability, CapabilityResolver, CapabilityRuntimeSnapshot, CapabilitySource, DialectProfileKey,
-    DialectProfileState, ReasoningCarrier, RequestedFeatures, ResolutionInput,
-    ResolvedCapabilities, RouteIdentity, RuntimeCapabilityHintSnapshot, SemanticPolicy,
-    WireProtocol,
+    Capability, CapabilityResolutionError, CapabilityResolver, CapabilityRuntimeSnapshot,
+    CapabilitySource, DialectProfileKey, DialectProfileState, ReasoningCarrier, RequestedFeatures,
+    ResolutionInput, ResolvedCapabilities, RouteIdentity, RuntimeCapabilityHintSnapshot,
+    SemanticPolicy, WireProtocol,
 };
 use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
@@ -474,6 +474,40 @@ pub(super) fn resolve_route_capabilities_with_runtime_hints(
     runtime_hints: &RuntimeCapabilityHintSnapshot,
     requested_value: Option<&str>,
 ) -> Option<ResolvedCapabilities> {
+    match evaluate_route_capabilities_with_runtime_hints(
+        snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+        requested,
+        runtime_hints,
+        requested_value,
+    ) {
+        RouteCapabilityResolution::Resolved(resolved) => Some(resolved),
+        RouteCapabilityResolution::Rejected(_) | RouteCapabilityResolution::Unavailable => None,
+    }
+}
+
+pub(super) enum RouteCapabilityResolution {
+    Resolved(ResolvedCapabilities),
+    Rejected(CapabilityResolutionError),
+    Unavailable,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate_route_capabilities_with_runtime_hints(
+    snapshot: &CapabilityRuntimeSnapshot,
+    upstream: &UpstreamConfig,
+    key_fingerprint: &str,
+    exposed_model_slug: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+    requested: &RequestedFeatures,
+    runtime_hints: &RuntimeCapabilityHintSnapshot,
+    requested_value: Option<&str>,
+) -> RouteCapabilityResolution {
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
         key_fingerprint: key_fingerprint.to_string(),
@@ -497,17 +531,18 @@ pub(super) fn resolve_route_capabilities_with_runtime_hints(
 
     let requested = adapt_requested_features_for_protocol(requested, protocol);
 
-    let mut resolved = CapabilityResolver
-        .resolve(ResolutionInput {
-            route: &route,
-            requested: &requested,
-            semantic: semantic_or_empty(&semantic),
-            route_overrides: &route_overrides,
-            policy_extensions: &policy_extensions,
-            profile: effective_profile,
-            strip_nonstandard_chat_fields: upstream.strip_nonstandard_chat_fields,
-        })
-        .ok()?;
+    let mut resolved = match CapabilityResolver.resolve(ResolutionInput {
+        route: &route,
+        requested: &requested,
+        semantic: semantic_or_empty(&semantic),
+        route_overrides: &route_overrides,
+        policy_extensions: &policy_extensions,
+        profile: effective_profile,
+        strip_nonstandard_chat_fields: upstream.strip_nonstandard_chat_fields,
+    }) {
+        Ok(resolved) => resolved,
+        Err(error) => return RouteCapabilityResolution::Rejected(error),
+    };
     if let Some(route_context) = upstream.context_config_for_model(exposed_model_slug) {
         resolved.context_window = Some(
             resolved
@@ -536,23 +571,24 @@ pub(super) fn resolve_route_capabilities_with_runtime_hints(
         runtime_model_slug,
         protocol.into(),
     );
-    let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+    let Ok(configuration_fingerprint) = AppState::route_configuration_fingerprint_with_snapshot(
         snapshot,
         upstream,
         key_fingerprint,
         exposed_model_slug,
         runtime_model_slug,
         protocol,
-    )
-    .ok()?;
+    ) else {
+        return RouteCapabilityResolution::Unavailable;
+    };
     if runtime_hints.blocks_protocol(&profile, &configuration_fingerprint) {
-        return None;
+        return RouteCapabilityResolution::Unavailable;
     }
     for (capability, value) in
         runtime_hints.blocked_features(&profile, &configuration_fingerprint, requested_value)
     {
         if value.is_some() || requested.required.contains(&capability) {
-            return None;
+            return RouteCapabilityResolution::Rejected(CapabilityResolutionError { capability });
         }
         resolved.values.insert(
             capability,
@@ -562,7 +598,7 @@ pub(super) fn resolve_route_capabilities_with_runtime_hints(
             },
         );
     }
-    Some(resolved)
+    RouteCapabilityResolution::Resolved(resolved)
 }
 
 fn exact_route_effective_profile<'a>(
@@ -600,12 +636,24 @@ fn exact_route_effective_profile<'a>(
         })
 }
 
-fn adapt_requested_features_for_protocol(
+pub(super) fn adapt_requested_features_for_protocol(
     requested: &RequestedFeatures,
     protocol: UpstreamProtocol,
 ) -> RequestedFeatures {
     let mut adapted = requested.clone();
     if protocol == UpstreamProtocol::ChatCompletions {
+        // Chat fallback can safely omit standalone Responses reasoning history.
+        // Tool continuations and exact gateway continuations require the original
+        // reasoning carrier, so they remain hard capability requirements.
+        if adapted.continuation_profile.is_none()
+            && !adapted.required.contains(&Capability::ToolContinuation)
+        {
+            for capability in [Capability::ReasoningOutput, Capability::ReasoningReplay] {
+                if adapted.required.remove(&capability) {
+                    adapted.optional.insert(capability);
+                }
+            }
+        }
         let uses_function_adapter = adapted.required.remove(&Capability::NamespaceTools)
             | adapted.required.remove(&Capability::CustomTools);
         if uses_function_adapter {
@@ -1093,6 +1141,35 @@ mod tests {
         assert!(requested.required.contains(&Capability::ReasoningOutput));
         assert!(requested.required.contains(&Capability::ReasoningReplay));
         assert!(requested.required.contains(&Capability::ToolContinuation));
+
+        let adapted =
+            adapt_requested_features_for_protocol(&requested, UpstreamProtocol::ChatCompletions);
+        assert!(adapted.required.contains(&Capability::ReasoningOutput));
+        assert!(adapted.required.contains(&Capability::ReasoningReplay));
+    }
+
+    #[test]
+    fn chat_fallback_can_reduce_unpinned_reasoning_history() {
+        let requested = requested_features_for_request(
+            EndpointKind::Responses,
+            &json!({
+                "input": [
+                    {"type": "reasoning", "id": "rs_1", "summary": []},
+                    {"role": "user", "content": "continue"}
+                ]
+            }),
+        );
+
+        let native = adapt_requested_features_for_protocol(&requested, UpstreamProtocol::Responses);
+        assert!(native.required.contains(&Capability::ReasoningOutput));
+        assert!(native.required.contains(&Capability::ReasoningReplay));
+
+        let adapted =
+            adapt_requested_features_for_protocol(&requested, UpstreamProtocol::ChatCompletions);
+        assert!(!adapted.required.contains(&Capability::ReasoningOutput));
+        assert!(!adapted.required.contains(&Capability::ReasoningReplay));
+        assert!(adapted.optional.contains(&Capability::ReasoningOutput));
+        assert!(adapted.optional.contains(&Capability::ReasoningReplay));
     }
 
     #[test]

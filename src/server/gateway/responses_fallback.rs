@@ -1,4 +1,7 @@
-use crate::protocol::{responses_request_to_chat_payload, tool_adapter, ProtocolError};
+use crate::capabilities::{Capability, ReasoningCarrier, ResolvedCapabilities};
+use crate::protocol::{
+    responses_request_to_chat_payload_with_context, tool_adapter, ConversionContext, ProtocolError,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -13,6 +16,7 @@ pub(super) fn responses_request_requires_responses_upstream(body: &Value) -> boo
 
 pub(super) fn responses_request_to_chat_payload_with_fallback(
     body: &Value,
+    resolved_capabilities: Option<&ResolvedCapabilities>,
     downgrade_codes: &mut BTreeSet<String>,
 ) -> Result<Value, ProtocolError> {
     let mut sanitized = body.clone();
@@ -50,7 +54,34 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
         }
     }
 
-    responses_request_to_chat_payload(&sanitized)
+    let preserves_reasoning = resolved_capabilities.is_some_and(|resolved| {
+        resolved.reasoning_carrier == ReasoningCarrier::ReasoningContent
+            && resolved.supports(Capability::ReasoningOutput)
+            && resolved.supports(Capability::ReasoningReplay)
+    });
+    let conversion_context = preserves_reasoning
+        .then(|| {
+            ConversionContext::new(
+                resolved_capabilities.expect("reasoning preservation requires capabilities"),
+                tool_adapter::ToolAdapterRegistry::empty(),
+            )
+        })
+        .unwrap_or_default();
+    if !preserves_reasoning && responses_input_contains_reasoning(&sanitized) {
+        downgrade_codes.insert("reasoning_history_dropped".to_string());
+    }
+
+    responses_request_to_chat_payload_with_context(&sanitized, &conversion_context)
+}
+
+fn responses_input_contains_reasoning(body: &Value) -> bool {
+    body.get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+        })
 }
 
 pub(super) fn apply_responses_hosted_tool_policy(

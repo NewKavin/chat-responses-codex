@@ -6,7 +6,7 @@ set +x
 : "${DOWNSTREAM_KEY:?DOWNSTREAM_KEY is required}"
 : "${MODEL_SLUG:?MODEL_SLUG is required}"
 
-readonly DEFAULT_CODEX_VERSION="0.144.4"
+readonly DEFAULT_CODEX_VERSION="0.144.6"
 readonly DEFAULT_OPENCODE_VERSION="1.17.18"
 readonly DEFAULT_CLAUDE_CODE_VERSION="2.1.195"
 readonly DEFAULT_HERMES_VERSION="0.14.0"
@@ -234,7 +234,6 @@ if client_enabled codex; then
 model_provider = "gateway"
 model = $MODEL_TOML
 review_model = $MODEL_TOML
-disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 web_search = "disabled"
 
@@ -243,6 +242,7 @@ name = "chat-responses-gateway"
 base_url = $API_BASE_TOML
 wire_api = "responses"
 env_key = "CHAT2RESPONSES_KEY"
+stream_max_retries = 0
 EOF
 
   record_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \

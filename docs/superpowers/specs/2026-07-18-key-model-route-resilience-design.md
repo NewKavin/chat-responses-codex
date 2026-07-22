@@ -245,6 +245,8 @@ route 或 Key cooldown 到期后，各自只允许一个请求原子取得 half-
 
 这里的 429 指真实 upstream HTTP 响应；gateway 自身在 dispatch 前的 admission/concurrency 等待保持既有语义。真实 upstream 429 不再按 `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS` 在原 route 内 sleep/retry，该变量及 `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS` 保留解析兼容但不再裁剪 route health 的 `Retry-After`，部署模板和文档要标记废弃。
 
+旧版 `UPSTREAM_CONCURRENCY_RETRY_*` 参数和同 route 并发重试 planner 已移除。它们在 exact route health 接入后没有生产调用者，并且其“先等待并重试原 route”语义与 provider 429 立即冷却 exact route、切换候选的约束冲突。
+
 ## 错误分类和请求动作
 
 分类器输入为 HTTP status、headers、结构化 upstream error code 和内部可检查的错误正文。优先级为：

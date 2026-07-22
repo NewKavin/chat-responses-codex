@@ -71,22 +71,24 @@ fn early_keepalive_stream(
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    Some((Ok(sse_gateway_error_frame(&error)), EarlyStreamState::Done))
+                                                    Some((Ok(sse_gateway_error_frame_for_endpoint(endpoint, &error, 1)), EarlyStreamState::Done))
                                                 }
                                             }
                                         }
                                     }
                                 }
                                 Some(Err(error)) => {
-                                    Some((Ok(sse_gateway_error_frame(&error)), EarlyStreamState::Done))
+                                    Some((Ok(sse_gateway_error_frame_for_endpoint(endpoint, &error, 1)), EarlyStreamState::Done))
                                 }
                                 None => {
-                                    Some((Ok(sse_error_frame(
+                                    Some((Ok(sse_error_frame_for_endpoint(
+                                        endpoint,
                                         "request processing channel closed",
                                         "api_error",
                                         "stream_processing_error",
                                         "stream_processing_error",
                                         json!({ "scope": "gateway" }),
+                                        1,
                                     )), EarlyStreamState::Done))
                                 }
                             }
@@ -185,6 +187,93 @@ fn sse_gateway_error_frame(error: &GatewayError) -> Bytes {
     )
 }
 
+fn sse_error_frame_for_endpoint(
+    endpoint: EndpointKind,
+    message: &str,
+    error_type: &str,
+    code: &str,
+    category: &str,
+    details: Value,
+    responses_sequence_number: u64,
+) -> Bytes {
+    match endpoint {
+        EndpointKind::ChatCompletions => {
+            sse_error_frame(message, error_type, code, category, details)
+        }
+        EndpointKind::Responses => {
+            let failed = json!({
+                "type": "response.failed",
+                "response": {
+                    "id": format!("resp_gateway_{}", Uuid::new_v4().simple()),
+                    "object": "response",
+                    "created_at": unix_seconds(),
+                    "status": "failed",
+                    "background": false,
+                    "completed_at": Value::Null,
+                    "error": {
+                        "code": code,
+                        "message": message,
+                    },
+                    "incomplete_details": Value::Null,
+                    "instructions": Value::Null,
+                    "max_output_tokens": Value::Null,
+                    "model": "gateway",
+                    "output": [],
+                    "parallel_tool_calls": false,
+                    "previous_response_id": Value::Null,
+                    "reasoning": Value::Null,
+                    "store": false,
+                    "temperature": Value::Null,
+                    "text": {
+                        "format": {
+                            "type": "text",
+                        },
+                    },
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "top_p": Value::Null,
+                    "truncation": "disabled",
+                    "usage": Value::Null,
+                    "user": Value::Null,
+                    "metadata": {},
+                },
+                "sequence_number": responses_sequence_number,
+            });
+            let error = json!({
+                "type": "error",
+                "code": code,
+                "message": message,
+                "param": Value::Null,
+                "sequence_number": responses_sequence_number.saturating_add(1),
+                "category": category,
+                "details": details,
+            });
+            Bytes::from(format!(
+                "event: response.failed\ndata: {failed}\n\nevent: error\ndata: {error}\n\ndata: [DONE]\n\n"
+            ))
+        }
+    }
+}
+
+fn sse_gateway_error_frame_for_endpoint(
+    endpoint: EndpointKind,
+    error: &GatewayError,
+    responses_sequence_number: u64,
+) -> Bytes {
+    if endpoint == EndpointKind::ChatCompletions {
+        return sse_gateway_error_frame(error);
+    }
+    sse_error_frame_for_endpoint(
+        endpoint,
+        error.message(),
+        error.error_type(),
+        error.error_code(),
+        error.error_category(),
+        error.safe_details(),
+        responses_sequence_number,
+    )
+}
+
 /// Handle a streaming request by spawning `process_gateway_request` in the
 /// background and returning an early SSE keepalive stream. If the request
 /// fails quickly (e.g. model not found, auth error) within the pre-check
@@ -243,7 +332,7 @@ pub(super) async fn dispatch_streaming_request(
             if error.error_category().starts_with("upstream_") {
                 dispatch_stream_response(
                     Body::from_stream(futures_stream::iter([Ok::<Bytes, std::io::Error>(
-                        sse_gateway_error_frame(&error),
+                        sse_gateway_error_frame_for_endpoint(endpoint, &error, 1),
                     )])),
                     request_id,
                 )
@@ -469,6 +558,7 @@ pub(super) fn proxied_stream_body(
         pending: VecDeque::new(),
         canonicalizer,
         rewrite_responses_events: endpoint == EndpointKind::Responses,
+        next_responses_sequence_number: 1,
         usage: None,
         log_context: Some(log_context),
         completion_context: stream_completion_context,
@@ -610,6 +700,7 @@ struct ProxiedStreamState {
     pending: VecDeque<Bytes>,
     canonicalizer: Option<ChatStreamCanonicalizer>,
     rewrite_responses_events: bool,
+    next_responses_sequence_number: u64,
     usage: Option<(u64, u64, u64)>,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
@@ -667,6 +758,12 @@ impl ProxiedStreamState {
                 vec![event]
             };
             for event in events {
+                if self.rewrite_responses_events {
+                    advance_responses_sequence_number(
+                        &mut self.next_responses_sequence_number,
+                        &event,
+                    );
+                }
                 if stream_event_has_usable_output(&event) {
                     self.usable_output_seen = true;
                 }
@@ -794,7 +891,12 @@ impl ProxiedStreamState {
         )
         .await;
 
-        sse_gateway_error_frame(&error)
+        let endpoint = if self.rewrite_responses_events {
+            EndpointKind::Responses
+        } else {
+            EndpointKind::ChatCompletions
+        };
+        sse_gateway_error_frame_for_endpoint(endpoint, &error, self.next_responses_sequence_number)
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {
@@ -850,6 +952,12 @@ impl Drop for ProxiedStreamState {
                 stream_drop_interruption_message(self.usable_output_seen),
             );
         }
+    }
+}
+
+fn advance_responses_sequence_number(next: &mut u64, event: &Value) {
+    if let Some(sequence_number) = event.get("sequence_number").and_then(Value::as_u64) {
+        *next = (*next).max(sequence_number.saturating_add(1));
     }
 }
 
@@ -923,6 +1031,8 @@ pub(super) fn translated_stream_body(
         completion_context: stream_completion_context,
         response_history_context,
         response_history_stored: false,
+        endpoint,
+        next_responses_sequence_number: 1,
         finished: false,
         semantic_completion_emitted: false,
         usable_output_observed: false,
@@ -1062,6 +1172,8 @@ struct TranslatedStreamState {
     completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
     response_history_stored: bool,
+    endpoint: EndpointKind,
+    next_responses_sequence_number: u64,
     finished: bool,
     semantic_completion_emitted: bool,
     usable_output_observed: bool,
@@ -1077,6 +1189,9 @@ impl TranslatedStreamState {
     }
 
     fn push_translated_event(&mut self, event: &Value) {
+        if self.endpoint == EndpointKind::Responses {
+            advance_responses_sequence_number(&mut self.next_responses_sequence_number, event);
+        }
         let usable_output = stream_event_has_usable_output(event);
         self.usable_output_observed |= usable_output;
         self.pending.push_back(TranslatedPendingFrame {
@@ -1270,7 +1385,11 @@ impl TranslatedStreamState {
         )
         .await;
 
-        sse_gateway_error_frame(&error)
+        sse_gateway_error_frame_for_endpoint(
+            self.endpoint,
+            &error,
+            self.next_responses_sequence_number,
+        )
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {

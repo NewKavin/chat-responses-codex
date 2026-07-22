@@ -203,18 +203,6 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should configure the upstream rate limit retry-after cap"
     );
     assert!(
-        compose.contains(
-            "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS: ${UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS:-20}"
-        ),
-        "docker-compose.yml should configure the upstream concurrency retry attempts"
-    );
-    assert!(
-        compose.contains(
-            "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS: ${UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS:-50}"
-        ),
-        "docker-compose.yml should configure the upstream concurrency retry backoff"
-    );
-    assert!(
         compose.contains("CONTEXT_RETRY_MAX_ATTEMPTS_CHAT: ${CONTEXT_RETRY_MAX_ATTEMPTS_CHAT:-2}"),
         "docker-compose.yml should configure chat context retry attempts"
     );
@@ -409,10 +397,6 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS=",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=",
         "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=",
-        "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS=",
-        "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=",
-        "UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=",
-        "UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=",
         "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT=",
         "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT=",
         "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES=",
@@ -451,10 +435,6 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS: ${UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS:-300}",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS: ${UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS:-3}",
         "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS: ${UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS:-10}",
-        "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS: ${UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS:-20}",
-        "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS: ${UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS:-50}",
-        "UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS: ${UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS:-10}",
-        "UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER: ${UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER:-2}",
         "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT: ${CONTEXT_RETRY_MAX_ATTEMPTS_CHAT:-2}",
         "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT: ${CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT:-128}",
         "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES: ${CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES:-3}",

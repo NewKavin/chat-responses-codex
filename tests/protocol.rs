@@ -203,21 +203,30 @@ fn responses_request_rejects_required_tool_choice_without_supported_tools() {
 }
 
 #[test]
-fn responses_request_rejects_unknown_input_items_for_chat_payload() {
+fn responses_request_drops_opaque_reasoning_history_for_chat_payload() {
     let responses = json!({
         "model": "gpt-4.1-mini",
         "input": [
             {
-                "type": "reasoning"
+                "type": "reasoning",
+                "id": "rs_opaque",
+                "summary": []
+            },
+            {
+                "role": "user",
+                "content": "Continue without replaying private reasoning."
             }
         ]
     });
 
-    let error = responses_request_to_chat_payload(&responses).expect_err("conversion should fail");
-    let message = error.to_string();
-    assert!(
-        message.contains("unsupported") || message.contains("missing field"),
-        "unexpected error message: {message}"
+    let converted =
+        responses_request_to_chat_payload(&responses).expect("conversion should reduce history");
+
+    assert_eq!(converted["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(converted["messages"][0]["role"], "user");
+    assert_eq!(
+        converted["messages"][0]["content"],
+        "Continue without replaying private reasoning."
     );
 }
 

@@ -7,9 +7,9 @@ model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
 model_reasoning_effort = "none"
-disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
+web_search = "disabled"
 
 [features]
 skill_mcp_dependency_install = true
@@ -25,7 +25,7 @@ name = "Chat Responses Gateway"
 base_url = "<gateway_url>/v1"
 wire_api = "responses"
 requires_openai_auth = true
-web_search = "disabled"
+stream_max_retries = 0
 
 # If a skill still triggers an install prompt, the missing MCP server is declared
 # by that skill itself. Add it to your global Codex MCP config, then restart Codex.

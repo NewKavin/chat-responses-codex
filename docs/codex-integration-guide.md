@@ -89,9 +89,9 @@ model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
 model_reasoning_effort = "none"
-disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
+web_search = "disabled"
 
 [features]
 skill_mcp_dependency_install = true
@@ -109,7 +109,7 @@ name = "Chat Responses Gateway"
 base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
-web_search = "disabled"
+stream_max_retries = 0
 ```
 
 完成配置后可运行 `codex --strict-config doctor --summary` 检查配置是否符合当前 Codex 版本。
@@ -334,9 +334,9 @@ model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
 model_reasoning_effort = "none"
-disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
+web_search = "disabled"
 
 [features]
 multi_agent = true
@@ -350,7 +350,7 @@ name = "Chat Responses Gateway"
 base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
-web_search = "disabled"
+stream_max_retries = 0
 ```
 
 ### 4.3 每个字段是什么意思
@@ -358,8 +358,8 @@ web_search = "disabled"
 - `model_provider`：使用哪个 provider
 - `model`：日常对话主模型
 - `review_model`：审查/评审模型
+- `stream_max_retries = 0`：网关已经在一次请求内完成 Key 和 upstream fallback；禁止 Codex 在收到终态 `response.failed` 后重复整次请求
 - `model_reasoning_effort`：推理强度。门户会使用所选模型目录项的 `default_reasoning_level`；没有验证到可配置推理控制时使用 `none`
-- `disable_response_storage`：关闭响应存储
 - `model_catalog_json`：Codex 模型目录文件路径，按相对路径解析
 - `base_url`：网关根地址加 `/v1`
 - `wire_api = "responses"`：让 Codex 按 Responses 协议跟网关通信
@@ -531,16 +531,9 @@ Codex 启动后选你在目录里写的模型，比如：
 
 ### 4. 上游并发满导致 429
 
-如果错误里明确是 `429`，而且上游文案提到了 `concurrency`、`busy`、`limit exceeded` 这类并发饱和信号，先调这两个参数：
+如果错误里明确是 `429`，而且上游文案提到了 `concurrency`、`busy`、`limit exceeded` 这类并发饱和信号，网关会冷却返回错误的精确 upstream、Key、模型和协议 route，并立即尝试下一个合格候选，不会在原 route 内等待重试。
 
-- `UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS`
-- `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS`
-
-这组参数控制网关遇到并发饱和时会不会换一个候选上游、以及换候选前等多久。它和普通限流 429 不是一回事：
-
-- 普通限流 429 看 `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS`
-- 普通限流窗口看 `UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS`
-- `Retry-After` 过大的保护上限看 `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS`
+若所有候选都处于临时冷却，网关返回 `503 upstream_routes_exhausted` 和最早可恢复的 `Retry-After`。此时应检查该模型是否配置了足够的独立 route，以及各 route 的 Key 模型映射和实时容量，而不是增加请求内重试次数。
 
 ### 5. 能用 Python `requests`，但 Codex 不行
 
@@ -569,7 +562,7 @@ Codex 启动后选你在目录里写的模型，比如：
 补充两条实战规则：
 
 - 同一个模型挂在多个上游账号上时，网关会自动按请求压力分摊，不需要拆成不同的模型名。
-- 如果上游因为并发满返回 429，可以调 `UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS` 和 `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS`；常规限流 429 则看 `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS`、`UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS` 和 `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS`。
+- 如果上游因为并发满返回 429，网关会立即冷却精确 route 并切换候选；所有候选都冷却时按响应中的 `Retry-After` 等待下一次客户端请求。
 
 这样职责最清楚：
 

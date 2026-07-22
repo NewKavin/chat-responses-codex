@@ -38,6 +38,12 @@ fn codex_config_example_uses_live_model_slug_exactly() {
     assert!(config.contains(r#"review_model = "<model_slug>""#));
     assert!(config.contains(r#"model_catalog_json = "model-catalog.json""#));
     assert!(config.contains(r#"web_search = "disabled""#));
+    assert!(config.contains("stream_max_retries = 0"));
+    assert!(
+        config.find(r#"web_search = "disabled""#).unwrap() < config.find("[features]").unwrap(),
+        "web_search is a top-level Codex setting, not a model-provider field"
+    );
+    assert!(!config.contains("disable_response_storage"));
     assert!(!config
         .contains("/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"));
 }
@@ -83,16 +89,36 @@ fn app_config_defaults_stream_watchdog_settings() {
 }
 
 #[test]
-fn app_config_defaults_concurrency_retry_policy() {
-    let config = AppConfig::default();
+fn deployment_surface_omits_obsolete_concurrency_retry_settings() {
+    let files = [
+        (".env.example", fs::read_to_string(".env.example").unwrap()),
+        (
+            "docker-compose.yml",
+            fs::read_to_string("docker-compose.yml").unwrap(),
+        ),
+        (
+            "DEPLOYMENT.md",
+            fs::read_to_string("DEPLOYMENT.md").unwrap(),
+        ),
+        (
+            "docs/codex-integration-guide.md",
+            fs::read_to_string("docs/codex-integration-guide.md").unwrap(),
+        ),
+    ];
 
-    assert_eq!(config.upstream_concurrency_retry_attempts, 20);
-    assert_eq!(config.upstream_concurrency_retry_backoff_ms, 50);
-    assert_eq!(config.upstream_concurrency_retry_max_wait_seconds, 10);
-    assert_eq!(
-        config.upstream_concurrency_retry_exclusive_wait_multiplier,
-        2
-    );
+    for marker in [
+        "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
+        "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS",
+        "UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS",
+        "UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER",
+    ] {
+        for (path, contents) in &files {
+            assert!(
+                !contents.contains(marker),
+                "{path} should not expose obsolete setting {marker}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -137,10 +163,6 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
     }
 
     for marker in [
-        "UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS",
-        "UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS",
-        "UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS",
-        "UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS",
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
     ] {

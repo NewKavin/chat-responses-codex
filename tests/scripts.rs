@@ -105,7 +105,7 @@ set -euo pipefail
 client="$(basename "$0")"
 if [[ "${1:-}" == "--version" ]]; then
   case "$client" in
-    codex) printf 'codex-cli 0.144.4\n' ;;
+    codex) printf 'codex-cli 0.144.6\n' ;;
     opencode) printf '1.17.18\n' ;;
     claude) printf '2.1.195 (Claude Code)\n' ;;
     hermes) printf 'Hermes Agent v0.14.0\n' ;;
@@ -731,7 +731,7 @@ set -euo pipefail
 client="$(basename "$0")"
 if [[ "${1:-}" == "--version" ]]; then
   case "$client" in
-    codex) printf 'codex-cli 0.144.4\n' ;;
+    codex) printf 'codex-cli 0.144.6\n' ;;
     opencode) printf '1.17.18\n' ;;
     claude) printf '2.1.195 (Claude Code)\n' ;;
     hermes) printf 'Hermes Agent v0.14.0\n' ;;
@@ -827,7 +827,7 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
         .expect("read installed client smoke script");
 
     for fixed_pin in [
-        "readonly DEFAULT_CODEX_VERSION=\"0.144.4\"",
+        "readonly DEFAULT_CODEX_VERSION=\"0.144.6\"",
         "readonly DEFAULT_OPENCODE_VERSION=\"1.17.18\"",
         "readonly DEFAULT_CLAUDE_CODE_VERSION=\"2.1.195\"",
         "readonly DEFAULT_HERMES_VERSION=\"0.14.0\"",
@@ -871,6 +871,8 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
     assert!(script.contains("\"$CLAUDE_CODE_BIN\" -p \"$READ_FILE_PROMPT\""));
     assert!(script.contains("CLAUDE_CONFIG_DIR=\"$WORKDIR/claude-home\""));
     assert!(script.contains("web_search = \"disabled\""));
+    assert!(script.contains("stream_max_retries = 0"));
+    assert!(!script.contains("disable_response_storage"));
     for client in ["codex", "opencode", "claude_code", "hermes"] {
         assert!(
             script.contains(&format!(
@@ -985,7 +987,7 @@ fn opencode_smoke_uses_inline_config_and_temporary_xdg_paths() {
 #[test]
 fn installed_client_smoke_keeps_exact_primary_versions() {
     let script = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
-    assert!(script.contains("DEFAULT_CODEX_VERSION=\"0.144.4\""));
+    assert!(script.contains("DEFAULT_CODEX_VERSION=\"0.144.6\""));
     assert!(script.contains("DEFAULT_OPENCODE_VERSION=\"1.17.18\""));
 }
 
@@ -1079,7 +1081,7 @@ fi
         .arg(
             r#"codex() {
   if [[ "${1:-}" == "--version" ]]; then
-    printf 'codex-cli 0.144.4\n'
+    printf 'codex-cli 0.144.6\n'
     return 0
   fi
   return 99
@@ -1105,7 +1107,7 @@ exec bash "$1""#,
     );
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(
-            "client=codex expected_version=0.144.4 actual_version=0.144.1 status=version_mismatch"
+            "client=codex expected_version=0.144.6 actual_version=0.144.1 status=version_mismatch"
         ),
         "version check must use the PATH binary\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -1119,7 +1121,7 @@ exec bash "$1""#,
     fs::remove_file(fake_bin.join("codex")).unwrap();
     let missing = Command::new("bash")
         .arg("-c")
-        .arg("codex() { printf 'codex-cli 0.144.4\\n'; }; export -f codex; exec bash \"$1\"")
+        .arg("codex() { printf 'codex-cli 0.144.6\\n'; }; export -f codex; exec bash \"$1\"")
         .arg("bash")
         .arg("scripts/installed_client_smoke.sh")
         .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
@@ -1154,7 +1156,7 @@ set -euo pipefail
 client="$(basename "$0")"
 if [[ "${1:-}" == "--version" ]]; then
   case "$client" in
-    codex) printf 'codex-cli 0.144.4\n' ;;
+    codex) printf 'codex-cli 0.144.6\n' ;;
     opencode) printf '1.17.18\n' ;;
     claude) printf '2.1.195 (Claude Code)\n' ;;
     hermes) printf 'Hermes Agent v0.14.0\n' ;;
@@ -1270,7 +1272,7 @@ set -euo pipefail
 client="$(basename "$0")"
 if [[ "${1:-}" == "--version" ]]; then
   case "$client" in
-    codex) printf 'codex-cli 0.144.4\n' ;;
+    codex) printf 'codex-cli 0.144.6\n' ;;
     opencode) printf '1.17.18\n' ;;
     claude) printf '2.1.195 (Claude Code)\n' ;;
     hermes) printf 'Hermes Agent v0.14.0\n' ;;
@@ -1318,7 +1320,7 @@ fi
         .env("OUTSIDE_SENTINEL", &outside_sentinel)
         .env("HERMES_MCP_DRIVER", &hermes_mcp_driver)
         .env("CLIENT_TIMEOUT_SECONDS", "5")
-        .env("CODEX_VERSION", "0.144.4")
+        .env("CODEX_VERSION", "0.144.6")
         .output()
         .unwrap();
 

@@ -264,6 +264,9 @@ describe('integration config generators', () => {
     expect(toml).toContain('max_threads = 8')
     expect(toml).toContain('max_depth = 3')
     expect(toml).toContain('base_url = "https://portal.example.com/v1"')
+    expect(toml).toContain('stream_max_retries = 0')
+    expect(toml.indexOf('web_search = "disabled"')).toBeLessThan(toml.indexOf('[features]'))
+    expect(toml).not.toContain('disable_response_storage')
     expect(toml).not.toContain('OPENAI_API_KEY')
     expect(toml).not.toContain('sk-downstream-123')
   })
@@ -355,6 +358,7 @@ describe('integration config generators', () => {
 
     expect(config).toContain('web_search = "disabled"')
     expect(config).toContain('wire_api = "responses"')
+    expect(config).toContain('stream_max_retries = 0')
   })
 
   it('maps every Claude Code alias to an arbitrary selected gateway slug', () => {
@@ -433,6 +437,11 @@ describe('integration config generators', () => {
       expect(example).toContain('max_threads = 8')
       expect(example).toContain('max_depth = 3')
       expect(example).toContain('web_search = "disabled"')
+      expect(example).toContain('stream_max_retries = 0')
+      expect(example.indexOf('web_search = "disabled"')).toBeLessThan(
+        example.indexOf('[features]')
+      )
+      expect(example).not.toContain('disable_response_storage')
     }
   })
 

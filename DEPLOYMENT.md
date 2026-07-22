@@ -34,10 +34,6 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
 - `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
-- `UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS=20`
-- `UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50`
-- `UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=10`
-- `UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=2`
 - `UPSTREAM_HEDGE_ENABLED=true`
 - `UPSTREAM_HEDGE_DELAY_MS=12000`
 - `UPSTREAM_HEDGE_INTERVAL_MS=12000`
@@ -60,8 +56,7 @@ UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses
 UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.
 UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.
 UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.
-These fields remain parsed for backward-compatible configuration only. The
-`UPSTREAM_CONCURRENCY_RETRY_*` fields do not override this provider-429 behavior.
+These rate-limit fields remain parsed for backward-compatible configuration only.
 
 `UPSTREAM_HEDGE_DELAY_MS` controls when a slow-first-output request launches its
 first extra attempt. `UPSTREAM_HEDGE_INTERVAL_MS` spaces later extra attempts,
@@ -154,10 +149,6 @@ docker run -d \
   -e UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32 \
   -e UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3 \
   -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
-  -e UPSTREAM_CONCURRENCY_RETRY_ATTEMPTS=20 \
-  -e UPSTREAM_CONCURRENCY_RETRY_BACKOFF_MS=50 \
-  -e UPSTREAM_CONCURRENCY_RETRY_MAX_WAIT_SECONDS=10 \
-  -e UPSTREAM_CONCURRENCY_RETRY_EXCLUSIVE_WAIT_MULTIPLIER=2 \
   -e UPSTREAM_HEDGE_ENABLED=true \
   -e UPSTREAM_HEDGE_DELAY_MS=12000 \
   -e UPSTREAM_HEDGE_INTERVAL_MS=12000 \

@@ -174,11 +174,7 @@ impl LearningHarness {
                 global_context_profiles: HashMap::new(),
             },
             tempdir().unwrap().path().join("state.json"),
-            AppConfig {
-                upstream_concurrency_retry_attempts: 2,
-                upstream_concurrency_retry_backoff_ms: 1,
-                ..AppConfig::default()
-            },
+            AppConfig::default(),
         );
         for api_key in upstream.available_keys() {
             let key = DialectProfileKey {

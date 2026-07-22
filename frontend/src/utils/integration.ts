@@ -292,9 +292,9 @@ export const buildCodexConfigToml = (input: CodexConfigInput) => {
 model = ${tomlString(input.modelSlug)}
 review_model = ${tomlString(input.modelSlug)}
 model_reasoning_effort = ${tomlString(modelReasoningEffort)}
-disable_response_storage = true
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
+web_search = "disabled"
 
 [features]
 skill_mcp_dependency_install = true
@@ -310,7 +310,7 @@ name = "Chat Responses Gateway"
 base_url = ${tomlString(gatewayApiBaseUrl)}
 wire_api = "responses"
 requires_openai_auth = true
-web_search = "disabled"
+stream_max_retries = 0
 `
 }
 

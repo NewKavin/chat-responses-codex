@@ -1086,6 +1086,9 @@ fn translate_responses_input_item(
             let item_type = object.get("type").and_then(Value::as_str);
             match item_type {
                 Some("reasoning") => {
+                    if context.reasoning_carrier != ReasoningCarrier::ReasoningContent {
+                        return Ok(());
+                    }
                     if let Some(reasoning) = reasoning_adapter::responses_reasoning_text(item)? {
                         if !reasoning.is_empty() {
                             merge_assistant_chat_message(

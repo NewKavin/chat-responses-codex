@@ -799,6 +799,94 @@ fn request_route_capability_cache_stays_on_captured_snapshot() {
 }
 
 #[test]
+fn request_route_capability_cache_preserves_the_actual_rejected_capability() {
+    let upstream = UpstreamConfig {
+        id: "up-replay-rejected".into(),
+        base_url: "https://unit.invalid".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["opaque".into()],
+        active: true,
+        ..Default::default()
+    };
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let profile_key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "opaque",
+        WireProtocol::ChatCompletions,
+    );
+    let mut snapshot = CapabilityRuntimeSnapshot::default();
+    let mut profile = UpstreamDialectProfile::unknown(profile_key);
+    profile.configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
+        &snapshot,
+        &upstream,
+        &key_fingerprint,
+        "opaque",
+        "opaque",
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    profile.reasoning_carrier = Some(crate::capabilities::ReasoningCarrier::ReasoningContent);
+    profile
+        .capabilities
+        .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::ReasoningReplay, EvidenceState::Rejected);
+    snapshot.profiles.insert(profile.key.clone(), profile);
+    let requested = RequestedFeatures {
+        required: BTreeSet::from([
+            Capability::FunctionTools,
+            Capability::ToolContinuation,
+            Capability::ReasoningOutput,
+            Capability::ReasoningReplay,
+        ]),
+        ..RequestedFeatures::default()
+    };
+
+    let cache = build_request_route_capability_cache(
+        &snapshot,
+        std::slice::from_ref(&upstream),
+        "opaque",
+        EndpointKind::Responses,
+        &requested,
+    );
+    let cached = cache
+        .get(&(WireProtocol::ChatCompletions, upstream.id, key_fingerprint))
+        .unwrap();
+
+    assert!(!cached.eligible);
+    assert_eq!(cached.failed_capability, Some(Capability::ReasoningReplay));
+}
+
+#[test]
+fn chat_fallback_marks_dropped_reasoning_history() {
+    let mut downgrades = BTreeSet::new();
+    let converted = responses_request_to_chat_payload_with_fallback(
+        &json!({
+            "model": "opaque",
+            "input": [
+                {"type": "reasoning", "id": "rs_opaque", "summary": []},
+                {"role": "user", "content": "continue"}
+            ]
+        }),
+        None,
+        &mut downgrades,
+    )
+    .unwrap();
+
+    assert_eq!(
+        converted["messages"],
+        json!([{"role": "user", "content": "continue"}])
+    );
+    assert_eq!(
+        downgrades,
+        BTreeSet::from(["reasoning_history_dropped".to_string()])
+    );
+}
+
+#[test]
 fn request_route_capability_cache_overlays_value_and_protocol_hints_exactly() {
     let upstream = UpstreamConfig {
         id: "up-runtime-hint".into(),
