@@ -12,37 +12,37 @@ export interface ChartTheme {
 
 export const buildChartTheme = (mode: ResolvedTheme): ChartTheme => mode === 'dark'
   ? {
-      text: '#d2dad6',
-      muted: '#98a59f',
-      border: '#343d39',
-      splitLine: '#2a322f',
-      tooltipBackground: '#202624',
-      tooltipBorder: '#343d39',
+      text: '#b3c4bd',
+      muted: '#7c918a',
+      border: '#24312c',
+      splitLine: '#1c2723',
+      tooltipBackground: '#18221e',
+      tooltipBorder: '#34453d',
       series: [
-        '#39b99c',
-        '#60a5d8',
+        '#2fe0a8',
+        '#6cb8f0',
         '#4ade80',
-        '#f6ad55',
+        '#fbbf24',
         '#fb7185',
-        '#a78bda',
-        '#67c7d4',
+        '#a78bfa',
+        '#67e8f9',
         '#d6b46c'
       ]
   }
   : {
-      text: '#34413d',
-      muted: '#66716d',
-      border: '#dfe5e2',
-      splitLine: '#e9eeec',
+      text: '#2b3834',
+      muted: '#5c6a65',
+      border: '#dce3e0',
+      splitLine: '#e7ece9',
       tooltipBackground: '#ffffff',
-      tooltipBorder: '#dfe5e2',
+      tooltipBorder: '#dce3e0',
       series: [
-        '#0f8f76',
-        '#2563a6',
+        '#0a8f6f',
+        '#2369ad',
         '#15803d',
         '#b45309',
-        '#c2413b',
-        '#7456a6',
+        '#cf3f38',
+        '#6d5bd0',
         '#258a9a',
         '#98732e'
       ]

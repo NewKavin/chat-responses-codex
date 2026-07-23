@@ -153,6 +153,7 @@
           v-for="channel in sortedChannels"
           :key="channel.route_id"
           class="channel-card"
+          :data-status="channel.status"
         >
           <div class="channel-card__top">
             <div>
@@ -502,8 +503,11 @@ onBeforeUnmount(() => {
 .probe-page-header__copy h2 {
   margin: 0;
   color: var(--crc-text-strong);
-  font-size: 20px;
-  line-height: 1.3;
+  font-family: var(--crc-font-display);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
 }
 
 .probe-description {
@@ -515,10 +519,24 @@ onBeforeUnmount(() => {
 }
 
 .probe-context {
-  margin: 0 0 5px;
-  color: var(--crc-accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.probe-context::before {
+  content: '';
+  width: 16px;
+  height: 1px;
+  flex: 0 0 16px;
+  background: var(--crc-accent);
 }
 
 .probe-page-header__meta {
@@ -538,7 +556,9 @@ onBeforeUnmount(() => {
 
 .refresh-label {
   color: var(--crc-text-muted);
-  font-size: 12px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .summary-grid,
@@ -547,6 +567,7 @@ onBeforeUnmount(() => {
 }
 
 .probe-metric {
+  position: relative;
   display: flex;
   min-height: 104px;
   padding: 16px;
@@ -556,27 +577,68 @@ onBeforeUnmount(() => {
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
   box-shadow: var(--crc-shadow-xs);
+  overflow: hidden;
   transition: transform var(--crc-duration) var(--crc-ease-out),
     box-shadow var(--crc-duration) var(--crc-ease-out),
     border-color var(--crc-duration) var(--crc-ease-out);
+  animation: probe-metric-enter 0.6s var(--crc-ease-expo) both;
+}
+
+.probe-metric::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: var(--crc-accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.45s var(--crc-ease-expo);
 }
 
 .probe-metric:hover {
   border-color: var(--crc-border-strong);
-  box-shadow: var(--crc-shadow-md);
+  box-shadow: var(--crc-shadow-md), var(--crc-accent-glow);
   transform: translateY(-2px);
+}
+
+.probe-metric:hover::before {
+  transform: scaleX(1);
+}
+
+.summary-grid .el-col:nth-child(2) .probe-metric { animation-delay: 0.05s; }
+.summary-grid .el-col:nth-child(3) .probe-metric { animation-delay: 0.1s; }
+.summary-grid .el-col:nth-child(4) .probe-metric { animation-delay: 0.15s; }
+.summary-grid .el-col:nth-child(5) .probe-metric { animation-delay: 0.2s; }
+.summary-grid .el-col:nth-child(6) .probe-metric { animation-delay: 0.25s; }
+
+@keyframes probe-metric-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .summary-value {
   color: var(--crc-text-strong);
-  font-size: 26px;
-  font-weight: 680;
+  font-family: var(--crc-font-display);
+  font-size: 28px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
 }
 
 .summary-label {
   margin-top: 8px;
   color: var(--crc-text-muted);
-  font-size: 13px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .probe-card {
@@ -597,7 +659,9 @@ onBeforeUnmount(() => {
 .card-header h3 {
   margin: 0;
   color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
   font-size: 16px;
+  font-weight: 600;
 }
 
 .card-header p {
@@ -641,7 +705,8 @@ onBeforeUnmount(() => {
   border-radius: var(--crc-radius-sm);
   color: var(--crc-text);
   background: var(--crc-surface-muted);
-  font-size: 13px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
 }
 
 .channel-grid {
@@ -662,10 +727,46 @@ onBeforeUnmount(() => {
 }
 
 .channel-card {
-  padding: 16px;
+  position: relative;
+  padding: 16px 16px 16px 20px;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    box-shadow var(--crc-duration) var(--crc-ease-out),
+    border-color var(--crc-duration) var(--crc-ease-out);
+}
+
+.channel-card::before {
+  content: '';
+  position: absolute;
+  inset: 10px auto 10px 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--crc-text-subtle);
+  opacity: 0.35;
+  transition: opacity var(--crc-duration) var(--crc-ease-out);
+}
+
+.channel-card[data-status='healthy']::before {
+  background: var(--crc-accent);
+  opacity: 0.9;
+}
+
+.channel-card[data-status='degraded']::before {
+  background: var(--crc-warning, #d99413);
+  opacity: 0.9;
+}
+
+.channel-card[data-status='offline']::before {
+  background: var(--crc-danger);
+  opacity: 0.9;
+}
+
+.channel-card:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-md);
+  transform: translateY(-2px);
 }
 
 .channel-card__top {
@@ -678,7 +779,9 @@ onBeforeUnmount(() => {
 .channel-card__top h4 {
   margin: 0;
   color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
   font-size: 15px;
+  font-weight: 600;
 }
 
 .channel-card__metrics {
@@ -696,7 +799,10 @@ onBeforeUnmount(() => {
   display: block;
   margin-bottom: 8px;
   color: var(--crc-text-muted);
-  font-size: 12px;
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .channel-card__models-list {
@@ -710,6 +816,8 @@ onBeforeUnmount(() => {
 
 .channel-card__model-tag {
   border-radius: var(--crc-radius-sm);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
 }
 
 .channel-card__models-empty {
@@ -720,14 +828,20 @@ onBeforeUnmount(() => {
 .channel-card__metrics span {
   display: block;
   color: var(--crc-text-muted);
-  font-size: 12px;
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .channel-card__metrics strong {
   display: block;
   margin-top: 4px;
   color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
   font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .channel-card__error {
@@ -737,8 +851,10 @@ onBeforeUnmount(() => {
   border-radius: var(--crc-radius-sm);
   color: var(--crc-danger);
   background: var(--crc-danger-soft);
-  font-size: 12px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
   line-height: 1.5;
+  word-break: break-all;
 }
 
 @media (max-width: 1200px) {

@@ -15,7 +15,7 @@
           placeholder="请输入工号"
           size="large"
           clearable
-          :prefix-icon="Postcard"
+          :prefix-icon="IdCard"
         />
       </el-form-item>
 
@@ -28,7 +28,7 @@
           size="large"
           show-password
           clearable
-          :prefix-icon="Key"
+          :prefix-icon="KeyRound"
         />
       </el-form-item>
 
@@ -53,7 +53,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Key, Postcard } from '@element-plus/icons-vue'
+import { IdCard, KeyRound } from '@lucide/vue'
 import AuthShell from '@/components/AuthShell.vue'
 import { portalApi } from '@/api/portal'
 

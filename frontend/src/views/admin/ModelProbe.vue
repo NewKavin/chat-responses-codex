@@ -2,6 +2,7 @@
   <div class="crc-page model-probe-page">
     <div class="crc-toolbar qualification-command-bar">
       <div>
+        <p class="crc-eyebrow">QUALIFY // REAL REQUESTS</p>
         <span class="qualification-command-title">模型资格验证</span>
         <p>向活动上游发起真实请求，会消耗模型 token，并按结果更新 test 下游模型列表。</p>
       </div>
@@ -11,7 +12,7 @@
         :disabled="loading"
         @click="runQualification"
       >
-        <el-icon><CircleCheck /></el-icon>
+        <BadgeCheck :size="15" :stroke-width="1.8" style="margin-right: 6px" />
         真实验证并应用
       </el-button>
     </div>
@@ -83,7 +84,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { CircleCheck } from '@element-plus/icons-vue'
+import { BadgeCheck } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
@@ -257,28 +258,34 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 0;
-  padding: 12px 14px;
+  padding: 16px 18px;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
-  background: var(--crc-surface);
+  background:
+    radial-gradient(ellipse 90% 160% at 100% 50%, var(--crc-accent-soft) 0%, transparent 55%),
+    var(--crc-surface);
   box-shadow: var(--crc-shadow-xs);
 }
 
 .qualification-command-title {
+  display: inline-block;
+  margin-top: 6px;
   color: var(--crc-text-strong);
-  font-size: 15px;
+  font-family: var(--crc-font-display);
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.qualification-command-bar p {
-  margin: 4px 0 0;
+.qualification-command-bar p:not(.crc-eyebrow) {
+  margin: 5px 0 0;
   color: var(--crc-text-muted);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .qualification-result {
-  padding: 14px;
+  padding: 18px;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
   background: var(--crc-surface);
@@ -289,13 +296,16 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-bottom: 12px;
+  padding-bottom: 14px;
 }
 
 .qualification-result-header h2 {
   margin: 0;
   color: var(--crc-text-strong);
-  font-size: 15px;
+  font-family: var(--crc-font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .qualification-metrics {
@@ -304,13 +314,13 @@ onUnmounted(() => {
   margin-bottom: 14px;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius-sm);
-  background: var(--crc-surface-muted);
+  background: var(--crc-canvas);
   overflow: hidden;
 }
 
 .qualification-metric {
   min-width: 0;
-  padding: 12px 16px;
+  padding: 14px 16px;
   display: flex;
   align-items: baseline;
   gap: 8px;
@@ -322,13 +332,17 @@ onUnmounted(() => {
 
 .qualification-metric strong {
   color: var(--crc-text-strong);
-  font-size: 20px;
+  font-family: var(--crc-font-display);
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   line-height: 1;
 }
 
 .qualification-metric span {
   color: var(--crc-text-muted);
-  font-size: 12px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
 }
 
 @media (max-width: 768px) {

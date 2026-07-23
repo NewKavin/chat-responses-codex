@@ -1,34 +1,36 @@
 <template>
-  <el-dropdown trigger="click" placement="bottom-end" @command="handleCommand">
+  <el-dropdown
+    placement="bottom-end"
+    trigger="click"
+    popper-class="theme-switcher__menu"
+    @command="handleCommand"
+  >
     <button
       type="button"
       class="theme-switcher"
-      aria-label="切换主题"
+      :aria-label="currentLabel"
       :title="currentLabel"
     >
-      <el-icon :size="17">
-        <transition name="theme-icon" mode="out-in">
-          <component :is="currentIcon" />
-        </transition>
-      </el-icon>
+      <transition name="theme-icon" mode="out-in">
+        <component :is="currentIcon" :key="mode" :size="16" :stroke-width="1.8" />
+      </transition>
     </button>
-
     <template #dropdown>
-      <el-dropdown-menu class="theme-switcher__menu">
+      <el-dropdown-menu>
         <el-dropdown-item command="light" :class="{ 'is-active': mode === 'light' }">
-          <el-icon><Sunny /></el-icon>
+          <Sun :size="14" :stroke-width="1.8" />
           <span>浅色</span>
-          <el-icon v-if="mode === 'light'" class="theme-switcher__check"><Check /></el-icon>
+          <Check v-if="mode === 'light'" :size="13" class="theme-switcher__check" />
         </el-dropdown-item>
         <el-dropdown-item command="dark" :class="{ 'is-active': mode === 'dark' }">
-          <el-icon><Moon /></el-icon>
+          <Moon :size="14" :stroke-width="1.8" />
           <span>深色</span>
-          <el-icon v-if="mode === 'dark'" class="theme-switcher__check"><Check /></el-icon>
+          <Check v-if="mode === 'dark'" :size="13" class="theme-switcher__check" />
         </el-dropdown-item>
         <el-dropdown-item command="auto" :class="{ 'is-active': mode === 'auto' }">
-          <el-icon><Monitor /></el-icon>
+          <Monitor :size="14" :stroke-width="1.8" />
           <span>跟随系统</span>
-          <el-icon v-if="mode === 'auto'" class="theme-switcher__check"><Check /></el-icon>
+          <Check v-if="mode === 'auto'" :size="13" class="theme-switcher__check" />
         </el-dropdown-item>
       </el-dropdown-menu>
     </template>
@@ -37,14 +39,14 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Check, Monitor, Moon, Sunny } from '@element-plus/icons-vue'
+import { Check, Monitor, Moon, Sun } from '@lucide/vue'
 import { useTheme, type ThemeMode } from '@/composables/useTheme'
 
 const { mode, resolvedTheme, setThemeMode } = useTheme()
 
 const currentIcon = computed(() => {
   if (mode.value === 'auto') return Monitor
-  return resolvedTheme.value === 'dark' ? Moon : Sunny
+  return resolvedTheme.value === 'dark' ? Moon : Sun
 })
 
 const currentLabel = computed(() => {
@@ -76,13 +78,17 @@ const handleCommand = (command: ThemeMode) => {
   color: var(--crc-text-muted);
   background: var(--crc-surface);
   cursor: pointer;
-  transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease;
+  transition: color var(--crc-duration-fast) var(--crc-ease),
+    border-color var(--crc-duration-fast) var(--crc-ease),
+    background-color var(--crc-duration-fast) var(--crc-ease),
+    box-shadow var(--crc-duration-fast) var(--crc-ease);
 }
 
 .theme-switcher:hover {
-  color: var(--crc-text-strong);
+  color: var(--crc-accent);
   border-color: var(--crc-border-strong);
   background: var(--crc-surface-hover);
+  box-shadow: var(--crc-accent-glow);
 }
 
 .theme-switcher__menu :deep(.el-dropdown-menu__item) {

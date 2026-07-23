@@ -8,7 +8,7 @@
             circle
             @click="sidebarCollapsed = !sidebarCollapsed"
           >
-            <el-icon><Expand v-if="sidebarCollapsed" /><Fold v-else /></el-icon>
+            <PanelLeftOpen v-if="sidebarCollapsed" :size="15" :stroke-width="1.8" /><PanelLeftClose v-else :size="15" :stroke-width="1.8" />
           </el-button>
         </el-tooltip>
       </div>
@@ -51,14 +51,14 @@
           circle
           @click="settingsDrawerOpen = true"
         >
-          <el-icon><Setting /></el-icon>
+          <Settings2 :size="15" :stroke-width="1.8" />
         </el-button>
       </div>
 
       <div class="playground-message-stream" ref="messagesContainerRef">
         <div v-if="!messages.length" class="chat-empty">
           <div class="chat-empty-icon">
-            <el-icon :size="42"><ChatDotRound /></el-icon>
+            <MessageSquareText :size="40" :stroke-width="1.2" />
           </div>
           <p>选择模型后开始对话</p>
         </div>
@@ -74,13 +74,13 @@
           ]"
         >
           <div class="chat-message-avatar">
-            <el-icon v-if="message.role === 'user'" :size="20"><User /></el-icon>
-            <el-icon v-else :size="20"><MagicStick /></el-icon>
+            <UserRound v-if="message.role === 'user'" :size="15" :stroke-width="1.8" />
+            <Sparkles v-else :size="15" :stroke-width="1.8" />
           </div>
           <div class="chat-message-body">
             <details v-if="message.reasoning" class="message-reasoning" open>
               <summary class="message-reasoning__summary">
-                <el-icon :size="14"><MagicStick /></el-icon>
+                <Sparkles :size="13" :stroke-width="1.8" />
                 <span>思考过程</span>
               </summary>
               <div class="message-reasoning__content markdown-body" v-html="renderMarkdown(message.reasoning)"></div>
@@ -98,7 +98,7 @@
 
         <div v-if="isSending" class="chat-message chat-message--assistant">
           <div class="chat-message-avatar">
-            <el-icon :size="20"><MagicStick /></el-icon>
+            <Sparkles :size="15" :stroke-width="1.8" />
           </div>
           <div class="chat-message-body">
             <div v-if="streamStatusText" class="chat-stream-status">
@@ -106,7 +106,7 @@
             </div>
             <details v-if="streamingReasoning" class="message-reasoning" open>
               <summary class="message-reasoning__summary">
-                <el-icon :size="14"><MagicStick /></el-icon>
+                <Sparkles :size="13" :stroke-width="1.8" />
                 <span>思考中…</span>
               </summary>
               <div class="message-reasoning__content markdown-body" v-html="renderMarkdown(streamingReasoning)"></div>
@@ -122,7 +122,7 @@
           <div v-if="uploadedFiles.length" class="upload-inline-list">
             <span v-for="file in uploadedFiles" :key="file.uid" class="upload-inline-tag">
               {{ file.name }}
-              <el-icon :size="12" class="upload-inline-remove" @click="removeUploadedFile(file.uid)"><Close /></el-icon>
+              <X :size="12" class="upload-inline-remove" @click="removeUploadedFile(file.uid)" />
             </span>
           </div>
 
@@ -144,7 +144,7 @@
                   :disabled="isBusy"
                   @click="openFileDialog"
                 >
-                  <el-icon :size="16"><Link /></el-icon>
+                  <Paperclip :size="15" :stroke-width="1.8" />
                 </el-button>
               </el-tooltip>
               <el-tooltip content="发送消息" placement="top">
@@ -157,7 +157,7 @@
                   @click="sendQuestion"
                   class="send-button"
                 >
-                  <el-icon v-if="!isSending" :size="18"><Promotion /></el-icon>
+                  <Send v-if="!isSending" :size="16" :stroke-width="1.8" />
                 </el-button>
               </el-tooltip>
               <input
@@ -209,16 +209,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  ChatDotRound,
-  Close,
-  Expand,
-  Fold,
-  Link,
-  MagicStick,
-  Promotion,
-  Setting,
-  User
-} from '@element-plus/icons-vue'
+  MessageSquareText,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Paperclip,
+  Send,
+  Settings2,
+  Sparkles,
+  UserRound,
+  X
+} from '@lucide/vue'
 import { Marked } from 'marked'
 import { portalApi } from '@/api/portal'
 import PlaygroundSettings from '@/components/PlaygroundSettings.vue'
@@ -1326,5 +1326,66 @@ html.dark .chat-message--user .chat-message-content {
     flex-basis: 76px;
     gap: 4px;
   }
+}
+
+.chat-toolbar__title {
+  font-family: var(--crc-font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.chat-empty p {
+  color: var(--crc-text-muted);
+  font-family: var(--crc-font-display);
+  font-size: 16px;
+  font-weight: 550;
+  letter-spacing: -0.01em;
+}
+
+.chat-empty-icon {
+  border: 1px solid var(--crc-border);
+  box-shadow: var(--crc-shadow-sm), 0 0 40px var(--crc-accent-soft);
+}
+
+.chat-message-avatar {
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+}
+
+.chat-message--user .chat-message-content {
+  background: linear-gradient(135deg, var(--crc-accent) 0%, var(--crc-accent-active) 100%);
+  box-shadow: var(--crc-shadow-sm);
+}
+
+.composer-shell {
+  transition: border-color var(--crc-duration-fast) var(--crc-ease),
+    box-shadow var(--crc-duration-fast) var(--crc-ease);
+}
+
+.composer-shell:focus-within {
+  border-color: var(--crc-accent);
+  box-shadow: 0 0 0 3px var(--crc-accent-soft), var(--crc-shadow-sm);
+}
+
+.send-button:not(.is-disabled) {
+  box-shadow: var(--crc-accent-glow);
+}
+
+.message-reasoning__summary {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.chat-stream-status {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+}
+
+.chat-message-meta {
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
 }
 </style>

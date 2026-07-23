@@ -2,6 +2,7 @@
   <div class="crc-page troubleshooting-page">
     <header class="crc-page-header">
       <div>
+        <p class="crc-eyebrow">DIAGNOSE // EVIDENCE</p>
         <h1 class="crc-page-title">排障中心</h1>
         <p class="crc-page-description">验证客户端、模型、协议、工具调用与流式响应，并检查跨客户端兼容路径。</p>
       </div>

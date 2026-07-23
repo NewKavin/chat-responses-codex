@@ -68,6 +68,7 @@
     <section class="integration-section">
       <div class="section-head">
         <div>
+          <p class="crc-eyebrow">MATRIX // PROTOCOLS</p>
           <h2>客户端兼容矩阵</h2>
           <p>按协议族分组，每个客户端只需要一个配置即可连接网关。</p>
         </div>
@@ -121,6 +122,7 @@
     <section v-if="sortedModelStats.length" class="integration-section">
       <div class="section-head">
         <div>
+          <p class="crc-eyebrow">RANK // MODELS</p>
           <h2>模型排序</h2>
           <p>按月使用量优先，月使用量相同再看今日使用量。</p>
         </div>
@@ -167,6 +169,7 @@
     <section v-else data-testid="integration-config-tabs" class="code-surface">
       <div class="section-head config-section-head">
         <div>
+          <p class="crc-eyebrow">CONFIG // CLIENTS</p>
           <h2>客户端配置</h2>
           <p>优先提供 Codex 与 OpenCode，其他客户端按协议兼容方式配置。</p>
         </div>
@@ -204,7 +207,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(codexConfigToml)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -225,7 +228,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(codexModelCatalogJson)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -244,7 +247,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(codexAuthLoginCommand)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -281,7 +284,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(opencodeConfig)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -319,7 +322,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(claudeCodeSettingsJson)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -358,7 +361,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(openAiCompatibleConfig)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -399,7 +402,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(anthropicCompatibleConfig)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -433,7 +436,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesInstallNpm)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -448,7 +451,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesInstallPython)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -463,7 +466,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesConfigYaml)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -478,7 +481,7 @@
                 </div>
                 <el-tooltip content="复制代码" placement="top">
                   <el-button aria-label="复制代码" circle size="small" @click="copyCode(hermesLaunch)">
-                    <el-icon><CopyDocument /></el-icon>
+                    <Copy :size="14" :stroke-width="1.8" />
                   </el-button>
                 </el-tooltip>
               </div>
@@ -502,7 +505,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CopyDocument } from '@element-plus/icons-vue'
+import { Copy } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
 import type { ModelContextEntry, PortalModelStat } from '@/types'
 import {
@@ -946,22 +949,20 @@ p {
   max-width: 100%;
   max-height: 420px;
   margin: 14px 0 0;
-  padding: 16px;
+  padding: 18px 20px;
   overflow-x: auto;
   overflow-y: auto;
-  border: 1px solid var(--crc-border);
+  border: 1px solid #223029;
   border-radius: var(--crc-radius-sm);
-  color: var(--crc-text);
-  background: var(--crc-surface-muted);
+  color: #c8e6d8;
+  background:
+    radial-gradient(ellipse 90% 60% at 50% -20%, rgb(47 224 168 / 7%) 0%, transparent 60%),
+    #0c1512;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%), var(--crc-shadow-sm);
   white-space: pre;
-  line-height: 1.7;
-  font-size: 13px;
-  font-family:
-    'SFMono-Regular',
-    'Consolas',
-    'Liberation Mono',
-    'Courier New',
-    monospace;
+  line-height: 1.75;
+  font-size: 12.5px;
+  font-family: var(--crc-font-mono);
 }
 
 .integration-tabs :deep(.el-tabs__header) {
@@ -1065,5 +1066,82 @@ p {
     grid-column: 2;
     white-space: normal;
   }
+}
+
+.section-head h2 {
+  font-family: var(--crc-font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.section-head .crc-eyebrow {
+  margin-bottom: 6px;
+}
+
+.summary-grid :deep(code) {
+  font-family: var(--crc-font-mono);
+  font-size: 12px;
+}
+
+.step-head code {
+  font-family: var(--crc-font-mono);
+  font-size: 12px;
+}
+
+.step-head h4 {
+  font-family: var(--crc-font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.compat-family {
+  transition: transform var(--crc-duration) var(--crc-ease-out),
+    border-color var(--crc-duration) var(--crc-ease),
+    box-shadow var(--crc-duration) var(--crc-ease);
+}
+
+.compat-family:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-sm);
+  transform: translateY(-2px);
+}
+
+.compat-family h4 {
+  font-family: var(--crc-font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.compat-family code {
+  font-family: var(--crc-font-mono);
+  font-size: 11.5px;
+}
+
+.model-ranking__position {
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-display);
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-ranking__item:first-child .model-ranking__position {
+  color: var(--crc-accent);
+  text-shadow: 0 0 12px var(--crc-accent);
+}
+
+.model-ranking__metrics {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+}
+
+.integration-tabs :deep(.el-tabs__item) {
+  font-weight: 550;
+}
+
+.codex-agent-limits code {
+  font-family: var(--crc-font-mono);
 }
 </style>

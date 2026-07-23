@@ -8,26 +8,36 @@
     </header>
 
     <div v-loading="loading" class="quota-details-content">
-      <section class="quota-summary-grid" aria-label="限额摘要">
+      <section class="quota-summary-grid crc-stagger" aria-label="限额摘要">
         <article v-if="data.request_quota" class="quota-summary-item crc-surface">
-          <span>请求配额</span>
-          <strong>{{ data.request_quota.used }} / {{ data.request_quota.limit }}</strong>
-          <small>{{ data.request_quota.window_hours }} 小时窗口 · 剩余 {{ data.request_quota.remaining }}</small>
+          <div class="quota-summary-item__main">
+            <span class="quota-summary-item__label">请求配额</span>
+            <strong>{{ data.request_quota.used }}<i> / {{ data.request_quota.limit }}</i></strong>
+            <small>{{ data.request_quota.window_hours }} 小时窗口 · 剩余 {{ data.request_quota.remaining }}</small>
+          </div>
+          <GaugeRing :value="formatPercentageTwoDecimals(data.request_quota.percentage)" :size="86" />
         </article>
         <article v-if="data.token_quota?.daily" class="quota-summary-item crc-surface">
-          <span>每日 Token</span>
-          <strong>{{ data.token_quota.daily.used.toLocaleString() }} / {{ data.token_quota.daily.limit.toLocaleString() }}</strong>
-          <small>剩余 {{ data.token_quota.daily.remaining.toLocaleString() }}</small>
+          <div class="quota-summary-item__main">
+            <span class="quota-summary-item__label">每日 Token</span>
+            <strong>{{ data.token_quota.daily.used.toLocaleString() }}<i> / {{ data.token_quota.daily.limit.toLocaleString() }}</i></strong>
+            <small>剩余 {{ data.token_quota.daily.remaining.toLocaleString() }}</small>
+          </div>
+          <GaugeRing :value="formatPercentageTwoDecimals(data.token_quota.daily.percentage)" :size="86" />
         </article>
         <article v-if="data.token_quota?.monthly" class="quota-summary-item crc-surface">
-          <span>每月 Token</span>
-          <strong>{{ data.token_quota.monthly.used.toLocaleString() }} / {{ data.token_quota.monthly.limit.toLocaleString() }}</strong>
-          <small>剩余 {{ data.token_quota.monthly.remaining.toLocaleString() }}</small>
+          <div class="quota-summary-item__main">
+            <span class="quota-summary-item__label">每月 Token</span>
+            <strong>{{ data.token_quota.monthly.used.toLocaleString() }}<i> / {{ data.token_quota.monthly.limit.toLocaleString() }}</i></strong>
+            <small>剩余 {{ data.token_quota.monthly.remaining.toLocaleString() }}</small>
+          </div>
+          <GaugeRing :value="formatPercentageTwoDecimals(data.token_quota.monthly.percentage)" :size="86" />
         </article>
       </section>
 
       <section v-if="data.request_quota" class="quota-detail-section">
         <div class="quota-detail-heading">
+          <p class="crc-eyebrow">QUOTA // REQUESTS</p>
           <h2>请求配额</h2>
           <span>{{ data.request_quota.window_hours }} 小时滑动窗口</span>
         </div>
@@ -45,6 +55,7 @@
 
       <section v-if="data.token_quota?.daily" class="quota-detail-section">
         <div class="quota-detail-heading">
+          <p class="crc-eyebrow">QUOTA // DAILY TOKENS</p>
           <h2>每日 Token 配额</h2>
           <span>当日累计</span>
         </div>
@@ -62,6 +73,7 @@
 
       <section v-if="data.token_quota?.monthly" class="quota-detail-section">
         <div class="quota-detail-heading">
+          <p class="crc-eyebrow">QUOTA // MONTHLY TOKENS</p>
           <h2>每月 Token 配额</h2>
           <span>本月累计</span>
         </div>
@@ -79,6 +91,7 @@
 
       <section class="quota-detail-section">
         <div class="quota-detail-heading">
+          <p class="crc-eyebrow">ACCESS // MODELS</p>
           <h2>模型白名单</h2>
           <span>{{ modelSectionHint }}</span>
         </div>
@@ -90,6 +103,7 @@
 
       <section class="quota-detail-section">
         <div class="quota-detail-heading">
+          <p class="crc-eyebrow">ACCESS // NETWORK</p>
           <h2>IP 白名单</h2>
           <span>{{ data.ip_allowlist.length > 0 ? '按来源地址限制' : '当前不限制来源地址' }}</span>
         </div>
@@ -108,6 +122,7 @@ import { ElMessage } from 'element-plus'
 import { portalApi } from '@/api/portal'
 import type { PortalQuota } from '@/types'
 import { formatPercentageLabel, formatPercentageTwoDecimals } from '@/utils/percentage'
+import GaugeRing from '@/components/GaugeRing.vue'
 import {
   buildGatewayModelsEndpoint,
   extractGatewayModelSlugs
@@ -232,20 +247,22 @@ onMounted(() => {
 }
 
 .quota-details-content {
-  gap: 20px;
+  gap: 8px;
 }
 
 .quota-summary-grid {
   display: grid;
   gap: 16px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
 }
 
 .quota-summary-item {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 18px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px;
   transition: transform var(--crc-duration) var(--crc-ease-out),
     box-shadow var(--crc-duration) var(--crc-ease-out),
     border-color var(--crc-duration) var(--crc-ease-out);
@@ -254,10 +271,22 @@ onMounted(() => {
 .quota-summary-item:hover {
   border-color: var(--crc-border-strong);
   box-shadow: var(--crc-shadow-md);
-  transform: translateY(-2px);
+  transform: translateY(-3px);
 }
 
-.quota-summary-item span,
+.quota-summary-item__main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quota-summary-item__label {
+  color: var(--crc-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .quota-summary-item small,
 .quota-detail-heading span,
 .quota-detail-metrics span {
@@ -273,12 +302,25 @@ onMounted(() => {
 }
 
 .quota-summary-item strong {
-  font-size: 20px;
+  font-family: var(--crc-font-display);
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
   overflow-wrap: anywhere;
 }
 
+.quota-summary-item strong i {
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 500;
+}
+
 .quota-detail-section {
-  padding: 20px 0;
+  padding: 22px 0;
   border-top: 1px solid var(--crc-border);
 }
 
@@ -292,7 +334,19 @@ onMounted(() => {
 
 .quota-detail-heading h2 {
   margin: 0;
-  font-size: 16px;
+  font-family: var(--crc-font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.quota-detail-heading .crc-eyebrow {
+  flex: 1 1 100%;
+  margin-bottom: 2px;
+}
+
+.quota-detail-heading {
+  flex-wrap: wrap;
 }
 
 .quota-detail-metrics {
@@ -310,6 +364,13 @@ onMounted(() => {
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius-sm);
   background: var(--crc-surface);
+}
+
+.quota-detail-metrics strong {
+  font-family: var(--crc-font-display);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .quota-tag-list {

@@ -2,13 +2,27 @@
   <div class="crc-page announcement-page">
     <header class="crc-page-header">
       <div>
+        <p class="crc-eyebrow">BROADCAST // NOTICE</p>
         <h1 class="crc-page-title">公告管理</h1>
         <p class="crc-page-description">每次保存都会生成新版本，门户用户在下次登录或刷新时重新确认。</p>
       </div>
-      <el-button :loading="loading" @click="loadAnnouncement">重新加载</el-button>
+      <el-button :icon="RefreshCw" :loading="loading" @click="loadAnnouncement">重新加载</el-button>
     </header>
 
     <section v-loading="loading" class="announcement-form-surface">
+      <div class="announcement-surface-head">
+        <span class="announcement-surface-head__icon" aria-hidden="true">
+          <Megaphone :size="18" :stroke-width="1.8" />
+        </span>
+        <div class="announcement-surface-head__text">
+          <span class="announcement-surface-head__label">DRAFT EDITOR</span>
+          <strong class="announcement-surface-head__title">公告草稿编辑器</strong>
+        </div>
+        <span class="announcement-surface-head__status" :class="{ 'is-live': form.active }">
+          <span class="crc-pulse-dot" :class="form.active ? 'crc-pulse-dot--success' : 'crc-pulse-dot--muted'" aria-hidden="true"></span>
+          {{ form.active ? '已启用' : '草稿' }}
+        </span>
+      </div>
       <el-alert
         title="公告默认以纯文本展示。启用后会在门户登录后弹出；关闭后会作为草稿保留，不再弹出。"
         type="info"
@@ -58,12 +72,12 @@
 
       <div class="announcement-meta">
         <div class="meta-item">
-          <span>当前版本 ID</span>
-          <strong>{{ announcementId || '未发布' }}</strong>
+          <span class="meta-item__label">VERSION ID // 当前版本</span>
+          <strong class="meta-item__value crc-mono">{{ announcementId || '未发布' }}</strong>
         </div>
         <div class="meta-item">
-          <span>更新时间</span>
-          <strong>{{ formatUpdatedAt(updatedAt) }}</strong>
+          <span class="meta-item__label">UPDATED // 更新时间</span>
+          <strong class="meta-item__value">{{ formatUpdatedAt(updatedAt) }}</strong>
         </div>
       </div>
 
@@ -78,6 +92,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Megaphone, RefreshCw } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { AnnouncementLevel } from '@/types'
 
@@ -232,13 +247,89 @@ onMounted(() => {
 }
 
 .announcement-form-surface {
+  position: relative;
   width: 100%;
   max-width: 760px;
   padding: 24px;
   border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius);
+  border-radius: var(--crc-radius-lg, 16px);
   background: var(--crc-surface);
   box-shadow: var(--crc-shadow-xs);
+  overflow: hidden;
+}
+
+.announcement-form-surface::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, var(--crc-accent), transparent 65%);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.announcement-surface-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px dashed var(--crc-border);
+}
+
+.announcement-surface-head__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  color: var(--crc-accent-ink, var(--crc-accent));
+  background: var(--crc-accent-soft, rgba(10, 143, 111, 0.1));
+  border: 1px solid var(--crc-border);
+  flex-shrink: 0;
+}
+
+.announcement-surface-head__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.announcement-surface-head__label {
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--crc-text-muted);
+}
+
+.announcement-surface-head__title {
+  font-family: var(--crc-font-display);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--crc-text-strong);
+}
+
+.announcement-surface-head__status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--crc-border);
+  border-radius: 999px;
+  background: var(--crc-surface-muted);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  color: var(--crc-text-muted);
+  white-space: nowrap;
+}
+
+.announcement-surface-head__status.is-live {
+  color: var(--crc-accent-ink, var(--crc-accent));
+  border-color: var(--crc-accent);
+  background: var(--crc-accent-soft, rgba(10, 143, 111, 0.08));
 }
 
 .announcement-note {
@@ -247,6 +338,14 @@ onMounted(() => {
 
 .announcement-form {
   margin-bottom: 20px;
+}
+
+.announcement-form :deep(.el-form-item__label) {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--crc-text-muted);
 }
 
 .announcement-meta {
@@ -264,16 +363,21 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
-.meta-item span {
+.meta-item__label {
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
   color: var(--crc-text-muted);
-  font-size: 12px;
 }
 
-.meta-item strong {
+.meta-item__value {
+  font-family: var(--crc-font-display);
   color: var(--crc-text-strong);
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 600;
   word-break: break-all;
 }
 

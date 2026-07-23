@@ -2,10 +2,11 @@
   <div class="troubleshooting-center">
     <div class="page-head">
       <div>
+        <p class="crc-eyebrow">EVIDENCE // DIAGNOSTICS</p>
         <h2>诊断与运行证据</h2>
         <p>配置诊断项目，检查解析结果，并持续观察活跃长任务。</p>
       </div>
-      <el-button :loading="loadingActive" @click="loadActiveRequests">刷新活跃请求</el-button>
+      <el-button :icon="RefreshCw" :loading="loadingActive" @click="loadActiveRequests">刷新活跃请求</el-button>
     </div>
 
     <div class="diagnostic-workspace-container">
@@ -52,7 +53,7 @@
               </el-checkbox-group>
             </el-form-item>
 
-            <el-button type="primary" :loading="running" @click="runDiagnostics">开始诊断</el-button>
+            <el-button type="primary" :icon="Activity" :loading="running" @click="runDiagnostics">开始诊断</el-button>
           </el-form>
         </section>
 
@@ -65,7 +66,7 @@
             <div v-else>
               <div class="result-toolbar">
                 <span>诊断 ID：{{ lastRun.run_id }}</span>
-                <el-button size="small" @click="copySummary">复制摘要</el-button>
+                <el-button size="small" :icon="Copy" @click="copySummary">复制摘要</el-button>
               </div>
               <el-timeline>
                 <el-timeline-item
@@ -91,6 +92,7 @@
                       v-if="admin && result.log_filter"
                       size="small"
                       text
+                      :icon="ArrowUpRight"
                       @click="openAdminLogs(result.log_filter)"
                     >
                       查看相关日志
@@ -132,9 +134,9 @@
         <h3>Capability 策略</h3>
       </header>
       <div class="capability-actions">
-        <el-button size="small" @click="handleExportCapabilities">导出 JSON</el-button>
-        <el-button size="small" @click="openImportDialog">导入 JSON</el-button>
-        <el-button size="small" :loading="loadingProfiles" @click="refreshDialectProfiles">刷新 Profiles</el-button>
+        <el-button size="small" :icon="Download" @click="handleExportCapabilities">导出 JSON</el-button>
+        <el-button size="small" :icon="Upload" @click="openImportDialog">导入 JSON</el-button>
+        <el-button size="small" :icon="RefreshCw" :loading="loadingProfiles" @click="refreshDialectProfiles">刷新 Profiles</el-button>
       </div>
 
       <div class="crc-table-shell evidence-table-shell">
@@ -258,6 +260,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Activity, ArrowUpRight, Copy, Download, RefreshCw, Upload } from '@lucide/vue'
 import type {
   ActiveGatewayRequest,
   CapabilityConfigurationDocument,
@@ -536,6 +539,7 @@ onMounted(() => {
 <style scoped>
 .troubleshooting-center {
   min-height: 100%;
+  counter-reset: evidence-section;
 }
 
 .page-head {
@@ -547,9 +551,12 @@ onMounted(() => {
 }
 
 .page-head h2 {
-  margin: 0 0 6px;
+  margin: 6px 0 6px;
   color: var(--crc-text-strong);
-  font-size: 18px;
+  font-family: var(--crc-font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .page-head p,
@@ -600,10 +607,24 @@ onMounted(() => {
 }
 
 .evidence-section__header h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   margin: 0;
   color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
   font-size: 15px;
+  font-weight: 600;
   line-height: 1.4;
+}
+
+.evidence-section__header h3::before {
+  counter-increment: evidence-section;
+  content: counter(evidence-section, decimal-leading-zero);
+  color: var(--crc-accent);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .full-width {
@@ -638,9 +659,11 @@ onMounted(() => {
 .resolved-meta {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   color: var(--crc-text-muted);
-  font-size: 12px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
@@ -668,7 +691,8 @@ onMounted(() => {
 .result-toolbar {
   margin-bottom: 16px;
   color: var(--crc-text-muted);
-  font-size: 13px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
 }
 
 .result-item p {
@@ -677,7 +701,8 @@ onMounted(() => {
 
 .category {
   color: var(--crc-warning);
-  font-size: 13px;
+  font-family: var(--crc-font-mono);
+  font-size: 12px;
 }
 
 .details {

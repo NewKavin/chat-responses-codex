@@ -1,6 +1,9 @@
 <template>
   <div class="playground-settings">
-    <h2 class="playground-settings__title">模型设置</h2>
+    <div>
+      <p class="crc-eyebrow">PLAYGROUND // TUNING</p>
+      <h2 class="playground-settings__title">模型设置</h2>
+    </div>
 
     <el-alert
       v-if="statusMessage"
@@ -105,7 +108,7 @@
 
     <div class="playground-settings__actions">
       <el-button :disabled="busy" @click="emit('clear')">
-        <el-icon><Delete /></el-icon>
+        <Trash2 :size="14" :stroke-width="1.8" />
         <span>清空对话</span>
       </el-button>
     </div>
@@ -113,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { Delete } from '@element-plus/icons-vue'
+import { Trash2 } from '@lucide/vue'
 
 defineProps<{
   modelOptions: string[]
@@ -152,9 +155,12 @@ const emit = defineEmits<{
 }
 
 .playground-settings__title {
-  margin: 0;
+  margin: 6px 0 0;
   color: var(--crc-text-strong);
-  font-size: 15px;
+  font-family: var(--crc-font-display);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1.4;
 }
 
@@ -177,8 +183,10 @@ const emit = defineEmits<{
 
 .playground-settings__label {
   color: var(--crc-text-muted);
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
 }
 
 .playground-settings__section :deep(.el-select),

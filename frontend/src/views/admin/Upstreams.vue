@@ -2,10 +2,13 @@
   <div class="crc-page upstreams-page">
     <header class="crc-page-header">
       <div>
+        <p class="crc-eyebrow">PROVIDERS // UPSTREAMS</p>
         <h1 class="crc-page-title">上游管理</h1>
         <p class="crc-page-description">配置模型供应方、协议、密钥、上下文限制和智能路由策略。</p>
       </div>
-      <el-button type="primary" @click="handleCreate">创建上游</el-button>
+      <el-button type="primary" @click="handleCreate">
+        <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建上游
+      </el-button>
     </header>
 
     <div class="crc-table-shell">
@@ -273,6 +276,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import { Plus } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
@@ -854,5 +858,22 @@ onMounted(() => {
   .fetch-btn {
     width: 100%;
   }
+}
+
+.drawer-section :deep(.el-divider__text) {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.protocol-cell :deep(.el-tag) {
+  font-family: var(--crc-font-mono);
+}
+
+.form-hint {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
 }
 </style>

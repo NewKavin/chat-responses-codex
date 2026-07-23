@@ -14,7 +14,7 @@
           autocomplete="username"
           placeholder="请输入用户名"
           size="large"
-          :prefix-icon="User"
+          :prefix-icon="UserRound"
         />
       </el-form-item>
 
@@ -26,7 +26,7 @@
           placeholder="请输入密码"
           size="large"
           show-password
-          :prefix-icon="Lock"
+          :prefix-icon="LockKeyhole"
         />
       </el-form-item>
 
@@ -51,7 +51,7 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Lock, User } from '@element-plus/icons-vue'
+import { LockKeyhole, UserRound } from '@lucide/vue'
 import AuthShell from '@/components/AuthShell.vue'
 import { adminApi, hasUsableAdminToken } from '@/api/admin'
 import { useAuthStore } from '@/stores/auth'

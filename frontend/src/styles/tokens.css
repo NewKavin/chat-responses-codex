@@ -1,53 +1,96 @@
+/* ==========================================================================
+   Chat Responses Codex — Design Tokens
+   "SIGNAL DECK" instrument-panel design system
+   ========================================================================== */
+
 :root {
-  --crc-canvas: #f6f7f8;
+  color-scheme: light;
+
+  /* -- Surfaces ---------------------------------------------------------- */
+  --crc-canvas: #f2f4f3;
   --crc-surface: #ffffff;
   --crc-surface-elevated: #ffffff;
-  --crc-surface-muted: #f0f3f2;
-  --crc-surface-hover: #edf2f0;
-  --crc-text-strong: #17201d;
-  --crc-text: #34413d;
-  --crc-text-muted: #66716d;
-  --crc-text-subtle: #87928d;
-  --crc-border: #dfe5e2;
-  --crc-border-strong: #cad4d0;
-  --crc-accent: #0f8f76;
-  --crc-accent-hover: #0b7662;
-  --crc-accent-active: #095f50;
-  --crc-accent-soft: #eaf6f2;
+  --crc-surface-muted: #edf1ef;
+  --crc-surface-hover: #e7ede9;
+  --crc-surface-inverse: #101715;
+
+  /* -- Text ---------------------------------------------------------------- */
+  --crc-text-strong: #0d1512;
+  --crc-text: #2b3834;
+  --crc-text-muted: #5c6a65;
+  --crc-text-subtle: #85928c;
+  --crc-text-inverse: #f2f7f5;
+
+  /* -- Lines --------------------------------------------------------------- */
+  --crc-border: #dce3e0;
+  --crc-border-strong: #c2cdc8;
+  --crc-grid-line: rgb(13 21 18 / 4%);
+
+  /* -- Brand accent -------------------------------------------------------- */
+  --crc-accent: #0a8f6f;
+  --crc-accent-hover: #087a5f;
+  --crc-accent-active: #06684f;
+  --crc-accent-soft: rgb(10 143 111 / 9%);
+  --crc-accent-ink: #ffffff;
+  --crc-accent-glow: 0 0 0 rgb(10 143 111 / 0%);
+
+  /* -- Semantic ------------------------------------------------------------ */
   --crc-success: #15803d;
-  --crc-success-soft: #eaf7ee;
+  --crc-success-soft: #e6f5eb;
   --crc-warning: #b45309;
-  --crc-warning-soft: #fff5e7;
-  --crc-danger: #c2413b;
-  --crc-danger-soft: #fff0ef;
-  --crc-info: #2563a6;
-  --crc-info-soft: #edf5fb;
+  --crc-warning-soft: #fcf1e0;
+  --crc-danger: #cf3f38;
+  --crc-danger-soft: #fcebe9;
+  --crc-info: #2369ad;
+  --crc-info-soft: #e8f1fa;
   --crc-violet: #6d5bd0;
-  --crc-violet-soft: #f0edfb;
+  --crc-violet-soft: #eeebfa;
+
+  /* -- Shape --------------------------------------------------------------- */
   --crc-radius-sm: 6px;
-  --crc-radius: 8px;
-  --crc-radius-lg: 12px;
-  --crc-shadow-xs: 0 1px 2px rgb(23 32 29 / 5%);
-  --crc-shadow-sm: 0 2px 10px rgb(23 32 29 / 7%);
-  --crc-shadow-md: 0 10px 28px rgb(23 32 29 / 11%);
-  --crc-shadow-elevated: 0 14px 36px rgb(23 32 29 / 14%);
-  --crc-brand-gradient: linear-gradient(135deg, #17b48f 0%, #0a6d59 100%);
-  --crc-topbar-bg: rgb(255 255 255 / 82%);
+  --crc-radius: 10px;
+  --crc-radius-lg: 14px;
+
+  /* -- Elevation ----------------------------------------------------------- */
+  --crc-shadow-xs: 0 1px 2px rgb(13 21 18 / 5%);
+  --crc-shadow-sm: 0 2px 10px rgb(13 21 18 / 6%);
+  --crc-shadow-md: 0 10px 28px rgb(13 21 18 / 9%);
+  --crc-shadow-elevated: 0 18px 44px rgb(13 21 18 / 13%);
+
+  /* -- Brand ---------------------------------------------------------------- */
+  --crc-brand-gradient: linear-gradient(135deg, #14b78d 0%, #0a6d59 100%);
+  --crc-topbar-bg: rgb(255 255 255 / 78%);
+
+  /* -- Typography ------------------------------------------------------------ */
+  --crc-font-body: "Inter Variable", Inter, ui-sans-serif, system-ui,
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --crc-font-display: "Space Grotesk", "Inter Variable", Inter, ui-sans-serif,
+    system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --crc-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
+    Consolas, "Liberation Mono", monospace;
+
+  /* -- Motion ---------------------------------------------------------------- */
   --crc-duration-fast: 140ms;
-  --crc-duration: 220ms;
-  --crc-duration-slow: 340ms;
+  --crc-duration: 240ms;
+  --crc-duration-slow: 420ms;
   --crc-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --crc-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --crc-sidebar-expanded: 216px;
-  --crc-sidebar-collapsed: 64px;
-  --crc-topbar-height: 56px;
+  --crc-ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --crc-ease-spring: cubic-bezier(0.34, 1.45, 0.44, 1);
 
+  /* -- Layout ---------------------------------------------------------------- */
+  --crc-sidebar-expanded: 228px;
+  --crc-sidebar-collapsed: 68px;
+  --crc-topbar-height: 60px;
+
+  /* -- Element Plus bridge --------------------------------------------------- */
   --el-color-primary: var(--crc-accent);
   --el-color-primary-dark-2: var(--crc-accent-active);
-  --el-color-primary-light-3: #56aa97;
-  --el-color-primary-light-5: #87c2b5;
-  --el-color-primary-light-7: #b9dbd3;
-  --el-color-primary-light-8: #d3e9e4;
+  --el-color-primary-light-3: #4dab91;
+  --el-color-primary-light-5: #84c4b3;
+  --el-color-primary-light-7: #b5dcd1;
+  --el-color-primary-light-8: #d0e8e1;
   --el-color-primary-light-9: var(--crc-accent-soft);
   --el-bg-color: var(--crc-surface);
   --el-bg-color-page: var(--crc-canvas);
@@ -69,43 +112,56 @@
 }
 
 html.dark {
-  --crc-canvas: #111514;
-  --crc-surface: #181d1b;
-  --crc-surface-elevated: #202624;
-  --crc-surface-muted: #252c29;
-  --crc-surface-hover: #2b3430;
-  --crc-text-strong: #f1f5f3;
-  --crc-text: #d2dad6;
-  --crc-text-muted: #98a59f;
-  --crc-text-subtle: #76837d;
-  --crc-border: #343d39;
-  --crc-border-strong: #46514c;
-  --crc-accent: #39b99c;
-  --crc-accent-hover: #53c9ae;
-  --crc-accent-active: #75d4be;
-  --crc-accent-soft: #173d34;
+  color-scheme: dark;
+
+  --crc-canvas: #0d1412;
+  --crc-surface: #121a17;
+  --crc-surface-elevated: #18221e;
+  --crc-surface-muted: #1c2723;
+  --crc-surface-hover: #22302b;
+  --crc-surface-inverse: #ecf5f1;
+
+  --crc-text-strong: #ecf5f1;
+  --crc-text: #b3c4bd;
+  --crc-text-muted: #7c918a;
+  --crc-text-subtle: #586b64;
+  --crc-text-inverse: #0d1512;
+
+  --crc-border: #24312c;
+  --crc-border-strong: #34453d;
+  --crc-grid-line: rgb(236 245 241 / 3.5%);
+
+  --crc-accent: #2fe0a8;
+  --crc-accent-hover: #59e9bc;
+  --crc-accent-active: #8af0d0;
+  --crc-accent-soft: rgb(47 224 168 / 11%);
+  --crc-accent-ink: #04241a;
+  --crc-accent-glow: 0 0 28px rgb(47 224 168 / 26%);
+
   --crc-success: #4ade80;
-  --crc-success-soft: #173923;
-  --crc-warning: #f6ad55;
-  --crc-warning-soft: #3c2c19;
+  --crc-success-soft: rgb(74 222 128 / 12%);
+  --crc-warning: #fbbf24;
+  --crc-warning-soft: rgb(251 191 36 / 12%);
   --crc-danger: #fb7185;
-  --crc-danger-soft: #401f25;
-  --crc-info: #60a5d8;
-  --crc-info-soft: #1c3444;
-  --crc-violet: #a597f0;
-  --crc-violet-soft: #2a2647;
-  --crc-shadow-xs: 0 1px 2px rgb(0 0 0 / 24%);
-  --crc-shadow-sm: 0 2px 10px rgb(0 0 0 / 28%);
-  --crc-shadow-md: 0 10px 28px rgb(0 0 0 / 32%);
-  --crc-shadow-elevated: 0 16px 40px rgb(0 0 0 / 36%);
-  --crc-brand-gradient: linear-gradient(135deg, #2fbf9c 0%, #148064 100%);
-  --crc-topbar-bg: rgb(24 29 27 / 78%);
+  --crc-danger-soft: rgb(251 113 133 / 12%);
+  --crc-info: #6cb8f0;
+  --crc-info-soft: rgb(108 184 240 / 12%);
+  --crc-violet: #a78bfa;
+  --crc-violet-soft: rgb(167 139 250 / 13%);
+
+  --crc-shadow-xs: 0 1px 2px rgb(0 0 0 / 26%);
+  --crc-shadow-sm: 0 2px 12px rgb(0 0 0 / 30%);
+  --crc-shadow-md: 0 12px 30px rgb(0 0 0 / 36%);
+  --crc-shadow-elevated: 0 20px 48px rgb(0 0 0 / 44%);
+
+  --crc-brand-gradient: linear-gradient(135deg, #2fe0a8 0%, #0d8a68 100%);
+  --crc-topbar-bg: rgb(13 20 18 / 72%);
 
   --el-color-primary: var(--crc-accent);
-  --el-color-primary-dark-2: #75d4be;
-  --el-color-primary-light-3: #31977f;
-  --el-color-primary-light-5: #286f5f;
-  --el-color-primary-light-7: #204f44;
-  --el-color-primary-light-8: #1c463c;
+  --el-color-primary-dark-2: #8af0d0;
+  --el-color-primary-light-3: #26a981;
+  --el-color-primary-light-5: #1f7d62;
+  --el-color-primary-light-7: #1a5c4a;
+  --el-color-primary-light-8: #16493c;
   --el-color-primary-light-9: var(--crc-accent-soft);
 }

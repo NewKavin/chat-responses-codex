@@ -8,6 +8,16 @@
     </header>
 
     <section v-loading="loading" class="key-security-surface crc-surface">
+        <div class="key-security-head">
+          <div>
+            <p class="crc-eyebrow">VAULT // ACCESS KEY</p>
+            <h2 class="key-security-title">下游访问密钥</h2>
+          </div>
+          <span class="key-security-badge">
+            <ShieldCheck :size="13" :stroke-width="1.8" />AES GUARDED
+          </span>
+        </div>
+
         <el-alert
           type="info"
           :closable="false"
@@ -17,7 +27,8 @@
         </el-alert>
 
         <div class="key-display">
-          <span class="key-display__label">当前访问密钥</span>
+          <span class="key-display__label">CURRENT KEY // 当前访问密钥</span>
+          <Fingerprint class="key-display__watermark" :size="84" :stroke-width="0.8" aria-hidden="true" />
           <code v-if="keyPlaintext">{{ keyPlaintext }}</code>
           <span v-else class="no-key">未设置密钥</span>
           <div class="key-actions">
@@ -28,10 +39,12 @@
                 :disabled="!keyPlaintext"
                 @click="copyKey(keyPlaintext)"
               >
-                <el-icon><CopyDocument /></el-icon>
+                <Copy :size="15" :stroke-width="1.8" />
               </el-button>
             </el-tooltip>
-            <el-button type="warning" @click="handleRotate">轮换密钥</el-button>
+            <el-button type="warning" @click="handleRotate">
+              <RotateCcw :size="14" :stroke-width="1.8" style="margin-right: 6px" />轮换密钥
+            </el-button>
           </div>
         </div>
 
@@ -64,7 +77,7 @@
             type="primary"
             @click="copyFullKey(newKey)"
           >
-            <el-icon><CopyDocument /></el-icon>
+            <Copy :size="15" :stroke-width="1.8" />
           </el-button>
         </el-tooltip>
       </div>
@@ -85,7 +98,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CopyDocument } from '@element-plus/icons-vue'
+import { Copy, Fingerprint, RotateCcw, ShieldCheck } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
 import { getCopyableKey } from '@/utils/keyUtils'
 
@@ -184,42 +197,91 @@ onMounted(() => {
   flex-direction: column;
   gap: 18px;
   max-width: 880px;
-  padding: 20px;
+  padding: 24px;
+}
+
+.key-security-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.key-security-title {
+  margin: 6px 0 0;
+  color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.key-security-badge {
+  display: inline-flex;
+  padding: 6px 10px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--crc-border);
+  border-radius: 999px;
+  color: var(--crc-accent);
+  background: var(--crc-accent-soft);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
 }
 
 .key-display {
+  position: relative;
   display: grid;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   grid-template-columns: minmax(0, 1fr) auto;
-  padding: 16px;
-  border: 1px solid var(--crc-border);
+  padding: 20px;
+  overflow: hidden;
+  border: 1px solid var(--crc-border-strong);
   border-radius: var(--crc-radius);
-  background: var(--crc-surface-muted);
+  background:
+    radial-gradient(ellipse 90% 130% at 100% 0%, var(--crc-accent-soft) 0%, transparent 55%),
+    var(--crc-canvas);
+}
+
+.key-display__watermark {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  color: var(--crc-accent);
+  opacity: 0.1;
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .key-display__label {
   grid-column: 1 / -1;
-  color: var(--crc-text-muted);
-  font-size: 12px;
-  font-weight: 600;
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
 }
 
 .key-display code,
 .new-key-container code {
+  position: relative;
   min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--crc-border);
+  padding: 12px 14px;
+  border: 1px dashed var(--crc-border-strong);
   border-radius: var(--crc-radius-sm);
   color: var(--crc-text-strong);
-  background: var(--crc-surface-muted);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 14px;
+  background: var(--crc-surface);
+  font-family: var(--crc-font-mono);
+  font-size: 15px;
+  letter-spacing: 0.02em;
   overflow-wrap: anywhere;
   user-select: all;
 }
 
 .key-actions {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -239,7 +301,7 @@ onMounted(() => {
   padding: 16px;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
-  background: var(--crc-surface-muted);
+  background: var(--crc-canvas);
 }
 
 .helper-text {

@@ -2,10 +2,13 @@
   <div class="crc-page downstreams-page">
     <header class="crc-page-header">
       <div>
+        <p class="crc-eyebrow">IDENTITY // DOWNSTREAMS</p>
         <h1 class="crc-page-title">下游管理</h1>
         <p class="crc-page-description">管理门户身份、可用模型、调用限额、生命周期和访问密钥。</p>
       </div>
-      <el-button type="primary" @click="handleCreate">创建下游</el-button>
+      <el-button type="primary" @click="handleCreate">
+        <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建下游
+      </el-button>
     </header>
 
     <el-form :inline="true" class="crc-toolbar downstream-filters">
@@ -213,7 +216,7 @@
               type="primary"
               @click="copyKey(newPlaintextKey)"
             >
-              <el-icon><CopyDocument /></el-icon>
+              <Copy :size="14" :stroke-width="1.8" />
             </el-button>
           </el-tooltip>
         </div>
@@ -237,7 +240,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CopyDocument } from '@element-plus/icons-vue'
+import { Copy, Plus } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { DownstreamConfig } from '@/types'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
@@ -606,5 +609,37 @@ code {
   :global(.form-drawer .el-drawer__body) {
     padding: 18px 16px;
   }
+}
+
+.key-cell code {
+  padding: 3px 8px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text);
+  background: var(--crc-canvas);
+  font-family: var(--crc-font-mono);
+  font-size: 11.5px;
+}
+
+.key-cell .full-key {
+  color: var(--crc-accent);
+  border-color: var(--crc-accent);
+  background: var(--crc-accent-soft);
+}
+
+.legacy-key-hint {
+  color: var(--crc-text-subtle);
+  font-size: 12px;
+}
+
+.key-result-surface code.new-key-value {
+  font-family: var(--crc-font-mono);
+  letter-spacing: 0.02em;
+}
+
+.downstream-filters :deep(.el-form-item__label) {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
 }
 </style>

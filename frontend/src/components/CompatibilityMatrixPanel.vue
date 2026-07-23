@@ -2,6 +2,7 @@
   <section class="compatibility-matrix-panel crc-surface">
     <header class="panel-head">
       <div>
+        <p class="crc-eyebrow">MATRIX // COMPATIBILITY</p>
         <h3>客户端兼容矩阵</h3>
         <p>批量检查下游对 Codex、opencode、Claude Code 和 Hermes 的兼容路径、语义证据与回退阶段。</p>
       </div>
@@ -26,8 +27,8 @@
           :value="downstream.id"
         />
       </el-select>
-      <el-button type="primary" :loading="running" @click="runMatrixJob">运行矩阵</el-button>
-      <el-button :disabled="!lastRun" @click="copySummary">复制摘要</el-button>
+      <el-button type="primary" :icon="Grid3x3" :loading="running" @click="runMatrixJob">运行矩阵</el-button>
+      <el-button :icon="Copy" :disabled="!lastRun" @click="copySummary">复制摘要</el-button>
     </div>
 
     <el-empty v-if="!lastRun" description="还没有运行兼容矩阵" />
@@ -144,6 +145,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Copy, Grid3x3 } from '@lucide/vue'
 import type {
   CompatibilityMatrixRunRequest,
   CompatibilityMatrixRunResponse,
@@ -232,16 +234,26 @@ const copySummary = async () => {
 }
 
 .panel-head h3 {
-  margin: 0 0 6px;
+  margin: 6px 0 6px;
   color: var(--crc-text-strong);
-  font-size: 18px;
+  font-family: var(--crc-font-display);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.panel-head p,
-.matrix-meta {
+.panel-head p {
   margin: 0;
   color: var(--crc-text-muted);
   font-size: 13px;
+  line-height: 1.6;
+}
+
+.matrix-meta {
+  margin: 0;
+  color: var(--crc-text-muted);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
   line-height: 1.6;
 }
 
@@ -278,7 +290,8 @@ const copySummary = async () => {
   gap: 16px;
   flex-wrap: wrap;
   color: var(--crc-text-muted);
-  font-size: 13px;
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 

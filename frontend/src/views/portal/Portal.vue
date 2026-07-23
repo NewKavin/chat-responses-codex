@@ -47,13 +47,13 @@
 import { computed, onMounted, provide, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  ChatDotRound,
-  Connection,
-  Cpu,
+  ChartLine,
+  FlaskConical,
   House,
-  Key,
-  TrendCharts
-} from '@element-plus/icons-vue'
+  KeyRound,
+  PlugZap,
+  Radar
+} from '@lucide/vue'
 import AppShell from '@/components/AppShell.vue'
 import { portalApi } from '@/api/portal'
 import { buildAnnouncementSeenKey, shouldShowAnnouncement } from '@/utils/announcement'
@@ -85,11 +85,11 @@ const collapsed = ref(readCollapsedPreference())
 
 const portalNavItems: AppNavItem[] = [
   { path: '/portal', label: '概览', icon: House, group: '工作台' },
-  { path: '/portal/model-probe', label: '模型探测', icon: Cpu, group: '工作台' },
-  { path: '/portal/history', label: '使用历史', icon: TrendCharts, group: '工作台' },
-  { path: '/portal/integration', label: '集成示例', icon: Connection, group: '开发工具' },
-  { path: '/portal/playground', label: '模型操练场', icon: ChatDotRound, group: '开发工具' },
-  { path: '/portal/key', label: '密钥管理', icon: Key, group: '账户' }
+  { path: '/portal/model-probe', label: '模型探测', icon: Radar, group: '工作台' },
+  { path: '/portal/history', label: '使用历史', icon: ChartLine, group: '工作台' },
+  { path: '/portal/integration', label: '集成示例', icon: PlugZap, group: '开发工具' },
+  { path: '/portal/playground', label: '模型操练场', icon: FlaskConical, group: '开发工具' },
+  { path: '/portal/key', label: '密钥管理', icon: KeyRound, group: '账户' }
 ]
 
 const titleMap: Record<string, string> = {

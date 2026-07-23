@@ -1,20 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Chat Responses Codex">
   <defs>
     <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#17b48f" />
+      <stop offset="0%" stop-color="#1fd3a2" />
       <stop offset="100%" stop-color="#0a6d59" />
     </linearGradient>
     <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.22" />
-      <stop offset="45%" stop-color="#ffffff" stop-opacity="0" />
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.24" />
+      <stop offset="48%" stop-color="#ffffff" stop-opacity="0" />
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="14" fill="url(#brand)" />
-  <rect width="64" height="64" rx="14" fill="url(#sheen)" />
-  <g fill="none" stroke="#ffffff" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M19 25.5h18.5" />
-    <path d="M33.5 19.5l6 6-6 6" />
-    <path d="M45 38.5H26.5" />
-    <path d="M30.5 32.5l-6 6 6 6" />
+  <rect width="64" height="64" rx="15" fill="url(#brand)" />
+  <rect width="64" height="64" rx="15" fill="url(#sheen)" />
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="none" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1.5" />
+  <g fill="none" stroke="#ffffff" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17.5 24.5h20" />
+    <path d="M32.5 18.5l6 6-6 6" />
+    <path d="M46.5 39.5h-20" />
+    <path d="M31.5 33.5l-6 6 6 6" />
   </g>
+  <circle cx="13.5" cy="24.5" r="2.6" fill="#ffffff" />
+  <circle cx="50.5" cy="39.5" r="2.6" fill="#ffffff" />
 </svg>

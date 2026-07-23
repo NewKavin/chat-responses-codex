@@ -32,14 +32,14 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  Bell,
-  Connection,
-  Cpu,
-  Document,
-  Key,
-  Odometer,
-  Tools
-} from '@element-plus/icons-vue'
+  KeyRound,
+  LayoutDashboard,
+  Megaphone,
+  Radar,
+  SatelliteDish,
+  ScrollText,
+  Stethoscope
+} from '@lucide/vue'
 import AppShell from '@/components/AppShell.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { AppNavItem } from '@/types/navigation'
@@ -63,13 +63,13 @@ const collapsed = ref(readCollapsedPreference())
 const mobileOpen = ref(false)
 
 const adminNavItems: AppNavItem[] = [
-  { path: '/admin/dashboard', label: '控制台总览', icon: Odometer, group: '概览' },
-  { path: '/admin/model-probe', label: '模型探测', icon: Cpu, group: '概览' },
-  { path: '/admin/upstreams', label: '上游管理', icon: Connection, group: '资源管理' },
-  { path: '/admin/downstreams', label: '下游管理', icon: Key, group: '资源管理' },
-  { path: '/admin/logs', label: '运行日志', icon: Document, group: '运维' },
-  { path: '/admin/troubleshooting', label: '排障中心', icon: Tools, group: '运维' },
-  { path: '/admin/announcement', label: '公告管理', icon: Bell, group: '运维' }
+  { path: '/admin/dashboard', label: '控制台总览', icon: LayoutDashboard, group: '概览' },
+  { path: '/admin/model-probe', label: '模型探测', icon: Radar, group: '概览' },
+  { path: '/admin/upstreams', label: '上游管理', icon: SatelliteDish, group: '资源管理' },
+  { path: '/admin/downstreams', label: '下游管理', icon: KeyRound, group: '资源管理' },
+  { path: '/admin/logs', label: '运行日志', icon: ScrollText, group: '运维' },
+  { path: '/admin/troubleshooting', label: '排障中心', icon: Stethoscope, group: '运维' },
+  { path: '/admin/announcement', label: '公告管理', icon: Megaphone, group: '运维' }
 ]
 
 const isAdminShell = computed(() =>

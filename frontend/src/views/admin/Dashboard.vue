@@ -1,15 +1,24 @@
 <template>
   <div class="crc-page dashboard-page">
-    <header class="crc-page-header dashboard-header">
-      <div class="dashboard-header__body">
-        <h1 class="crc-page-title">控制台总览</h1>
-        <p class="crc-page-description">查看网关资源、请求趋势、模型健康和客户端使用情况。</p>
-      </div>
-      <div class="dashboard-header__meta">
+    <section class="dashboard-deck">
+      <SignalWave class="dashboard-deck__wave" :layers="3" :packets="12" :intensity="0.85" />
+      <div class="dashboard-deck__left">
+        <p class="dashboard-deck__eyebrow">CONSOLE // OVERVIEW</p>
+        <h1 class="dashboard-deck__title">控制台总览</h1>
+        <p class="dashboard-deck__desc">查看网关资源、请求趋势、模型健康和客户端使用情况。</p>
         <div class="dashboard-header__chips">
           <el-tag effect="light" type="success">自动聚合</el-tag>
           <el-tag effect="plain">{{ rangeLabel }}</el-tag>
           <el-tag effect="plain">Responses 上游 {{ dashboard.responses_upstreams }}</el-tag>
+        </div>
+      </div>
+      <div class="dashboard-deck__right">
+        <div class="dashboard-deck__headline-stat">
+          <span class="dashboard-deck__stat-label">TOTAL REQUESTS // {{ rangeLabel }}</span>
+          <strong class="dashboard-deck__stat-value">{{ formatCompactNumber(chartSummary.total_requests) }}</strong>
+          <span class="dashboard-deck__stat-sub">
+            成功率 {{ formatPercentageLabel(chartSummary.success_rate) }} · 平均耗时 {{ chartSummary.average_latency_ms }}ms
+          </span>
         </div>
         <div class="dashboard-header__controls">
           <el-radio-group v-model="chartRange" size="small" @change="handleRangeChange">
@@ -18,7 +27,7 @@
             <el-radio-button label="30d" value="30d">30 天</el-radio-button>
           </el-radio-group>
           <el-button
-            :icon="Refresh"
+            :icon="RefreshCw"
             :loading="loading"
             size="small"
             circle
@@ -29,7 +38,7 @@
         </div>
         <div class="refresh-label">最近刷新 {{ refreshedLabel }}</div>
       </div>
-    </header>
+    </section>
 
     <div class="kpi-wrap">
       <el-row v-if="showKpiSkeleton" :gutter="20" class="kpi-grid" aria-hidden="true">
@@ -48,6 +57,10 @@
       <el-row v-else v-loading="loading" :gutter="20" class="kpi-grid">
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--blue">
+            <div class="metric-card__top">
+              <span class="metric-card__icon"><SatelliteDish :size="15" :stroke-width="1.8" /></span>
+              <span class="metric-card__tag">UPSTREAM</span>
+            </div>
             <div class="metric-card__value"><CountUpValue :value="dashboard.upstreams_count" /></div>
             <div class="metric-card__label">上游密钥</div>
             <div class="metric-card__detail">启用 {{ dashboard.upstreams_active }} / 共 {{ dashboard.upstreams_count }}</div>
@@ -55,6 +68,10 @@
         </el-col>
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--teal">
+            <div class="metric-card__top">
+              <span class="metric-card__icon"><KeyRound :size="15" :stroke-width="1.8" /></span>
+              <span class="metric-card__tag">DOWNSTREAM</span>
+            </div>
             <div class="metric-card__value"><CountUpValue :value="dashboard.downstreams_count" /></div>
             <div class="metric-card__label">下游密钥</div>
             <div class="metric-card__detail">启用 {{ dashboard.downstreams_active }} / 共 {{ dashboard.downstreams_count }}</div>
@@ -62,6 +79,10 @@
         </el-col>
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--amber">
+            <div class="metric-card__top">
+              <span class="metric-card__icon"><ScrollText :size="15" :stroke-width="1.8" /></span>
+              <span class="metric-card__tag">LOGS</span>
+            </div>
             <div class="metric-card__value"><CountUpValue :value="dashboard.logs_count" /></div>
             <div class="metric-card__label">运行日志</div>
             <div class="metric-card__detail">最近记录 {{ dashboard.logs_count }} 条</div>
@@ -69,6 +90,10 @@
         </el-col>
         <el-col :xs="24" :sm="12" :lg="6">
           <div class="metric-card metric-card--violet">
+            <div class="metric-card__top">
+              <span class="metric-card__icon"><Boxes :size="15" :stroke-width="1.8" /></span>
+              <span class="metric-card__tag">MODELS</span>
+            </div>
             <div class="metric-card__value"><CountUpValue :value="dashboard.active_models" /></div>
             <div class="metric-card__label">可见模型</div>
             <div class="metric-card__detail">{{ dashboard.responses_upstreams }} 个 Responses 上游在线</div>
@@ -98,12 +123,13 @@
           <template #header>
             <div class="card-header card-header--trend">
               <div>
-                <h2>模型探测健康</h2>
+                <p class="card-eyebrow">PROBE // HEALTH</p>
+              <h2>模型探测健康</h2>
                 <p>通道模型探测快照，不影响主控制台数据加载。</p>
               </div>
               <div class="model-health-actions">
                 <el-tag effect="plain">轮询 {{ modelProbeRefreshIntervalLabel }}</el-tag>
-                <el-button :icon="View" type="primary" plain size="small" @click="openModelProbe">
+                <el-button :icon="Radar" type="primary" plain size="small" @click="openModelProbe">
                   查看探测
                 </el-button>
               </div>
@@ -151,7 +177,8 @@
           <template #header>
             <div class="card-header card-header--trend">
               <div>
-                <h2>请求趋势</h2>
+                <p class="card-eyebrow">TREND // TRAFFIC</p>
+              <h2>请求趋势</h2>
                 <p>请求量、Token 总量和平均耗时的组合视图。</p>
               </div>
               <el-tag effect="plain">{{ rangeLabel }} · {{ analytics.daily_series.length }} 天</el-tag>
@@ -188,7 +215,8 @@
           <template #header>
             <div class="card-header">
               <div>
-                <h2>模型使用</h2>
+                <p class="card-eyebrow">DIST // MODELS</p>
+              <h2>模型使用</h2>
                 <p>按调用次数排序的 Top 模型分布。</p>
               </div>
               <el-tag effect="plain">{{ modelUsage.total }} 次</el-tag>
@@ -215,7 +243,8 @@
           <template #header>
             <div class="card-header">
               <div>
-                <h2>客户端分布</h2>
+                <p class="card-eyebrow">RANK // CLIENTS</p>
+              <h2>客户端分布</h2>
                 <p>下游账号调用次数的横向排行。</p>
               </div>
               <el-tag effect="plain">{{ downstreamUsage.total }} 次</el-tag>
@@ -242,7 +271,8 @@
           <template #header>
             <div class="card-header">
               <div>
-                <h2>失败分类</h2>
+                <p class="card-eyebrow">DIST // FAILURES</p>
+              <h2>失败分类</h2>
                 <p>按错误类别拆分的失败请求结构。</p>
               </div>
               <el-tag effect="plain">{{ failureUsage.total }} 次</el-tag>
@@ -279,7 +309,8 @@
           <template #header>
             <div class="card-header card-header--trend">
               <div>
-                <h2>User-Agent 聚类</h2>
+                <p class="card-eyebrow">CLUSTER // UA</p>
+              <h2>User-Agent 聚类</h2>
                 <p>下游客户端的聚类结果与覆盖数。</p>
               </div>
               <el-tag effect="plain">{{ userAgentSummary.clusterCount }} 个聚类</el-tag>
@@ -316,8 +347,9 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Refresh, View } from '@element-plus/icons-vue'
+import { Boxes, KeyRound, Radar, RefreshCw, SatelliteDish, ScrollText } from '@lucide/vue'
 import CountUpValue from '@/components/CountUpValue.vue'
+import SignalWave from '@/components/SignalWave.vue'
 import { adminApi } from '@/api/admin'
 import type { DashboardAnalyticsRange, DashboardBreakdownItem, DashboardData, ModelProbeResponse } from '@/types'
 import { loadEcharts } from '@/utils/echartsLoader'
@@ -921,25 +953,124 @@ onUnmounted(() => {
   min-height: 100%;
 }
 
-.dashboard-header {
+/* -- Command deck hero -------------------------------------------------------- */
+
+.dashboard-deck {
+  position: relative;
   display: flex;
+  margin-bottom: 20px;
+  padding: clamp(22px, 3vw, 38px);
+  align-items: center;
   justify-content: space-between;
-  align-items: flex-start;
+  gap: 36px;
+  overflow: hidden;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-lg);
+  background:
+    radial-gradient(ellipse 60% 90% at 8% -10%, var(--crc-accent-soft) 0%, transparent 56%),
+    radial-gradient(ellipse 50% 75% at 100% 115%, var(--crc-info-soft) 0%, transparent 60%),
+    linear-gradient(140deg, var(--crc-surface) 0%, var(--crc-canvas) 100%);
+  box-shadow: var(--crc-shadow-sm);
 }
 
-.dashboard-header__meta {
+.dashboard-deck__wave {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.5;
+}
+
+.dashboard-deck__left,
+.dashboard-deck__right {
+  position: relative;
+  z-index: 1;
+}
+
+.dashboard-deck__left {
+  max-width: 520px;
+}
+
+.dashboard-deck__eyebrow {
+  display: flex;
+  margin: 0 0 14px;
+  align-items: center;
+  gap: 10px;
+  color: var(--crc-accent);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+}
+
+.dashboard-deck__eyebrow::before {
+  content: '';
+  width: 24px;
+  height: 1px;
+  background: var(--crc-accent);
+}
+
+.dashboard-deck__title {
+  margin: 0;
+  color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
+  font-size: clamp(28px, 3.4vw, 46px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.12;
+}
+
+.dashboard-deck__desc {
+  margin: 12px 0 0;
+  color: var(--crc-text-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.dashboard-deck .dashboard-header__chips {
+  display: flex;
+  margin-top: 18px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dashboard-deck__right {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.dashboard-deck__headline-stat {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
-  white-space: nowrap;
+  gap: 4px;
 }
 
-.dashboard-header__chips {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
+.dashboard-deck__stat-label {
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+}
+
+.dashboard-deck__stat-value {
+  color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
+  font-size: clamp(40px, 4.6vw, 64px);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.dashboard-deck__stat-sub {
+  color: var(--crc-text-muted);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
 }
 
 .dashboard-header__controls {
@@ -949,9 +1080,13 @@ onUnmounted(() => {
 }
 
 .refresh-label {
-  color: var(--crc-text-muted);
-  font-size: 12px;
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
 }
+
+/* -- KPI metric cards ----------------------------------------------------------- */
 
 .kpi-wrap {
   margin-top: 4px;
@@ -964,7 +1099,7 @@ onUnmounted(() => {
 @keyframes kpi-card-in {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(12px);
   }
   to {
     opacity: 1;
@@ -973,7 +1108,7 @@ onUnmounted(() => {
 }
 
 .kpi-grid .el-col {
-  animation: kpi-card-in var(--crc-duration-slow) var(--crc-ease-out) backwards;
+  animation: kpi-card-in var(--crc-duration-slow) var(--crc-ease-expo) backwards;
 }
 
 .kpi-grid .el-col:nth-child(2) {
@@ -990,8 +1125,8 @@ onUnmounted(() => {
 
 .metric-card {
   position: relative;
-  min-height: 118px;
-  padding: 18px;
+  min-height: 138px;
+  padding: 18px 20px;
   overflow: hidden;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius);
@@ -1003,9 +1138,9 @@ onUnmounted(() => {
 }
 
 .metric-card:hover {
-  border-color: var(--crc-border-strong);
+  border-color: var(--metric-accent, var(--crc-border-strong));
   box-shadow: var(--crc-shadow-md);
-  transform: translateY(-2px);
+  transform: translateY(-3px);
 }
 
 .metric-card--skeleton {
@@ -1021,7 +1156,7 @@ onUnmounted(() => {
   position: absolute;
   inset: 0 auto auto 0;
   width: 100%;
-  height: 3px;
+  height: 2px;
   background: linear-gradient(
     90deg,
     var(--metric-accent, var(--crc-accent)),
@@ -1029,41 +1164,83 @@ onUnmounted(() => {
   );
 }
 
-.metric-card--blue {
-  --metric-accent: var(--crc-info);
+.metric-card::after {
+  content: '';
+  position: absolute;
+  right: -34px;
+  bottom: -34px;
+  width: 110px;
+  height: 110px;
+  border: 1px solid var(--metric-accent, var(--crc-accent));
+  border-radius: 50%;
+  opacity: 0.08;
+  transition: opacity var(--crc-duration) var(--crc-ease),
+    transform var(--crc-duration) var(--crc-ease-out);
 }
 
-.metric-card--teal {
-  --metric-accent: var(--crc-accent);
+.metric-card:hover::after {
+  opacity: 0.2;
+  transform: scale(1.12);
 }
 
-.metric-card--amber {
-  --metric-accent: var(--crc-warning);
+.metric-card--blue { --metric-accent: var(--crc-info); }
+.metric-card--teal { --metric-accent: var(--crc-accent); }
+.metric-card--amber { --metric-accent: var(--crc-warning); }
+.metric-card--violet { --metric-accent: var(--crc-violet); }
+
+.metric-card__top {
+  display: flex;
+  margin-bottom: 14px;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.metric-card--violet {
-  --metric-accent: var(--crc-violet);
+.metric-card__icon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  color: var(--metric-accent, var(--crc-accent));
+  background: var(--crc-canvas);
+}
+
+.metric-card__tag {
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
 }
 
 .metric-card__value {
   color: var(--crc-text-strong);
-  font-size: 28px;
-  font-weight: 680;
-  line-height: 1.15;
-  letter-spacing: -0.01em;
+  font-family: var(--crc-font-display);
+  font-size: 38px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
 }
 
 .metric-card__label {
-  margin-top: 8px;
-  font-size: 14px;
+  margin-top: 7px;
   color: var(--crc-text);
+  font-size: 13px;
+  font-weight: 550;
 }
 
 .metric-card__detail {
-  margin-top: 10px;
-  font-size: 12px;
+  margin-top: 5px;
   color: var(--crc-text-muted);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
 }
+
+/* -- Status strip ------------------------------------------------------------------ */
 
 .status-strip {
   display: grid;
@@ -1077,23 +1254,30 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 14px;
+  padding: 12px 16px;
   border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius);
+  border-radius: var(--crc-radius-sm);
   background: var(--crc-surface);
   box-shadow: var(--crc-shadow-xs);
 }
 
 .status-pill span {
-  color: var(--crc-text-muted);
-  font-size: 13px;
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 .status-pill strong {
   color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
   font-size: 14px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
+
+/* -- Chart cards --------------------------------------------------------------------- */
 
 .charts-grid {
   margin-top: 16px;
@@ -1113,7 +1297,7 @@ onUnmounted(() => {
 }
 
 .model-health-card .summary-chip strong {
-  font-size: 17px;
+  font-size: 20px;
   overflow-wrap: anywhere;
 }
 
@@ -1146,10 +1330,6 @@ onUnmounted(() => {
   box-shadow: var(--crc-shadow-xs);
 }
 
-.chart-card--trend {
-  background: var(--crc-surface);
-}
-
 .card-header {
   display: flex;
   justify-content: space-between;
@@ -1161,13 +1341,25 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.card-eyebrow {
+  margin: 0 0 6px;
+  color: var(--crc-accent);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+}
+
 .card-header h2 {
   margin: 0;
   color: var(--crc-text-strong);
-  font-size: 16px;
+  font-family: var(--crc-font-display);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.card-header p {
+.card-header p:not(.card-eyebrow) {
   margin: 6px 0 0;
   color: var(--crc-text-muted);
   font-size: 13px;
@@ -1187,22 +1379,28 @@ onUnmounted(() => {
 .summary-chip {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 12px 14px;
+  gap: 5px;
+  padding: 13px 15px;
   border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius);
-  background: var(--crc-surface-muted);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-canvas);
 }
 
 .summary-chip strong {
   color: var(--crc-text-strong);
-  font-size: 18px;
-  line-height: 1.2;
+  font-family: var(--crc-font-display);
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
 }
 
 .summary-chip span {
   color: var(--crc-text-muted);
-  font-size: 12px;
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
 }
 
 .chart {
@@ -1231,24 +1429,22 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1200px) {
+  .dashboard-deck {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dashboard-deck__right,
+  .dashboard-deck__headline-stat {
+    align-items: flex-start;
+  }
+
   .status-strip {
     grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 768px) {
-  .dashboard-header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .dashboard-header__meta {
-    width: 100%;
-    align-items: flex-start;
-    white-space: normal;
-  }
-
-  .dashboard-header__chips,
   .dashboard-header__controls {
     justify-content: flex-start;
   }

@@ -2,12 +2,13 @@
   <div class="crc-page logs-page">
     <header class="crc-page-header">
       <div>
+        <p class="crc-eyebrow">EVIDENCE // GATEWAY LOGS</p>
         <h1 class="crc-page-title">日志管理</h1>
         <p class="crc-page-description">按请求、模型和错误类别检索网关调用证据。</p>
       </div>
       <el-tooltip content="刷新日志" placement="bottom">
         <el-button
-          :icon="Refresh"
+          :icon="RefreshCw"
           aria-label="刷新日志"
           circle
           :loading="loading"
@@ -163,9 +164,7 @@
         <el-table-column label="API 名称" width="190">
           <template #default="{ row }">
             <div class="api-cell">
-              <el-icon class="api-icon">
-                <component :is="row.apiIcon" />
-              </el-icon>
+              <component :is="row.apiIcon" :size="14" :stroke-width="1.8" class="api-icon" />
               <span>{{ row.apiName }}</span>
             </div>
           </template>
@@ -202,16 +201,16 @@
             <div class="token-cell">
               <div class="token-pair">
                 <div class="token-line token-line--prompt">
-                  <el-icon><Top /></el-icon>
+                  <ArrowUp :size="12" :stroke-width="2.2" />
                   <span>{{ row.prompt_tokens }}</span>
                 </div>
                 <div class="token-line token-line--completion">
-                  <el-icon><Bottom /></el-icon>
+                  <ArrowDown :size="12" :stroke-width="2.2" />
                   <span>{{ row.completion_tokens }}</span>
                 </div>
               </div>
               <div class="token-line token-line--total">
-                <el-icon><PieChart /></el-icon>
+                <Sigma :size="12" :stroke-width="2" />
                 <strong>{{ row.total_tokens }}</strong>
               </div>
             </div>
@@ -279,17 +278,17 @@
 import { ref, onMounted, computed, type Component } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  Bottom,
-  ChatDotRound,
-  Connection,
-  DataLine,
+  ArrowDown,
+  ArrowUp,
+  CircleHelp,
+  ChartSpline,
   Download,
-  PieChart,
-  QuestionFilled,
-  Refresh,
-  Top,
-  UploadFilled
-} from '@element-plus/icons-vue'
+  MessageSquareText,
+  RefreshCw,
+  Sigma,
+  Upload,
+  Waypoints
+} from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { UsageLog } from '@/types'
 import {
@@ -381,7 +380,7 @@ const resolveApiDescriptor = (log: UsageLog): ApiDescriptor => {
     return {
       name: log.api_name,
       logType: log.log_type?.trim() || '通用',
-      icon: QuestionFilled
+      icon: CircleHelp
     }
   }
 
@@ -390,18 +389,18 @@ const resolveApiDescriptor = (log: UsageLog): ApiDescriptor => {
     return { name: '文件下载', logType: '文件', icon: Download }
   }
   if (endpoint.includes('/files') || endpoint.includes('/upload')) {
-    return { name: '文件上传', logType: '文件', icon: UploadFilled }
+    return { name: '文件上传', logType: '文件', icon: Upload }
   }
   if (endpoint.includes('/responses')) {
-    return { name: 'Responses API', logType: '推理', icon: ChatDotRound }
+    return { name: 'Responses API', logType: '推理', icon: MessageSquareText }
   }
   if (endpoint.includes('/chat/completions')) {
-    return { name: 'ChatCompletions API', logType: '对话', icon: Connection }
+    return { name: 'ChatCompletions API', logType: '对话', icon: Waypoints }
   }
   if (endpoint.includes('/embeddings')) {
-    return { name: 'Embeddings API', logType: '向量', icon: DataLine }
+    return { name: 'Embeddings API', logType: '向量', icon: ChartSpline }
   }
-  return { name: '通用 API', logType: '其它', icon: QuestionFilled }
+  return { name: '通用 API', logType: '其它', icon: CircleHelp }
 }
 
 const buildDisplayLog = (log: UsageLog): DisplayLog => {
@@ -750,5 +749,34 @@ onMounted(() => {
     overflow-x: auto;
     padding-bottom: 4px;
   }
+}
+
+.summary-item strong {
+  font-family: var(--crc-font-display);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.summary-label {
+  color: var(--crc-text-subtle);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.token-cell {
+  font-family: var(--crc-font-mono);
+  font-size: 12px;
+}
+
+.api-cell span {
+  font-weight: 550;
+}
+
+.filter-disclosure-title {
+  font-family: var(--crc-font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 </style>

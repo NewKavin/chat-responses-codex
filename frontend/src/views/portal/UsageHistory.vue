@@ -20,25 +20,34 @@
           circle
           @click="reloadCurrentPage"
         >
-          <el-icon><Refresh /></el-icon>
+          <RefreshCw :size="15" :stroke-width="1.8" />
         </el-button>
       </el-tooltip>
     </div>
 
-    <div v-loading="loading" class="history-content">
+    <div v-loading="loading" class="history-content crc-stagger">
         <div class="history-chart-grid">
           <section class="crc-surface history-chart-surface">
-            <h2>每日请求</h2>
+            <div class="history-surface-head">
+              <p class="crc-eyebrow">TRAFFIC // DAILY</p>
+              <h2>每日请求</h2>
+            </div>
             <div ref="dailyChartRef" class="chart"></div>
           </section>
           <section class="crc-surface history-chart-surface">
-            <h2>Token 使用趋势</h2>
+            <div class="history-surface-head">
+              <p class="crc-eyebrow">TOKENS // TREND</p>
+              <h2>Token 使用趋势</h2>
+            </div>
             <div ref="tokenChartRef" class="chart"></div>
           </section>
         </div>
 
         <section class="history-table-section">
-          <h2>最近请求</h2>
+          <div class="history-surface-head">
+            <p class="crc-eyebrow">LOGS // RECENT</p>
+            <h2>最近请求</h2>
+          </div>
           <div class="crc-table-shell">
           <el-table
             :data="data.recent_logs"
@@ -74,16 +83,16 @@
                 <div class="token-cell">
                   <div class="token-pair">
                     <div class="token-line token-line--prompt">
-                      <el-icon><Top /></el-icon>
+                      <ArrowUp :size="12" :stroke-width="2.2" />
                       <span>{{ formatToken(row.prompt_tokens) }}</span>
                     </div>
                     <div class="token-line token-line--completion">
-                      <el-icon><Bottom /></el-icon>
+                      <ArrowDown :size="12" :stroke-width="2.2" />
                       <span>{{ formatToken(row.completion_tokens) }}</span>
                     </div>
                   </div>
                   <div class="token-line token-line--total">
-                    <el-icon><PieChart /></el-icon>
+                    <Sigma :size="12" :stroke-width="2" />
                     <strong>{{ formatToken(row.total_tokens) }}</strong>
                   </div>
                 </div>
@@ -121,7 +130,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, Top, Bottom, PieChart } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowUp, RefreshCw, Sigma } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
 import type { PortalUsageHistory } from '@/types'
 import { buildUsageHistoryBuckets } from '@/utils/usageHistoryChart'
@@ -432,16 +441,32 @@ onUnmounted(() => {
 .history-chart-surface {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   min-height: 0;
-  padding: 16px;
+  padding: 18px 20px;
+  transition: border-color var(--crc-duration) var(--crc-ease),
+    box-shadow var(--crc-duration) var(--crc-ease);
+}
+
+.history-chart-surface:hover {
+  border-color: var(--crc-border-strong);
+  box-shadow: var(--crc-shadow-sm);
+}
+
+.history-surface-head {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .history-chart-surface h2,
 .history-table-section h2 {
   margin: 0;
   color: var(--crc-text-strong);
-  font-size: 14px;
+  font-family: var(--crc-font-display);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .chart {
@@ -449,7 +474,6 @@ onUnmounted(() => {
   height: 280px;
   min-height: 280px;
   border-radius: var(--crc-radius-sm);
-  background: var(--crc-surface-muted);
 }
 
 .history-table-section {
@@ -468,20 +492,22 @@ onUnmounted(() => {
 .token-cell {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  line-height: 1.2;
+  gap: 3px;
+  font-family: var(--crc-font-mono);
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .token-pair {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .token-line {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
 
 .token-line--prompt {
