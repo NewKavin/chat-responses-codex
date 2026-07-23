@@ -3757,6 +3757,9 @@ async fn process_gateway_request_inner(
         .flatten()
         .map(str::to_owned);
     let mut requested_features = requested_features_for_request(endpoint, &body);
+    if legacy_continuation_upstream_id.is_some() {
+        requested_features.allow_reasoning_history_downgrade = false;
+    }
     if let Some(continuation) = exact_continuation.as_ref() {
         continuation.apply_to_requested(&mut requested_features);
     }

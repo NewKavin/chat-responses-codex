@@ -150,6 +150,126 @@ async fn legacy_continuation_rejects_ambiguous_multi_protocol_upstream_before_di
 }
 
 #[tokio::test]
+async fn legacy_continuation_does_not_downgrade_reasoning_tool_history() {
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let base_url =
+        spawn_recording_chat_upstream("legacy-reasoning", "upstream-secret", hits.clone()).await;
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let model = "arbitrary/legacy-reasoning";
+    let upstream = UpstreamConfig {
+        id: "legacy-upstream".into(),
+        name: "legacy-upstream".into(),
+        base_url,
+        api_key: "upstream-secret".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec![model.into()],
+        active: true,
+        ..Default::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream.clone()],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Partial;
+    profile.reasoning_carrier =
+        Some(chat_responses_codex::capabilities::ReasoningCarrier::ReasoningContent);
+    profile
+        .capabilities
+        .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::ReasoningReplay, EvidenceState::Rejected);
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+    state.store_response_history(
+        "legacy-reasoning",
+        vec![
+            json!({
+                "type": "reasoning",
+                "id": "reasoning-legacy",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "must preserve"}]
+            }),
+            json!({
+                "type": "function_call",
+                "call_id": "call-legacy",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}"
+            }),
+        ],
+        serde_json::Map::from_iter([(
+            "_gateway_continuation".to_string(),
+            json!({"upstream_id": upstream.id}),
+        )]),
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "previous_response_id": "legacy-reasoning",
+                        "input": [{
+                            "type": "function_call_output",
+                            "call_id": "call-legacy",
+                            "output": "/workspace"
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "gateway_response_history_invalid");
+    assert!(hits.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn responses_private_continuation_keys_are_stripped_before_upstream_dispatch() {
     let captured = Arc::new(Mutex::new(None::<Value>));
     let tempdir = tempdir().unwrap();

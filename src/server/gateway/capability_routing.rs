@@ -241,6 +241,7 @@ pub(super) fn requested_features_for_request(
     let mut required = BTreeSet::new();
     let mut optional = BTreeSet::new();
     let mut explicitly_selected_tool_kind = None;
+    let mut allow_reasoning_history_downgrade = false;
     match endpoint {
         EndpointKind::Responses => {
             scan_responses_images(body, &mut required);
@@ -251,7 +252,7 @@ pub(super) fn requested_features_for_request(
                 &mut explicitly_selected_tool_kind,
             );
             scan_responses_files(body, &mut required);
-            scan_responses_reasoning(body, &mut required);
+            scan_responses_reasoning(body, &mut required, &mut allow_reasoning_history_downgrade);
         }
         EndpointKind::ChatCompletions => {
             scan_chat_images(body, &mut required);
@@ -275,6 +276,7 @@ pub(super) fn requested_features_for_request(
         required,
         optional,
         explicitly_selected_tool_kind,
+        allow_reasoning_history_downgrade,
         ..RequestedFeatures::default()
     }
 }
@@ -642,12 +644,10 @@ pub(super) fn adapt_requested_features_for_protocol(
 ) -> RequestedFeatures {
     let mut adapted = requested.clone();
     if protocol == UpstreamProtocol::ChatCompletions {
-        // Chat fallback can safely omit standalone Responses reasoning history.
-        // Tool continuations and exact gateway continuations require the original
-        // reasoning carrier, so they remain hard capability requirements.
-        if adapted.continuation_profile.is_none()
-            && !adapted.required.contains(&Capability::ToolContinuation)
-        {
+        // Unpinned client replay can omit Responses reasoning history while
+        // retaining tool calls and outputs. Exact gateway continuations remain
+        // hard requirements through their pinned continuation profile.
+        if adapted.continuation_profile.is_none() && adapted.allow_reasoning_history_downgrade {
             for capability in [Capability::ReasoningOutput, Capability::ReasoningReplay] {
                 if adapted.required.remove(&capability) {
                     adapted.optional.insert(capability);
@@ -896,12 +896,20 @@ fn scan_responses_tools(
     }
 }
 
-fn scan_responses_reasoning(body: &Value, required: &mut BTreeSet<Capability>) {
-    fn scan(value: &Value, required: &mut BTreeSet<Capability>) {
+fn scan_responses_reasoning(
+    body: &Value,
+    required: &mut BTreeSet<Capability>,
+    allow_reasoning_history_downgrade: &mut bool,
+) {
+    fn scan(
+        value: &Value,
+        required: &mut BTreeSet<Capability>,
+        allow_reasoning_history_downgrade: &mut bool,
+    ) {
         match value {
             Value::Array(items) => {
                 for item in items {
-                    scan(item, required);
+                    scan(item, required, allow_reasoning_history_downgrade);
                 }
             }
             Value::Object(object) => {
@@ -909,6 +917,7 @@ fn scan_responses_reasoning(body: &Value, required: &mut BTreeSet<Capability>) {
                     Some("reasoning") => {
                         required.insert(Capability::ReasoningOutput);
                         required.insert(Capability::ReasoningReplay);
+                        *allow_reasoning_history_downgrade = true;
                     }
                     Some("function_call")
                         if object
@@ -927,7 +936,7 @@ fn scan_responses_reasoning(body: &Value, required: &mut BTreeSet<Capability>) {
                     _ => {}
                 }
                 if let Some(content) = object.get("content") {
-                    scan(content, required);
+                    scan(content, required, allow_reasoning_history_downgrade);
                 }
             }
             _ => {}
@@ -935,7 +944,7 @@ fn scan_responses_reasoning(body: &Value, required: &mut BTreeSet<Capability>) {
     }
 
     if let Some(input) = body.get("input") {
-        scan(input, required);
+        scan(input, required, allow_reasoning_history_downgrade);
     }
 }
 
@@ -1127,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_reasoning_tool_continuation_requires_replay_capabilities() {
+    fn chat_fallback_can_reduce_unpinned_reasoning_tool_history() {
         let requested = requested_features_for_request(
             EndpointKind::Responses,
             &json!({
@@ -1144,8 +1153,11 @@ mod tests {
 
         let adapted =
             adapt_requested_features_for_protocol(&requested, UpstreamProtocol::ChatCompletions);
-        assert!(adapted.required.contains(&Capability::ReasoningOutput));
-        assert!(adapted.required.contains(&Capability::ReasoningReplay));
+        assert!(!adapted.required.contains(&Capability::ReasoningOutput));
+        assert!(!adapted.required.contains(&Capability::ReasoningReplay));
+        assert!(adapted.optional.contains(&Capability::ReasoningOutput));
+        assert!(adapted.optional.contains(&Capability::ReasoningReplay));
+        assert!(adapted.required.contains(&Capability::ToolContinuation));
     }
 
     #[test]

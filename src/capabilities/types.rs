@@ -550,6 +550,7 @@ pub struct RequestedFeatures {
     pub required: BTreeSet<Capability>,
     pub optional: BTreeSet<Capability>,
     pub explicitly_selected_tool_kind: Option<String>,
+    pub allow_reasoning_history_downgrade: bool,
     pub continuation_profile: Option<DialectProfileKey>,
     pub continuation_reasoning_carrier: Option<ReasoningCarrier>,
 }

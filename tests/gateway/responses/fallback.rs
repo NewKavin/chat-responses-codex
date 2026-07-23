@@ -266,6 +266,165 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
 }
 
 #[tokio::test]
+async fn chat_only_fallback_drops_unpinned_reasoning_and_preserves_tool_history() {
+    let capture = Arc::new(Mutex::new(RequestCapture::default()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let capture = capture_clone.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let body = to_bytes(body, usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                let mut lock = capture.lock().unwrap();
+                lock.path = parts.uri.path().to_string();
+                lock.request_body = Some(payload);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-model-switch",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "synthetic/chat-only",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "continued"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let model = "synthetic/chat-only";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "chat-only".into(),
+                name: "chat-only".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "input": [
+                            {
+                                "type": "reasoning",
+                                "id": "reasoning-from-previous-model",
+                                "summary": [],
+                                "content": [{
+                                    "type": "reasoning_text",
+                                    "text": "private history"
+                                }]
+                            },
+                            {
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "name": "exec_command",
+                                "arguments": "{\"cmd\":\"pwd\"}"
+                            },
+                            {
+                                "type": "function_call_output",
+                                "call_id": "call-1",
+                                "output": "/workspace"
+                            },
+                            {"role": "user", "content": "continue with this model"}
+                        ],
+                        "tools": [{
+                            "type": "function",
+                            "name": "exec_command",
+                            "description": "Run a command",
+                            "parameters": {"type": "object"}
+                        }],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-chat2responses-downgrade"],
+        "reasoning_history_dropped"
+    );
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.path, "/v1/chat/completions");
+    let upstream_body = captured.request_body.unwrap();
+    let messages = upstream_body["messages"].as_array().unwrap();
+    assert!(messages.iter().all(|message| {
+        message.get("reasoning_content").is_none()
+            && !message.to_string().contains("private history")
+    }));
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(
+        messages[0]["tool_calls"][0]["function"]["name"],
+        "exec_command"
+    );
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "call-1");
+    assert_eq!(messages[1]["content"], "/workspace");
+}
+
+#[tokio::test]
 async fn downstream_responses_bad_response_status_preserves_tools_without_retry() {
     let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
     let tempdir = tempdir().unwrap();
