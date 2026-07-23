@@ -1098,6 +1098,9 @@ impl AppState {
     }
 
     pub fn queue_capability_probe(&self, job: ProbeJob) -> bool {
+        if job.reason.is_automatic() && !self.config.automatic_capability_probes_enabled {
+            return false;
+        }
         if !self
             .capability_snapshot()
             .configuration
@@ -2754,7 +2757,9 @@ impl AppState {
         }
 
         let snapshot = self.capability_snapshot();
-        if !snapshot.configuration.source().probe.enabled {
+        if !self.config.automatic_capability_probes_enabled
+            || !snapshot.configuration.source().probe.enabled
+        {
             return Ok(Vec::new());
         }
         let refresh_interval_seconds = snapshot
@@ -3058,7 +3063,9 @@ impl AppState {
         jobs: BTreeMap<DialectProfileKey, BTreeSet<String>>,
         reason: ProbeReason,
     ) -> io::Result<()> {
-        if jobs.is_empty() {
+        if jobs.is_empty()
+            || (reason.is_automatic() && !self.config.automatic_capability_probes_enabled)
+        {
             return Ok(());
         }
         let routing = self.routing_snapshot().await;

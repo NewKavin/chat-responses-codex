@@ -20,6 +20,7 @@ describe('admin ui structure', () => {
 
     expect(adminProbe).toContain('crc-page model-probe-page')
     expect(adminProbe).toContain('crc-table-shell')
+    expect(adminProbe).toContain('会消耗模型 token')
     expect(board).toContain('probe-page-header')
     expect(board).not.toContain('summary-card')
   })

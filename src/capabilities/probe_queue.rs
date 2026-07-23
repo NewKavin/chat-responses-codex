@@ -12,6 +12,12 @@ pub enum ProbeReason {
     Manual,
 }
 
+impl ProbeReason {
+    pub fn is_automatic(self) -> bool {
+        !matches!(self, Self::Manual)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeConfigurationBinding {
     pub configuration_fingerprint: String,

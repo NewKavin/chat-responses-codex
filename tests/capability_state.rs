@@ -239,6 +239,51 @@ async fn disabled_capability_probe_configuration_rejects_jobs_and_reconciliation
 }
 
 #[tokio::test]
+async fn default_runtime_does_not_queue_automatic_capability_probes() {
+    let dir = tempdir().unwrap();
+    let upstream = learning_upstream("up-default-no-auto-probe", "glm-5.2");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream],
+            downstreams: vec![startup_downstream()],
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let jobs = state
+        .reconcile_dialect_profiles(1_700_000_000)
+        .await
+        .unwrap();
+
+    assert!(jobs.is_empty());
+}
+
+#[tokio::test]
+async fn default_runtime_rejects_automatic_but_allows_manual_probe_jobs() {
+    let dir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let (sender, mut receiver) = mpsc::channel(2);
+    state.set_capability_probe_sender(sender);
+
+    let mut automatic = single_probe_job(blocker_probe_batch());
+    automatic.reason = ProbeReason::ConfigurationChanged;
+    assert!(!state.queue_capability_probe(automatic));
+
+    let manual = single_probe_job(blocker_probe_batch());
+    assert!(state.queue_capability_probe(manual));
+    let queued = receiver
+        .try_recv()
+        .expect("manual probe should remain available");
+    assert_eq!(single_probe_job(queued).reason, ProbeReason::Manual);
+}
+
+#[tokio::test]
 async fn targeted_probe_job_is_bound_to_the_requested_key_fingerprint() {
     let dir = tempdir().unwrap();
     let upstream = UpstreamConfig {
@@ -751,9 +796,15 @@ async fn multi_key_startup_discards_ambiguous_legacy_evidence_and_queues_both_ke
     let upstream = startup_keyed_upstream(&[("key-a", &["glm-5.2"]), ("key-b", &["glm-5.2"])]);
     let legacy_key = write_legacy_startup_fixture(&path, upstream.clone()).await;
 
-    let loaded = AppState::load_from_path(&path, AppConfig::default())
-        .await
-        .unwrap();
+    let loaded = AppState::load_from_path(
+        &path,
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     assert!(loaded.capability_snapshot().profiles.is_empty());
     let jobs = loaded
         .reconcile_dialect_profiles(1_700_000_000)
@@ -1152,7 +1203,14 @@ async fn removing_upstream_clears_capability_profiles_for_that_upstream() {
 async fn inserting_upstream_queues_capability_probe_jobs_for_active_routes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
-    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
+    let state = AppState::new(
+        PersistedState::default(),
+        &path,
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..AppConfig::default()
+        },
+    );
     state
         .replace_capability_configuration(CapabilityConfiguration::default())
         .await
@@ -1190,7 +1248,14 @@ async fn inserting_upstream_queues_capability_probe_jobs_for_active_routes() {
 async fn updating_upstream_queues_capability_probe_jobs_for_active_routes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
-    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
+    let state = AppState::new(
+        PersistedState::default(),
+        &path,
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..AppConfig::default()
+        },
+    );
     state
         .replace_capability_configuration(CapabilityConfiguration::default())
         .await
@@ -1684,7 +1749,14 @@ async fn updating_upstream_succeeds_after_probe_queue_closes() {
 async fn freekey_sync_queues_capability_probe_for_created_route() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
-    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
+    let state = AppState::new(
+        PersistedState::default(),
+        &path,
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..AppConfig::default()
+        },
+    );
     state
         .replace_capability_configuration(CapabilityConfiguration::default())
         .await
@@ -1731,7 +1803,14 @@ async fn freekey_sync_queues_capability_probe_for_created_route() {
 async fn freekey_sync_does_not_requeue_current_route_profile() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("state.json");
-    let state = AppState::new(PersistedState::default(), &path, AppConfig::default());
+    let state = AppState::new(
+        PersistedState::default(),
+        &path,
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..AppConfig::default()
+        },
+    );
     state
         .replace_capability_configuration(CapabilityConfiguration::default())
         .await

@@ -27,7 +27,8 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
-- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=900`
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0`
+- `AUTOMATIC_CAPABILITY_PROBES_ENABLED=false`
 - `CAPABILITY_PROBE_QUEUE_CAPACITY=256`
 - `POSTGRES_POOL_MAX_SIZE=16`
 - `ADMIN_LOGS_PAGE_SIZE_MAX=200`
@@ -85,7 +86,13 @@ fresh model-probe snapshot. Keep it separate from `DASHBOARD_CACHE_TTL_SECONDS`,
 which controls how long the backend reuses the cached probe result before
 calling upstreams again.
 `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` controls background model-key
-synchronization and defaults to `900` seconds. Set to 0 to disable background model-key synchronization.
+synchronization and defaults to `0`. Set to 0 to disable background model-key synchronization.
+Set a positive interval only when periodic `/v1/models` discovery is required.
+
+`AUTOMATIC_CAPABILITY_PROBES_ENABLED` defaults to `false`. Leave it disabled to
+prevent background Chat/Responses probe requests from consuming model tokens.
+Manual capability probes and the admin “真实验证并应用” action are explicit real
+inference requests and still consume model tokens when invoked.
 
 ## Multi-Key Route Resilience And Upgrade
 

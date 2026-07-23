@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .max(1),
         upstream_model_key_sync_interval_seconds: env_u64(
             "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
-            900,
+            0,
         ),
         dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
@@ -101,6 +101,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             20,
         )
         .max(1),
+        automatic_capability_probes_enabled: env_bool("AUTOMATIC_CAPABILITY_PROBES_ENABLED", false),
         admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
         upstream_http_pool_max_idle_per_host: env_usize("UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST", 32)
             .max(8),
@@ -158,6 +159,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         hedge_delay_ms = config.upstream_hedge_delay_ms,
         hedge_interval_ms = config.upstream_hedge_interval_ms,
         hedge_max_extra_attempts = config.upstream_hedge_max_extra_attempts,
+        automatic_capability_probes_enabled = config.automatic_capability_probes_enabled,
+        upstream_model_key_sync_interval_seconds = config.upstream_model_key_sync_interval_seconds,
         backend = if env::var("DATABASE_URL")
             .ok()
             .map(|value| !value.trim().is_empty())

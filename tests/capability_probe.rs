@@ -465,6 +465,7 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
         let tempdir = tempdir().unwrap();
         let config = AppConfig {
             capability_probe_request_timeout_seconds: 2,
+            automatic_capability_probes_enabled: true,
             ..AppConfig::default()
         };
         let state = AppState::new(
@@ -552,7 +553,10 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
                 ..PersistedState::default()
             },
             tempdir().unwrap().path().join("state.json"),
-            AppConfig::default(),
+            AppConfig {
+                automatic_capability_probes_enabled: true,
+                ..AppConfig::default()
+            },
         );
         state
             .replace_capability_configuration(CapabilityConfiguration {
@@ -697,7 +701,10 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                 ..PersistedState::default()
             },
             tempdir().unwrap().path().join("state.json"),
-            AppConfig::default(),
+            AppConfig {
+                automatic_capability_probes_enabled: true,
+                ..AppConfig::default()
+            },
         );
         state
             .replace_capability_configuration(CapabilityConfiguration {
@@ -2622,7 +2629,10 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                 global_context_profiles: std::collections::HashMap::new(),
             },
             state_path,
-            AppConfig::default(),
+            AppConfig {
+                automatic_capability_probes_enabled: true,
+                ..AppConfig::default()
+            },
         );
         let (sender, mut receiver) = mpsc::channel(8);
         state.set_capability_probe_sender(sender);

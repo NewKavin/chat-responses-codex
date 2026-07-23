@@ -3,7 +3,7 @@
     <div class="crc-toolbar qualification-command-bar">
       <div>
         <span class="qualification-command-title">模型资格验证</span>
-        <p>向活动上游发起真实请求，并按验证结果更新 test 下游模型列表。</p>
+        <p>向活动上游发起真实请求，会消耗模型 token，并按结果更新 test 下游模型列表。</p>
       </div>
       <el-button
         type="primary"
@@ -20,7 +20,7 @@
       tone="admin"
       scope-label="管理员视图"
       title="模型探测"
-      subtitle="自动轮询刷新通道健康、模型覆盖和最近探测结果。"
+      subtitle="自动轮询模型列表与通道状态；此刷新不发送推理请求。"
       :data="probeData"
       :loading="loading"
       :error-message="loadError"
@@ -199,7 +199,7 @@ const loadData = async () => {
 const runQualification = async () => {
   try {
     await ElMessageBox.confirm(
-      '将向所有活动上游发送真实推理请求，并原子更新 test 下游模型列表。',
+      '将向所有活动上游发送真实推理请求，会消耗模型 token，并原子更新 test 下游模型列表。',
       '确认真实验证并应用',
       {
         type: 'warning',

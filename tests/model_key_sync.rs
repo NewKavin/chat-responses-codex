@@ -85,6 +85,14 @@ fn sync_state(
     base_url: String,
     api_key_models: Vec<ApiKeyModelConfig>,
 ) -> (tempfile::TempDir, AppState) {
+    sync_state_with_interval(base_url, api_key_models, 0)
+}
+
+fn sync_state_with_interval(
+    base_url: String,
+    api_key_models: Vec<ApiKeyModelConfig>,
+    interval_seconds: u64,
+) -> (tempfile::TempDir, AppState) {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
@@ -106,6 +114,7 @@ fn sync_state(
         tempdir.path().join("state.json"),
         AppConfig {
             admin_upstream_timeout_seconds: 1,
+            upstream_model_key_sync_interval_seconds: interval_seconds,
             ..AppConfig::default()
         },
     );
@@ -286,9 +295,10 @@ async fn targeted_queue_deduplicates_and_clears_confirmed_model_quarantine() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let (_tempdir, state) = sync_state(
+    let (_tempdir, state) = sync_state_with_interval(
         format!("http://{address}"),
         vec![mapping("key-a", &["old-a"]), mapping("key-b", &["old-b"])],
+        900,
     );
     let key_fingerprint = upstream_key_fingerprint("sync-upstream", "key-a");
     let route = RouteHealthKey {
@@ -440,9 +450,10 @@ async fn nonzero_interval_waits_for_deterministic_startup_and_upstream_jitter() 
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let (_tempdir, state) = sync_state(
+    let (_tempdir, state) = sync_state_with_interval(
         format!("http://{address}"),
         vec![mapping("key-a", &["old-a"]), mapping("key-b", &["old-b"])],
+        900,
     );
     let startup_delay = ModelKeySyncService::startup_delay(&state);
 

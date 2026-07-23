@@ -91,7 +91,8 @@ cargo run
 - `ADMIN_PASSWORD=admin`
 - `APP_NAME=chat-responses-codex`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
-- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=900`
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0`
+- `AUTOMATIC_CAPABILITY_PROBES_ENABLED=false`
 
 启动后打开：
 
@@ -171,7 +172,8 @@ flowchart LR
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`：后台登录账号。
 - `APP_NAME`：页面和日志中的应用名。
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`：模型探测页自动刷新间隔，单位秒。
-- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：后台模型-key 映射同步间隔，默认 `900` 秒；设为 `0` 可禁用后台同步。
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：后台模型-key 映射同步间隔，默认 `0`（关闭）；设为正整数才会启用。
+- `AUTOMATIC_CAPABILITY_PROBES_ENABLED`：是否自动发送真实 Chat/Responses 能力探测请求，默认 `false`。启用会消耗模型 token；手工 capability probe 和“真实验证并应用”不受该自动开关控制，在管理员明确触发时仍会消耗 token。
 - `DASHBOARD_CACHE_TTL_SECONDS`：后端复用模型探测快照的缓存时间，单位秒。
 - `UPSTREAM_HEDGE_ENABLED`：是否为长时间没有首个可用输出的流式请求启用竞争尝试。
 - `UPSTREAM_HEDGE_DELAY_MS`：发起第一个额外竞争尝试前的等待时间，默认 `12000` 毫秒。
@@ -439,7 +441,8 @@ Common environment variables:
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`: admin login.
 - `APP_NAME`: application name shown in the UI and logs.
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS`: browser model-probe refresh interval in seconds.
-- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`: background model-key synchronization interval; defaults to `900`, and `0` disables it.
+- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`: background model-key synchronization interval; defaults to `0` (disabled), and a positive value enables it.
+- `AUTOMATIC_CAPABILITY_PROBES_ENABLED`: enables automatic real Chat/Responses capability probes. It defaults to `false`; enabling it consumes model tokens. Explicit manual probes still consume tokens when an administrator runs them.
 - `USAGE_LOG_ROTATION_MAX_BYTES`: file-backed log rotation threshold.
 - `USAGE_LOG_ARCHIVE_MAX_FILES`: maximum number of log archive files.
 - `RUST_LOG`: optional log level filter.
