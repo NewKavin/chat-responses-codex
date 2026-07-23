@@ -149,6 +149,9 @@ impl ChatStreamCanonicalizer {
             let delta = choice
                 .entry("delta")
                 .or_insert_with(|| Value::Object(Map::new()));
+            if delta.is_null() {
+                *delta = Value::Object(Map::new());
+            }
             let delta = delta.as_object_mut().ok_or_else(Self::invalid_stream)?;
             for field in ["tool_calls", "function_call", "function_calls"] {
                 if delta.get(field).is_some_and(Value::is_null) {
@@ -199,11 +202,10 @@ impl ChatStreamCanonicalizer {
         Ok(vec![event])
     }
 
-    /// Finishes on an upstream EOF. A provider must have emitted an explicit
-    /// terminal reason before closing; otherwise the gateway cannot infer why
-    /// generation stopped without changing semantics.
+    /// Finishes on a clean upstream EOF. A terminal may be synthesized only
+    /// when prior output makes the completion reason unambiguous.
     pub fn finish(&mut self) -> Result<Vec<Value>, ProtocolError> {
-        self.finish_inner(false)
+        self.finish_inner(true)
     }
 
     /// Finishes after the provider's `[DONE]` marker. `[DONE]` proves stream
@@ -278,12 +280,6 @@ impl ChatStreamCanonicalizer {
         let incoming_created = Self::optional_u64(object, "created")?;
 
         if self.identity_locked {
-            if incoming_id.is_some_and(|value| value != self.id)
-                || incoming_model.is_some_and(|value| value != self.model)
-                || incoming_created.is_some_and(|value| value != self.created)
-            {
-                return Err(Self::invalid_stream());
-            }
             return Ok(());
         }
 

@@ -1223,24 +1223,37 @@ fn chat_stream_ignores_events_after_terminal_output() {
 }
 
 #[test]
-fn chat_stream_canonicalizer_rejects_eof_without_explicit_terminal() {
+fn chat_stream_canonicalizer_synthesizes_stop_at_eof_after_text_output() {
     let mut canonicalizer = ChatStreamCanonicalizer::new("chatcmpl-stable", "opaque", 1);
-    let events = canonicalizer
+    canonicalizer
         .push(json!({
             "choices": [{
                 "delta": {"content": "partial"},
                 "finish_reason": null
             }]
         }))
-        .expect("partial event should be accepted");
-    assert_eq!(events[0]["id"], "chatcmpl-stable");
-    assert_eq!(events[0]["model"], "opaque");
-    assert_eq!(events[0]["created"], 1);
+        .unwrap();
 
-    let error = canonicalizer
-        .finish()
-        .expect_err("EOF without an upstream terminal must fail closed");
-    assert!(error.to_string().contains("invalid upstream SSE stream"));
+    let terminal = canonicalizer.finish().unwrap();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0]["id"], "chatcmpl-stable");
+    assert_eq!(terminal[0]["model"], "opaque");
+    assert_eq!(terminal[0]["created"], 1);
+    assert_eq!(terminal[0]["choices"][0]["delta"], json!({}));
+    assert_eq!(terminal[0]["choices"][0]["finish_reason"], "stop");
+}
+
+#[test]
+fn chat_stream_canonicalizer_normalizes_null_delta_to_empty_object() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("id", "model", 1);
+    let events = canonicalizer
+        .push(json!({
+            "choices": [{"index": 0, "delta": null, "finish_reason": null}]
+        }))
+        .unwrap();
+
+    assert_eq!(events[0]["choices"][0]["delta"], json!({}));
+    assert!(canonicalizer.finish().is_err());
 }
 
 #[test]
@@ -1271,6 +1284,32 @@ fn chat_stream_canonicalizer_stabilizes_sparse_identity_and_terminal_alias() {
         canonicalizer.finish_after_done().unwrap()[0]["usage"]["total_tokens"],
         4
     );
+}
+
+#[test]
+fn chat_stream_canonicalizer_keeps_first_identity_when_later_chunks_drift() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("fallback", "fallback", 1);
+    canonicalizer
+        .push(json!({
+            "id": "first-id",
+            "model": "first-model",
+            "created": 10,
+            "choices": [{"delta": {"content": "hello"}, "finish_reason": null}]
+        }))
+        .unwrap();
+
+    let terminal = canonicalizer
+        .push(json!({
+            "id": "later-id",
+            "model": "later-model",
+            "created": 20,
+            "choices": [{"delta": {}, "finish_reason": "stop"}]
+        }))
+        .unwrap();
+
+    assert_eq!(terminal[0]["id"], "first-id");
+    assert_eq!(terminal[0]["model"], "first-model");
+    assert_eq!(terminal[0]["created"], 10);
 }
 
 #[test]
@@ -1376,13 +1415,61 @@ fn chat_stream_canonicalizer_completes_each_unterminated_choice_after_done() {
 }
 
 #[test]
+fn chat_stream_canonicalizer_synthesizes_tool_calls_at_eof_after_tool_output() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("id", "model", 1);
+    canonicalizer
+        .push(json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"}
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }))
+        .unwrap();
+
+    let terminal = canonicalizer.finish().unwrap();
+    assert_eq!(terminal[0]["choices"][0]["delta"], json!({}));
+    assert_eq!(terminal[0]["choices"][0]["finish_reason"], "tool_calls");
+}
+
+#[test]
+fn chat_stream_canonicalizer_rejects_eof_with_only_role_and_usage() {
+    let mut canonicalizer = ChatStreamCanonicalizer::new("id", "model", 1);
+    canonicalizer
+        .push(json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": null
+            }]
+        }))
+        .unwrap();
+    canonicalizer
+        .push(json!({
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}
+        }))
+        .unwrap();
+
+    assert!(canonicalizer.latest_usage().is_some());
+    assert!(canonicalizer.finish().is_err());
+}
+
+#[test]
 fn chat_stream_canonicalizer_rejects_eof_when_any_choice_lacks_terminal() {
     let mut canonicalizer = ChatStreamCanonicalizer::new("id", "model", 1);
     canonicalizer
         .push(json!({
             "choices": [
                 {"index": 0, "delta": {"content": "first"}, "finish_reason": "stop"},
-                {"index": 1, "delta": {"content": "second"}, "finish_reason": null}
+                {"index": 1, "delta": {"role": "assistant"}, "finish_reason": null}
             ]
         }))
         .unwrap();
