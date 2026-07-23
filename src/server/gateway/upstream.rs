@@ -1934,10 +1934,17 @@ pub(super) async fn send_to_upstream(
                 "upstream_stream_content_type_invalid",
             ));
         }
+        let diagnostic_context = StreamDiagnosticContext {
+            request_id: request_id.to_string(),
+            upstream_id: upstream.id.clone(),
+            upstream_protocol,
+            endpoint: endpoint.path().to_string(),
+        };
         let upstream_json = aggregate_upstream_sse_response(
             response,
             upstream_protocol,
             StreamTimeouts::from_config(&state.config),
+            &diagnostic_context,
         )
         .await?;
         let body = match (endpoint, upstream_protocol) {

@@ -169,6 +169,125 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
 }
 
 #[tokio::test]
+async fn downstream_responses_stream_canonicalizes_domestic_chat_provider_eof_variants() {
+    let tempdir = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let chunks = vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"id\":\"first-id\",\"object\":\"chat.completion.chunk\",\"created\":10,\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"delta\":null,\"finish_reason\":null}]}\n\n",
+                )),
+                Ok(Bytes::from_static(
+                    b"data: {\"id\":\"later-id\",\"object\":\"chat.completion.chunk\",\"created\":20,\"model\":\"provider-alias\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\n",
+                )),
+            ];
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(stream::iter(chunks)),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "input": "Hello"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!body.contains("response.failed"), "{body}");
+    assert!(!body.contains("upstream_stream_error_event"), "{body}");
+    assert!(body.contains("\"type\":\"response.created\""), "{body}");
+    assert!(body.contains("\"id\":\"first-id\""), "{body}");
+    assert!(body.contains("\"model\":\"gpt-4.1-mini\""), "{body}");
+    assert!(body.contains("\"created_at\":10"), "{body}");
+    assert!(body.contains("\"delta\":\"OK\""), "{body}");
+    assert_eq!(
+        body.matches("\"type\":\"response.completed\"").count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+    let completed_position = body.find("event: response.completed").unwrap();
+    let done_position = body.find("data: [DONE]").unwrap();
+    assert!(completed_position < done_position, "{body}");
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].status_code, 200);
+    assert!(snapshot.usage_logs[0].error_category.is_none());
+}
+
+#[tokio::test]
 async fn downstream_responses_proxied_stream_drop_after_completed_event_is_logged_as_success() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();

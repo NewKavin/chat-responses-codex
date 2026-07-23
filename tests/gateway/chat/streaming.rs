@@ -1424,8 +1424,176 @@ async fn normal_first_event_then_error_is_not_retried() {
             .to_vec(),
     )
     .unwrap();
-    assert!(body.contains("ready"));
-    assert!(body.contains("upstream_stream_error_event"));
+    let ready_position = body.find("ready").expect("normal output must be preserved");
+    let error_position = body
+        .find("upstream_stream_error_event")
+        .expect("late upstream failure must be reported");
+    assert!(
+        ready_position < error_position,
+        "unexpected SSE body: {body}"
+    );
+    assert_eq!(*attempts.lock().unwrap(), vec![true]);
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+}
+
+#[tokio::test]
+async fn responses_output_then_named_error_is_preserved_and_not_retried() {
+    let attempts = Arc::new(Mutex::new(Vec::<bool>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let attempts_for_handler = attempts.clone();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let attempts = attempts_for_handler.clone();
+            async move {
+                let payload: Value = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX).await.unwrap(),
+                )
+                .unwrap();
+                let request_stream = payload["stream"].as_bool().unwrap_or(false);
+                attempts.lock().unwrap().push(request_stream);
+
+                if request_stream {
+                    let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        concat!(
+                            "data: {\"type\":\"response.created\",\"response\":{",
+                            "\"id\":\"resp-late-error\",\"object\":\"response\",",
+                            "\"created_at\":1,\"status\":\"in_progress\",",
+                            "\"model\":\"gpt-4.1-mini\",\"output\":[]}}\n\n",
+                            "data: {\"type\":\"response.output_text.delta\",",
+                            "\"response_id\":\"resp-late-error\",\"item_id\":\"msg-1\",",
+                            "\"output_index\":0,\"content_index\":0,",
+                            "\"delta\":\"ready\",\"sequence_number\":2}\n\n",
+                            "event: error\n\n"
+                        )
+                        .as_bytes(),
+                    ))];
+                    return (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(stream::iter(chunks)),
+                    )
+                        .into_response();
+                }
+
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "resp-unexpected-retry",
+                        "object": "response",
+                        "created_at": 1,
+                        "status": "completed",
+                        "model": "gpt-4.1-mini",
+                        "output": [{
+                            "id": "msg-unexpected-retry",
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "unexpected retry",
+                                "annotations": []
+                            }]
+                        }],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2,
+                            "total_tokens": 3
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{address}"),
+                api_key: "fixture-key".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                ..Default::default()
+            }],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4.1-mini".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let ready_position = body
+        .find("\"content\":\"ready\"")
+        .expect("translated output must be preserved");
+    let error_position = body
+        .find("upstream_stream_error_event")
+        .expect("late named failure must be reported");
+    assert!(
+        ready_position < error_position,
+        "unexpected SSE body: {body}"
+    );
+    assert!(
+        !body.contains("unexpected retry"),
+        "unexpected SSE body: {body}"
+    );
     assert_eq!(*attempts.lock().unwrap(), vec![true]);
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
 }

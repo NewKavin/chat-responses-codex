@@ -1058,6 +1058,14 @@ impl StreamTimeouts {
     }
 }
 
+#[derive(Clone, Debug)]
+struct StreamDiagnosticContext {
+    request_id: String,
+    upstream_id: String,
+    upstream_protocol: UpstreamProtocol,
+    endpoint: String,
+}
+
 #[derive(Clone)]
 struct StreamUsageLogContext {
     state: AppState,
@@ -1093,6 +1101,17 @@ impl std::fmt::Debug for StreamUsageLogContext {
             .field("status", &self.status)
             .field("error_category", &self.error_category)
             .finish()
+    }
+}
+
+impl StreamDiagnosticContext {
+    fn from_usage(context: &StreamUsageLogContext) -> Self {
+        Self {
+            request_id: context.request_id.clone(),
+            upstream_id: context.upstream_key_id.clone(),
+            upstream_protocol: context.upstream_protocol,
+            endpoint: context.endpoint.clone(),
+        }
     }
 }
 

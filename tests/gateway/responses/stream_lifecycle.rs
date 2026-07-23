@@ -492,11 +492,9 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 Ok::<Bytes, std::io::Error>(Bytes::from_static(
                     concat!(
-                        "data: {\"id\":\"chatcmpl-invalid\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",",
-                        "\"choices\":[",
-                        "{\"index\":0,\"delta\":{\"content\":\"two\"},\"finish_reason\":null},",
-                        "{\"index\":1,\"delta\":{\"content\":\"three\"},\"finish_reason\":null}",
-                        "]}\n\n",
+                        "data: {\"id\":\"chatcmpl-valid\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",",
+                        "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"two\"},",
+                        "\"finish_reason\":\"provider_unknown\"}]}\n\n",
                     )
                     .as_bytes(),
                 ))
@@ -600,7 +598,10 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     assert!(body.contains("\"object\":\"response\""));
     assert!(body.contains("\"output\":[]"));
     assert!(body.contains("\"usage\":null"));
-    assert!(body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"upstream SSE stream reported failure\"}"));
+    assert!(
+        body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"upstream SSE stream reported failure\"}"),
+        "unexpected SSE body: {body}"
+    );
     assert!(body.contains("\"sequence_number\":4"));
     assert!(body.contains("event: error"), "unexpected SSE body: {body}");
     assert!(

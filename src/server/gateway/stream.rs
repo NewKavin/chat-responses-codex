@@ -420,6 +420,7 @@ pub(super) async fn aggregate_upstream_sse_response(
     response: reqwest::Response,
     protocol: UpstreamProtocol,
     stream_timeouts: StreamTimeouts,
+    diagnostic_context: &StreamDiagnosticContext,
 ) -> Result<Value, GatewayError> {
     let mut aggregator = StreamResponseAggregator::new(protocol);
     let mut reader = UpstreamStreamReader::new(response, stream_timeouts);
@@ -427,13 +428,25 @@ pub(super) async fn aggregate_upstream_sse_response(
     loop {
         match reader.next_chunk().await {
             StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
-                match aggregator.push(&chunk).map_err(protocol_error_to_gateway)? {
+                match aggregator.push(&chunk).map_err(|error| {
+                    protocol_error_to_gateway_with_diagnostics(
+                        error,
+                        "aggregate_push",
+                        Some(diagnostic_context),
+                    )
+                })? {
                     StreamAggregateResult::Pending => {}
                     StreamAggregateResult::Complete(response) => return Ok(response),
                 }
             }
             StreamReadOutcome::Chunk(Ok(None)) => {
-                return aggregator.finish().map_err(protocol_error_to_gateway);
+                return aggregator.finish().map_err(|error| {
+                    protocol_error_to_gateway_with_diagnostics(
+                        error,
+                        "aggregate_finish",
+                        Some(diagnostic_context),
+                    )
+                });
             }
             StreamReadOutcome::Chunk(Err(error)) => {
                 let message = error.to_string();
@@ -589,7 +602,7 @@ pub(super) fn proxied_stream_body(
                     }
                     state.buffer.extend_from_slice(&chunk);
                     if let Err(error) = state.drain_usage_from_buffer() {
-                        let frame = state.finish_with_gateway_error(error).await;
+                        let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
                     if let Some(frame) = state.pending.pop_front() {
@@ -617,7 +630,7 @@ pub(super) fn proxied_stream_body(
                 }
                 StreamReadOutcome::Chunk(Ok(None)) => {
                     if let Err(error) = state.finish_stream(false) {
-                        let frame = state.finish_with_gateway_error(error).await;
+                        let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
                     if state.should_emit_empty_response_error() {
@@ -715,6 +728,13 @@ struct ProxiedStreamState {
 impl ProxiedStreamState {
     fn drain_usage_from_buffer(&mut self) -> Result<(), GatewayError> {
         while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
+            if let Some(error) = named_upstream_sse_failure(&frame) {
+                return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                    error,
+                    "canonicalize_push",
+                    self.log_context.as_ref(),
+                ));
+            }
             let payload =
                 match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error())? {
                     Some(payload) => payload,
@@ -743,6 +763,13 @@ impl ProxiedStreamState {
 
             let mut event: Value =
                 serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error())?;
+            if let Some(error) = enveloped_upstream_sse_failure(&event) {
+                return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                    error,
+                    "canonicalize_push",
+                    self.log_context.as_ref(),
+                ));
+            }
             let responses_usage_normalized = normalize_responses_event_usage(&mut event);
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
@@ -750,10 +777,15 @@ impl ProxiedStreamState {
             if self.canonicalizer.is_some() && chat_stream_event_is_semantically_complete(&event) {
                 self.semantic_completion_emitted = true;
             }
+            let log_context = self.log_context.as_ref();
             let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
-                canonicalizer
-                    .push(event)
-                    .map_err(protocol_error_to_gateway)?
+                canonicalizer.push(event).map_err(|error| {
+                    protocol_error_to_gateway_with_usage_diagnostics(
+                        error,
+                        "canonicalize_push",
+                        log_context,
+                    )
+                })?
             } else {
                 vec![event]
             };
@@ -829,7 +861,13 @@ impl ProxiedStreamState {
                 {
                     return Err(upstream_empty_response_error());
                 }
-                Err(error) => return Err(protocol_error_to_gateway(error)),
+                Err(error) => {
+                    return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                        error,
+                        "canonicalize_finish",
+                        self.log_context.as_ref(),
+                    ));
+                }
             };
             for event in events {
                 self.pending.push_back(serialize_sse_data(&event));
@@ -897,6 +935,16 @@ impl ProxiedStreamState {
             EndpointKind::ChatCompletions
         };
         sse_gateway_error_frame_for_endpoint(endpoint, &error, self.next_responses_sequence_number)
+    }
+
+    async fn finish_with_gateway_error_after_pending(&mut self, error: GatewayError) -> Bytes {
+        let pending = std::mem::take(&mut self.pending);
+        let error_frame = self.finish_with_gateway_error(error).await;
+        self.pending = pending;
+        self.pending.push_back(error_frame);
+        self.pending
+            .pop_front()
+            .expect("gateway error frame must remain pending")
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {
@@ -1071,13 +1119,13 @@ pub(super) fn translated_stream_body(
                     }
                     state.buffer.extend_from_slice(&chunk);
                     if let Err(error) = state.drain_buffer() {
-                        let frame = state.finish_with_gateway_error(error).await;
+                        let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
                 }
                 StreamReadOutcome::Chunk(Ok(None)) => {
                     if let Err(error) = state.finish_stream(false) {
-                        let frame = state.finish_with_gateway_error(error).await;
+                        let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
                     if state.should_emit_empty_response_error() {
@@ -1202,6 +1250,13 @@ impl TranslatedStreamState {
 
     fn drain_buffer(&mut self) -> Result<(), GatewayError> {
         while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
+            if let Some(error) = named_upstream_sse_failure(&frame) {
+                return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                    error,
+                    "canonicalize_push",
+                    self.log_context.as_ref(),
+                ));
+            }
             let payload =
                 match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error())? {
                     Some(payload) => payload,
@@ -1226,13 +1281,25 @@ impl TranslatedStreamState {
 
             let event: Value =
                 serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error())?;
+            if let Some(error) = enveloped_upstream_sse_failure(&event) {
+                return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                    error,
+                    "canonicalize_push",
+                    self.log_context.as_ref(),
+                ));
+            }
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
+            let log_context = self.log_context.as_ref();
             let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
-                canonicalizer
-                    .push(event)
-                    .map_err(protocol_error_to_gateway)?
+                canonicalizer.push(event).map_err(|error| {
+                    protocol_error_to_gateway_with_usage_diagnostics(
+                        error,
+                        "canonicalize_push",
+                        log_context,
+                    )
+                })?
             } else {
                 vec![event]
             };
@@ -1285,7 +1352,13 @@ impl TranslatedStreamState {
                 {
                     return Err(upstream_empty_response_error());
                 }
-                Err(error) => return Err(protocol_error_to_gateway(error)),
+                Err(error) => {
+                    return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                        error,
+                        "canonicalize_finish",
+                        self.log_context.as_ref(),
+                    ));
+                }
             };
             for event in events {
                 let translated = self
@@ -1390,6 +1463,18 @@ impl TranslatedStreamState {
             &error,
             self.next_responses_sequence_number,
         )
+    }
+
+    async fn finish_with_gateway_error_after_pending(&mut self, error: GatewayError) -> Bytes {
+        let pending = std::mem::take(&mut self.pending);
+        let error_frame = self.finish_with_gateway_error(error).await;
+        self.pending = pending;
+        self.pending.push_back(TranslatedPendingFrame {
+            bytes: error_frame,
+            usable_output: false,
+        });
+        self.pop_pending()
+            .expect("gateway error frame must remain pending")
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {
@@ -1551,6 +1636,44 @@ fn sse_done_frame() -> Bytes {
     Bytes::from_static(b"data: [DONE]\n\n")
 }
 
+fn protocol_error_to_gateway_with_diagnostics(
+    error: ProtocolError,
+    phase: &'static str,
+    context: Option<&StreamDiagnosticContext>,
+) -> GatewayError {
+    if let ProtocolError::InvalidUpstreamStream { kind, message } = &error {
+        if let Some(context) = context {
+            tracing::warn!(
+                request_id = %context.request_id,
+                selected_upstream_id = %context.upstream_id,
+                selected_upstream_protocol = ?context.upstream_protocol,
+                path = %context.endpoint,
+                stream_phase = phase,
+                stream_error_kind = ?kind,
+                stream_error_reason = %message,
+                "upstream stream protocol validation failed"
+            );
+        } else {
+            tracing::warn!(
+                stream_phase = phase,
+                stream_error_kind = ?kind,
+                stream_error_reason = %message,
+                "upstream stream protocol validation failed"
+            );
+        }
+    }
+    protocol_error_to_gateway(error)
+}
+
+fn protocol_error_to_gateway_with_usage_diagnostics(
+    error: ProtocolError,
+    phase: &'static str,
+    context: Option<&StreamUsageLogContext>,
+) -> GatewayError {
+    let diagnostic_context = context.map(StreamDiagnosticContext::from_usage);
+    protocol_error_to_gateway_with_diagnostics(error, phase, diagnostic_context.as_ref())
+}
+
 pub(super) fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
     match error {
         ProtocolError::CapabilityUnsupported => GatewayError::classified(
@@ -1608,6 +1731,41 @@ pub(super) fn next_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
     Some((buffer[..position].to_vec(), delimiter_len))
 }
 
+fn named_upstream_sse_failure(frame: &[u8]) -> Option<ProtocolError> {
+    let frame = std::str::from_utf8(frame).ok()?;
+    let mut event_type = None;
+    for raw_line in frame.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let (field, raw_value) = line.split_once(':').unwrap_or((line, ""));
+        if field == "event" {
+            event_type = Some(raw_value.strip_prefix(' ').unwrap_or(raw_value));
+        }
+    }
+    matches!(event_type, Some("error" | "response.failed")).then(|| {
+        ProtocolError::InvalidUpstreamStream {
+            kind: crate::protocol::UpstreamStreamErrorKind::UpstreamEvent,
+            message: "upstream emitted an SSE error event",
+        }
+    })
+}
+
+fn enveloped_upstream_sse_failure(value: &Value) -> Option<ProtocolError> {
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        return Some(ProtocolError::InvalidUpstreamStream {
+            kind: crate::protocol::UpstreamStreamErrorKind::UpstreamEvent,
+            message: "upstream returned an error envelope",
+        });
+    }
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("error" | "response.failed")
+    )
+    .then(|| ProtocolError::InvalidUpstreamStream {
+        kind: crate::protocol::UpstreamStreamErrorKind::UpstreamEvent,
+        message: "upstream emitted a failed Responses event",
+    })
+}
+
 pub(super) fn parse_sse_data_payload(frame: &[u8]) -> Result<Option<String>, std::io::Error> {
     let frame_str =
         std::str::from_utf8(frame).map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -1623,5 +1781,164 @@ pub(super) fn parse_sse_data_payload(frame: &[u8]) -> Result<Option<String>, std
         Ok(None)
     } else {
         Ok(Some(data_lines.join("\n")))
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::protocol::UpstreamStreamErrorKind;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Capture {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Capture {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.bytes.lock().unwrap()).into_owned()
+        }
+    }
+
+    struct CaptureWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for Capture {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CaptureWriter {
+                bytes: self.bytes.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn stream_protocol_error_logs_safe_diagnostics() {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        let usage_context = StreamUsageLogContext {
+            state: AppState::new(
+                crate::state::PersistedState::default(),
+                std::env::temp_dir().join(format!(
+                    "chat2responses-stream-diagnostics-{}.json",
+                    uuid::Uuid::new_v4()
+                )),
+                AppConfig::default(),
+            ),
+            request_id: "request-diagnostic-marker".into(),
+            downstream_key_id: "api-key-secret".into(),
+            downstream_name: Some("excluded-downstream-name-marker".into()),
+            upstream_key_id: "upstream-diagnostic-marker".into(),
+            upstream_name: Some("provider-message-secret".into()),
+            upstream_protocol: UpstreamProtocol::ChatCompletions,
+            endpoint: "/v1/responses".into(),
+            model: "prompt-secret".into(),
+            inference_strength: Some("excluded-inference-marker".into()),
+            user_agent: Some("excluded-user-agent-marker".into()),
+            compatibility: None,
+            normalized_model: "excluded-normalized-model-marker".into(),
+            status: StatusCode::OK,
+            error_message: Some("tool-argument-secret".into()),
+            error_category: Some("excluded-error-category-marker".into()),
+            started: Instant::now(),
+            hedge_control: None,
+        };
+        assert_eq!(usage_context.model, "prompt-secret");
+        assert_eq!(
+            usage_context.error_message.as_deref(),
+            Some("tool-argument-secret")
+        );
+        assert_eq!(usage_context.downstream_key_id, "api-key-secret");
+        assert_eq!(
+            usage_context.upstream_name.as_deref(),
+            Some("provider-message-secret")
+        );
+        let context = StreamDiagnosticContext::from_usage(&usage_context);
+        assert_eq!(context.request_id, "request-diagnostic-marker");
+        assert_eq!(context.upstream_id, "upstream-diagnostic-marker");
+        assert_eq!(context.upstream_protocol, UpstreamProtocol::ChatCompletions);
+        assert_eq!(context.endpoint, "/v1/responses");
+
+        let gateway_error = tracing::subscriber::with_default(subscriber, || {
+            let gateway_error = protocol_error_to_gateway_with_diagnostics(
+                ProtocolError::InvalidUpstreamStream {
+                    kind: UpstreamStreamErrorKind::UpstreamEvent,
+                    message: "Chat stream event has an invalid envelope or terminal",
+                },
+                "canonicalize_push",
+                Some(&context),
+            );
+            let _ = protocol_error_to_gateway_with_diagnostics(
+                ProtocolError::InvalidPayload("provider-message-secret".into()),
+                "canonicalize_push",
+                Some(&context),
+            );
+            gateway_error
+        });
+
+        assert_eq!(
+            gateway_error.error_category(),
+            "upstream_stream_error_event"
+        );
+        assert_eq!(
+            gateway_error.message(),
+            "upstream SSE stream reported failure"
+        );
+
+        let logs = capture.contents();
+        assert!(logs.contains("request-diagnostic-marker"), "{logs}");
+        assert!(logs.contains("upstream-diagnostic-marker"), "{logs}");
+        assert!(logs.contains("canonicalize_push"), "{logs}");
+        assert!(
+            logs.contains("Chat stream event has an invalid envelope or terminal"),
+            "{logs}"
+        );
+        for secret in [
+            "provider-message-secret",
+            "prompt-secret",
+            "tool-argument-secret",
+            "api-key-secret",
+        ] {
+            assert!(!logs.contains(secret), "diagnostic leaked {secret}: {logs}");
+        }
+    }
+
+    #[test]
+    fn named_upstream_sse_failure_uses_the_last_event_field() {
+        assert!(named_upstream_sse_failure(b"event: error\nevent: message\ndata: {}").is_none());
+        assert!(named_upstream_sse_failure(b"event: message\nevent: error\ndata: {}").is_some());
+        assert!(named_upstream_sse_failure(b"event: error\r\n\r\n").is_some());
+        assert!(named_upstream_sse_failure(b"event: response.failed\n\n").is_some());
+        assert!(named_upstream_sse_failure(b"event: error \n\n").is_none());
+        assert!(named_upstream_sse_failure(b"event: Error\n\n").is_none());
+    }
+
+    #[test]
+    fn enveloped_upstream_sse_failure_matches_only_explicit_failures() {
+        assert!(enveloped_upstream_sse_failure(&json!({"error": null})).is_none());
+        assert!(enveloped_upstream_sse_failure(&json!({"error": {}})).is_some());
+        assert!(enveloped_upstream_sse_failure(&json!({"type": "error"})).is_some());
+        assert!(enveloped_upstream_sse_failure(&json!({"type": "response.failed"})).is_some());
+        assert!(enveloped_upstream_sse_failure(&json!({"type": "Error"})).is_none());
     }
 }
