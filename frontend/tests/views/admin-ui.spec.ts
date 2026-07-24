@@ -75,6 +75,17 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('item.key_prefix')
   })
 
+  it('keeps discovered upstream models as explicit selection candidates', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('discoveredModelCandidates')
+    expect(page).toContain('latestDiscoveryResults')
+    expect(page).toContain('mergeDiscoveredModelCandidates')
+    expect(page).toContain('buildSelectedKeyModelMappings')
+    expect(page).toContain('v-for="model in selectableModelOptions"')
+    expect(page).not.toContain('form.value.supported_models = mappedModels')
+  })
+
   it('uses the responsive downstream management workbench', () => {
     const page = source('views/admin/Downstreams.vue')
 

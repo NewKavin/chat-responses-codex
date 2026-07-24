@@ -124,6 +124,12 @@
         <el-form-item label="支持的模型">
           <div class="model-input-group">
             <el-select v-model="form.supported_models" multiple filterable allow-create placeholder="手动输入或点击获取模型">
+              <el-option
+                v-for="model in selectableModelOptions"
+                :key="model"
+                :label="model"
+                :value="model"
+              />
             </el-select>
             <el-button
               v-if="form.base_url && form.api_key"
@@ -280,10 +286,11 @@ import { Plus } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
-  reconcileKeyModelMappings,
+  buildSelectedKeyModelMappings,
+  mergeDiscoveredModelCandidates,
   type BatchCreateUpstreamPayload
 } from '@/api/admin'
-import type { ApiKeyModelConfig, UpstreamConfig } from '@/types'
+import type { ApiKeyModelConfig, KeyModelDiscoveryResult, UpstreamConfig } from '@/types'
 
 const loading = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
@@ -291,6 +298,8 @@ const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const submitting = ref(false)
 const fetchingModels = ref(false)
+const discoveredModelCandidates = ref<string[]>([])
+const latestDiscoveryResults = ref<KeyModelDiscoveryResult[]>([])
 const formRef = ref()
 const contextConfigTab = ref<'default' | 'overrides'>('overrides')
 const clearDefaultContext = ref(false)
@@ -331,6 +340,16 @@ const premiumModelOptions = computed(() => {
   const combined = [...supported, ...premium]
   return Array.from(new Set(combined)).sort()
 })
+
+const selectableModelOptions = computed(() => Array.from(new Set([
+  ...(form.value.supported_models || []),
+  ...discoveredModelCandidates.value
+])).sort())
+
+const resetDiscoveryCandidates = () => {
+  discoveredModelCandidates.value = []
+  latestDiscoveryResults.value = []
+}
 
 const addModelCost = () => {
   if (!form.value.model_request_costs) {
@@ -438,6 +457,7 @@ const handleCreate = () => {
   dialogMode.value = 'create'
   contextConfigTab.value = 'overrides'
   clearDefaultContext.value = false
+  resetDiscoveryCandidates()
   form.value = {
     id: '',
     name: '',
@@ -469,6 +489,7 @@ const handleCopy = (row: UpstreamConfig) => {
   dialogMode.value = 'create'
   contextConfigTab.value = 'overrides'
   clearDefaultContext.value = false
+  resetDiscoveryCandidates()
   const protocols = resolveProtocols(row)
   form.value = {
     id: '',
@@ -498,6 +519,7 @@ const handleEdit = (row: UpstreamConfig) => {
   dialogMode.value = 'edit'
   contextConfigTab.value = 'default'
   clearDefaultContext.value = false
+  resetDiscoveryCandidates()
   const protocols = resolveProtocols(row)
   const allKeys = [
     row.api_key,
@@ -582,32 +604,49 @@ const handleSubmit = async () => {
     submitData.protocols = protocols
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
     submitData.strip_nonstandard_chat_fields = Boolean(submitData.strip_nonstandard_chat_fields)
-    
+
+    const submittedKeys = (form.value.api_key || '')
+      .split('\n')
+      .map((key: string) => key.trim())
+      .filter((key, index, keys) => key.length > 0 && keys.indexOf(key) === index)
+
+    if (submittedKeys.length === 0) {
+      ElMessage.error('请输入至少一个 API Key')
+      submitting.value = false
+      return
+    }
+
+    const selectedModels = Array.from(new Set(
+      (form.value.supported_models || [])
+        .map((model: any) => String(model || '').trim())
+        .filter(Boolean)
+    ))
+    submitData.api_key = submittedKeys[0]
+    submitData.api_keys = submittedKeys.slice(1)
+    submitData.supported_models = selectedModels
+    submitData.api_key_models = buildSelectedKeyModelMappings(
+      submittedKeys,
+      selectedModels,
+      form.value.api_key_models || [],
+      latestDiscoveryResults.value
+    )
+
     if (dialogMode.value === 'create') {
       submitData.id = ''
-      // 将 API Key 按换行分割，每行一个 key 创建一个上游
-      const apiKeys = (form.value.api_key || '')
-        .split('\n')
-        .map(k => k.trim())
-        .filter(k => k.length > 0)
-      
-      if (apiKeys.length === 0) {
-        ElMessage.error('请输入至少一个 API Key')
-        submitting.value = false
-        return
-      }
-      
-      if (apiKeys.length === 1) {
+
+      if (submittedKeys.length === 1) {
         // 单 key：保持原有行为
-        submitData.api_key = apiKeys[0]
+        submitData.api_key = submittedKeys[0]
         await adminApi.createUpstream(submitData)
         ElMessage.success('创建成功')
       } else {
-        // 多 key：改用 batch 接口自动获取模型
+        // 多 key：使用 batch 接口提交显式模型映射
         const batchPayload: BatchCreateUpstreamPayload = {
           name: form.value.name!,
           base_url: form.value.base_url!,
-          keys: apiKeys,
+          keys: submittedKeys,
+          supported_models: submitData.supported_models || [],
+          api_key_models: submitData.api_key_models || [],
           protocol: protocols[0] ? String(protocols[0]) : 'ChatCompletions',
           protocols: protocols.map(p => String(p)),
           active: submitData.active,
@@ -630,13 +669,7 @@ const handleSubmit = async () => {
         }
       }
     } else {
-      const editKeys = (submitData.api_key || '')
-        .split('\n')
-        .map(k => k.trim())
-        .filter(k => k.length > 0)
-      if (editKeys.length > 0) {
-        submitData.api_key = editKeys[0]
-        submitData.api_keys = editKeys.slice(1)
+      if (submittedKeys.length > 0) {
         // 添加替换标志，让后端替换所有 key 而不是合并
         submitData._replace_api_keys = true
       } else {
@@ -725,15 +758,12 @@ const fetchModels = async () => {
       keys: apiKeys
     })
     const result = response.data
-    form.value.api_key_models = reconcileKeyModelMappings(
-      apiKeys,
-      form.value.api_key_models || [],
-      result.results || []
+    latestDiscoveryResults.value = result.results || []
+    discoveredModelCandidates.value = mergeDiscoveredModelCandidates(
+      form.value.supported_models || [],
+      discoveredModelCandidates.value,
+      latestDiscoveryResults.value
     )
-    const mappedModels = Array.from(new Set(
-      form.value.api_key_models.flatMap(item => item.supported_models)
-    )).sort()
-    form.value.supported_models = mappedModels
 
     if (!result.models || result.models.length === 0) {
       const errorDetails = (result.results || [])
