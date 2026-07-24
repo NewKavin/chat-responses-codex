@@ -30,6 +30,8 @@ export interface BatchCreateUpstreamPayload {
   name: string
   base_url: string
   keys: string[]
+  supported_models: string[]
+  api_key_models: ApiKeyModelConfig[]
   protocol?: string
   protocols?: string[]
   active?: boolean
@@ -101,6 +103,54 @@ export function reconcileKeyModelMappings(
       api_key: key,
       supported_models: discoveredByKey.get(key) || previousByKey.get(key) || []
     })
+  }
+  return mappings
+}
+
+const uniqueModels = (models: string[]): string[] => {
+  const seen = new Set<string>()
+  const normalized: string[] = []
+  for (const rawModel of models) {
+    const model = String(rawModel || '').trim()
+    if (model && !seen.has(model)) {
+      seen.add(model)
+      normalized.push(model)
+    }
+  }
+  return normalized
+}
+
+export function mergeDiscoveredModelCandidates(
+  selected: string[],
+  previousCandidates: string[],
+  results: KeyModelDiscoveryResult[]
+): string[] {
+  return uniqueModels([
+    ...selected,
+    ...previousCandidates,
+    ...results.flatMap(result => result.error ? [] : (result.model_list || []))
+  ]).sort()
+}
+
+export function buildSelectedKeyModelMappings(
+  keys: string[],
+  selectedModels: string[],
+  previous: ApiKeyModelConfig[] = [],
+  results: KeyModelDiscoveryResult[] = []
+): ApiKeyModelConfig[] {
+  const selected = uniqueModels(selectedModels)
+  const selectedSet = new Set(selected)
+  const mappings = reconcileKeyModelMappings(keys, previous, results).map(mapping => ({
+    api_key: mapping.api_key,
+    supported_models: mapping.supported_models.filter(model => selectedSet.has(model))
+  }))
+  const assigned = new Set(mappings.flatMap(mapping => mapping.supported_models))
+  const assertedModels = selected.filter(model => !assigned.has(model))
+  for (const mapping of mappings) {
+    mapping.supported_models = uniqueModels([
+      ...mapping.supported_models,
+      ...assertedModels
+    ])
   }
   return mappings
 }

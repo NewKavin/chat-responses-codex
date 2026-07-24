@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   adminApi,
   adminHttp,
+  buildSelectedKeyModelMappings,
   createAdminApiClient,
   hasUsableAdminToken,
+  mergeDiscoveredModelCandidates,
   reconcileKeyModelMappings,
   splitDashboardResponse,
   type DiscoverUpstreamModelsResult
@@ -143,6 +145,38 @@ describe('admin api auth behavior', () => {
       { api_key: 'key-a', supported_models: ['glm-5.2'] },
       { api_key: 'key-b', supported_models: ['old-b'] },
       { api_key: 'key-new', supported_models: [] }
+    ])
+  })
+
+  it('keeps discovered models as candidates without changing the selected set', () => {
+    const selected = ['existing-model']
+
+    expect(mergeDiscoveredModelCandidates(
+      selected,
+      ['older-candidate'],
+      [
+        { key_index: 0, models: 2, model_list: ['glm-5.2', 'unwanted-model'] },
+        { key_index: 1, error: 'upstream returned 503' }
+      ]
+    )).toEqual(['existing-model', 'glm-5.2', 'older-candidate', 'unwanted-model'])
+    expect(selected).toEqual(['existing-model'])
+  })
+
+  it('builds authoritative key mappings from selected models only', () => {
+    expect(buildSelectedKeyModelMappings(
+      ['key-a', 'key-b'],
+      ['glm-5.2', 'old-b', 'manual-only'],
+      [
+        { api_key: 'key-a', supported_models: ['old-a'] },
+        { api_key: 'key-b', supported_models: ['old-b'] }
+      ],
+      [
+        { key_index: 0, models: 2, model_list: ['glm-5.2', 'unwanted-model'] },
+        { key_index: 1, error: 'upstream returned 503' }
+      ]
+    )).toEqual([
+      { api_key: 'key-a', supported_models: ['glm-5.2', 'manual-only'] },
+      { api_key: 'key-b', supported_models: ['old-b', 'manual-only'] }
     ])
   })
 
