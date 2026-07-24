@@ -1232,7 +1232,10 @@ pub(super) async fn admin_create_upstreams_batch(
         "Responses" => UpstreamProtocol::Responses,
         _ => UpstreamProtocol::ChatCompletions,
     };
-    let protocols = payload.protocols.clone().unwrap_or_else(|| vec![protocol_str]);
+    let protocols = payload
+        .protocols
+        .clone()
+        .unwrap_or_else(|| vec![protocol_str]);
     let protocols: Vec<UpstreamProtocol> = protocols
         .into_iter()
         .filter_map(|p| match p.as_str() {
