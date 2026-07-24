@@ -25,7 +25,7 @@ name = "Chat Responses Gateway"
 base_url = "<gateway_url>/v1"
 wire_api = "responses"
 requires_openai_auth = true
-stream_max_retries = 0
+stream_max_retries = 8
 
 # If a skill still triggers an install prompt, the missing MCP server is declared
 # by that skill itself. Add it to your global Codex MCP config, then restart Codex.

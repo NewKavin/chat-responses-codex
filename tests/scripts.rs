@@ -871,7 +871,7 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
     assert!(script.contains("\"$CLAUDE_CODE_BIN\" -p \"$READ_FILE_PROMPT\""));
     assert!(script.contains("CLAUDE_CONFIG_DIR=\"$WORKDIR/claude-home\""));
     assert!(script.contains("web_search = \"disabled\""));
-    assert!(script.contains("stream_max_retries = 0"));
+    assert!(script.contains("stream_max_retries = 8"));
     assert!(!script.contains("disable_response_storage"));
     for client in ["codex", "opencode", "claude_code", "hermes"] {
         assert!(

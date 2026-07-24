@@ -38,7 +38,7 @@ fn codex_config_example_uses_live_model_slug_exactly() {
     assert!(config.contains(r#"review_model = "<model_slug>""#));
     assert!(config.contains(r#"model_catalog_json = "model-catalog.json""#));
     assert!(config.contains(r#"web_search = "disabled""#));
-    assert!(config.contains("stream_max_retries = 0"));
+    assert!(config.contains("stream_max_retries = 8"));
     assert!(
         config.find(r#"web_search = "disabled""#).unwrap() < config.find("[features]").unwrap(),
         "web_search is a top-level Codex setting, not a model-provider field"

@@ -310,7 +310,7 @@ name = "Chat Responses Gateway"
 base_url = ${tomlString(gatewayApiBaseUrl)}
 wire_api = "responses"
 requires_openai_auth = true
-stream_max_retries = 0
+stream_max_retries = 8
 `
 }
 
