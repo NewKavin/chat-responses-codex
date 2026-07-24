@@ -849,6 +849,10 @@ pub(super) struct BatchCreateUpstreamPayload {
     base_url: String,
     keys: Vec<String>,
     #[serde(default)]
+    supported_models: Vec<String>,
+    #[serde(default)]
+    api_key_models: Vec<ApiKeyModelConfig>,
+    #[serde(default)]
     protocol: Option<String>,
     #[serde(default)]
     protocols: Option<Vec<String>>,
@@ -1077,6 +1081,120 @@ pub(super) async fn build_model_probe_response(
     response
 }
 
+struct BatchModelConfiguration {
+    api_key_models: Vec<ApiKeyModelConfig>,
+    supported_models: Vec<String>,
+    results: Vec<Value>,
+    failed: usize,
+}
+
+fn explicit_batch_model_configuration(
+    current_keys: &[String],
+    supported_models: Vec<String>,
+    api_key_models: Vec<ApiKeyModelConfig>,
+) -> BatchModelConfiguration {
+    let mut upstream = UpstreamConfig {
+        api_key: current_keys.first().cloned().unwrap_or_default(),
+        api_keys: current_keys.to_vec(),
+        api_key_models,
+        supported_models,
+        ..Default::default()
+    };
+    upstream.normalize_for_storage();
+    for mapping in &mut upstream.api_key_models {
+        mapping.supported_models.sort();
+    }
+    upstream.supported_models.sort();
+    let results = current_keys
+        .iter()
+        .enumerate()
+        .map(|(key_index, api_key)| {
+            let model_list = upstream
+                .api_key_models
+                .iter()
+                .find(|mapping| mapping.api_key == *api_key)
+                .map(|mapping| mapping.supported_models.clone())
+                .unwrap_or_default();
+            json!({
+                "key_index": key_index,
+                "models": model_list.len(),
+                "model_list": model_list,
+            })
+        })
+        .collect();
+    BatchModelConfiguration {
+        api_key_models: upstream.api_key_models,
+        supported_models: upstream.supported_models,
+        results,
+        failed: 0,
+    }
+}
+
+async fn discover_batch_model_configuration(
+    payload: &BatchCreateUpstreamPayload,
+    current_keys: &[String],
+    timeout_seconds: u64,
+) -> BatchModelConfiguration {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()
+        .unwrap_or_default();
+    let discovery_results = fetch_models_from_upstream_keys_concurrently(
+        &client,
+        &payload.base_url,
+        &payload.keys,
+        timeout_seconds,
+    )
+    .await;
+    let mut models_by_key: HashMap<String, Vec<String>> = HashMap::new();
+    let mut results = Vec::new();
+    let mut failed = 0usize;
+    for result in discovery_results {
+        let api_key = payload
+            .keys
+            .get(result.key_index)
+            .map(|key| key.trim().to_string())
+            .unwrap_or_default();
+        if let Some(error) = result.error {
+            failed = failed.saturating_add(1);
+            results.push(json!({"key_index": result.key_index, "error": error}));
+            continue;
+        }
+        models_by_key
+            .entry(api_key)
+            .or_default()
+            .extend(result.models.iter().cloned());
+        results.push(json!({
+            "key_index": result.key_index,
+            "models": result.models.len(),
+            "model_list": result.models,
+        }));
+    }
+    for models in models_by_key.values_mut() {
+        models.sort();
+        models.dedup();
+    }
+    let api_key_models = current_keys
+        .iter()
+        .map(|api_key| ApiKeyModelConfig {
+            api_key: api_key.clone(),
+            supported_models: models_by_key.get(api_key).cloned().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    let mut supported_models = api_key_models
+        .iter()
+        .flat_map(|mapping| mapping.supported_models.iter().cloned())
+        .collect::<Vec<_>>();
+    supported_models.sort();
+    supported_models.dedup();
+    BatchModelConfiguration {
+        api_key_models,
+        supported_models,
+        results,
+        failed,
+    }
+}
+
 pub(super) async fn admin_create_upstreams_batch(
     State(state): State<AppState>,
     Json(payload): Json<BatchCreateUpstreamPayload>,
@@ -1106,19 +1224,15 @@ pub(super) async fn admin_create_upstreams_batch(
             .into_response();
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(admin_timeout))
-        .build()
-        .unwrap_or_default();
-
     let protocol_str = payload
         .protocol
+        .clone()
         .unwrap_or_else(|| "ChatCompletions".to_string());
     let protocol: UpstreamProtocol = match protocol_str.as_str() {
         "Responses" => UpstreamProtocol::Responses,
         _ => UpstreamProtocol::ChatCompletions,
     };
-    let protocols = payload.protocols.unwrap_or_else(|| vec![protocol_str]);
+    let protocols = payload.protocols.clone().unwrap_or_else(|| vec![protocol_str]);
     let protocols: Vec<UpstreamProtocol> = protocols
         .into_iter()
         .filter_map(|p| match p.as_str() {
@@ -1142,62 +1256,22 @@ pub(super) async fn admin_create_upstreams_batch(
             current_keys.push(key);
         }
     }
-    let mut models_by_key: HashMap<String, Vec<String>> = HashMap::new();
-    let mut key_results: Vec<Value> = Vec::new();
-    let mut failed = 0usize;
-
-    // 并发获取每个 key 的模型列表
-    let discovery_results = fetch_models_from_upstream_keys_concurrently(
-        &client,
-        &payload.base_url,
-        &payload.keys,
-        admin_timeout,
-    )
-    .await;
-    for result in discovery_results {
-        let key = payload
-            .keys
-            .get(result.key_index)
-            .map(|key| key.trim().to_string())
-            .unwrap_or_default();
-        if let Some(error) = result.error {
-            failed = failed.saturating_add(1);
-            key_results.push(json!({
-                "key_index": result.key_index,
-                "error": error
-            }));
-            continue;
-        }
-
-        models_by_key
-            .entry(key)
-            .or_default()
-            .extend(result.models.iter().cloned());
-        key_results.push(json!({
-            "key_index": result.key_index,
-            "models": result.models.len(),
-            "model_list": result.models,
-        }));
-    }
-
-    for models in models_by_key.values_mut() {
-        models.sort();
-        models.dedup();
-    }
-    let mut all_models: Vec<String> = models_by_key
-        .values()
-        .flat_map(|models| models.iter().cloned())
-        .collect();
-    all_models.sort();
-    all_models.dedup();
-
-    let api_key_models = current_keys
-        .iter()
-        .map(|api_key| ApiKeyModelConfig {
-            api_key: api_key.clone(),
-            supported_models: models_by_key.get(api_key).cloned().unwrap_or_default(),
-        })
-        .collect::<Vec<_>>();
+    let automatic_discovery = state.config.upstream_model_auto_discovery_enabled;
+    let model_configuration = if automatic_discovery {
+        discover_batch_model_configuration(&payload, &current_keys, admin_timeout).await
+    } else {
+        explicit_batch_model_configuration(
+            &current_keys,
+            payload.supported_models.clone(),
+            payload.api_key_models.clone(),
+        )
+    };
+    let BatchModelConfiguration {
+        api_key_models,
+        supported_models: all_models,
+        results: key_results,
+        failed,
+    } = model_configuration;
 
     if current_keys.is_empty() {
         return (
@@ -1230,9 +1304,9 @@ pub(super) async fn admin_create_upstreams_batch(
         request_quota_requests: payload.request_quota_requests,
         max_concurrency: payload.max_concurrency,
         active: payload.active,
-        auto_managed: true,
-        managed_source: Some("batch".to_string()),
-        last_synced_at: now,
+        auto_managed: automatic_discovery,
+        managed_source: automatic_discovery.then(|| "batch".to_string()),
+        last_synced_at: if automatic_discovery { now } else { 0 },
         strip_nonstandard_chat_fields: payload.strip_nonstandard_chat_fields,
         default_model_context: Some(DefaultModelContextConfig {
             context_limit: 200_000,

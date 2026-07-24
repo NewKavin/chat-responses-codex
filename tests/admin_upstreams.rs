@@ -91,13 +91,21 @@ fn create_test_state() -> AppState {
 }
 
 fn create_test_state_with_upstreams(upstreams: Vec<UpstreamConfig>) -> AppState {
-    let config = AppConfig {
-        admin_username: "admin".to_string(),
-        admin_password: "admin".to_string(),
-        jwt_secret: "test_secret".to_string(),
-        ..Default::default()
-    };
+    create_test_state_with_upstreams_and_config(
+        upstreams,
+        AppConfig {
+            admin_username: "admin".to_string(),
+            admin_password: "admin".to_string(),
+            jwt_secret: "test_secret".to_string(),
+            ..Default::default()
+        },
+    )
+}
 
+fn create_test_state_with_upstreams_and_config(
+    upstreams: Vec<UpstreamConfig>,
+    config: AppConfig,
+) -> AppState {
     let state = PersistedState {
         upstreams,
         downstreams: vec![],
@@ -2439,7 +2447,16 @@ async fn test_batch_discovery_results_store_failed_keys_as_empty_mappings() {
         axum::serve(listener, upstream_app).await.unwrap();
     });
 
-    let state = create_test_state_with_upstreams(vec![]);
+    let state = create_test_state_with_upstreams_and_config(
+        vec![],
+        AppConfig {
+            admin_username: "admin".into(),
+            admin_password: "admin".into(),
+            jwt_secret: "test_secret".into(),
+            upstream_model_auto_discovery_enabled: true,
+            ..Default::default()
+        },
+    );
     let app = build_router(state.clone());
     let token = get_admin_token(&app, "admin", "admin").await;
     let payload = json!({
@@ -2525,7 +2542,16 @@ async fn test_batch_discovery_results_all_failed_still_create_authoritative_empt
         axum::serve(listener, upstream_app).await.unwrap();
     });
 
-    let state = create_test_state_with_upstreams(vec![]);
+    let state = create_test_state_with_upstreams_and_config(
+        vec![],
+        AppConfig {
+            admin_username: "admin".into(),
+            admin_password: "admin".into(),
+            jwt_secret: "test_secret".into(),
+            upstream_model_auto_discovery_enabled: true,
+            ..Default::default()
+        },
+    );
     let app = build_router(state.clone());
     let token = get_admin_token(&app, "admin", "admin").await;
     let payload = json!({
@@ -3520,4 +3546,85 @@ async fn test_freekey_sync_empty_valid_set_preserves_upstream_clears_keys() {
         "no keys should be available, got {:?}",
         upstream.available_keys()
     );
+}
+
+#[tokio::test]
+async fn batch_create_uses_explicit_models_without_automatic_discovery_by_default() {
+    use chat_responses_codex::server::build_router;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_hits = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(move || {
+            let hits = upstream_hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({"data": [{"id": "unselected-model"}]}))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "name": "Manual Batch",
+        "base_url": format!("http://{address}"),
+        "keys": ["key-a", "key-b"],
+        "supported_models": ["selected-a", "manual-shared"],
+        "api_key_models": [
+            {"api_key": "key-a", "supported_models": ["selected-a", "manual-shared"]},
+            {"api_key": "key-b", "supported_models": ["manual-shared"]}
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|u| u.name == "Manual Batch")
+        .unwrap();
+    assert_eq!(
+        upstream.supported_models,
+        vec!["manual-shared", "selected-a"]
+    );
+    assert_eq!(
+        upstream.api_key_models,
+        vec![
+            ApiKeyModelConfig {
+                api_key: "key-a".into(),
+                supported_models: vec!["manual-shared".into(), "selected-a".into()],
+            },
+            ApiKeyModelConfig {
+                api_key: "key-b".into(),
+                supported_models: vec!["manual-shared".into()],
+            },
+        ]
+    );
+    assert!(!upstream.auto_managed);
+    assert_eq!(upstream.last_synced_at, 0);
+    assert!(upstream.keys_for_model("unselected-model").is_empty());
 }
