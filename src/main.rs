@@ -89,6 +89,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .filter(|value| !value.trim().is_empty()),
         model_probe_refresh_interval_seconds: env_u64("MODEL_PROBE_REFRESH_INTERVAL_SECONDS", 15)
             .max(1),
+        upstream_model_auto_discovery_enabled: env_bool(
+            "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED",
+            false,
+        ),
         upstream_model_key_sync_interval_seconds: env_u64(
             "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
             0,
@@ -160,6 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         hedge_interval_ms = config.upstream_hedge_interval_ms,
         hedge_max_extra_attempts = config.upstream_hedge_max_extra_attempts,
         automatic_capability_probes_enabled = config.automatic_capability_probes_enabled,
+        upstream_model_auto_discovery_enabled = config.upstream_model_auto_discovery_enabled,
         upstream_model_key_sync_interval_seconds = config.upstream_model_key_sync_interval_seconds,
         backend = if env::var("DATABASE_URL")
             .ok()

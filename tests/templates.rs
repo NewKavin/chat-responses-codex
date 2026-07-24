@@ -86,6 +86,7 @@ fn app_config_defaults_stream_watchdog_settings() {
     assert_eq!(config.upstream_stream_max_duration_seconds, 86_400);
     assert_eq!(config.model_probe_refresh_interval_seconds, 15);
     assert_eq!(config.upstream_model_key_sync_interval_seconds, 0);
+    assert!(!config.upstream_model_auto_discovery_enabled);
     assert!(!config.automatic_capability_probes_enabled);
 }
 

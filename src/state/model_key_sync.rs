@@ -633,6 +633,9 @@ impl ModelKeySyncService {
     }
 
     pub fn spawn(state: AppState) -> Option<JoinHandle<()>> {
+        if !state.config.upstream_model_auto_discovery_enabled {
+            return None;
+        }
         let interval_seconds = state.config.upstream_model_key_sync_interval_seconds;
         if interval_seconds == 0 {
             return None;

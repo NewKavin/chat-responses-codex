@@ -93,6 +93,15 @@ fn sync_state_with_interval(
     api_key_models: Vec<ApiKeyModelConfig>,
     interval_seconds: u64,
 ) -> (tempfile::TempDir, AppState) {
+    sync_state_with_auto_discovery(base_url, api_key_models, interval_seconds, true)
+}
+
+fn sync_state_with_auto_discovery(
+    base_url: String,
+    api_key_models: Vec<ApiKeyModelConfig>,
+    interval_seconds: u64,
+    enabled: bool,
+) -> (tempfile::TempDir, AppState) {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
@@ -115,6 +124,7 @@ fn sync_state_with_interval(
         AppConfig {
             admin_upstream_timeout_seconds: 1,
             upstream_model_key_sync_interval_seconds: interval_seconds,
+            upstream_model_auto_discovery_enabled: enabled,
             ..AppConfig::default()
         },
     );
@@ -416,6 +426,7 @@ fn zero_interval_disables_periodic_and_targeted_model_sync() {
         tempdir.path().join("state.json"),
         AppConfig {
             upstream_model_key_sync_interval_seconds: 0,
+            upstream_model_auto_discovery_enabled: true,
             ..AppConfig::default()
         },
     );
@@ -424,6 +435,16 @@ fn zero_interval_disables_periodic_and_targeted_model_sync() {
     let startup_delay = ModelKeySyncService::startup_delay(&state);
     assert_eq!(startup_delay, ModelKeySyncService::startup_delay(&state));
     assert!((30..=90).contains(&startup_delay.as_secs()));
+    assert!(!state.submit_targeted_model_discovery("up-1", "fingerprint", "model"));
+    assert_eq!(state.targeted_model_discovery_pending_count(), 0);
+}
+
+#[test]
+fn disabled_auto_discovery_blocks_periodic_and_targeted_sync_with_positive_interval() {
+    let (_tempdir, state) =
+        sync_state_with_auto_discovery("http://127.0.0.1:1".into(), Vec::new(), 900, false);
+
+    assert!(ModelKeySyncService::spawn(state.clone()).is_none());
     assert!(!state.submit_targeted_model_discovery("up-1", "fingerprint", "model"));
     assert_eq!(state.targeted_model_discovery_pending_count(), 0);
 }
