@@ -173,8 +173,16 @@ cargo run
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=admin`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
+- `UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED=false`
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0`
 - `AUTOMATIC_CAPABILITY_PROBES_ENABLED=false`
+
+`UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED` defaults to `false`. When `false`, batch
+creation, periodic synchronization, and targeted discovery cannot add or remove
+persisted model mappings. The administrator's "获取模型" action remains available
+and only loads candidates; selected models are persisted when the upstream is
+saved. Automatic upstream model discovery is disabled by default. Manual model
+discovery remains available when automatic discovery is disabled.
 
 默认不会在后台发送真实模型推理探测。`MODEL_PROBE_REFRESH_INTERVAL_SECONDS`
 只控制页面刷新；`/v1/models` 列表请求不产生推理 token。管理员手工执行

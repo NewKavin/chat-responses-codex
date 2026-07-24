@@ -27,6 +27,7 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
+- `UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED=false`
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0`
 - `AUTOMATIC_CAPABILITY_PROBES_ENABLED=false`
 - `CAPABILITY_PROBE_QUEUE_CAPACITY=256`
@@ -85,6 +86,12 @@ the gateway keeps per host before opening new sockets.
 fresh model-probe snapshot. Keep it separate from `DASHBOARD_CACHE_TTL_SECONDS`,
 which controls how long the backend reuses the cached probe result before
 calling upstreams again.
+`UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED` defaults to `false`. When `false`, batch
+creation, periodic synchronization, and targeted discovery cannot add or remove
+persisted model mappings. The administrator's "获取模型" action remains available and only loads candidates; selected models are persisted when the upstream is saved.
+Automatic upstream model discovery is disabled by default.
+Manual model discovery remains available when automatic discovery is disabled.
+
 `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` controls background model-key
 synchronization and defaults to `0`. Set to 0 to disable background model-key synchronization.
 Set a positive interval only when periodic `/v1/models` discovery is required.

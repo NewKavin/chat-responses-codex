@@ -436,6 +436,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "USAGE_LOG_ROTATION_MAX_BYTES: ${USAGE_LOG_ROTATION_MAX_BYTES:-1048576}",
         "USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS: ${MODEL_PROBE_REFRESH_INTERVAL_SECONDS:-15}",
+        "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED: ${UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED:-false}",
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}",
         "AUTOMATIC_CAPABILITY_PROBES_ENABLED: ${AUTOMATIC_CAPABILITY_PROBES_ENABLED:-false}",
         "DASHBOARD_CACHE_TTL_SECONDS: ${DASHBOARD_CACHE_TTL_SECONDS:-30}",
@@ -469,9 +470,13 @@ fn deployment_surfaces_document_model_key_sync_and_process_local_health() {
     let deployment = fs::read_to_string("DEPLOYMENT.md").expect("DEPLOYMENT.md should be readable");
 
     assert!(dotenv.contains("UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0"));
+    assert!(dotenv.contains("UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED=false"));
     assert!(dotenv.contains("AUTOMATIC_CAPABILITY_PROBES_ENABLED=false"));
     assert!(compose.contains(
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}"
+    ));
+    assert!(compose.contains(
+        "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED: ${UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED:-false}"
     ));
 
     for (name, surface) in [
@@ -480,6 +485,8 @@ fn deployment_surfaces_document_model_key_sync_and_process_local_health() {
         ("DEPLOYMENT.md", deployment.as_str()),
     ] {
         for marker in [
+            "Automatic upstream model discovery is disabled by default.",
+            "Manual model discovery remains available when automatic discovery is disabled.",
             "Set to 0 to disable background model-key synchronization.",
             "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.",
             "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.",

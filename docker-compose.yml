@@ -63,6 +63,9 @@ services:
       USAGE_LOG_ROTATION_MAX_BYTES: ${USAGE_LOG_ROTATION_MAX_BYTES:-1048576}
       USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}
       MODEL_PROBE_REFRESH_INTERVAL_SECONDS: ${MODEL_PROBE_REFRESH_INTERVAL_SECONDS:-15}
+      # Automatic upstream model discovery is disabled by default.
+      # Manual model discovery remains available when automatic discovery is disabled.
+      UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED: ${UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED:-false}
       # Set to 0 to disable background model-key synchronization.
       UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}
       # Automatic capability probes send real inference requests and consume model tokens.
