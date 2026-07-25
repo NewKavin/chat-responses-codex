@@ -26,6 +26,7 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `APP_NAME=chat-responses-codex`
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
+- `USAGE_LOG_RETENTION_DAYS=14`
 - `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
 - `UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED=false`
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0`
@@ -152,6 +153,7 @@ docker run -d \
   -e APP_NAME=chat-responses-codex \
   -e USAGE_LOG_ROTATION_MAX_BYTES=1048576 \
   -e USAGE_LOG_ARCHIVE_MAX_FILES=10 \
+  -e USAGE_LOG_RETENTION_DAYS=14 \
   -e POSTGRES_POOL_MAX_SIZE=16 \
   -e ADMIN_LOGS_PAGE_SIZE_MAX=200 \
   -e UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32 \
@@ -218,6 +220,7 @@ services:
       APP_NAME: chat-responses-codex
       USAGE_LOG_ROTATION_MAX_BYTES: "1048576"
       USAGE_LOG_ARCHIVE_MAX_FILES: "10"
+      USAGE_LOG_RETENTION_DAYS: "14"
       POSTGRES_POOL_MAX_SIZE: "16"
       ADMIN_LOGS_PAGE_SIZE_MAX: "200"
       UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST: "32"
@@ -323,6 +326,7 @@ The matrix fails on semantic check failures and unpermitted downgrades. The inst
 
 - In file-backed compatibility mode, usage logs rotate into archive files next to `STATE_PATH` once the current state file grows beyond `USAGE_LOG_ROTATION_MAX_BYTES`.
 - Archive files are capped at `USAGE_LOG_ARCHIVE_MAX_FILES`.
+- Logs older than `USAGE_LOG_RETENTION_DAYS` are automatically pruned by a background task (hourly sweep; set to 0 to disable).
 - In PostgreSQL mode, usage logs stay in the database and do not rotate into local archive files.
 - Runtime logs are appended to `LOG_PATH` and can be mounted to the host with `./logs:/logs`.
 - The Docker image exposes a `HEALTHCHECK` that runs the binary's built-in healthcheck mode.

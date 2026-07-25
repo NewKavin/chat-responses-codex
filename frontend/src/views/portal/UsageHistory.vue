@@ -150,7 +150,7 @@ const daysByRange: Record<ChartRange, number> = {
 }
 
 const loading = ref(false)
-const timeRange = ref<ChartRange>('7d')
+const timeRange = ref<ChartRange>('1d')
 const { resolvedTheme } = useTheme()
 const dailyChartRef = ref<HTMLElement>()
 const tokenChartRef = ref<HTMLElement>()

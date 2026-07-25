@@ -2166,7 +2166,7 @@ fn default_page_size() -> usize {
     10
 }
 fn default_time_range() -> String {
-    "7d".to_string()
+    "1d".to_string()
 }
 
 /// List logs with filtering and pagination
@@ -2192,7 +2192,7 @@ pub(super) async fn admin_list_logs(
             "1d" | "24h" => 86400,
             "7d" => 7 * 86400,
             "30d" => 30 * 86400,
-            _ => 7 * 86400,
+            _ => 86400,
         };
         (now.saturating_sub(time_range_seconds), now)
     };

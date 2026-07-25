@@ -60,4 +60,8 @@ pub trait StateStore: Send + Sync {
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
         Box::pin(async { Ok(None) })
     }
+
+    fn delete_usage_logs_before<'a>(&'a self, _cutoff: u64) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }

@@ -72,6 +72,44 @@ impl FileStateStore {
         fs::write(&tmp_path, bytes).await?;
         fs::rename(tmp_path, path).await
     }
+
+    async fn delete_usage_logs_before(&self, cutoff: u64) -> io::Result<()> {
+        let Some(parent) = self.config_path.parent() else {
+            return Ok(());
+        };
+        let Some(base_name) = self.config_path.file_name().and_then(|v| v.to_str()) else {
+            return Ok(());
+        };
+        let archive_prefix = format!("{base_name}.usage.");
+        let mut dir = fs::read_dir(parent).await?;
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with(&archive_prefix) || !file_name.ends_with(".json") {
+                continue;
+            }
+            let bytes = fs::read(&path).await?;
+            let logs: Vec<UsageLog> = serde_json::from_slice(&bytes).unwrap_or_default();
+            let retained: Vec<&UsageLog> =
+                logs.iter().filter(|log| log.created_at >= cutoff).collect();
+            if retained.is_empty() {
+                match fs::remove_file(&path).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            } else if retained.len() < logs.len() {
+                let kept: Vec<UsageLog> = retained.into_iter().cloned().collect();
+                let bytes = serde_json::to_vec(&kept).map_err(io::Error::other)?;
+                let tmp_path = path.with_extension("tmp");
+                fs::write(&tmp_path, &bytes).await?;
+                fs::rename(&tmp_path, &path).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl StateStore for FileStateStore {
@@ -181,6 +219,10 @@ impl StateStore for FileStateStore {
         _downstream_id: &'a str,
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
         Box::pin(async { Ok(None) })
+    }
+
+    fn delete_usage_logs_before<'a>(&'a self, cutoff: u64) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move { self.delete_usage_logs_before(cutoff).await })
     }
 }
 

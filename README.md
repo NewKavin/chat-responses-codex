@@ -182,6 +182,7 @@ flowchart LR
 - `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS`：每个逻辑请求允许的额外尝试数，默认 `1`；设为 `0` 可禁用。
 - `USAGE_LOG_ROTATION_MAX_BYTES`：文件模式日志轮转阈值。
 - `USAGE_LOG_ARCHIVE_MAX_FILES`：文件模式日志归档上限。
+- `USAGE_LOG_RETENTION_DAYS`：日志保留天数，超过自动清理，默认 `14`；设为 `0` 关闭自动清理。
 - `RUST_LOG`：可选，控制日志级别。
 - `TZ`：可选，时区。
 
@@ -447,6 +448,7 @@ Common environment variables:
 - `AUTOMATIC_CAPABILITY_PROBES_ENABLED`: enables automatic real Chat/Responses capability probes. It defaults to `false`; enabling it consumes model tokens. Explicit manual probes still consume tokens when an administrator runs them.
 - `USAGE_LOG_ROTATION_MAX_BYTES`: file-backed log rotation threshold.
 - `USAGE_LOG_ARCHIVE_MAX_FILES`: maximum number of log archive files.
+- `USAGE_LOG_RETENTION_DAYS`: auto-delete logs older than this many days (default 14; 0 disables).
 - `RUST_LOG`: optional log level filter.
 - `TZ`: optional timezone.
 

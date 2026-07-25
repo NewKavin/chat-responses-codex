@@ -376,6 +376,10 @@ impl StateStore for PostgresStateStore {
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
         Box::pin(async move { self.downstream_usage_summary(downstream_id).await })
     }
+
+    fn delete_usage_logs_before<'a>(&'a self, cutoff: u64) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async move { self.delete_usage_logs_before(cutoff).await })
+    }
 }
 
 impl AppState {
@@ -2158,6 +2162,49 @@ impl AppState {
                 return;
             }
         }
+    }
+
+    pub async fn prune_expired_usage_logs(&self) -> io::Result<u64> {
+        let retention_days = self.config.usage_log_retention_days;
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let now = unix_seconds();
+        let cutoff = now.saturating_sub(retention_days * 86400);
+
+        // Delete from durable storage (file archives or postgres)
+        if let Some(postgres) = &self.postgres {
+            postgres.delete_usage_logs_before(cutoff).await?;
+        } else {
+            self.config_store.delete_usage_logs_before(cutoff).await?;
+        }
+
+        // Remove from in-memory archived logs
+        let removed_archived = {
+            let mut archived = self.archived_usage_logs.lock().await;
+            let before = archived.len();
+            archived.retain(|log| log.created_at >= cutoff);
+            before - archived.len()
+        };
+
+        // Remove from in-memory state logs
+        let removed_state = {
+            let mut state = self.inner.lock().await;
+            let before = state.usage_logs.len();
+            state.usage_logs.retain(|log| log.created_at >= cutoff);
+            before - state.usage_logs.len()
+        };
+
+        let total_removed = (removed_archived + removed_state) as u64;
+        if total_removed > 0 {
+            tracing::info!(
+                cutoff,
+                retention_days,
+                removed = total_removed,
+                "pruned expired usage logs"
+            );
+        }
+        Ok(total_removed)
     }
 
     async fn flush_pending_usage_logs_now(&self) -> io::Result<()> {

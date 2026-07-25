@@ -157,6 +157,10 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should configure the usage log archive limit"
     );
     assert!(
+        compose.contains("USAGE_LOG_RETENTION_DAYS: ${USAGE_LOG_RETENTION_DAYS:-14}"),
+        "docker-compose.yml should configure the usage log retention period"
+    );
+    assert!(
         compose.contains(
             "MODEL_PROBE_REFRESH_INTERVAL_SECONDS: ${MODEL_PROBE_REFRESH_INTERVAL_SECONDS:-15}"
         ),
@@ -383,6 +387,7 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "APP_NAME=",
         "USAGE_LOG_ROTATION_MAX_BYTES=",
         "USAGE_LOG_ARCHIVE_MAX_FILES=",
+        "USAGE_LOG_RETENTION_DAYS=",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS=",
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=",
         "AUTOMATIC_CAPABILITY_PROBES_ENABLED=",
@@ -420,6 +425,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "APP_NAME: ${APP_NAME:-chat-responses-codex}",
         "USAGE_LOG_ROTATION_MAX_BYTES: ${USAGE_LOG_ROTATION_MAX_BYTES:-1048576}",
         "USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}",
+        "USAGE_LOG_RETENTION_DAYS: ${USAGE_LOG_RETENTION_DAYS:-14}",
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS: ${MODEL_PROBE_REFRESH_INTERVAL_SECONDS:-15}",
         "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED: ${UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED:-false}",
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}",

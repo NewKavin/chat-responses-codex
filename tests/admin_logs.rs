@@ -241,7 +241,7 @@ async fn test_logs_list_supports_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?page=1&page_size=2")
+                .uri("/api/admin/logs?page=1&page_size=2&time_range=7d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -314,7 +314,7 @@ async fn test_logs_list_supports_filtering_by_status_code() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?status_code=200")
+                .uri("/api/admin/logs?status_code=200&time_range=7d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -350,7 +350,7 @@ async fn test_logs_list_supports_filtering_by_model() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?model=gpt-4")
+                .uri("/api/admin/logs?model=gpt-4&time_range=7d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -385,7 +385,7 @@ async fn test_logs_list_supports_filtering_by_model_substring_case_insensitive()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?model=GPT")
+                .uri("/api/admin/logs?model=GPT&time_range=7d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -485,7 +485,7 @@ async fn test_logs_list_supports_filtering_by_status_code_list() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?status_codes=200,400")
+                .uri("/api/admin/logs?status_codes=200,400&time_range=7d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -766,7 +766,7 @@ async fn test_logs_list_keeps_existing_shape_after_query_api_switch() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?status_codes=200&page=1&page_size=2")
+                .uri("/api/admin/logs?status_codes=200&page=1&page_size=2&time_range=7d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -791,4 +791,132 @@ async fn test_logs_list_keeps_existing_shape_after_query_api_switch() {
     assert_eq!(logs[0]["api_name"], "ChatCompletions API");
     assert_eq!(logs[0]["downstream_name"], "Team Alpha");
     assert!(logs[0].get("log").is_none());
+}
+
+#[tokio::test]
+async fn test_prune_expired_usage_logs_removes_old_entries() {
+    let now = chat_responses_codex::state::unix_seconds();
+
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        usage_log_retention_days: 14,
+        ..Default::default()
+    };
+
+    let state = PersistedState {
+        upstreams: vec![],
+        downstreams: vec![],
+        usage_logs: vec![
+            UsageLog {
+                id: "recent-1".to_string(),
+                downstream_key_id: "ds".to_string(),
+                upstream_key_id: "us".to_string(),
+                downstream_name: None,
+                upstream_name: None,
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "gpt-4".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "r1".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                latency_ms: 100,
+                created_at: now,
+                compatibility: None,
+            },
+            UsageLog {
+                id: "old-1".to_string(),
+                downstream_key_id: "ds".to_string(),
+                upstream_key_id: "us".to_string(),
+                downstream_name: None,
+                upstream_name: None,
+                endpoint: "/v1/chat/completions".to_string(),
+                model: "gpt-4".to_string(),
+                inference_strength: None,
+                billing_mode: None,
+                request_count: None,
+                user_agent: None,
+                request_id: "r2".to_string(),
+                status_code: 200,
+                error_message: None,
+                error_category: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                latency_ms: 100,
+                created_at: now - 15 * 86400,
+                compatibility: None,
+            },
+        ],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+
+    let app = AppState::new(state, unique_state_path(), config);
+
+    let removed = app.prune_expired_usage_logs().await.unwrap();
+    assert_eq!(removed, 1);
+
+    let snapshot = app.snapshot().await;
+    let ids: Vec<&str> = snapshot.usage_logs.iter().map(|l| l.id.as_str()).collect();
+    assert!(ids.contains(&"recent-1"));
+    assert!(!ids.contains(&"old-1"));
+}
+
+#[tokio::test]
+async fn test_prune_expired_usage_logs_respects_zero_retention() {
+    let now = chat_responses_codex::state::unix_seconds();
+
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        usage_log_retention_days: 0,
+        ..Default::default()
+    };
+
+    let state = PersistedState {
+        upstreams: vec![],
+        downstreams: vec![],
+        usage_logs: vec![UsageLog {
+            id: "ancient".to_string(),
+            downstream_key_id: "ds".to_string(),
+            upstream_key_id: "us".to_string(),
+            downstream_name: None,
+            upstream_name: None,
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            inference_strength: None,
+            billing_mode: None,
+            request_count: None,
+            user_agent: None,
+            request_id: "r1".to_string(),
+            status_code: 200,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            latency_ms: 100,
+            created_at: now - 999 * 86400,
+            compatibility: None,
+        }],
+        announcement: None,
+        global_context_profiles: std::collections::HashMap::new(),
+    };
+
+    let app = AppState::new(state, unique_state_path(), config);
+
+    let removed = app.prune_expired_usage_logs().await.unwrap();
+    assert_eq!(removed, 0);
+    let snapshot = app.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
 }

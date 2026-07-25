@@ -89,6 +89,7 @@ fn app_config_defaults_stream_watchdog_settings() {
     assert!(!config.upstream_model_auto_discovery_enabled);
     assert_eq!(config.upstream_user_agent, "codex/0.144.6");
     assert!(!config.automatic_capability_probes_enabled);
+    assert_eq!(config.usage_log_retention_days, 14);
 }
 
 #[test]

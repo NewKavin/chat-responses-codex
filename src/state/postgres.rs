@@ -446,6 +446,17 @@ impl PostgresStateStore {
         tx.commit().await.map_err(io_other)
     }
 
+    pub async fn delete_usage_logs_before(&self, cutoff: u64) -> io::Result<()> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        conn.execute(
+            "DELETE FROM usage_logs WHERE created_at < $1",
+            &[&(cutoff as i64)],
+        )
+        .await
+        .map_err(io_other)?;
+        Ok(())
+    }
+
     pub async fn query_usage_logs_page(
         &self,
         query: &UsageLogQuery,

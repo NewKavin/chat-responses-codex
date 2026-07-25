@@ -44,6 +44,7 @@ services:
       APP_NAME: ${APP_NAME:-chat-responses-codex}
       USAGE_LOG_ROTATION_MAX_BYTES: ${USAGE_LOG_ROTATION_MAX_BYTES:-1048576}
       USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}
+      USAGE_LOG_RETENTION_DAYS: ${USAGE_LOG_RETENTION_DAYS:-14}
       MODEL_PROBE_REFRESH_INTERVAL_SECONDS: ${MODEL_PROBE_REFRESH_INTERVAL_SECONDS:-15}
       # Automatic upstream model discovery is disabled by default.
       # Manual model discovery remains available when automatic discovery is disabled.

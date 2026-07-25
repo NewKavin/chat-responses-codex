@@ -37,6 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_name: env_or("APP_NAME", "chat-responses-codex"),
         usage_log_rotation_max_bytes: env_usize("USAGE_LOG_ROTATION_MAX_BYTES", 1_048_576).max(1),
         usage_log_archive_max_files: env_usize("USAGE_LOG_ARCHIVE_MAX_FILES", 10).max(1),
+        usage_log_retention_days: env_u64("USAGE_LOG_RETENTION_DAYS", 14),
         upstream_rate_limit_default_retry_seconds: env_u64(
             "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS",
             30,
@@ -189,6 +190,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     chat_responses_codex::server::CapabilityProbeService::spawn(state.clone());
     ModelKeySyncService::spawn(state.clone());
+    spawn_usage_log_retention_task(state.clone());
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,
@@ -288,6 +290,31 @@ fn env_bool(key: &str, default: bool) -> bool {
                 || (!matches!(normalized.as_str(), "0" | "false" | "no" | "off") && default)
         })
         .unwrap_or(default)
+}
+
+fn spawn_usage_log_retention_task(state: AppState) {
+    let retention_days = state.config.usage_log_retention_days;
+    if retention_days == 0 {
+        tracing::info!("usage log retention disabled (USAGE_LOG_RETENTION_DAYS=0)");
+        return;
+    }
+    let interval = Duration::from_secs(3600);
+    tokio::spawn(async move {
+        // Run once at startup after a short delay, then every hour
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        loop {
+            match state.prune_expired_usage_logs().await {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "usage log retention sweep completed");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "usage log retention sweep failed");
+                }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 fn init_tracing(log_path: &str) {

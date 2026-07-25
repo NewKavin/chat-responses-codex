@@ -322,7 +322,7 @@ const filters = ref({
   status_codes: [] as number[],
   error_categories: [] as string[],
   model: '',
-  time_range: '7d',
+  time_range: '1d',
   custom_range: [] as string[]
 })
 
@@ -448,7 +448,7 @@ const resetFilters = () => {
     status_codes: [],
     error_categories: [],
     model: '',
-    time_range: '7d',
+    time_range: '1d',
     custom_range: []
   }
   handleFilterChange()
@@ -493,7 +493,7 @@ const loadData = async () => {
         params.start_time = Math.floor(Number(start) / 1000)
         params.end_time = Math.floor(Number(end) / 1000)
       } else {
-        params.time_range = '7d'
+        params.time_range = '1d'
       }
     }
 
