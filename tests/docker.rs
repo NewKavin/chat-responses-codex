@@ -451,6 +451,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "ROUTING_AFFINITY_ENABLED: ${ROUTING_AFFINITY_ENABLED:-true}",
         "ROUTING_AFFINITY_TTL_SECONDS: ${ROUTING_AFFINITY_TTL_SECONDS:-180}",
         "ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO: ${ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO:-1.5}",
+        "UPSTREAM_USER_AGENT: ${UPSTREAM_USER_AGENT:-codex/0.144.6}",
         "UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${UPSTREAM_CONNECT_TIMEOUT_SECONDS:-30}",
         "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-30}",
         "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: ${UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS:-1800}",
@@ -471,6 +472,7 @@ fn deployment_surfaces_document_model_key_sync_and_process_local_health() {
 
     assert!(dotenv.contains("UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0"));
     assert!(dotenv.contains("UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED=false"));
+    assert!(dotenv.contains("UPSTREAM_USER_AGENT=codex/0.144.6"));
     assert!(dotenv.contains("AUTOMATIC_CAPABILITY_PROBES_ENABLED=false"));
     assert!(compose.contains(
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}"
@@ -478,6 +480,7 @@ fn deployment_surfaces_document_model_key_sync_and_process_local_health() {
     assert!(compose.contains(
         "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED: ${UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED:-false}"
     ));
+    assert!(compose.contains("UPSTREAM_USER_AGENT: ${UPSTREAM_USER_AGENT:-codex/0.144.6}"));
 
     for (name, surface) in [
         (".env.example", dotenv.as_str()),

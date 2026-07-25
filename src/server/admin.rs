@@ -955,6 +955,7 @@ pub(super) async fn build_model_probe_response(
     let snapshot = state.snapshot().await;
     let timeout_seconds = state.config.admin_upstream_timeout_seconds.max(1);
     let client = reqwest::Client::builder()
+        .user_agent(&state.config.upstream_user_agent)
         .timeout(Duration::from_secs(timeout_seconds))
         .build()
         .unwrap_or_default();
@@ -1134,8 +1135,10 @@ async fn discover_batch_model_configuration(
     payload: &BatchCreateUpstreamPayload,
     current_keys: &[String],
     timeout_seconds: u64,
+    user_agent: &str,
 ) -> BatchModelConfiguration {
     let client = reqwest::Client::builder()
+        .user_agent(user_agent)
         .timeout(Duration::from_secs(timeout_seconds))
         .build()
         .unwrap_or_default();
@@ -1261,7 +1264,13 @@ pub(super) async fn admin_create_upstreams_batch(
     }
     let automatic_discovery = state.config.upstream_model_auto_discovery_enabled;
     let model_configuration = if automatic_discovery {
-        discover_batch_model_configuration(&payload, &current_keys, admin_timeout).await
+        discover_batch_model_configuration(
+            &payload,
+            &current_keys,
+            admin_timeout,
+            &state.config.upstream_user_agent,
+        )
+        .await
     } else {
         explicit_batch_model_configuration(
             &current_keys,
@@ -1361,6 +1370,7 @@ pub(super) async fn admin_discover_upstream_models(
     }
 
     let client = reqwest::Client::builder()
+        .user_agent(&state.config.upstream_user_agent)
         .timeout(std::time::Duration::from_secs(admin_timeout))
         .build()
         .unwrap_or_default();

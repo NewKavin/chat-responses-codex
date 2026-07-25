@@ -87,6 +87,7 @@ fn app_config_defaults_stream_watchdog_settings() {
     assert_eq!(config.model_probe_refresh_interval_seconds, 15);
     assert_eq!(config.upstream_model_key_sync_interval_seconds, 0);
     assert!(!config.upstream_model_auto_discovery_enabled);
+    assert_eq!(config.upstream_user_agent, "codex/0.144.6");
     assert!(!config.automatic_capability_probes_enabled);
 }
 

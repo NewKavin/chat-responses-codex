@@ -60,6 +60,7 @@ pub fn should_bypass_proxy_for_host(host: &str) -> bool {
 /// Build an HTTP client for upstream requests.
 pub fn build_upstream_http_client(config: &AppConfig, no_proxy: bool) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
+        .user_agent(&config.upstream_user_agent)
         .connect_timeout(Duration::from_secs(
             config.upstream_connect_timeout_seconds.max(1),
         ))
