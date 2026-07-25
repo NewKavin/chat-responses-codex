@@ -43,10 +43,8 @@ mod usage;
 
 use arc_swap::ArcSwap;
 use futures_util::{stream, StreamExt};
-use redis::aio::ConnectionManager;
-use redis::AsyncCommands;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -284,7 +282,6 @@ pub struct AppState {
     direct_client: Client,
     config_store: Arc<dyn StateStore>,
     postgres: Option<Arc<PostgresStateStore>>,
-    redis: Option<Arc<Mutex<ConnectionManager>>>,
 }
 
 fn new_internal_route_capture_token() -> Arc<str> {
@@ -596,7 +593,6 @@ impl AppState {
             config,
             config_store,
             postgres: None,
-            redis: None,
         }
     }
 
@@ -660,7 +656,6 @@ impl AppState {
             config,
             config_store,
             postgres,
-            redis: None,
         }
     }
 
@@ -718,38 +713,11 @@ impl AppState {
             config,
             config_store,
             postgres: Some(postgres),
-            redis: None,
         }
     }
 
     pub fn troubleshooting_route_capture_token(&self) -> &str {
         &self.troubleshooting_route_capture_token
-    }
-
-    pub async fn maybe_attach_redis(&mut self) -> bool {
-        let Some(redis_url) = self.config.redis_url.as_deref().map(str::trim) else {
-            return false;
-        };
-        if redis_url.is_empty() {
-            return false;
-        }
-        match redis::Client::open(redis_url) {
-            Ok(client) => match client.get_connection_manager().await {
-                Ok(connection) => {
-                    tracing::info!(redis_url = %redis_url, "redis cache enabled");
-                    self.redis = Some(Arc::new(Mutex::new(connection)));
-                    true
-                }
-                Err(error) => {
-                    tracing::warn!(redis_url = %redis_url, error = %error, "failed to connect to redis");
-                    false
-                }
-            },
-            Err(error) => {
-                tracing::warn!(redis_url = %redis_url, error = %error, "failed to open redis client");
-                false
-            }
-        }
     }
 
     pub fn client(&self) -> Client {
@@ -1023,35 +991,6 @@ impl AppState {
         drop(registry);
         self.reconcile_runtime_capability_hints(&upstreams);
         self.reconcile_model_key_sync_runtime(&upstreams);
-    }
-
-    pub async fn get_cached_json<T>(&self, key: &str) -> Option<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let redis = self.redis.as_ref()?.clone();
-        let mut connection = redis.lock().await;
-        let value = match connection.get::<_, Option<String>>(key).await {
-            Ok(Some(value)) => value,
-            _ => return None,
-        };
-        serde_json::from_str(&value).ok()
-    }
-
-    pub async fn set_cached_json<T>(&self, key: &str, value: &T, ttl_seconds: u64)
-    where
-        T: Serialize,
-    {
-        let Some(redis) = &self.redis else {
-            return;
-        };
-        let Ok(serialized) = serde_json::to_string(value) else {
-            return;
-        };
-        let mut connection = redis.lock().await;
-        let _ = connection
-            .set_ex::<_, _, ()>(key, serialized, ttl_seconds)
-            .await;
     }
 
     pub fn create_admin_session(&self) -> String {

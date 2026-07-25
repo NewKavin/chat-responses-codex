@@ -92,11 +92,9 @@ pub struct AppConfig {
     pub routing_affinity_enabled: bool,
     pub routing_affinity_ttl_seconds: u64,
     pub routing_affinity_escape_pressure_ratio: f64,
-    pub redis_url: Option<String>,
     pub model_probe_refresh_interval_seconds: u64,
     pub upstream_model_auto_discovery_enabled: bool,
     pub upstream_model_key_sync_interval_seconds: u64,
-    pub dashboard_cache_ttl_seconds: u64,
     pub postgres_pool_max_size: u32,
     /// Maximum pending atomic probe submission batches. Route jobs inside an
     /// accepted batch are expanded and deduplicated by `ProbeQueueState`.
@@ -140,11 +138,9 @@ impl Default for AppConfig {
             routing_affinity_enabled: true,
             routing_affinity_ttl_seconds: 180,
             routing_affinity_escape_pressure_ratio: 1.5,
-            redis_url: None,
             model_probe_refresh_interval_seconds: 15,
             upstream_model_auto_discovery_enabled: false,
             upstream_model_key_sync_interval_seconds: 0,
-            dashboard_cache_ttl_seconds: 30,
             postgres_pool_max_size: 16,
             capability_probe_queue_capacity: 256,
             capability_probe_request_timeout_seconds: 20,

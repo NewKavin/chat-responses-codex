@@ -326,11 +326,9 @@ pub(super) async fn portal_model_probe(
         }
     };
 
-    let cache_key = format!("model_probe:portal:{downstream_id}");
     let response = super::admin::build_model_probe_response(
         &state,
         Some(downstream.model_allowlist.as_slice()),
-        &cache_key,
     )
     .await;
 

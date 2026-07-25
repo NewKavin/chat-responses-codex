@@ -84,9 +84,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             1.5,
         )
         .max(1.0),
-        redis_url: env::var("REDIS_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty()),
         model_probe_refresh_interval_seconds: env_u64("MODEL_PROBE_REFRESH_INTERVAL_SECONDS", 15)
             .max(1),
         upstream_model_auto_discovery_enabled: env_bool(
@@ -97,7 +94,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
             0,
         ),
-        dashboard_cache_ttl_seconds: env_u64("DASHBOARD_CACHE_TTL_SECONDS", 30).max(1),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
         capability_probe_queue_capacity: env_usize("CAPABILITY_PROBE_QUEUE_CAPACITY", 256).max(1),
         capability_probe_request_timeout_seconds: env_u64(
@@ -179,7 +175,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "starting gateway"
     );
 
-    let mut state = match AppState::load_from_path(&state_path, config).await {
+    let state = match AppState::load_from_path(&state_path, config).await {
         Ok(state) => state,
         Err(error) => {
             tracing::error!(
@@ -191,7 +187,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Err(error.into());
         }
     };
-    state.maybe_attach_redis().await;
     chat_responses_codex::server::CapabilityProbeService::spawn(state.clone());
     ModelKeySyncService::spawn(state.clone());
     let app = build_router(state);

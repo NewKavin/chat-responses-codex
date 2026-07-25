@@ -176,7 +176,6 @@ flowchart LR
 - `UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED`：上游模型自动发现开关，默认 `false`（关闭）。关闭时批量创建、后台同步和定向发现都不能自动新增或删除持久化模型映射；管理员"获取模型"仍然可用，仅加载候选模型，保存时才持久化选中的模型。Automatic upstream model discovery is disabled by default. Manual model discovery remains available when automatic discovery is disabled.
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：后台模型-key 映射同步间隔，默认 `0`（关闭）；设为正整数才会启用。Automatic upstream model discovery is disabled by default. Manual model discovery remains available when automatic discovery is disabled.
 - `AUTOMATIC_CAPABILITY_PROBES_ENABLED`：是否自动发送真实 Chat/Responses 能力探测请求，默认 `false`。启用会消耗模型 token；手工 capability probe 和“真实验证并应用”不受该自动开关控制，在管理员明确触发时仍会消耗 token。
-- `DASHBOARD_CACHE_TTL_SECONDS`：后端复用模型探测快照的缓存时间，单位秒。
 - `UPSTREAM_HEDGE_ENABLED`：是否为长时间没有首个可用输出的流式请求启用竞争尝试。
 - `UPSTREAM_HEDGE_DELAY_MS`：发起第一个额外竞争尝试前的等待时间，默认 `12000` 毫秒。
 - `UPSTREAM_HEDGE_INTERVAL_MS`：后续额外竞争尝试之间的最小间隔，默认 `12000` 毫秒。

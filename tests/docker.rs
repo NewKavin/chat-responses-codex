@@ -107,10 +107,6 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should run PostgreSQL 15"
     );
     assert!(
-        compose.contains("image: redis:7-alpine"),
-        "docker-compose.yml should run Redis from the official lightweight image"
-    );
-    assert!(
         compose.contains("POSTGRES_DB: chat_responses_codex"),
         "docker-compose.yml should set the gateway database name"
     );
@@ -137,10 +133,6 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
         "docker-compose.yml should point the gateway at the postgres service"
     );
     assert!(
-        compose.contains("REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}"),
-        "docker-compose.yml should point the gateway at the redis service"
-    );
-    assert!(
         compose.contains("STATE_PATH: ${STATE_PATH:-/data/state.json}"),
         "docker-compose.yml should configure the gateway state path"
     );
@@ -163,10 +155,6 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
     assert!(
         compose.contains("USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}"),
         "docker-compose.yml should configure the usage log archive limit"
-    );
-    assert!(
-        compose.contains("DASHBOARD_CACHE_TTL_SECONDS: ${DASHBOARD_CACHE_TTL_SECONDS:-30}"),
-        "docker-compose.yml should configure the dashboard cache TTL"
     );
     assert!(
         compose.contains(
@@ -389,7 +377,6 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "BIND_ADDR=",
         "STATE_PATH=",
         "DATABASE_URL=",
-        "REDIS_URL=",
         "LOG_PATH=",
         "TZ=",
         "ADMIN_USERNAME=",
@@ -399,7 +386,6 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "MODEL_PROBE_REFRESH_INTERVAL_SECONDS=",
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=",
         "AUTOMATIC_CAPABILITY_PROBES_ENABLED=",
-        "DASHBOARD_CACHE_TTL_SECONDS=",
         "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS=",
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS=",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=",
@@ -428,7 +414,6 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "BIND_ADDR: ${BIND_ADDR:-0.0.0.0:3001}",
         "STATE_PATH: ${STATE_PATH:-/data/state.json}",
         "DATABASE_URL: ${DATABASE_URL:-postgres://chat_responses_codex@postgres/chat_responses_codex}",
-        "REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}",
         "LOG_PATH: ${LOG_PATH:-/logs/chat-responses-codex.log}",
         "TZ: ${TZ:-Asia/Shanghai}",
         "ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}",
@@ -439,7 +424,6 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED: ${UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED:-false}",
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}",
         "AUTOMATIC_CAPABILITY_PROBES_ENABLED: ${AUTOMATIC_CAPABILITY_PROBES_ENABLED:-false}",
-        "DASHBOARD_CACHE_TTL_SECONDS: ${DASHBOARD_CACHE_TTL_SECONDS:-30}",
         "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS: ${UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS:-30}",
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS: ${UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS:-300}",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS: ${UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS:-3}",

@@ -167,14 +167,6 @@ pub(super) async fn admin_dashboard(
         "30d" => "30d",
         _ => "7d",
     };
-    let cache_key = format!("dashboard:{range}");
-    if let Some(cached) = state
-        .get_cached_json::<DashboardSummaryResponse>(&cache_key)
-        .await
-    {
-        return Json(cached).into_response();
-    }
-
     let snapshot = state.snapshot().await;
     let now = unix_seconds();
     let days = match range {
@@ -362,20 +354,11 @@ pub(super) async fn admin_dashboard(
         analytics,
     };
 
-    state
-        .set_cached_json(
-            &cache_key,
-            &response,
-            state.config.dashboard_cache_ttl_seconds,
-        )
-        .await;
-
     Json(response).into_response()
 }
 
 pub(super) async fn admin_model_probe(State(state): State<AppState>) -> impl IntoResponse {
-    let cache_key = "model_probe:admin";
-    let response = build_model_probe_response(&state, None, cache_key).await;
+    let response = build_model_probe_response(&state, None).await;
     Json(response).into_response()
 }
 
@@ -946,12 +929,7 @@ struct QualifyModelsResponse {
 pub(super) async fn build_model_probe_response(
     state: &AppState,
     allowlist: Option<&[String]>,
-    cache_key: &str,
 ) -> ModelProbeResponse {
-    if let Some(cached) = state.get_cached_json::<ModelProbeResponse>(cache_key).await {
-        return cached;
-    }
-
     let snapshot = state.snapshot().await;
     let timeout_seconds = state.config.admin_upstream_timeout_seconds.max(1);
     let client = reqwest::Client::builder()
@@ -1070,14 +1048,6 @@ pub(super) async fn build_model_probe_response(
         channels,
         models,
     };
-
-    state
-        .set_cached_json(
-            cache_key,
-            &response,
-            state.config.dashboard_cache_ttl_seconds,
-        )
-        .await;
 
     response
 }

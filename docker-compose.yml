@@ -19,21 +19,6 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  redis:
-    image: redis:7-alpine
-    container_name: chat-responses-codex-redis
-    restart: unless-stopped
-    environment:
-      TZ: Asia/Shanghai
-    expose:
-      - "6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 3s
-
   gateway:
     image: chat-responses-codex:latest
     build:
@@ -43,8 +28,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     ports:
       - "3001:3001"
     # Exact route health is process-local; run one active gateway instance per database.
@@ -52,7 +35,6 @@ services:
       BIND_ADDR: ${BIND_ADDR:-0.0.0.0:3001}
       STATE_PATH: ${STATE_PATH:-/data/state.json}
       DATABASE_URL: ${DATABASE_URL:-postgres://chat_responses_codex@postgres/chat_responses_codex}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your shell or .env file}
       LOG_PATH: ${LOG_PATH:-/logs/chat-responses-codex.log}
       TZ: ${TZ:-Asia/Shanghai}
@@ -70,7 +52,6 @@ services:
       UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}
       # Automatic capability probes send real inference requests and consume model tokens.
       AUTOMATIC_CAPABILITY_PROBES_ENABLED: ${AUTOMATIC_CAPABILITY_PROBES_ENABLED:-false}
-      DASHBOARD_CACHE_TTL_SECONDS: ${DASHBOARD_CACHE_TTL_SECONDS:-30}
       UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS: ${UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS:-30}
       # UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.
       UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS: ${UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS:-300}

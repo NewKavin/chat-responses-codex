@@ -74,19 +74,12 @@ Optional but useful:
 
 - `RUST_LOG=info`
 - `TZ=Asia/Shanghai`
-- `REDIS_URL=redis://redis:6379/0`
-- `DASHBOARD_CACHE_TTL_SECONDS=30`
-
-If Redis is configured, the admin dashboard response is cached in Redis and reused
-until the TTL expires. This reduces repeated log scans on refresh-heavy admin pages.
 `POSTGRES_POOL_MAX_SIZE` sets the maximum number of pooled PostgreSQL connections.
 `ADMIN_LOGS_PAGE_SIZE_MAX` is the intended ceiling for admin log pagination responses.
 `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST` controls how many idle upstream HTTP connections
 the gateway keeps per host before opening new sockets.
 `MODEL_PROBE_REFRESH_INTERVAL_SECONDS` controls how often the browser asks for a
-fresh model-probe snapshot. Keep it separate from `DASHBOARD_CACHE_TTL_SECONDS`,
-which controls how long the backend reuses the cached probe result before
-calling upstreams again.
+fresh model-probe snapshot.
 `UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED` defaults to `false`. When `false`, batch
 creation, periodic synchronization, and targeted discovery cannot add or remove
 persisted model mappings. The administrator's "获取模型" action remains available and only loads candidates; selected models are persisted when the upstream is saved.
@@ -331,8 +324,6 @@ The matrix fails on semantic check failures and unpermitted downgrades. The inst
 - In file-backed compatibility mode, usage logs rotate into archive files next to `STATE_PATH` once the current state file grows beyond `USAGE_LOG_ROTATION_MAX_BYTES`.
 - Archive files are capped at `USAGE_LOG_ARCHIVE_MAX_FILES`.
 - In PostgreSQL mode, usage logs stay in the database and do not rotate into local archive files.
-- Redis is optional, but when enabled it caches the admin dashboard response and
-  keeps repeated refreshes from rescanning the full usage log history.
 - Runtime logs are appended to `LOG_PATH` and can be mounted to the host with `./logs:/logs`.
 - The Docker image exposes a `HEALTHCHECK` that runs the binary's built-in healthcheck mode.
 - Per-minute request limiting is enforced at the gateway entry point.
