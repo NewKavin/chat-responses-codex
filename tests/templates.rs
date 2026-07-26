@@ -136,6 +136,15 @@ fn app_config_defaults_upstream_hedge_policy() {
 }
 
 #[test]
+fn app_config_defaults_upstream_route_retry_policy() {
+    let config = AppConfig::default();
+
+    assert!(config.upstream_route_exhaustion_retry_enabled);
+    assert_eq!(config.upstream_route_exhaustion_retry_max_wait_ms, 10_000);
+    assert_eq!(config.upstream_route_exhaustion_retry_max_rounds, 3);
+}
+
+#[test]
 fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_settings() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();

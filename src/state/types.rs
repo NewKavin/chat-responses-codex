@@ -71,6 +71,9 @@ pub const DEFAULT_UPSTREAM_HEDGE_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_HEDGE_DELAY_MS: u64 = 12_000;
 pub const DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS: u64 = 12_000;
 pub const DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS: u32 = 1;
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 10_000;
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -116,6 +119,9 @@ pub struct AppConfig {
     pub upstream_hedge_delay_ms: u64,
     pub upstream_hedge_interval_ms: u64,
     pub upstream_hedge_max_extra_attempts: u32,
+    pub upstream_route_exhaustion_retry_enabled: bool,
+    pub upstream_route_exhaustion_retry_max_wait_ms: u64,
+    pub upstream_route_exhaustion_retry_max_rounds: u32,
 }
 
 impl Default for AppConfig {
@@ -161,6 +167,12 @@ impl Default for AppConfig {
             upstream_hedge_delay_ms: DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
             upstream_hedge_interval_ms: DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
             upstream_hedge_max_extra_attempts: DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+            upstream_route_exhaustion_retry_enabled:
+                DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+            upstream_route_exhaustion_retry_max_wait_ms:
+                DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
+            upstream_route_exhaustion_retry_max_rounds:
+                DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
         }
     }
 }

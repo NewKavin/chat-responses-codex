@@ -83,7 +83,7 @@ pub use model_qualification::{
 };
 pub use route_health::{
     HealthLease, HealthStateSnapshot, KeyHealthKey, RouteAvailability, RouteHealthKey,
-    RouteHealthPermit, RouteHealthRegistry, RouteOutcome, RouteSetAggregateKey,
+    RouteHealthPermit, RouteHealthRegistry, RouteOutcome, RouteRecovery, RouteSetAggregateKey,
     ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 pub use types::{
@@ -96,6 +96,9 @@ pub use types::{
     RouteHealthSnapshotDto, UpstreamConfig, UpstreamMutationError, UsageLog,
     ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS, DEFAULT_UPSTREAM_HEDGE_ENABLED,
     DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS, DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
 };
 pub use usage::{
     portal_model_is_allowed, DailyStats, ModelStats, PerMinuteUsage, RequestQuotaUsage, TokenQuota,
@@ -793,6 +796,16 @@ impl AppState {
             .lock()
             .await
             .observe_route_set_failure(aggregate, class, retry_after);
+    }
+
+    pub async fn earliest_temporary_route_recovery(
+        &self,
+        routes: &[RouteHealthKey],
+    ) -> Option<RouteRecovery> {
+        self.route_health
+            .lock()
+            .await
+            .earliest_temporary_recovery(routes)
     }
 
     pub async fn route_health_snapshot(

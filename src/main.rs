@@ -2,7 +2,9 @@ use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     AppConfig, AppState, ModelKeySyncService, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
-    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
 };
 use chrono::{FixedOffset, Utc};
 use std::env;
@@ -144,6 +146,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS",
             DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
         ),
+        upstream_route_exhaustion_retry_enabled: env_bool(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED",
+            DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+        ),
+        upstream_route_exhaustion_retry_max_wait_ms: env_u64(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS",
+            DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
+        ),
+        upstream_route_exhaustion_retry_max_rounds: normalize_route_retry_rounds(env_u32(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS",
+            DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
+        )),
     };
 
     init_tracing(&log_path);
@@ -161,6 +175,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         hedge_delay_ms = config.upstream_hedge_delay_ms,
         hedge_interval_ms = config.upstream_hedge_interval_ms,
         hedge_max_extra_attempts = config.upstream_hedge_max_extra_attempts,
+        route_exhaustion_retry_enabled = config.upstream_route_exhaustion_retry_enabled,
+        route_exhaustion_retry_max_wait_ms = config.upstream_route_exhaustion_retry_max_wait_ms,
+        route_exhaustion_retry_max_rounds = config.upstream_route_exhaustion_retry_max_rounds,
         automatic_capability_probes_enabled = config.automatic_capability_probes_enabled,
         upstream_model_auto_discovery_enabled = config.upstream_model_auto_discovery_enabled,
         upstream_model_key_sync_interval_seconds = config.upstream_model_key_sync_interval_seconds,
@@ -264,6 +281,10 @@ fn env_u64(key: &str, default: u64) -> u64 {
 }
 
 fn normalize_hedge_delay_ms(value: u64) -> u64 {
+    value.max(1)
+}
+
+fn normalize_route_retry_rounds(value: u32) -> u32 {
     value.max(1)
 }
 
@@ -398,7 +419,7 @@ impl Write for TeeWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{env_u64, normalize_hedge_delay_ms};
+    use super::{env_u64, normalize_hedge_delay_ms, normalize_route_retry_rounds};
     use std::env;
     use std::sync::{Mutex, OnceLock};
 
@@ -411,6 +432,13 @@ mod tests {
     fn hedge_delay_and_interval_are_at_least_one_millisecond() {
         assert_eq!(normalize_hedge_delay_ms(0), 1);
         assert_eq!(normalize_hedge_delay_ms(7), 7);
+    }
+
+    #[test]
+    fn normalize_route_retry_rounds_is_at_least_one() {
+        assert_eq!(normalize_route_retry_rounds(0), 1);
+        assert_eq!(normalize_route_retry_rounds(1), 1);
+        assert_eq!(normalize_route_retry_rounds(3), 3);
     }
 
     #[test]

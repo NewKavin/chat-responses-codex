@@ -376,6 +376,111 @@ async fn route_and_key_half_open_leases_are_acquired_atomically() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn temporary_recovery_uses_larger_route_and_key_delay() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("fingerprint-recovery", "glm-5.2");
+    let key = key("fingerprint-recovery");
+
+    registry.observe_route_failure(
+        &route,
+        RouteFailureClass::TransientServer,
+        Some(Duration::from_secs(40)),
+    );
+    registry.observe_key_failure(
+        &key,
+        RouteFailureClass::KeyQuota,
+        Some(Duration::from_secs(90)),
+    );
+    let route_delay = registry
+        .route_health_snapshot(&route)
+        .expect("route state")
+        .cooldown_remaining;
+    let key_delay = registry
+        .key_health_snapshot(&key)
+        .expect("key state")
+        .cooldown_remaining;
+
+    let recovery = registry
+        .earliest_temporary_recovery(std::slice::from_ref(&route))
+        .expect("temporary route should expose recovery");
+
+    assert_eq!(recovery.class, RouteFailureClass::KeyQuota);
+    assert_eq!(recovery.retry_after, route_delay.max(key_delay));
+    assert!(recovery.retry_after >= Duration::from_secs(90));
+}
+
+#[tokio::test(start_paused = true)]
+async fn temporary_recovery_chooses_earliest_exact_route() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let slower = route("fingerprint-slower", "glm-5.2");
+    let faster = route("fingerprint-faster", "glm-5.2");
+    registry.observe_route_failure(
+        &slower,
+        RouteFailureClass::TransientServer,
+        Some(Duration::from_secs(80)),
+    );
+    registry.observe_route_failure(
+        &faster,
+        RouteFailureClass::TransientServer,
+        Some(Duration::from_secs(45)),
+    );
+    let slower_recovery = registry
+        .earliest_temporary_recovery(std::slice::from_ref(&slower))
+        .expect("slower route recovery");
+    let faster_recovery = registry
+        .earliest_temporary_recovery(std::slice::from_ref(&faster))
+        .expect("faster route recovery");
+
+    let combined = registry
+        .earliest_temporary_recovery(&[slower, faster])
+        .expect("one temporary route should recover");
+
+    assert_eq!(combined, faster_recovery);
+    assert!(combined.retry_after < slower_recovery.retry_after);
+}
+
+#[tokio::test(start_paused = true)]
+async fn temporary_recovery_excludes_a_credential_blocked_exact_route() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("fingerprint-credentials", "glm-5.2");
+    let key = key("fingerprint-credentials");
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    registry.observe_key_failure(&key, RouteFailureClass::Credentials, None);
+
+    assert!(registry
+        .earliest_temporary_recovery(std::slice::from_ref(&route))
+        .is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn temporary_recovery_query_is_read_only_and_reports_half_open_busy() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("fingerprint-half-open", "glm-5.2");
+    let key = key("fingerprint-half-open");
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let cooldown = registry
+        .route_health_snapshot(&route)
+        .expect("route state")
+        .cooldown_remaining;
+    tokio::time::advance(cooldown + Duration::from_nanos(1)).await;
+
+    let ready_recovery = registry
+        .earliest_temporary_recovery(std::slice::from_ref(&route))
+        .expect("expired temporary state should be immediately recoverable");
+    assert_eq!(ready_recovery.retry_after, Duration::ZERO);
+
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("read-only query must leave half-open lease available, got {other:?}"),
+    };
+    let busy_recovery = registry
+        .earliest_temporary_recovery(std::slice::from_ref(&route))
+        .expect("active half-open route is temporarily busy");
+    assert!(busy_recovery.retry_after >= Duration::from_secs(1));
+    registry.finish(lease, RouteOutcome::Cancelled);
+}
+
+#[tokio::test(start_paused = true)]
 async fn per_upstream_capacity_evicts_only_from_the_full_upstream() {
     let mut registry = RouteHealthRegistry::new(8, 1);
     let route_a = route("fingerprint-a", "glm-5.2");

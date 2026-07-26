@@ -62,6 +62,12 @@ pub enum RouteAvailability<T> {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteRecovery {
+    pub class: RouteFailureClass,
+    pub retry_after: Duration,
+}
+
 #[derive(Debug)]
 pub struct HealthLease {
     route: RouteHealthKey,
@@ -272,6 +278,43 @@ impl RouteHealthRegistry {
         self.keys
             .get(key)
             .map(|state| health_snapshot(state, Instant::now()))
+    }
+
+    pub fn earliest_temporary_recovery(
+        &self,
+        routes: &[RouteHealthKey],
+    ) -> Option<RouteRecovery> {
+        let now = Instant::now();
+        routes
+            .iter()
+            .filter_map(|route| self.temporary_recovery_for_route(route, now))
+            .min_by_key(|recovery| (recovery.retry_after, recovery.class.as_str()))
+    }
+
+    fn temporary_recovery_for_route(
+        &self,
+        route: &RouteHealthKey,
+        now: Instant,
+    ) -> Option<RouteRecovery> {
+        let key = KeyHealthKey {
+            upstream_id: route.upstream_id.clone(),
+            key_fingerprint: route.key_fingerprint.clone(),
+        };
+        let recoveries = [self.keys.get(&key), self.routes.get(route)]
+            .into_iter()
+            .flatten()
+            .filter_map(|state| health_state_recovery(state, now))
+            .collect::<Vec<_>>();
+        if recoveries.is_empty()
+            || recoveries
+                .iter()
+                .any(|recovery| !recovery.class.is_temporary())
+        {
+            return None;
+        }
+        recoveries
+            .into_iter()
+            .max_by_key(|recovery| (recovery.retry_after, recovery.class.as_str()))
     }
 
     pub fn route_set_health_snapshot(
@@ -852,6 +895,17 @@ fn health_snapshot(state: &HealthState, now: Instant) -> HealthStateSnapshot {
         cooldown_remaining: state.retry_after(now),
         half_open: state.half_open_generation.is_some(),
     }
+}
+
+fn health_state_recovery(state: &HealthState, now: Instant) -> Option<RouteRecovery> {
+    let class = state.last_failure_class?;
+    state.cooldown_until?;
+    let retry_after = if state.is_active() {
+        state.retry_after(now).max(HALF_OPEN_BUSY_RETRY)
+    } else {
+        state.retry_after(now)
+    };
+    Some(RouteRecovery { class, retry_after })
 }
 
 fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {
