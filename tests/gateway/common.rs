@@ -213,6 +213,46 @@ pub(crate) async fn wait_for_upstream_in_flight(
     }
 }
 
+pub(crate) async fn spawn_truncated_chunked_sse_upstream(
+    first_complete_chunk: Option<&'static [u8]>,
+    truncated_fragment: &'static [u8],
+    hits: Arc<AtomicUsize>,
+) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0u8; 16 * 1024];
+        let _ = socket.read(&mut request).await.unwrap();
+        hits.fetch_add(1, Ordering::SeqCst);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        if let Some(first) = first_complete_chunk {
+            socket
+                .write_all(format!("{:X}\r\n", first.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(first).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        socket
+            .write_all(format!("{:X}\r\n", truncated_fragment.len() + 32).as_bytes())
+            .await
+            .unwrap();
+        socket.write_all(truncated_fragment).await.unwrap();
+        socket.shutdown().await.unwrap();
+    });
+    format!("http://{address}")
+}
+
 pub(crate) async fn spawn_recording_chat_upstream(
     label: &'static str,
     api_key: &'static str,

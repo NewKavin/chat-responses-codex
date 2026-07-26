@@ -1092,6 +1092,17 @@ struct StreamDiagnosticContext {
 }
 
 #[derive(Clone)]
+struct StreamBodyReadDiagnosticContext {
+    request_id: String,
+    upstream_id: String,
+    route_id: String,
+    upstream_protocol: UpstreamProtocol,
+    endpoint: String,
+    started: Instant,
+    route_attempts: RequestRouteAttempts,
+}
+
+#[derive(Clone)]
 struct StreamUsageLogContext {
     state: AppState,
     request_id: String,

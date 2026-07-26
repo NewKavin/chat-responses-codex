@@ -561,7 +561,7 @@ fn build_compatibility_usage_metadata(
 struct HedgeStreamReady {
     reader: UpstreamStreamReader,
     reservation: Option<UpstreamRequestGuard>,
-    route_id: String,
+    body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
 }
 
 struct RouteHedgeReady {
@@ -575,7 +575,7 @@ enum HedgeWinnerReady {
 }
 
 enum PrefetchedStreamWinner {
-    Reader(Box<UpstreamStreamReader>),
+    Reader(Box<HedgeStreamReady>),
     Dispatch(Box<DispatchResult>),
 }
 
@@ -590,6 +590,7 @@ struct HedgeStreamAttempt {
     response_header_timeout: Duration,
     stream_timeouts: StreamTimeouts,
     route_attempts: RequestRouteAttempts,
+    body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
 }
 
 #[derive(Clone)]
@@ -791,6 +792,7 @@ async fn send_hedge_stream_attempt(
         response_header_timeout,
         stream_timeouts,
         route_attempts,
+        body_read_diagnostic_context,
     } = attempt;
     state
         .try_reserve_upstream_hedge(&upstream, &request_model)
@@ -840,17 +842,13 @@ async fn send_hedge_stream_attempt(
     let reader = prefetch_first_usable_output(
         UpstreamStreamReader::new(response, stream_timeouts),
         upstream_protocol,
+        &body_read_diagnostic_context,
     )
     .await?;
     Ok(HedgeStreamReady {
         reader,
         reservation: Some(reservation),
-        route_id: anonymous_route_id(
-            &upstream.id,
-            &upstream_key_fingerprint(&upstream.id, &api_key),
-            &request_model,
-            WireProtocol::from(upstream_protocol),
-        ),
+        body_read_diagnostic_context,
     })
 }
 
@@ -859,19 +857,21 @@ async fn prefetch_stream_with_hedges(
     state: &AppState,
     upstream: &UpstreamConfig,
     primary_reader: UpstreamStreamReader,
-    primary_api_key: &str,
     hedge_api_keys: &[String],
     route_hedge_candidates: &[RouteHedgeCandidate],
     route_hedge_context: Option<RouteHedgeContext>,
     url: &str,
     upstream_body: &Value,
     request_model: &str,
+    runtime_model_slug: &str,
     upstream_protocol: UpstreamProtocol,
+    endpoint: EndpointKind,
     response_header_timeout: Duration,
     stream_timeouts: StreamTimeouts,
     request_id: &str,
     started: Instant,
     route_attempts: &RequestRouteAttempts,
+    primary_body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
 ) -> Result<PrefetchedStreamWinner, GatewayError> {
     let route_hedge_count = route_hedge_context
         .as_ref()
@@ -880,33 +880,39 @@ async fn prefetch_stream_with_hedges(
     let extra_candidate_count = route_hedge_count.saturating_add(hedge_api_keys.len());
     let max_extra_attempts = hedge_extra_attempt_limit(&state.config, extra_candidate_count);
     if max_extra_attempts == 0 {
-        return prefetch_first_usable_output(primary_reader, upstream_protocol)
-            .await
-            .map(|reader| PrefetchedStreamWinner::Reader(Box::new(reader)));
+        let reader = prefetch_first_usable_output(
+            primary_reader,
+            upstream_protocol,
+            &primary_body_read_diagnostic_context,
+        )
+        .await?;
+        return Ok(PrefetchedStreamWinner::Reader(Box::new(HedgeStreamReady {
+            reader,
+            reservation: None,
+            body_read_diagnostic_context: primary_body_read_diagnostic_context,
+        })));
     }
 
     type HedgeFuture =
         futures_util::future::BoxFuture<'static, (u32, Result<HedgeWinnerReady, GatewayError>)>;
     let mut attempts = futures_stream::FuturesUnordered::<HedgeFuture>::new();
-    let primary_route_id = anonymous_route_id(
-        &upstream.id,
-        &upstream_key_fingerprint(&upstream.id, primary_api_key),
-        request_model,
-        WireProtocol::from(upstream_protocol),
-    );
     attempts.push(
         async move {
             (
                 0,
-                prefetch_first_usable_output(primary_reader, upstream_protocol)
-                    .await
-                    .map(|reader| {
-                        HedgeWinnerReady::Stream(Box::new(HedgeStreamReady {
-                            reader,
-                            reservation: None,
-                            route_id: primary_route_id,
-                        }))
-                    }),
+                prefetch_first_usable_output(
+                    primary_reader,
+                    upstream_protocol,
+                    &primary_body_read_diagnostic_context,
+                )
+                .await
+                .map(|reader| {
+                    HedgeWinnerReady::Stream(Box::new(HedgeStreamReady {
+                        reader,
+                        reservation: None,
+                        body_read_diagnostic_context: primary_body_read_diagnostic_context,
+                    }))
+                }),
             )
         }
         .boxed(),
@@ -956,13 +962,13 @@ async fn prefetch_stream_with_hedges(
                                     hedge_winner_upstream_id = %upstream.id,
                                     selected_upstream_id = %upstream.id,
                                     hedge_winner_attempt = attempt_index,
-                                    route_id = %ready.route_id,
+                                    route_id = %ready.body_read_diagnostic_context.route_id,
                                     hedge_extra_attempts_launched = launched_extra_attempts,
                                     hedge_losers_cancelled = attempts.len(),
                                     first_usable_output_latency_ms = started.elapsed().as_millis() as u64,
                                     "selected first usable upstream stream"
                                 );
-                                PrefetchedStreamWinner::Reader(Box::new(ready.reader))
+                                PrefetchedStreamWinner::Reader(ready)
                             }
                             HedgeWinnerReady::Route(ready) => {
                                 tracing::info!(
@@ -1063,6 +1069,20 @@ async fn prefetch_stream_with_hedges(
                         ),
                         "launching slow first-output key hedge"
                     );
+                    let body_read_diagnostic_context = StreamBodyReadDiagnosticContext {
+                        request_id: request_id.to_string(),
+                        upstream_id: upstream.id.clone(),
+                        route_id: anonymous_route_id(
+                            &upstream.id,
+                            &upstream_key_fingerprint(&upstream.id, &api_key),
+                            runtime_model_slug,
+                            WireProtocol::from(upstream_protocol),
+                        ),
+                        upstream_protocol,
+                        endpoint: endpoint.path().to_string(),
+                        started,
+                        route_attempts: route_attempts.clone(),
+                    };
                     let future = send_hedge_stream_attempt(HedgeStreamAttempt {
                         state: state.clone(),
                         upstream: upstream.clone(),
@@ -1074,6 +1094,7 @@ async fn prefetch_stream_with_hedges(
                         response_header_timeout,
                         stream_timeouts,
                         route_attempts: route_attempts.clone(),
+                        body_read_diagnostic_context,
                     });
                     attempts.push(
                         async move {
@@ -2037,57 +2058,76 @@ pub(super) async fn send_to_upstream(
         let mut usage_body = None;
         let body = if content_type.contains("text/event-stream") {
             let reader = UpstreamStreamReader::new(response, stream_timeouts);
-            let reader = if attempt_mode == UpstreamAttemptMode::SsePassThrough {
-                let route_hedge_context =
-                    stream_completion_context
-                        .as_ref()
-                        .map(|completion| RouteHedgeContext {
-                            state: state.clone(),
-                            capability_snapshot: capability_snapshot.clone(),
-                            requested_features: requested_features.clone(),
-                            body: body.clone(),
-                            endpoint,
-                            started,
-                            request_id: request_id.to_string(),
-                            model: model.to_string(),
-                            normalized_model: normalized_model.to_string(),
-                            downstream_key_id: downstream_key_id.to_string(),
-                            downstream_name: downstream_name.to_string(),
-                            inference_strength: inference_strength.map(str::to_string),
-                            user_agent: user_agent.map(str::to_string),
-                            downstream_concurrency_guard: completion
-                                .downstream_concurrency_guard
-                                .clone(),
-                            route_attempts: route_attempts.clone(),
-                            response_history_context: response_history_context.clone(),
-                            stream_only_recovery_request_safe,
-                        });
-                match prefetch_stream_with_hedges(
-                    state,
-                    upstream,
-                    reader,
-                    api_key,
-                    hedge_api_keys,
-                    route_hedge_candidates,
-                    route_hedge_context,
-                    &url,
-                    &upstream_body,
-                    request_model,
-                    upstream_protocol,
-                    response_header_timeout,
-                    stream_timeouts,
-                    request_id,
-                    started,
-                    &route_attempts,
-                )
-                .await?
-                {
-                    PrefetchedStreamWinner::Reader(reader) => *reader,
-                    PrefetchedStreamWinner::Dispatch(result) => return Ok(*result),
-                }
-            } else {
-                reader
+            let primary_body_read_diagnostic_context = StreamBodyReadDiagnosticContext {
+                request_id: request_id.to_string(),
+                upstream_id: upstream.id.clone(),
+                route_id: anonymous_route_id(
+                    &route_health_key.upstream_id,
+                    &route_health_key.key_fingerprint,
+                    &route_health_key.runtime_model_slug,
+                    route_health_key.protocol,
+                ),
+                upstream_protocol,
+                endpoint: endpoint.path().to_string(),
+                started,
+                route_attempts: route_attempts.clone(),
             };
+            let (reader, body_read_diagnostic_context) =
+                if attempt_mode == UpstreamAttemptMode::SsePassThrough {
+                    let route_hedge_context =
+                        stream_completion_context
+                            .as_ref()
+                            .map(|completion| RouteHedgeContext {
+                                state: state.clone(),
+                                capability_snapshot: capability_snapshot.clone(),
+                                requested_features: requested_features.clone(),
+                                body: body.clone(),
+                                endpoint,
+                                started,
+                                request_id: request_id.to_string(),
+                                model: model.to_string(),
+                                normalized_model: normalized_model.to_string(),
+                                downstream_key_id: downstream_key_id.to_string(),
+                                downstream_name: downstream_name.to_string(),
+                                inference_strength: inference_strength.map(str::to_string),
+                                user_agent: user_agent.map(str::to_string),
+                                downstream_concurrency_guard: completion
+                                    .downstream_concurrency_guard
+                                    .clone(),
+                                route_attempts: route_attempts.clone(),
+                                response_history_context: response_history_context.clone(),
+                                stream_only_recovery_request_safe,
+                            });
+                    match prefetch_stream_with_hedges(
+                        state,
+                        upstream,
+                        reader,
+                        hedge_api_keys,
+                        route_hedge_candidates,
+                        route_hedge_context,
+                        &url,
+                        &upstream_body,
+                        request_model,
+                        &route_health_key.runtime_model_slug,
+                        upstream_protocol,
+                        endpoint,
+                        response_header_timeout,
+                        stream_timeouts,
+                        request_id,
+                        started,
+                        &route_attempts,
+                        primary_body_read_diagnostic_context,
+                    )
+                    .await?
+                    {
+                        PrefetchedStreamWinner::Reader(ready) => {
+                            (ready.reader, ready.body_read_diagnostic_context)
+                        }
+                        PrefetchedStreamWinner::Dispatch(result) => return Ok(*result),
+                    }
+                } else {
+                    (reader, primary_body_read_diagnostic_context)
+                };
             let stream_log_context = StreamUsageLogContext {
                 state: state.clone(),
                 request_id: request_id.to_string(),
@@ -2112,6 +2152,7 @@ pub(super) async fn send_to_upstream(
                 proxied_stream_body(
                     reader,
                     endpoint,
+                    body_read_diagnostic_context,
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
@@ -2122,6 +2163,7 @@ pub(super) async fn send_to_upstream(
                     upstream_protocol,
                     endpoint.native_protocol(),
                     endpoint,
+                    body_read_diagnostic_context,
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,

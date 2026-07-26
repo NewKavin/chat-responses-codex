@@ -643,6 +643,153 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     );
 }
 
+#[tokio::test]
+async fn translated_truncated_chunked_body_after_usable_output_is_not_retried() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first_event = concat!(
+        "data: {\"id\":\"chatcmpl-truncated\",\"object\":\"chat.completion.chunk\",",
+        "\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"translated-before-truncation\"},\"finish_reason\":null}]}\n\n"
+    )
+    .as_bytes();
+    let first_url =
+        spawn_truncated_chunked_sse_upstream(Some(first_event), b"data: {", first_hits.clone())
+            .await;
+    let second_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second_address = second_listener.local_addr().unwrap();
+    let second_hits_for_handler = second_hits.clone();
+    let second_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let second_hits = second_hits_for_handler.clone();
+            async move {
+                second_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"id\":\"chatcmpl-replay\",\"object\":\"chat.completion.chunk\",",
+                        "\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,",
+                        "\"delta\":{\"content\":\"unexpected-replay\"},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(second_listener, second_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![
+                UpstreamConfig {
+                    id: "translated-truncated-first".into(),
+                    name: "translated-truncated-first".into(),
+                    base_url: first_url,
+                    api_key: "first-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4".into()],
+                    priority: 100,
+                    active: true,
+                    ..Default::default()
+                },
+                UpstreamConfig {
+                    id: "translated-fallback-second".into(),
+                    name: "translated-fallback-second".into(),
+                    base_url: format!("http://{second_address}"),
+                    api_key: "second-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4".into()],
+                    priority: 0,
+                    active: true,
+                    ..Default::default()
+                },
+            ],
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-4", "input": "Hello", "stream": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("translated body failure should become typed Responses SSE")
+            .to_vec(),
+    )
+    .unwrap();
+    let output_position = body
+        .find("translated-before-truncation")
+        .expect("translated output must be preserved");
+    let error_position = body
+        .find("stream_upstream_body_decode_error")
+        .expect("translated stream must expose the stable body-decode category");
+    assert!(output_position < error_position, "{body}");
+    assert!(body.contains("event: response.failed"), "{body}");
+    assert!(body.contains("event: error"), "{body}");
+    assert!(!body.contains("unexpected-replay"), "{body}");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+    wait_for_upstream_in_flight(&state, "translated-truncated-first", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(
+        snapshot.usage_logs[0].status_code,
+        StatusCode::BAD_GATEWAY.as_u16()
+    );
+    assert_eq!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("stream_upstream_body_decode_error")
+    );
+}
+
 async fn translated_drop_after_event(event_type: &str) -> (Vec<String>, u16, String) {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");

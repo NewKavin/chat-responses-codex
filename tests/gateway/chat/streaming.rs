@@ -5078,6 +5078,256 @@ async fn drop_after_terminal_chat_chunk_is_logged_as_success() {
     assert_eq!(snapshot.upstreams[0].failure_count, 0);
 }
 
+async fn spawn_marker_chat_sse_upstream(marker: &'static str, hits: Arc<AtomicUsize>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                let body = format!(
+                    "data: {{\"id\":\"chatcmpl-fallback\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{marker}\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+                );
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    body,
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+    format!("http://{address}")
+}
+
+fn truncated_stream_test_state(
+    state_path: std::path::PathBuf,
+    downstream_key: &GeneratedDownstreamKey,
+    upstreams: Vec<UpstreamConfig>,
+) -> AppState {
+    AppState::new(
+        PersistedState {
+            upstreams,
+            downstreams: vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }],
+            ..Default::default()
+        },
+        state_path,
+        AppConfig {
+            upstream_hedge_enabled: false,
+            ..AppConfig::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn truncated_chunked_body_before_usable_output_falls_back_to_next_route() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first_url =
+        spawn_truncated_chunked_sse_upstream(None, b"data: {", first_hits.clone()).await;
+    let second_url =
+        spawn_marker_chat_sse_upstream("fallback-after-truncation", second_hits.clone()).await;
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = truncated_stream_test_state(
+        tempdir.path().join("state.json"),
+        &downstream_key,
+        vec![
+            UpstreamConfig {
+                id: "truncated-first".into(),
+                name: "truncated-first".into(),
+                base_url: first_url,
+                api_key: "first-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                priority: 100,
+                active: true,
+                ..Default::default()
+            },
+            UpstreamConfig {
+                id: "fallback-second".into(),
+                name: "fallback-second".into(),
+                base_url: second_url,
+                api_key: "second-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                priority: 0,
+                active: true,
+                ..Default::default()
+            },
+        ],
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("fallback-after-truncation"), "{body}");
+    assert!(
+        !body.contains("stream_upstream_body_decode_error"),
+        "{body}"
+    );
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    wait_for_upstream_in_flight(&state, "truncated-first", 0).await;
+    wait_for_upstream_in_flight(&state, "fallback-second", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].status_code, StatusCode::OK.as_u16());
+    assert_eq!(snapshot.usage_logs[0].error_category, None);
+}
+
+#[tokio::test]
+async fn truncated_chunked_body_after_usable_output_is_not_retried() {
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let first_event = concat!(
+        "data: {\"id\":\"chatcmpl-truncated\",\"object\":\"chat.completion.chunk\",",
+        "\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"partial-before-truncation\"},\"finish_reason\":null}]}\n\n"
+    )
+    .as_bytes();
+    let first_url =
+        spawn_truncated_chunked_sse_upstream(Some(first_event), b"data: {", first_hits.clone())
+            .await;
+    let second_url = spawn_marker_chat_sse_upstream("unexpected-replay", second_hits.clone()).await;
+    let downstream_key = generate_downstream_key("gw");
+    let tempdir = tempdir().unwrap();
+    let state = truncated_stream_test_state(
+        tempdir.path().join("state.json"),
+        &downstream_key,
+        vec![
+            UpstreamConfig {
+                id: "truncated-first".into(),
+                name: "truncated-first".into(),
+                base_url: first_url,
+                api_key: "first-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                priority: 100,
+                active: true,
+                ..Default::default()
+            },
+            UpstreamConfig {
+                id: "fallback-second".into(),
+                name: "fallback-second".into(),
+                base_url: second_url,
+                api_key: "second-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                priority: 0,
+                active: true,
+                ..Default::default()
+            },
+        ],
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body decode failure should become a typed SSE error")
+            .to_vec(),
+    )
+    .unwrap();
+    let output_position = body
+        .find("partial-before-truncation")
+        .expect("first usable output must be preserved");
+    let error_position = body
+        .find("stream_upstream_body_decode_error")
+        .expect("body read failure must be typed");
+    assert!(output_position < error_position, "{body}");
+    assert!(!body.contains("unexpected-replay"), "{body}");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+    wait_for_upstream_in_flight(&state, "truncated-first", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(
+        snapshot.usage_logs[0].status_code,
+        StatusCode::BAD_GATEWAY.as_u16()
+    );
+    assert_eq!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("stream_upstream_body_decode_error")
+    );
+}
+
 #[tokio::test]
 async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
     let tempdir = tempdir().unwrap();

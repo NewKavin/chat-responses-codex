@@ -482,6 +482,7 @@ pub(super) async fn aggregate_upstream_sse_response(
 pub(super) async fn prefetch_first_usable_output(
     mut reader: UpstreamStreamReader,
     protocol: UpstreamProtocol,
+    diagnostic_context: &StreamBodyReadDiagnosticContext,
 ) -> Result<UpstreamStreamReader, GatewayError> {
     let mut classifier = FirstUsableOutputClassifier::new(protocol);
 
@@ -516,6 +517,13 @@ pub(super) async fn prefetch_first_usable_output(
                 let message = error.to_string();
                 let (status, category) =
                     classify_upstream_stream_error(&message, error.is_timeout(), error.is_decode());
+                log_stream_body_read_diagnostic(
+                    diagnostic_context,
+                    "prefetch",
+                    category,
+                    false,
+                    false,
+                );
                 return Err(stream_gateway_error(status, message, category));
             }
             StreamReadOutcome::Heartbeat => {}
@@ -551,9 +559,34 @@ fn sse_event_has_usable_output(event: &crate::protocol::stream_aggregate::SseEve
     serde_json::from_str::<Value>(payload).is_ok_and(|value| stream_event_has_usable_output(&value))
 }
 
+fn log_stream_body_read_diagnostic(
+    context: &StreamBodyReadDiagnosticContext,
+    stream_stage: &'static str,
+    error_category: &str,
+    usable_output_exposed: bool,
+    semantic_terminal_observed: bool,
+) {
+    tracing::warn!(
+        request_id = context.request_id,
+        upstream_id = context.upstream_id,
+        route_id = context.route_id,
+        upstream_protocol = ?context.upstream_protocol,
+        endpoint = context.endpoint,
+        stream_stage,
+        error_category,
+        usable_output_exposed,
+        semantic_terminal_observed,
+        elapsed_ms = context.started.elapsed().as_millis() as u64,
+        routing_round = context.route_attempts.routing_round(),
+        physical_attempt_count = context.route_attempts.physical_attempt_count(),
+        "upstream stream body read failed"
+    );
+}
+
 pub(super) fn proxied_stream_body(
     reader: UpstreamStreamReader,
     endpoint: EndpointKind,
+    body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
@@ -573,6 +606,7 @@ pub(super) fn proxied_stream_body(
         rewrite_responses_events: endpoint == EndpointKind::Responses,
         next_responses_sequence_number: 1,
         usage: None,
+        body_read_diagnostic_context,
         log_context: Some(log_context),
         completion_context: stream_completion_context,
         response_history_context,
@@ -650,11 +684,18 @@ pub(super) fn proxied_stream_body(
                     let error_message = error.to_string();
                     let is_timeout = error.is_timeout();
                     let is_decode = error.is_decode();
+                    let (status, error_category) =
+                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+                    log_stream_body_read_diagnostic(
+                        &state.body_read_diagnostic_context,
+                        "proxied",
+                        error_category,
+                        state.usable_output_seen,
+                        state.semantic_completion_emitted,
+                    );
                     state
                         .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
                         .await;
-                    let (status, error_category) =
-                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
                     let frame = state
                         .finish_with_gateway_error(stream_gateway_error(
                             status,
@@ -715,6 +756,7 @@ struct ProxiedStreamState {
     rewrite_responses_events: bool,
     next_responses_sequence_number: u64,
     usage: Option<(u64, u64, u64)>,
+    body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
@@ -1045,6 +1087,7 @@ pub(super) fn translated_stream_body(
     source_protocol: UpstreamProtocol,
     target_protocol: UpstreamProtocol,
     endpoint: EndpointKind,
+    body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
@@ -1075,6 +1118,7 @@ pub(super) fn translated_stream_body(
         buffer: Vec::new(),
         pending: VecDeque::new(),
         usage: None,
+        body_read_diagnostic_context,
         log_context: Some(log_context),
         completion_context: stream_completion_context,
         response_history_context,
@@ -1147,11 +1191,18 @@ pub(super) fn translated_stream_body(
                     let error_message = error.to_string();
                     let is_timeout = error.is_timeout();
                     let is_decode = error.is_decode();
+                    let (status, error_category) =
+                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
+                    log_stream_body_read_diagnostic(
+                        &state.body_read_diagnostic_context,
+                        "translated",
+                        error_category,
+                        state.usable_output_delivered,
+                        state.semantic_completion_emitted,
+                    );
                     state
                         .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
                         .await;
-                    let (status, error_category) =
-                        classify_upstream_stream_error(&error_message, is_timeout, is_decode);
                     let frame = state
                         .finish_with_gateway_error(stream_gateway_error(
                             status,
@@ -1216,6 +1267,7 @@ struct TranslatedStreamState {
     buffer: Vec<u8>,
     pending: VecDeque<TranslatedPendingFrame>,
     usage: Option<(u64, u64, u64)>,
+    body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
     log_context: Option<StreamUsageLogContext>,
     completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
@@ -1918,6 +1970,64 @@ mod diagnostic_tests {
             "prompt-secret",
             "tool-argument-secret",
             "api-key-secret",
+        ] {
+            assert!(!logs.contains(secret), "diagnostic leaked {secret}: {logs}");
+        }
+    }
+
+    #[test]
+    fn stream_body_read_diagnostic_logs_only_safe_route_metadata() {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        let route_attempts = RequestRouteAttempts::default();
+        route_attempts.record_physical_send();
+        route_attempts.record_physical_send();
+        let context = StreamBodyReadDiagnosticContext {
+            request_id: "request-body-read-marker".into(),
+            upstream_id: "upstream-body-read-marker".into(),
+            route_id: "route-anonymous-marker".into(),
+            upstream_protocol: UpstreamProtocol::ChatCompletions,
+            endpoint: "/v1/responses".into(),
+            started: Instant::now(),
+            route_attempts,
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_stream_body_read_diagnostic(
+                &context,
+                "translated",
+                "stream_upstream_body_decode_error",
+                true,
+                false,
+            );
+        });
+
+        let logs = capture.contents();
+        for expected in [
+            "request-body-read-marker",
+            "upstream-body-read-marker",
+            "route-anonymous-marker",
+            "stream_stage=\"translated\"",
+            "error_category=\"stream_upstream_body_decode_error\"",
+            "usable_output_exposed=true",
+            "semantic_terminal_observed=false",
+            "routing_round=1",
+            "physical_attempt_count=2",
+        ] {
+            assert!(logs.contains(expected), "missing {expected}: {logs}");
+        }
+        for secret in [
+            "raw-body-secret",
+            "prompt-secret",
+            "tool-argument-secret",
+            "api-key-secret",
+            "full-key-fingerprint-secret",
+            "provider-error-secret",
         ] {
             assert!(!logs.contains(secret), "diagnostic leaked {secret}: {logs}");
         }
