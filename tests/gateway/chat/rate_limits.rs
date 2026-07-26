@@ -909,3 +909,425 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
+
+fn route_retry_upstream_config(id: &str, name: &str, base_url: String) -> UpstreamConfig {
+    UpstreamConfig {
+        id: id.into(),
+        name: name.into(),
+        base_url,
+        api_key: "upstream-a-secret".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["gpt-4.1-mini".into()],
+        request_quota_window_hours: 5,
+        request_quota_requests: 600,
+        requests_per_minute: 20,
+        max_concurrency: 4,
+        active: true,
+        ..Default::default()
+    }
+}
+
+fn route_retry_downstream_config(downstream_key: &GeneratedDownstreamKey) -> DownstreamConfig {
+    DownstreamConfig {
+        id: "down-1".into(),
+        name: "team-a".into(),
+        hash: downstream_key.hash.clone(),
+        plaintext_key: Some(downstream_key.plaintext.clone()),
+        plaintext_key_prefix: None,
+        model_allowlist: vec!["gpt-4.1-mini".into()],
+        per_minute_limit: 60,
+        rate_limit_enabled: true,
+        max_concurrency: 10,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    }
+}
+
+fn route_retry_request(downstream_key: &GeneratedDownstreamKey) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header(
+            "Authorization",
+            format!("Bearer {}", downstream_key.plaintext),
+        )
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "model": "gpt-4.1-mini",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+async fn spawn_retry_after_upstream(
+    hits: Arc<AtomicUsize>,
+    fail_first_hits: usize,
+    failure_status: StatusCode,
+    retry_after_seconds: Option<u64>,
+) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = hits.clone();
+            async move {
+                let attempt = hits.fetch_add(1, Ordering::SeqCst);
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                if attempt < fail_first_hits {
+                    if let Some(retry_after_seconds) = retry_after_seconds {
+                        headers.insert(
+                            header::RETRY_AFTER,
+                            HeaderValue::from_str(&retry_after_seconds.to_string()).unwrap(),
+                        );
+                    }
+                    return (
+                        failure_status,
+                        headers,
+                        axum::Json(json!({"error": {"message": "upstream exploded"}})),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    headers,
+                    axum::Json(json!({
+                        "id": "chatcmpl-second-round",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "second-round-ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })),
+                )
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    format!("http://{}", address)
+}
+
+#[tokio::test]
+async fn short_temporary_route_exhaustion_succeeds_in_second_round() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    // Two failures: the first is absorbed by the in-place same-route retry, the second
+    // exhausts round one and forces the bounded routing-round wait.
+    let base_url =
+        spawn_retry_after_upstream(hits.clone(), 2, StatusCode::INTERNAL_SERVER_ERROR, None).await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![route_retry_upstream_config("up-a", "primary-a", base_url)],
+            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig {
+            // The first transient failure cools the route for 8-12s (jittered); a
+            // fifteen-second budget guarantees the second round is always admitted.
+            upstream_route_exhaustion_retry_max_wait_ms: 15_000,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state.clone());
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("bounded retry must finish before the wait budget expires")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["choices"][0]["message"]["content"],
+        "second-round-ok"
+    );
+    // Hit one fails, hit two fails the in-place same-route retry, hit three is the
+    // second routing round succeeding after the bounded cooldown wait.
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+    let logs = state.snapshot().await.usage_logs;
+    let successes = logs
+        .iter()
+        .filter(|log| log.status_code == 200 && log.model == "gpt-4.1-mini")
+        .count();
+    assert_eq!(
+        successes, 1,
+        "one logical request must record exactly one success usage row"
+    );
+}
+
+#[tokio::test]
+async fn long_retry_after_returns_immediately_without_second_round() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        usize::MAX,
+        StatusCode::TOO_MANY_REQUESTS,
+        Some(147822),
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![route_retry_upstream_config("up-a", "primary-a", base_url)],
+            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("long provider Retry-After must not schedule a retry wait")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let retry_after_header = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    assert_eq!(retry_after_header.as_deref(), Some("147822"));
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn route_retry_wait_budget_and_round_limit_are_bounded() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let base_url = spawn_retry_after_upstream(
+        hits.clone(),
+        usize::MAX,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![route_retry_upstream_config("up-a", "primary-a", base_url)],
+            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig {
+            upstream_route_exhaustion_retry_max_wait_ms: 15_000,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("bounded retry must terminate")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+    // Each round issues one attempt plus one in-place same-route retry. Round two is
+    // always admitted (first cooldown 8-12s fits the 15s budget) and the doubled second
+    // cooldown (16-24s) never fits the remaining budget, so exactly two rounds run.
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+    assert!(
+        elapsed <= std::time::Duration::from_secs(25),
+        "total retry waiting must stay within the wait budget plus overhead, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn non_temporary_exhaustion_never_waits() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits_clone = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = hits_clone.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({"error": {"message": "invalid credentials"}})),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                format!("http://{}", address),
+            )],
+            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("credential exhaustion must answer immediately")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_credentials_exhausted");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn mixed_credentials_and_short_temporary_retries_only_the_temporary_route() {
+    let temporary_hits = Arc::new(AtomicUsize::new(0));
+    let credential_hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let temporary_url = spawn_retry_after_upstream(
+        temporary_hits.clone(),
+        2,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+    )
+    .await;
+
+    let credential_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let credential_address = credential_listener.local_addr().unwrap();
+    let credential_hits_clone = credential_hits.clone();
+    let credential_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = credential_hits_clone.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({"error": {"message": "invalid credentials"}})),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(credential_listener, credential_app)
+            .await
+            .unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![
+                route_retry_upstream_config(
+                    "up-cred",
+                    "credentials-broken",
+                    format!("http://{}", credential_address),
+                ),
+                route_retry_upstream_config("up-temp", "temporary", temporary_url),
+            ],
+            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig {
+            upstream_route_exhaustion_retry_max_wait_ms: 15_000,
+            ..AppConfig::default()
+        },
+    );
+
+    let app = build_router(state);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("mixed exhaustion with a short temporary route must recover")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["choices"][0]["message"]["content"],
+        "second-round-ok"
+    );
+    assert_eq!(temporary_hits.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        credential_hits.load(Ordering::SeqCst),
+        1,
+        "the credential-blocked route must stay cooling in round two"
+    );
+}

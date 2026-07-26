@@ -152,7 +152,12 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
             global_context_profiles: std::collections::HashMap::new(),
         },
         tempdir.path().join("state.json"),
-        AppConfig::default(),
+        AppConfig {
+            // This test pins the continuation to the exact route; bounded route
+            // retry would only repeat the same pinned failure and slow the test.
+            upstream_route_exhaustion_retry_enabled: false,
+            ..AppConfig::default()
+        },
     );
     for upstream_id in ["fallback-exact", "fallback-alternative"] {
         let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {

@@ -589,6 +589,7 @@ struct HedgeStreamAttempt {
     upstream_protocol: UpstreamProtocol,
     response_header_timeout: Duration,
     stream_timeouts: StreamTimeouts,
+    route_attempts: RequestRouteAttempts,
 }
 
 #[derive(Clone)]
@@ -789,6 +790,7 @@ async fn send_hedge_stream_attempt(
         upstream_protocol,
         response_header_timeout,
         stream_timeouts,
+        route_attempts,
     } = attempt;
     state
         .try_reserve_upstream_hedge(&upstream, &request_model)
@@ -800,6 +802,7 @@ async fn send_hedge_stream_attempt(
             )
         })?;
     let reservation = UpstreamRequestGuard::new(state.clone(), upstream.id.clone());
+    route_attempts.record_physical_send();
     let response = tokio::time::timeout(
         response_header_timeout,
         state
@@ -868,6 +871,7 @@ async fn prefetch_stream_with_hedges(
     stream_timeouts: StreamTimeouts,
     request_id: &str,
     started: Instant,
+    route_attempts: &RequestRouteAttempts,
 ) -> Result<PrefetchedStreamWinner, GatewayError> {
     let route_hedge_count = route_hedge_context
         .as_ref()
@@ -1069,6 +1073,7 @@ async fn prefetch_stream_with_hedges(
                         upstream_protocol,
                         response_header_timeout,
                         stream_timeouts,
+                        route_attempts: route_attempts.clone(),
                     });
                     attempts.push(
                         async move {
@@ -2073,6 +2078,7 @@ pub(super) async fn send_to_upstream(
                     stream_timeouts,
                     request_id,
                     started,
+                    &route_attempts,
                 )
                 .await?
                 {
