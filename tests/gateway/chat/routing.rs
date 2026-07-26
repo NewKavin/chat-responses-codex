@@ -2303,3 +2303,188 @@ async fn equal_model_accounts_rotate_when_their_pressure_ties() {
     })
     .await;
 }
+
+fn priority_test_upstream(
+    id: &str,
+    name: &str,
+    base_url: String,
+    api_key: &str,
+    priority: u32,
+) -> UpstreamConfig {
+    UpstreamConfig {
+        id: id.into(),
+        name: name.into(),
+        base_url,
+        api_key: api_key.into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["gpt-4.1-mini".into()],
+        request_quota_window_hours: 5,
+        request_quota_requests: 600,
+        requests_per_minute: 20,
+        max_concurrency: 4,
+        priority,
+        active: true,
+        ..Default::default()
+    }
+}
+
+fn priority_test_downstream(downstream_key: &GeneratedDownstreamKey) -> DownstreamConfig {
+    DownstreamConfig {
+        id: "down-1".into(),
+        name: "team-a".into(),
+        hash: downstream_key.hash.clone(),
+        plaintext_key: Some(downstream_key.plaintext.clone()),
+        plaintext_key_prefix: None,
+        model_allowlist: vec!["gpt-4.1-mini".into()],
+        per_minute_limit: 60,
+        rate_limit_enabled: true,
+        max_concurrency: 10,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    }
+}
+
+#[tokio::test]
+async fn upstream_priority_wins_over_pressure_among_healthy_routes() {
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        let high_url =
+            spawn_recording_chat_upstream("up-high", "upstream-a-secret", hits.clone()).await;
+        let low_url =
+            spawn_recording_chat_upstream("up-low", "upstream-b-secret", hits.clone()).await;
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![
+                    priority_test_upstream("up-low", "low", low_url, "upstream-b-secret", 0),
+                    priority_test_upstream("up-high", "high", high_url, "upstream-a-secret", 100),
+                ],
+                downstreams: vec![priority_test_downstream(&downstream_key)],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // The high-priority upstream accumulates minute/window pressure with every
+        // request, but priority now outranks fine-grained pressure, so every request
+        // must keep landing on the healthy priority-100 route.
+        for _ in 0..4 {
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        }
+
+        let hits = hits.lock().unwrap().clone();
+        assert_eq!(hits, vec!["up-high".to_string(); 4]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cooling_high_priority_upstream_yields_to_healthy_lower_priority() {
+    with_proxy_env_cleared(|| async move {
+        let hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tempdir = tempdir().unwrap();
+        let state_path = tempdir.path().join("state.json");
+        // Retry-After far above the wait budget keeps the high-priority route cooling
+        // without triggering a bounded routing-round wait.
+        let high_url = spawn_rate_limited_chat_upstream(
+            "up-high",
+            "upstream-a-secret",
+            hits.clone(),
+            false,
+            3600,
+        )
+        .await;
+        let low_url =
+            spawn_recording_chat_upstream("up-low", "upstream-b-secret", hits.clone()).await;
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: vec![
+                    priority_test_upstream("up-high", "high", high_url, "upstream-a-secret", 100),
+                    priority_test_upstream("up-low", "low", low_url, "upstream-b-secret", 0),
+                ],
+                downstreams: vec![priority_test_downstream(&downstream_key)],
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::collections::HashMap::new(),
+            },
+            state_path,
+            AppConfig::default(),
+        );
+
+        let app = build_router(state);
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4.1-mini",
+                        "messages": [{"role": "user", "content": "Hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // First request: the priority-100 route is tried first, fails 429, and the
+        // healthy priority-0 route serves the response. Second request: the cooling
+        // priority-100 route is skipped entirely.
+        for _ in 0..2 {
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        }
+
+        let hits = hits.lock().unwrap().clone();
+        assert_eq!(
+            hits,
+            vec![
+                "up-high".to_string(),
+                "up-low".to_string(),
+                "up-low".to_string(),
+            ]
+        );
+    })
+    .await;
+}
