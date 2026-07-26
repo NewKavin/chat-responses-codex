@@ -1,6 +1,9 @@
 use chat_responses_codex::state::{
     AppConfig, DEFAULT_UPSTREAM_HEDGE_DELAY_MS, DEFAULT_UPSTREAM_HEDGE_ENABLED,
     DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS, DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
 };
 use std::fs;
 
@@ -320,6 +323,63 @@ fn deployment_exposes_upstream_hedge_configuration() {
         format!(
             "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS={}",
             defaults.upstream_hedge_max_extra_attempts
+        ),
+    ] {
+        assert!(
+            env.contains(&expected),
+            ".env.example should contain {expected}"
+        );
+    }
+}
+
+#[test]
+fn deployment_exposes_route_exhaustion_retry_configuration() {
+    let compose = fs::read_to_string("docker-compose.yml").expect("compose should be readable");
+    let env = fs::read_to_string(".env.example").expect("env example should be readable");
+    let defaults = AppConfig::default();
+    assert_eq!(
+        defaults.upstream_route_exhaustion_retry_enabled,
+        DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED
+    );
+    assert_eq!(
+        defaults.upstream_route_exhaustion_retry_max_wait_ms,
+        DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS
+    );
+    assert_eq!(
+        defaults.upstream_route_exhaustion_retry_max_rounds,
+        DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS
+    );
+    for expected in [
+        format!(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: ${{UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED:-{}}}",
+            defaults.upstream_route_exhaustion_retry_enabled
+        ),
+        format!(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: ${{UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS:-{}}}",
+            defaults.upstream_route_exhaustion_retry_max_wait_ms
+        ),
+        format!(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: ${{UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS:-{}}}",
+            defaults.upstream_route_exhaustion_retry_max_rounds
+        ),
+    ] {
+        assert!(
+            compose.contains(&expected),
+            "compose should contain {expected}"
+        );
+    }
+    for expected in [
+        format!(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED={}",
+            defaults.upstream_route_exhaustion_retry_enabled
+        ),
+        format!(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS={}",
+            defaults.upstream_route_exhaustion_retry_max_wait_ms
+        ),
+        format!(
+            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS={}",
+            defaults.upstream_route_exhaustion_retry_max_rounds
         ),
     ] {
         assert!(

@@ -188,6 +188,68 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
 }
 
 #[test]
+fn route_exhaustion_retry_is_exposed_on_every_operator_surface() {
+    let env_example = fs::read_to_string(".env.example").unwrap();
+    let compose = fs::read_to_string("docker-compose.yml").unwrap();
+    let readme = fs::read_to_string("README.md").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+
+    for marker in [
+        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED",
+        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS",
+        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS",
+    ] {
+        for (path, contents) in [
+            (".env.example", env_example.as_str()),
+            ("docker-compose.yml", compose.as_str()),
+            ("README.md", readme.as_str()),
+            ("DEPLOYMENT.md", deployment.as_str()),
+        ] {
+            assert!(contents.contains(marker), "{path} should expose {marker}");
+        }
+    }
+}
+
+#[test]
+fn route_exhaustion_docs_preserve_retry_and_replay_safety_contract() {
+    let readme = fs::read_to_string("README.md").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+
+    for (path, contents) in [
+        ("README.md", readme.as_str()),
+        ("DEPLOYMENT.md", deployment.as_str()),
+    ] {
+        for contract in [
+            "zero disables waiting",
+            "total rounds include the initial round",
+            "full `Retry-After`",
+            "priority cannot make an unhealthy route eligible",
+            "output or tool calls are never replayed after delivery",
+        ] {
+            assert!(
+                contents.contains(contract),
+                "{path} should document `{contract}`"
+            );
+        }
+    }
+
+    for profile in [
+        "UPSTREAM_HEDGE_ENABLED=true",
+        "UPSTREAM_HEDGE_DELAY_MS=2000",
+        "UPSTREAM_HEDGE_INTERVAL_MS=2000",
+        "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=2",
+        "at most three admitted attempts",
+        "concurrency and quota admission",
+        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=false",
+    ] {
+        assert!(
+            deployment.contains(profile),
+            "DEPLOYMENT.md should document `{profile}`"
+        );
+    }
+}
+
+#[test]
 fn deployment_docs_explain_multi_key_route_resilience_contract() {
     let readme = fs::read_to_string("README.md").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
@@ -197,7 +259,6 @@ fn deployment_docs_explain_multi_key_route_resilience_contract() {
             "authoritative empty mapping",
             "persisted model catalog",
             "same exact route once",
-            "without sleeping inside the request",
             "full `Retry-After`",
             "503 `upstream_routes_exhausted`",
             "502 `upstream_credentials_exhausted`",

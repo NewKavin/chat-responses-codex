@@ -38,6 +38,9 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_USER_AGENT=codex/0.144.6`
 - `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
+- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true`
+- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000`
+- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3`
 - `UPSTREAM_HEDGE_ENABLED=true`
 - `UPSTREAM_HEDGE_DELAY_MS=12000`
 - `UPSTREAM_HEDGE_INTERVAL_MS=12000`
@@ -53,9 +56,12 @@ into the route-key-deduplicating probe scheduler.
 Keep the keepalive interval below the idle timeout so the gateway can emit
 heartbeats before the idle watchdog fires.
 
-Real upstream 429 responses cool the exact route and switch to another candidate
-without sleeping inside the request. The route-health state preserves the full
-`Retry-After`; it is not capped before a terminal response is returned.
+Real upstream 429 responses cool the exact route and switch immediately to
+another eligible candidate. After temporary all-route exhaustion, the gateway
+waits only when the earliest exact-route recovery plus jitter fits the remaining
+logical-request budget; it never probes before the provider recovery time. The
+route-health state preserves the full `Retry-After`; it is not capped before a
+terminal response is returned.
 UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.
 UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.
 UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.
@@ -66,6 +72,35 @@ These rate-limit fields remain parsed for backward-compatible configuration only
 first extra attempt. `UPSTREAM_HEDGE_INTERVAL_MS` spaces later extra attempts,
 and `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS` bounds their number. Set the maximum to
 `0` to disable extra attempts without rebuilding the service.
+
+`UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=0` means zero disables waiting,
+and total rounds include the initial round. The gateway preserves the full
+`Retry-After`; configured priority cannot make an unhealthy route eligible;
+output or tool calls are never replayed after delivery.
+
+Keep the checked-in hedge defaults at `true/12000/12000/1`. For the internal
+high-utilization GLM deployment, use this explicit profile:
+
+```dotenv
+UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true
+UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000
+UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3
+UPSTREAM_HEDGE_ENABLED=true
+UPSTREAM_HEDGE_DELAY_MS=2000
+UPSTREAM_HEDGE_INTERVAL_MS=2000
+UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=2
+```
+
+This permits at most three admitted attempts for one logical stream. Every
+extra attempt still requires normal upstream concurrency and quota admission.
+Rollback uses:
+
+```dotenv
+UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=false
+UPSTREAM_HEDGE_DELAY_MS=12000
+UPSTREAM_HEDGE_INTERVAL_MS=12000
+UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=1
+```
 
 Optional for file-backed compatibility mode:
 
@@ -108,11 +143,12 @@ persisted model catalog.
 
 Runtime health is deliberately separate from capability persistence. A generic
 upstream 5xx retries the same exact route once before another route is selected.
-An upstream 429 switches candidates without sleeping inside the request and
-stores the full `Retry-After` on the exact route. Automatic replay reuses the
-same idempotency identifier, but remains at-least-once when the provider does not
-honor an idempotency header, so retries can duplicate inference or provider-side
-storage.
+An upstream 429 stores the full `Retry-After` on the exact route and switches to
+another eligible route. A new round starts only after temporary all-route
+exhaustion and only when exact recovery fits the remaining request wait budget.
+Automatic replay before usable output reuses the same idempotency identifier,
+but remains at-least-once when the provider does not honor an idempotency header,
+so retries can duplicate inference or provider-side storage.
 
 The runtime route health resets on restart and fails open for the next request.
 It does not change the persisted model catalog and is never consulted by
@@ -159,6 +195,9 @@ docker run -d \
   -e UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32 \
   -e UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3 \
   -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
+  -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true \
+  -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000 \
+  -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3 \
   -e UPSTREAM_HEDGE_ENABLED=true \
   -e UPSTREAM_HEDGE_DELAY_MS=12000 \
   -e UPSTREAM_HEDGE_INTERVAL_MS=12000 \
