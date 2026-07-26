@@ -251,6 +251,76 @@ fn shared_request_route_attempts_unify_hedge_physical_attempts_and_failures() {
     assert_eq!(ledger.class_count(FailureClass::RateLimited), 1);
 }
 
+#[test]
+fn request_route_attempts_start_each_round_fresh_and_share_physical_send_count() {
+    let round_one = RequestRouteAttempts::default();
+    let aggregate = tracked_aggregate();
+    let route = tracked_route("fingerprint-rounds");
+    round_one.register_eligible(aggregate.clone(), route.clone());
+    round_one.record_physical_attempt(route.clone());
+    round_one.record_failure(
+        &route,
+        FailureClass::TransientServer,
+        Some(Duration::from_secs(7)),
+    );
+
+    let round_two = round_one.next_round();
+    assert_eq!(round_one.routing_round(), 1);
+    assert_eq!(round_two.routing_round(), 2);
+    assert_eq!(round_two.physical_attempt_count(), 1);
+    assert!(round_two.should_attempt(&route));
+    assert!(round_two.ledger_snapshot().is_empty());
+    assert!(round_two.eligible_routes().is_empty());
+
+    round_two.register_eligible(aggregate, route.clone());
+    assert_eq!(round_two.eligible_routes(), vec![route.clone()]);
+    round_two.record_physical_attempt(route);
+    assert_eq!(round_one.physical_attempt_count(), 2);
+    assert_eq!(round_two.physical_attempt_count(), 2);
+}
+
+#[test]
+fn direct_hedge_send_count_does_not_change_round_route_selection() {
+    let attempts = RequestRouteAttempts::default();
+    let route = tracked_route("fingerprint-direct-hedge");
+
+    attempts.record_physical_send();
+
+    assert_eq!(attempts.physical_attempt_count(), 1);
+    assert!(attempts.should_attempt(&route));
+}
+
+#[test]
+fn terminal_observation_matches_the_public_terminal_failure_class() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "temporary-route".into(),
+        upstream_status: Some(503),
+        class: FailureClass::TransientServer,
+        retry_after: Some(Duration::from_secs(7)),
+    });
+    ledger.record(AttemptFailure {
+        route_id: "credential-route".into(),
+        upstream_status: Some(403),
+        class: FailureClass::Credentials,
+        retry_after: None,
+    });
+    let terminal = ledger.terminal_failure();
+
+    assert_eq!(
+        terminal,
+        TerminalFailure::Temporary {
+            retry_after: Duration::from_secs(7)
+        }
+    );
+    let selected = ledger
+        .terminal_observation_for(terminal)
+        .expect("temporary terminal response should select a temporary observation");
+    assert_eq!(selected.route_id, "temporary-route");
+    assert_eq!(selected.class, FailureClass::TransientServer);
+    assert_eq!(selected.upstream_status, Some(503));
+}
+
 fn stream_completion_fixture(
     route: RouteHealthKey,
     route_attempts: RequestRouteAttempts,

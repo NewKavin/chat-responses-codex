@@ -3,6 +3,7 @@ use crate::state::{RouteHealthKey, RouteSetAggregateKey};
 pub(super) use crate::upstream_feedback::FailureClass;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -61,6 +62,10 @@ impl RequestRouteTracker {
 
     pub fn should_attempt(&self, route: &RouteHealthKey) -> bool {
         !self.attempted_routes.contains(route)
+    }
+
+    pub fn eligible_routes(&self) -> Vec<RouteHealthKey> {
+        self.route_to_set.keys().cloned().collect()
     }
 
     pub fn record_physical_attempt(&mut self, route: RouteHealthKey) {
@@ -147,10 +152,28 @@ pub(super) struct AttemptLedger {
     cooled_candidates: Vec<AttemptFailure>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
+struct RequestAttemptMetrics {
+    physical_attempts: AtomicUsize,
+}
+
+#[derive(Clone)]
 pub(super) struct RequestRouteAttempts {
     tracker: Arc<Mutex<RequestRouteTracker>>,
     ledger: Arc<Mutex<AttemptLedger>>,
+    metrics: Arc<RequestAttemptMetrics>,
+    routing_round: u32,
+}
+
+impl Default for RequestRouteAttempts {
+    fn default() -> Self {
+        Self {
+            tracker: Arc::new(Mutex::new(RequestRouteTracker::default())),
+            ledger: Arc::new(Mutex::new(AttemptLedger::default())),
+            metrics: Arc::new(RequestAttemptMetrics::default()),
+            routing_round: 1,
+        }
+    }
 }
 
 impl RequestRouteAttempts {
@@ -174,8 +197,34 @@ impl RequestRouteAttempts {
         self.tracker().should_attempt(route)
     }
 
+    pub fn eligible_routes(&self) -> Vec<RouteHealthKey> {
+        self.tracker().eligible_routes()
+    }
+
     pub fn record_physical_attempt(&self, route: RouteHealthKey) {
+        self.record_physical_send();
         self.tracker().record_physical_attempt(route);
+    }
+
+    pub fn record_physical_send(&self) {
+        self.metrics.physical_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn physical_attempt_count(&self) -> usize {
+        self.metrics.physical_attempts.load(Ordering::Relaxed)
+    }
+
+    pub fn routing_round(&self) -> u32 {
+        self.routing_round
+    }
+
+    pub fn next_round(&self) -> Self {
+        Self {
+            tracker: Arc::new(Mutex::new(RequestRouteTracker::default())),
+            ledger: Arc::new(Mutex::new(AttemptLedger::default())),
+            metrics: self.metrics.clone(),
+            routing_round: self.routing_round.saturating_add(1),
+        }
     }
 
     pub fn record_failure(
@@ -297,6 +346,50 @@ impl AttemptLedger {
                 self.cooled_candidates
                     .iter()
                     .min_by_key(|failure| failure.retry_after.unwrap_or(Duration::MAX))
+            })
+            .cloned()
+    }
+
+    pub fn terminal_observation_for(&self, terminal: TerminalFailure) -> Option<AttemptFailure> {
+        let candidates = self
+            .failures
+            .iter()
+            .chain(self.cooled_candidates.iter());
+        match terminal {
+            TerminalFailure::Temporary { retry_after } => candidates
+                .filter(|failure| failure.class.is_temporary())
+                .min_by_key(|failure| {
+                    (
+                        u8::from(failure.retry_after != Some(retry_after)),
+                        failure.retry_after.unwrap_or(Duration::MAX),
+                        failure.route_id.as_str(),
+                    )
+                })
+                .cloned(),
+            TerminalFailure::Credentials => self.observation_for_class(FailureClass::Credentials),
+            TerminalFailure::ModelUnsupported => {
+                self.observation_for_class(FailureClass::ModelUnsupported)
+            }
+            TerminalFailure::CapabilityUnsupported => {
+                self.observation_for_class(FailureClass::FeatureUnsupported)
+            }
+            TerminalFailure::ProtocolUnsupported => {
+                self.observation_for_class(FailureClass::ProtocolUnsupported)
+            }
+            TerminalFailure::MixedRoutesExhausted => self.terminal_observation(),
+        }
+    }
+
+    fn observation_for_class(&self, class: FailureClass) -> Option<AttemptFailure> {
+        self.failures
+            .iter()
+            .chain(self.cooled_candidates.iter())
+            .filter(|failure| failure.class == class)
+            .min_by_key(|failure| {
+                (
+                    failure.retry_after.unwrap_or(Duration::MAX),
+                    failure.route_id.as_str(),
+                )
             })
             .cloned()
     }
