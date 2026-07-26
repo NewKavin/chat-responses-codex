@@ -21,6 +21,7 @@ impl Default for RouteRetryBudget {
 }
 
 impl RouteRetryBudget {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn current_round(self) -> u32 {
         self.current_round
     }

@@ -280,10 +280,7 @@ impl RouteHealthRegistry {
             .map(|state| health_snapshot(state, Instant::now()))
     }
 
-    pub fn earliest_temporary_recovery(
-        &self,
-        routes: &[RouteHealthKey],
-    ) -> Option<RouteRecovery> {
+    pub fn earliest_temporary_recovery(&self, routes: &[RouteHealthKey]) -> Option<RouteRecovery> {
         let now = Instant::now();
         routes
             .iter()

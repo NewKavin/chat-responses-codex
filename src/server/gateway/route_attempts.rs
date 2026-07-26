@@ -207,7 +207,9 @@ impl RequestRouteAttempts {
     }
 
     pub fn record_physical_send(&self) {
-        self.metrics.physical_attempts.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .physical_attempts
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn physical_attempt_count(&self) -> usize {
@@ -351,10 +353,7 @@ impl AttemptLedger {
     }
 
     pub fn terminal_observation_for(&self, terminal: TerminalFailure) -> Option<AttemptFailure> {
-        let candidates = self
-            .failures
-            .iter()
-            .chain(self.cooled_candidates.iter());
+        let candidates = self.failures.iter().chain(self.cooled_candidates.iter());
         match terminal {
             TerminalFailure::Temporary { retry_after } => candidates
                 .filter(|failure| failure.class.is_temporary())
