@@ -58,6 +58,7 @@ mod dialect_retry;
 mod errors;
 mod responses_fallback;
 mod route_attempts;
+mod route_retry;
 mod stream;
 pub(super) mod thinking_signature;
 mod troubleshooting;
