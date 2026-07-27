@@ -41,6 +41,9 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true`
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000`
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3`
+- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=30000`
+- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32`
+- `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000`
 - `UPSTREAM_HEDGE_ENABLED=true`
 - `UPSTREAM_HEDGE_DELAY_MS=12000`
 - `UPSTREAM_HEDGE_INTERVAL_MS=12000`
@@ -62,6 +65,10 @@ waits only when the earliest exact-route recovery plus jitter fits the remaining
 logical-request budget; it never probes before the provider recovery time. The
 route-health state preserves the full `Retry-After`; it is not capped before a
 terminal response is returned.
+Concurrency-specific 429 responses without `Retry-After` use
+`UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS`; the last delay repeats after the
+sequence is exhausted. An explicit provider `Retry-After` always takes
+precedence, and exact-route half-open admission allows only one probe at a time.
 UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.
 UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.
 UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.
@@ -85,6 +92,9 @@ high-utilization GLM deployment, use this explicit profile:
 UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true
 UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000
 UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3
+UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=30000
+UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32
+UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000
 UPSTREAM_HEDGE_ENABLED=true
 UPSTREAM_HEDGE_DELAY_MS=2000
 UPSTREAM_HEDGE_INTERVAL_MS=2000
@@ -198,6 +208,9 @@ docker run -d \
   -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true \
   -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000 \
   -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3 \
+  -e UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=30000 \
+  -e UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32 \
+  -e UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000 \
   -e UPSTREAM_HEDGE_ENABLED=true \
   -e UPSTREAM_HEDGE_DELAY_MS=12000 \
   -e UPSTREAM_HEDGE_INTERVAL_MS=12000 \

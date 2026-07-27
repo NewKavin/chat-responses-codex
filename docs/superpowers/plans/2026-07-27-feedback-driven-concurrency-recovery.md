@@ -82,17 +82,21 @@ Expected: FAIL because `parse_concurrency_probe_delays_ms` and `DEFAULT_UPSTREAM
 
 - [ ] **Step 3: Add config defaults and parser**
 
-In `src/state/types.rs`, change route retry defaults and add the delay list default:
+In `src/state/types.rs`, keep ordinary route retry defaults, add concurrency-specific budgets, and add the delay list default:
 
 ```rust
-pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 30_000;
-pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 32;
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 10_000;
+pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
+pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS: u64 = 30_000;
+pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: &[u64] = &[100, 200, 400, 800, 1_000, 2_000];
 ```
 
 Add to `AppConfig`:
 
 ```rust
+pub upstream_concurrency_recovery_max_wait_ms: u64,
+pub upstream_concurrency_recovery_max_rounds: u32,
 pub upstream_concurrency_probe_delays_ms: Vec<u64>,
 ```
 
@@ -166,8 +170,10 @@ concurrency_probe_delays_ms = ?config.upstream_concurrency_probe_delays_ms,
 Set these values in `.env.example`, `docker-compose.yml`, README, and DEPLOYMENT:
 
 ```dotenv
-UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=30000
-UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=32
+UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000
+UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3
+UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=30000
+UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32
 UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000
 ```
 
@@ -887,7 +893,7 @@ rtk git commit -m "docs(gateway): document concurrency recovery defaults"
 - [ ] `CapacityUnavailable` still uses the existing 15-second base cooldown for `503 no available channel`.
 - [ ] Ordinary `RateLimited` 429 still uses rate-limit cooldown and does not use fast probes.
 - [ ] `Retry-After` is preserved as a duration internally and rounded up when rendered as seconds.
-- [ ] `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS` defaults to 30000 and `MAX_ROUNDS` defaults to 32 in code, env examples, Docker, README, and deployment docs.
+- [ ] Ordinary route exhaustion remains 10000ms/3 rounds, while concurrency recovery defaults to 30000ms/32 rounds in code, env examples, Docker, README, and deployment docs.
 - [ ] Malformed `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS` falls back to the full default sequence.
 - [ ] Route health stale-generation tests prove old in-flight success cannot clear a newer concurrency cooldown.
 - [ ] Multi-request tests prove only one half-open probe is active for an exact route.

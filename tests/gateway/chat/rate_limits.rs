@@ -453,7 +453,7 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
 }
 
 #[tokio::test]
-async fn upstream_concurrency_full_429_does_not_retry_in_place() {
+async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -565,39 +565,220 @@ async fn upstream_concurrency_full_429_does_not_retry_in_place() {
             global_context_profiles: std::collections::HashMap::new(),
         },
         state_path,
+        AppConfig {
+            upstream_concurrency_recovery_max_wait_ms: 30_000,
+            upstream_concurrency_recovery_max_rounds: 32,
+            upstream_concurrency_probe_delays_ms: vec![100, 200, 400, 800, 1_000, 2_000],
+            ..AppConfig::default()
+        },
+    );
+
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    install_non_stream_profile(&state, &upstream).await;
+    let app = build_router(state.clone());
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["choices"][0]["message"]["content"], "Hi");
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn upstream_concurrency_retry_after_is_not_probed_early() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_clone = attempts.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let attempts = attempts_clone.clone();
+            async move {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                if attempt == 0 {
+                    headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        headers,
+                        axum::Json(json!({
+                            "error": {"message": "concurrency limit exceeded"}
+                        })),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    headers,
+                    axum::Json(json!({
+                        "id": "chatcmpl-retry-after",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "retry-after-ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                format!("http://{}", address),
+            )],
+            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
         AppConfig::default(),
     );
 
-    let app = build_router(state.clone());
-    let request = Request::builder()
-        .method("POST")
-        .uri("/v1/chat/completions")
-        .header(
-            "Authorization",
-            format!("Bearer {}", downstream_key.plaintext),
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    install_non_stream_profile(&state, &upstream).await;
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        build_router(state).oneshot(route_retry_request(&downstream_key)),
+    )
+    .await
+    .expect("provider Retry-After should fit the request wait budget")
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "must not probe before provider Retry-After, elapsed {elapsed:?}"
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn concurrent_waiters_share_one_concurrency_probe() {
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post({
+            let hits = hits.clone();
+            let in_flight = in_flight.clone();
+            let max_in_flight = max_in_flight.clone();
+            move |_body: String| {
+                let hits = hits.clone();
+                let in_flight = in_flight.clone();
+                let max_in_flight = max_in_flight.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_in_flight.fetch_max(active, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    axum::Json(json!({
+                        "id": "chatcmpl-shared-probe",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "gpt-4.1-mini",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "shared-probe-ok"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let upstream = route_retry_upstream_config("up-a", "primary-a", format!("http://{}", address));
+    let key_fingerprint = upstream_model_key_fingerprint(&upstream, "gpt-4.1-mini");
+    let route = chat_responses_codex::state::RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug: "gpt-4.1-mini".into(),
+        protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: vec![upstream],
+            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::collections::HashMap::new(),
+        },
+        state_path,
+        AppConfig {
+            upstream_concurrency_recovery_max_wait_ms: 30_000,
+            upstream_concurrency_recovery_max_rounds: 32,
+            upstream_concurrency_probe_delays_ms: vec![100, 200, 400, 800, 1_000, 2_000],
+            ..AppConfig::default()
+        },
+    );
+    state
+        .observe_route_failure(
+            &route,
+            chat_responses_codex::state::RouteFailureClass::ConcurrencySaturated,
+            None,
         )
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            json!({
-                "model": "gpt-4.1-mini",
-                "messages": [
-                    {"role": "user", "content": "Hello"}
-                ]
-            })
-            .to_string(),
-        ))
-        .unwrap();
+        .await;
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    install_non_stream_profile(&state, &upstream).await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(request))
-        .await
-        .unwrap()
-        .unwrap();
+    let app = build_router(state);
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            app.clone().oneshot(route_retry_request(&downstream_key)),
+            app.oneshot(route_retry_request(&downstream_key))
+        )
+    })
+    .await
+    .expect("both waiters should finish");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(first.unwrap().status(), StatusCode::OK);
+    assert_eq!(second.unwrap().status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        max_in_flight.load(Ordering::SeqCst),
+        1,
+        "only one physical recovery probe may run at a time"
+    );
 }
 
 #[tokio::test]
@@ -968,6 +1149,38 @@ fn route_retry_request(downstream_key: &GeneratedDownstreamKey) -> Request<Body>
             .to_string(),
         ))
         .unwrap()
+}
+
+async fn install_non_stream_profile(state: &AppState, upstream: &UpstreamConfig) {
+    use chat_responses_codex::capabilities::{
+        Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
+        WireProtocol,
+    };
+
+    let key_fingerprint = upstream_model_key_fingerprint(upstream, "gpt-4.1-mini");
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: key_fingerprint.clone(),
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: "gpt-4.1-mini".into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Verified;
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            upstream,
+            &key_fingerprint,
+            "gpt-4.1-mini",
+            "gpt-4.1-mini",
+            UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
+    profile
+        .capabilities
+        .insert(Capability::TextInput, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::NonStreamingResponse, EvidenceState::Supported);
+    state.upsert_dialect_profile(profile).await.unwrap();
 }
 
 async fn spawn_retry_after_upstream(

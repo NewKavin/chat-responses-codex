@@ -94,9 +94,11 @@ pub use types::{
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
     ModelContextConfig, ModelRequestCostConfig, PersistedState, RouteFailureClass,
     RouteHealthSnapshotDto, UpstreamConfig, UpstreamMutationError, UsageLog,
-    ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS, DEFAULT_UPSTREAM_HEDGE_ENABLED,
-    DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS, DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
-    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
+    ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+    DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
+    DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
 };
@@ -285,6 +287,16 @@ pub struct AppState {
     direct_client: Client,
     config_store: Arc<dyn StateStore>,
     postgres: Option<Arc<PostgresStateStore>>,
+}
+
+fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealthRegistry>> {
+    Arc::new(Mutex::new(
+        RouteHealthRegistry::new_with_concurrency_probe_delays(
+            ROUTE_HEALTH_GLOBAL_CAPACITY,
+            ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+            config.upstream_concurrency_probe_delays_ms.clone(),
+        ),
+    ))
 }
 
 fn new_internal_route_capture_token() -> Arc<str> {
@@ -572,7 +584,7 @@ impl AppState {
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
-            route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
+            route_health: route_health_registry_from_config(&config),
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
@@ -635,7 +647,7 @@ impl AppState {
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
-            route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
+            route_health: route_health_registry_from_config(&config),
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
@@ -692,7 +704,7 @@ impl AppState {
             pending_usage_logs: Arc::new(Mutex::new(Vec::new())),
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
-            route_health: Arc::new(Mutex::new(RouteHealthRegistry::default())),
+            route_health: route_health_registry_from_config(&config),
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,

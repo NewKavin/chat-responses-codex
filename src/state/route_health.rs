@@ -4,7 +4,10 @@
 //! kept separate from the upstream admission state because a credential or capacity failure on
 //! one virtual route must not make the other routes of the same account unavailable.
 
-use super::types::{RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig};
+use super::types::{
+    RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig,
+    DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+};
 use crate::capabilities::WireProtocol;
 use crate::keys::upstream_key_fingerprint;
 use sha2::{Digest, Sha256};
@@ -74,6 +77,7 @@ pub struct HealthLease {
     key: KeyHealthKey,
     key_generation: Option<u64>,
     route_generation: Option<u64>,
+    route_state_generation: Option<u64>,
     half_open: bool,
 }
 
@@ -171,6 +175,7 @@ struct HealthState {
     last_failure_at: Option<Instant>,
     cooldown_until: Option<Instant>,
     half_open_generation: Option<u64>,
+    state_generation: u64,
     last_access: Instant,
 }
 
@@ -182,6 +187,7 @@ impl HealthState {
             last_failure_at: None,
             cooldown_until: None,
             half_open_generation: None,
+            state_generation: 0,
             last_access: now,
         }
     }
@@ -224,6 +230,7 @@ pub struct RouteHealthRegistry {
     route_capacity: usize,
     per_upstream_capacity: usize,
     next_generation: u64,
+    concurrency_probe_delays: Vec<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -258,6 +265,18 @@ impl std::fmt::Debug for RouteHealthRegistry {
 
 impl RouteHealthRegistry {
     pub fn new(route_capacity: usize, per_upstream_capacity: usize) -> Self {
+        Self::new_with_concurrency_probe_delays(
+            route_capacity,
+            per_upstream_capacity,
+            DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec(),
+        )
+    }
+
+    pub fn new_with_concurrency_probe_delays(
+        route_capacity: usize,
+        per_upstream_capacity: usize,
+        concurrency_probe_delays_ms: Vec<u64>,
+    ) -> Self {
         Self {
             routes: HashMap::new(),
             keys: HashMap::new(),
@@ -265,6 +284,9 @@ impl RouteHealthRegistry {
             route_capacity: route_capacity.max(1),
             per_upstream_capacity: per_upstream_capacity.max(1),
             next_generation: 0,
+            concurrency_probe_delays: normalize_concurrency_probe_delays(
+                concurrency_probe_delays_ms,
+            ),
         }
     }
 
@@ -514,6 +536,7 @@ impl RouteHealthRegistry {
             }
         }
 
+        let route_state_generation = self.routes.get(route).map(|state| state.state_generation);
         let key_generation = self.reserve_expired_half_open_key(key, now);
         let route_generation = self.reserve_expired_half_open_route(route, now);
         RouteAvailability::Ready(HealthLease {
@@ -521,6 +544,7 @@ impl RouteHealthRegistry {
             key: key.clone(),
             key_generation,
             route_generation,
+            route_state_generation,
             half_open: key_generation.is_some() || route_generation.is_some(),
         })
     }
@@ -572,7 +596,7 @@ impl RouteHealthRegistry {
         let now = Instant::now();
         match outcome {
             RouteOutcome::Success => {
-                self.clear_route(&lease.route, now);
+                self.clear_route_for_success(&lease, now);
                 if lease.key_generation.is_some() {
                     self.clear_key(&lease.key, now);
                 } else {
@@ -597,10 +621,14 @@ impl RouteHealthRegistry {
             }
             RouteOutcome::UncertainRouteFailure(class) => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
-                self.observe_route_failure_at(&lease.route, class, None, now);
+                if !self.reapply_concurrency_probe_delay(&lease, now) {
+                    self.observe_route_failure_at(&lease.route, class, None, now);
+                }
             }
             RouteOutcome::Cancelled => {
-                self.release_route_lease(&lease.route, lease.route_generation, now);
+                if !self.reapply_concurrency_probe_delay(&lease, now) {
+                    self.release_route_lease(&lease.route, lease.route_generation, now);
+                }
                 self.release_key_lease(&lease.key, lease.key_generation, now);
             }
         }
@@ -690,11 +718,13 @@ impl RouteHealthRegistry {
         if !self.ensure_route_capacity(route, now) {
             return;
         }
+        let concurrency_probe_delays = self.concurrency_probe_delays.clone();
         let state = self
             .routes
             .entry(route.clone())
             .or_insert_with(|| HealthState::new(now));
         let step = failure_step(state, class, now);
+        state.state_generation = state.state_generation.wrapping_add(1).max(1);
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);
         state.last_failure_at = Some(now);
@@ -705,9 +735,19 @@ impl RouteHealthRegistry {
         } else {
             ROUTE_COOLDOWN_MAX
         };
-        let local = route_cooldown(class, step, route, max);
-        state.cooldown_until =
-            Some(now + retry_after.map_or(local, |explicit| explicit.max(local)));
+        let local = route_cooldown_with_concurrency_delays(
+            class,
+            step,
+            route,
+            max,
+            &concurrency_probe_delays,
+        );
+        let cooldown = match (class, retry_after) {
+            (RouteFailureClass::ConcurrencySaturated, Some(explicit)) => explicit,
+            (_, Some(explicit)) => explicit.max(local),
+            _ => local,
+        };
+        state.cooldown_until = Some(now + cooldown);
     }
 
     fn observe_key_failure_at(
@@ -748,6 +788,43 @@ impl RouteHealthRegistry {
         if let Some(state) = self.routes.get_mut(route) {
             state.clear(now);
         }
+    }
+
+    fn clear_route_for_success(&mut self, lease: &HealthLease, now: Instant) {
+        let Some(state) = self.routes.get_mut(&lease.route) else {
+            return;
+        };
+        let owns_half_open = lease.route_generation.is_some()
+            && state.half_open_generation == lease.route_generation;
+        let same_observation = lease.route_generation.is_none()
+            && lease.route_state_generation == Some(state.state_generation);
+        if owns_half_open || same_observation {
+            state.clear(now);
+        }
+    }
+
+    fn reapply_concurrency_probe_delay(&mut self, lease: &HealthLease, now: Instant) -> bool {
+        let Some((step, generation)) = self.routes.get(&lease.route).and_then(|state| {
+            (state.last_failure_class == Some(RouteFailureClass::ConcurrencySaturated)
+                && lease.route_generation.is_some()
+                && state.half_open_generation == lease.route_generation)
+                .then_some((state.consecutive_failures, state.state_generation))
+        }) else {
+            return false;
+        };
+        let delay = sequence_delay(&self.concurrency_probe_delays, step);
+        let Some(state) = self.routes.get_mut(&lease.route) else {
+            return false;
+        };
+        if state.state_generation != generation
+            || state.half_open_generation != lease.route_generation
+        {
+            return false;
+        }
+        state.half_open_generation = None;
+        state.cooldown_until = Some(now + delay);
+        state.last_access = now;
+        true
     }
 
     fn clear_key(&mut self, key: &KeyHealthKey, now: Instant) {
@@ -909,6 +986,7 @@ fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {
     matches!(
         class,
         RouteFailureClass::CapacityUnavailable
+            | RouteFailureClass::ConcurrencySaturated
             | RouteFailureClass::TransientServer
             | RouteFailureClass::Transport
             | RouteFailureClass::RateLimited
@@ -949,6 +1027,43 @@ fn route_cooldown(
         _ => TRANSIENT_ROUTE_BASE,
     };
     jittered_backoff(base, step, max, route_jitter_material(route, class, step))
+}
+
+fn route_cooldown_with_concurrency_delays(
+    class: RouteFailureClass,
+    step: u32,
+    route: &RouteHealthKey,
+    max: Duration,
+    concurrency_probe_delays: &[Duration],
+) -> Duration {
+    if class == RouteFailureClass::ConcurrencySaturated {
+        return sequence_delay(concurrency_probe_delays, step).min(max);
+    }
+    route_cooldown(class, step, route, max)
+}
+
+fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
+    const MAX_PROBE_DELAY_MS: u64 = 60_000;
+    let values = if values.is_empty()
+        || values
+            .iter()
+            .any(|value| *value == 0 || *value > MAX_PROBE_DELAY_MS)
+        || values.windows(2).any(|window| window[0] > window[1])
+    {
+        DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec()
+    } else {
+        values
+    };
+    values.into_iter().map(Duration::from_millis).collect()
+}
+
+fn sequence_delay(delays: &[Duration], step: u32) -> Duration {
+    let index = step.saturating_sub(1) as usize;
+    delays
+        .get(index)
+        .copied()
+        .or_else(|| delays.last().copied())
+        .unwrap_or_else(|| Duration::from_millis(1))
 }
 
 fn key_cooldown(

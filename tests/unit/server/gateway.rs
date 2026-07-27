@@ -155,6 +155,38 @@ fn route_attempts_terminal_details_are_numeric_and_secret_free() {
     }
 }
 
+#[test]
+fn terminal_retry_after_seconds_are_rounded_up() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route".into(),
+        upstream_status: Some(503),
+        class: FailureClass::TransientServer,
+        retry_after: Some(Duration::from_millis(1_001)),
+    });
+
+    let error = terminal_route_failure_error(&ledger);
+    assert_eq!(error.retry_after_seconds(), Some(2));
+    assert_eq!(error.safe_details()["retry_after_seconds"], 2);
+}
+
+#[test]
+fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
+    let error = GatewayError::ConcurrencyFull {
+        message: "concurrency limit exceeded".into(),
+        retry_after: None,
+    };
+
+    assert_eq!(
+        error.route_failure_class(),
+        Some(FailureClass::CapacityUnavailable)
+    );
+    assert_eq!(
+        route_health_outcome(&error),
+        RouteOutcome::RouteFailure(FailureClass::ConcurrencySaturated)
+    );
+}
+
 fn tracked_route(fingerprint: &str) -> RouteHealthKey {
     RouteHealthKey {
         upstream_id: "up-1".into(),

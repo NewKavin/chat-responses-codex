@@ -418,7 +418,7 @@ async fn record_route_attempt(
         class,
     )
     .await;
-    let retry_after = error.retry_after_seconds().map(Duration::from_secs);
+    let retry_after = error.retry_after();
     route_attempts.record_failure_with_status(
         route_health_key,
         class,
@@ -464,8 +464,25 @@ fn route_health_keys(
     )
 }
 
+fn duration_seconds_ceil(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
+        .max(1)
+}
+
 fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
-    let retry_after = error.retry_after_seconds().map(Duration::from_secs);
+    let retry_after = error.retry_after();
+    if matches!(error, GatewayError::ConcurrencyFull { .. }) {
+        return retry_after
+            .map(|retry_after| RouteOutcome::RouteFailureWithRetry {
+                class: FailureClass::ConcurrencySaturated,
+                retry_after,
+            })
+            .unwrap_or(RouteOutcome::RouteFailure(
+                FailureClass::ConcurrencySaturated,
+            ));
+    }
     match error.route_failure_class() {
         Some(class @ (FailureClass::Credentials | FailureClass::KeyQuota)) => retry_after
             .map(|retry_after| RouteOutcome::KeyFailureWithRetry { class, retry_after })
@@ -5181,9 +5198,14 @@ async fn process_gateway_request_inner(
                             }
                             Err(GatewayError::ConcurrencyFull {
                                 message,
-                                retry_after_seconds,
+                                retry_after,
                             }) => {
-                                let retry_after_seconds = retry_after_seconds.unwrap_or(15).max(1);
+                                if stream_only_recovery_leader.is_some()
+                                    || stream_only_recovery.consumed
+                                {
+                                    stream_only_recovery.final_attempt = true;
+                                }
+                                let retry_after_seconds = retry_after.map(duration_seconds_ceil);
                                 tracing::warn!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
@@ -5200,15 +5222,18 @@ async fn process_gateway_request_inner(
                                 if state.config.routing_affinity_enabled {
                                     state.clear_affinity_upstream(&downstream.id, normalized_model);
                                 }
-                                state
-                                    .mark_upstream_concurrency_full(
-                                        &upstream.id,
-                                        retry_after_seconds.saturating_mul(1_000),
-                                    )
-                                    .await;
+                                if let Some(retry_after) = retry_after {
+                                    state
+                                        .mark_upstream_concurrency_full(
+                                            &upstream.id,
+                                            retry_after.as_millis().min(u128::from(u64::MAX))
+                                                as u64,
+                                        )
+                                        .await;
+                                }
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message,
-                                    retry_after_seconds: Some(retry_after_seconds),
+                                    retry_after,
                                 });
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -5227,7 +5252,7 @@ async fn process_gateway_request_inner(
                                     protocol,
                                     &GatewayError::ConcurrencyFull {
                                         message: String::new(),
-                                        retry_after_seconds: Some(retry_after_seconds),
+                                        retry_after,
                                     },
                                 )
                                 .await;
@@ -5240,10 +5265,16 @@ async fn process_gateway_request_inner(
                                         // quarantine the exact route for the next request.
                                         RouteOutcome::Cancelled
                                     } else {
-                                        RouteOutcome::RouteFailureWithRetry {
-                                            class: FailureClass::CapacityUnavailable,
-                                            retry_after: Duration::from_secs(retry_after_seconds),
-                                        }
+                                        retry_after
+                                            .map(|retry_after| {
+                                                RouteOutcome::RouteFailureWithRetry {
+                                                    class: FailureClass::ConcurrencySaturated,
+                                                    retry_after,
+                                                }
+                                            })
+                                            .unwrap_or(RouteOutcome::RouteFailure(
+                                                FailureClass::ConcurrencySaturated,
+                                            ))
                                     },
                                 )
                                 .await;
@@ -5252,14 +5283,17 @@ async fn process_gateway_request_inner(
                             }
                             Err(GatewayError::TooManyRequests {
                                 message,
-                                retry_after_seconds,
+                                retry_after,
                             }) => {
-                                let retry_after_seconds = retry_after_seconds.unwrap_or(
-                                    state
-                                        .config
-                                        .upstream_rate_limit_default_retry_seconds
-                                        .max(1),
-                                );
+                                let retry_after = retry_after.unwrap_or_else(|| {
+                                    Duration::from_secs(
+                                        state
+                                            .config
+                                            .upstream_rate_limit_default_retry_seconds
+                                            .max(1),
+                                    )
+                                });
+                                let retry_after_seconds = duration_seconds_ceil(retry_after);
                                 tracing::warn!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
@@ -5281,7 +5315,7 @@ async fn process_gateway_request_inner(
                                     .await;
                                 last_error = Some(GatewayError::TooManyRequests {
                                     message,
-                                    retry_after_seconds: Some(retry_after_seconds),
+                                    retry_after: Some(retry_after),
                                 });
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -5300,7 +5334,7 @@ async fn process_gateway_request_inner(
                                     protocol,
                                     &GatewayError::TooManyRequests {
                                         message: String::new(),
-                                        retry_after_seconds: Some(retry_after_seconds),
+                                        retry_after: Some(retry_after),
                                     },
                                 )
                                 .await;
@@ -5311,7 +5345,7 @@ async fn process_gateway_request_inner(
                                     } else {
                                         RouteOutcome::RouteFailureWithRetry {
                                             class: FailureClass::RateLimited,
-                                            retry_after: Duration::from_secs(retry_after_seconds),
+                                            retry_after,
                                         }
                                     },
                                 )
@@ -5546,6 +5580,9 @@ async fn process_gateway_request_inner(
                                 break;
                             }
                         }
+                    }
+                    if stream_only_recovery.consumed {
+                        stream_only_final_attempt = true;
                     }
                     if stream_only_recovery.final_attempt {
                         stream_only_final_attempt = true;

@@ -189,6 +189,124 @@ async fn route_failure_isolated_from_another_model_on_the_same_key() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn concurrency_saturation_uses_configured_probe_sequence() {
+    let mut registry = RouteHealthRegistry::new_with_concurrency_probe_delays(
+        16,
+        16,
+        vec![100, 200, 400, 800, 1_000, 2_000],
+    );
+    let key = key("fingerprint-a");
+    let route = route("fingerprint-a", "glm-5.2");
+
+    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None);
+    let first = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(first.cooldown_remaining, Duration::from_millis(100));
+
+    let mut previous_delay = Duration::from_millis(100);
+    for expected_delay in [200, 400, 800, 1_000, 2_000, 2_000] {
+        tokio::time::advance(previous_delay).await;
+        let lease = match registry.reserve(&route, &key) {
+            RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+            other => panic!("expected concurrency probe lease, got {other:?}"),
+        };
+        registry.finish(
+            lease,
+            RouteOutcome::RouteFailure(RouteFailureClass::ConcurrencySaturated),
+        );
+        let expected_delay = Duration::from_millis(expected_delay);
+        assert_eq!(
+            registry
+                .route_health_snapshot(&route)
+                .unwrap()
+                .cooldown_remaining,
+            expected_delay
+        );
+        previous_delay = expected_delay;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrency_half_open_uncertainty_reapplies_current_delay() {
+    let mut registry =
+        RouteHealthRegistry::new_with_concurrency_probe_delays(16, 16, vec![100, 200]);
+    let key = key("fingerprint-a");
+    let route = route("fingerprint-a", "glm-5.2");
+
+    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None);
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected concurrency probe lease, got {other:?}"),
+    };
+    registry.finish(
+        lease,
+        RouteOutcome::UncertainRouteFailure(RouteFailureClass::Transport),
+    );
+
+    let state = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(
+        state.last_failure_class,
+        Some(RouteFailureClass::ConcurrencySaturated)
+    );
+    assert_eq!(state.consecutive_failures, 1);
+    assert_eq!(state.cooldown_remaining, Duration::from_millis(100));
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrency_retry_after_is_authoritative() {
+    let mut registry =
+        RouteHealthRegistry::new_with_concurrency_probe_delays(16, 16, vec![100, 200]);
+    let key = key("fingerprint-a");
+    let route = route("fingerprint-a", "glm-5.2");
+
+    registry.observe_route_failure(
+        &route,
+        RouteFailureClass::ConcurrencySaturated,
+        Some(Duration::from_millis(1_500)),
+    );
+    assert_eq!(
+        registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .cooldown_remaining,
+        Duration::from_millis(1_500)
+    );
+
+    tokio::time::advance(Duration::from_millis(1_499)).await;
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(lease) if lease.is_half_open()
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_healthy_success_does_not_clear_newer_concurrency_saturation() {
+    let mut registry = RouteHealthRegistry::new_with_concurrency_probe_delays(16, 16, vec![100]);
+    let key = key("fingerprint-a");
+    let route = route("fingerprint-a", "glm-5.2");
+
+    let stale = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) => lease,
+        other => panic!("expected healthy lease, got {other:?}"),
+    };
+    registry.observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None);
+    registry.finish(stale, RouteOutcome::Success);
+
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling {
+            class: RouteFailureClass::ConcurrencySaturated,
+            retry_after,
+        } if retry_after > Duration::ZERO
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn explicit_retry_after_is_a_lower_bound_and_failure_streak_resets() {
     let mut registry = RouteHealthRegistry::new(16, 16);
     let route = route("fingerprint-a", "glm-5.2");

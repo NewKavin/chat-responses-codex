@@ -1,6 +1,8 @@
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    AppConfig, AppState, ModelKeySyncService, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
+    AppConfig, AppState, ModelKeySyncService, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
@@ -27,6 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3001");
     let state_path = PathBuf::from(env_or("STATE_PATH", "data/state.json"));
     let log_path = env_or("LOG_PATH", "logs/chat-responses-codex.log");
+    init_tracing(&log_path);
     let context_retry_max_attempts_chat_default = env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 2).max(1);
     let context_retry_max_attempts_responses_default =
         env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 3).max(1);
@@ -158,9 +161,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS",
             DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
         )),
+        upstream_concurrency_recovery_max_wait_ms: env_u64(
+            "UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS",
+            DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
+        ),
+        upstream_concurrency_recovery_max_rounds: normalize_route_retry_rounds(env_u32(
+            "UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS",
+            DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+        )),
+        upstream_concurrency_probe_delays_ms: env::var("UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS")
+            .ok()
+            .map(|value| normalize_concurrency_probe_delays_ms(&value))
+            .unwrap_or_else(|| DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec()),
     };
 
-    init_tracing(&log_path);
     if config.jwt_secret == "change_me_in_production" {
         tracing::warn!(
             "JWT_SECRET is using the development default; production deployments should set a strong secret because rotating it invalidates outstanding thinking continuations"
@@ -178,6 +192,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         route_exhaustion_retry_enabled = config.upstream_route_exhaustion_retry_enabled,
         route_exhaustion_retry_max_wait_ms = config.upstream_route_exhaustion_retry_max_wait_ms,
         route_exhaustion_retry_max_rounds = config.upstream_route_exhaustion_retry_max_rounds,
+        concurrency_recovery_max_wait_ms = config.upstream_concurrency_recovery_max_wait_ms,
+        concurrency_recovery_max_rounds = config.upstream_concurrency_recovery_max_rounds,
+        upstream_concurrency_probe_delays_ms = ?config.upstream_concurrency_probe_delays_ms,
         automatic_capability_probes_enabled = config.automatic_capability_probes_enabled,
         upstream_model_auto_discovery_enabled = config.upstream_model_auto_discovery_enabled,
         upstream_model_key_sync_interval_seconds = config.upstream_model_key_sync_interval_seconds,
@@ -286,6 +303,35 @@ fn normalize_hedge_delay_ms(value: u64) -> u64 {
 
 fn normalize_route_retry_rounds(value: u32) -> u32 {
     value.max(1)
+}
+
+fn normalize_concurrency_probe_delays_ms(value: &str) -> Vec<u64> {
+    const MAX_PROBE_DELAY_MS: u64 = 60_000;
+    let parsed = value
+        .split(',')
+        .map(str::trim)
+        .map(|item| item.parse::<u64>())
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(values) = parsed else {
+        tracing::warn!(
+            value,
+            "invalid UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS; using defaults"
+        );
+        return DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec();
+    };
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|value| *value == 0 || *value > MAX_PROBE_DELAY_MS)
+        || values.windows(2).any(|window| window[0] > window[1])
+    {
+        tracing::warn!(
+            value,
+            "invalid UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS; using defaults"
+        );
+        return DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec();
+    }
+    values
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
@@ -419,7 +465,10 @@ impl Write for TeeWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{env_u64, normalize_hedge_delay_ms, normalize_route_retry_rounds};
+    use super::{
+        env_u64, normalize_concurrency_probe_delays_ms, normalize_hedge_delay_ms,
+        normalize_route_retry_rounds,
+    };
     use std::env;
     use std::sync::{Mutex, OnceLock};
 
@@ -439,6 +488,22 @@ mod tests {
         assert_eq!(normalize_route_retry_rounds(0), 1);
         assert_eq!(normalize_route_retry_rounds(1), 1);
         assert_eq!(normalize_route_retry_rounds(3), 3);
+    }
+
+    #[test]
+    fn concurrency_probe_delays_fall_back_on_invalid_values() {
+        assert_eq!(
+            normalize_concurrency_probe_delays_ms(" 100, 200,400 "),
+            vec![100, 200, 400]
+        );
+        assert_eq!(
+            normalize_concurrency_probe_delays_ms("100,0,400"),
+            vec![100, 200, 400, 800, 1_000, 2_000]
+        );
+        assert_eq!(
+            normalize_concurrency_probe_delays_ms("100,70000"),
+            vec![100, 200, 400, 800, 1_000, 2_000]
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub struct RouteHealthSnapshotDto {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RouteFailureClass {
     CapacityUnavailable,
+    ConcurrencySaturated,
     TransientServer,
     Transport,
     RateLimited,
@@ -26,8 +27,9 @@ pub enum RouteFailureClass {
 }
 
 impl RouteFailureClass {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::CapacityUnavailable,
+        Self::ConcurrencySaturated,
         Self::TransientServer,
         Self::Transport,
         Self::RateLimited,
@@ -43,6 +45,7 @@ impl RouteFailureClass {
         matches!(
             self,
             Self::CapacityUnavailable
+                | Self::ConcurrencySaturated
                 | Self::TransientServer
                 | Self::Transport
                 | Self::RateLimited
@@ -53,6 +56,7 @@ impl RouteFailureClass {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CapacityUnavailable => "capacity_unavailable",
+            Self::ConcurrencySaturated => "concurrency_saturated",
             Self::TransientServer => "transient_server",
             Self::Transport => "transport",
             Self::RateLimited => "rate_limited",
@@ -74,6 +78,10 @@ pub const DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS: u32 = 1;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED: bool = true;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS: u64 = 10_000;
 pub const DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS: u32 = 3;
+pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS: u64 = 30_000;
+pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
+pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: [u64; 6] =
+    [100, 200, 400, 800, 1_000, 2_000];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -122,6 +130,9 @@ pub struct AppConfig {
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
+    pub upstream_concurrency_recovery_max_wait_ms: u64,
+    pub upstream_concurrency_recovery_max_rounds: u32,
+    pub upstream_concurrency_probe_delays_ms: Vec<u64>,
 }
 
 impl Default for AppConfig {
@@ -173,6 +184,12 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
             upstream_route_exhaustion_retry_max_rounds:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
+            upstream_concurrency_recovery_max_wait_ms:
+                DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS,
+            upstream_concurrency_recovery_max_rounds:
+                DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+            upstream_concurrency_probe_delays_ms: DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS
+                .to_vec(),
         }
     }
 }

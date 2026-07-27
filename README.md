@@ -177,8 +177,11 @@ flowchart LR
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`：后台模型-key 映射同步间隔，默认 `0`（关闭）；设为正整数才会启用。Automatic upstream model discovery is disabled by default. Manual model discovery remains available when automatic discovery is disabled.
 - `AUTOMATIC_CAPABILITY_PROBES_ENABLED`：是否自动发送真实 Chat/Responses 能力探测请求，默认 `false`。启用会消耗模型 token；手工 capability probe 和“真实验证并应用”不受该自动开关控制，在管理员明确触发时仍会消耗 token。
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED`：所有候选路由暂时不可用时，是否允许在同一逻辑请求内开始新的路由轮次，默认 `true`。
-- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS`：一个逻辑请求等待临时路由恢复的总预算，默认 `10000` 毫秒；设为 `0` 可禁用等待。
-- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS`：最大路由总轮数，默认 `3`，包含初始轮次。
+- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS`：一个逻辑请求等待普通临时路由恢复的总预算，默认 `10000` 毫秒；设为 `0` 可禁用等待。
+- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS`：普通临时恢复的最大路由总轮数，默认 `3`，包含初始轮次。
+- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS`：并发已满恢复的单请求总等待预算，默认 `30000` 毫秒。
+- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS`：并发已满恢复的最大路由总轮数，默认 `32`，包含初始轮次。
+- `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS`：上游并发 429 未提供 `Retry-After` 时的探测间隔，默认 `100,200,400,800,1000,2000` 毫秒；用完序列后持续复用最后一项。
 - `UPSTREAM_HEDGE_ENABLED`：是否为长时间没有首个可用输出的流式请求启用竞争尝试。
 - `UPSTREAM_HEDGE_DELAY_MS`：发起第一个额外竞争尝试前的等待时间，默认 `12000` 毫秒。
 - `UPSTREAM_HEDGE_INTERVAL_MS`：后续额外竞争尝试之间的最小间隔，默认 `12000` 毫秒。
@@ -199,7 +202,7 @@ flowchart LR
 
 `/v1/models` 只读取持久化模型目录，不读取运行时健康状态。精确路由健康状态只保存在当前进程：重启会清空冷却/半开记录并以 fail-open 方式重新尝试，但不会新增或删除目录模型。因此，共享同一数据库时只支持一个活跃网关实例。
 
-请求失败时使用有界切路：普通上游 5xx 在同一精确路由最多重试一次；429 保存上游完整的 `Retry-After`、冷却该路由并立即尝试下一条候选路由。全部候选路由都因临时故障耗尽后，只有最早恢复时间（含不超过 100 毫秒的抖动）能放进剩余等待预算时才开始新一轮，且绝不会早于供应商的 `Retry-After`。否则网关立即返回终态 503 和完整等待时间。自动重放只发生在首个可用输出交付之前，并复用同一个幂等标识；如果供应商不支持该幂等头，交付语义仍是 at-least-once，可能产生重复推理或供应商侧存储。
+请求失败时使用有界切路：普通上游 5xx 在同一精确路由最多重试一次；429 保存上游完整的 `Retry-After`、冷却该路由并立即尝试下一条候选路由。明确识别为上游并发已满、但没有 `Retry-After` 的 429 使用 `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS` 短探测序列，同一路由同一时刻只允许一个半开探测。全部候选路由都因临时故障耗尽后，只有最早恢复时间（含不超过 100 毫秒的抖动）能放进剩余等待预算时才开始新一轮，且绝不会早于供应商的 `Retry-After`。否则网关立即返回终态 503 和完整等待时间。自动重放只发生在首个可用输出交付之前，并复用同一个幂等标识；如果供应商不支持该幂等头，交付语义仍是 at-least-once，可能产生重复推理或供应商侧存储。
 
 `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=0` means zero disables waiting, and total rounds include the initial round. The gateway preserves the full `Retry-After`; configured priority cannot make an unhealthy route eligible; output or tool calls are never replayed after delivery.
 
@@ -452,8 +455,11 @@ Common environment variables:
 - `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS`: background model-key synchronization interval; defaults to `0` (disabled), and a positive value enables it. Automatic upstream model discovery is disabled by default. Manual model discovery remains available when automatic discovery is disabled.
 - `AUTOMATIC_CAPABILITY_PROBES_ENABLED`: enables automatic real Chat/Responses capability probes. It defaults to `false`; enabling it consumes model tokens. Explicit manual probes still consume tokens when an administrator runs them.
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED`: enables a new bounded routing round after temporary all-route exhaustion; defaults to `true`.
-- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS`: total temporary-recovery wait budget for one logical request; defaults to `10000` milliseconds.
-- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS`: maximum total routing rounds, including the initial round; defaults to `3`.
+- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS`: total ordinary temporary-recovery wait budget for one logical request; defaults to `10000` milliseconds.
+- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS`: maximum ordinary temporary-recovery routing rounds, including the initial round; defaults to `3`.
+- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS`: total concurrency-recovery wait budget for one logical request; defaults to `30000` milliseconds.
+- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS`: maximum concurrency-recovery routing rounds, including the initial round; defaults to `32`.
+- `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS`: probe intervals for upstream concurrency 429 responses without `Retry-After`; defaults to `100,200,400,800,1000,2000` milliseconds and repeats the final value.
 - `UPSTREAM_HEDGE_ENABLED`: enables slow-first-output competition for streaming requests.
 - `UPSTREAM_HEDGE_DELAY_MS`: delay before the first extra attempt; defaults to `12000` milliseconds.
 - `UPSTREAM_HEDGE_INTERVAL_MS`: minimum interval between later extra attempts; defaults to `12000` milliseconds.
@@ -474,7 +480,7 @@ Configuration model:
 
 Each key under one upstream account has its own persisted model mapping and is scheduled as an exact route. A successful discovery that returns no models is an authoritative empty mapping: that key supports no models and does not inherit the account-level list. As an upgrade step, a deployment with empty persisted `supported_models` must complete one explicit discovery, or one full background legacy discovery, before `/v1/models` advertises those models. The endpoint reads only the persisted model catalog.
 
-Runtime failures never rewrite capability data. A generic upstream 5xx retries the same exact route once before moving on. An upstream 429 stores the full `Retry-After` as route cooldown and switches immediately to another eligible route. After temporary all-route exhaustion, the gateway starts a fresh round only when the earliest exact-route recovery plus jitter fits the remaining logical-request wait budget; it never probes before provider recovery. Automatic replay before usable output reuses the same idempotency identifier, but delivery remains at-least-once when a provider ignores or does not support the idempotency header; duplicate inference or provider-side storage is still possible.
+Runtime failures never rewrite capability data. A generic upstream 5xx retries the same exact route once before moving on. An upstream 429 stores the full `Retry-After` as route cooldown and switches immediately to another eligible route. A concurrency-specific 429 without `Retry-After` uses `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS`, with one half-open probe per exact route at a time. After temporary all-route exhaustion, the gateway starts a fresh round only when the earliest exact-route recovery plus jitter fits the remaining logical-request wait budget; it never probes before provider recovery. Automatic replay before usable output reuses the same idempotency identifier, but delivery remains at-least-once when a provider ignores or does not support the idempotency header; duplicate inference or provider-side storage is still possible.
 
 `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=0` means zero disables waiting, and total rounds include the initial round. The gateway preserves the full `Retry-After`; configured priority cannot make an unhealthy route eligible; output or tool calls are never replayed after delivery.
 

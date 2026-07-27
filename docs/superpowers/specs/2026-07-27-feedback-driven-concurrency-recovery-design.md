@@ -84,15 +84,20 @@ capacity.
 
 ## Configuration
 
-The existing route-exhaustion recovery settings remain the outer safety budget:
+The existing route-exhaustion switch remains the outer safety gate. Ordinary
+temporary failures keep their existing budget, while concurrency saturation
+uses a separate budget so faster retries do not broaden ordinary 429, 5xx, or
+stream-only recovery behavior:
 
 | Environment variable | Default | Meaning |
 | --- | ---: | --- |
 | `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED` | `true` | Permit another routing round after temporary exhaustion. |
-| `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS` | `30000` | Maximum cumulative sleep for one logical request. |
-| `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS` | `32` | Maximum total routing rounds, including the first. |
+| `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS` | `10000` | Maximum cumulative sleep for ordinary temporary recovery. |
+| `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS` | `3` | Maximum ordinary routing rounds, including the first. |
+| `UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS` | `30000` | Maximum cumulative sleep for concurrency recovery. |
+| `UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS` | `32` | Maximum concurrency recovery rounds, including the first. |
 
-Add one concurrency-specific setting:
+Add the concurrency-specific probe schedule:
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |

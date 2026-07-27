@@ -171,8 +171,15 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
         .or_else(|_| DateTime::parse_from_rfc3339(value))
         .ok()?
         .with_timezone(&Utc);
-    let seconds = retry_at.signed_duration_since(Utc::now()).num_seconds();
-    Some(Duration::from_secs(seconds.max(0) as u64))
+    retry_after_deadline_duration(retry_at, Utc::now())
+}
+
+fn retry_after_deadline_duration(retry_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<Duration> {
+    let duration = retry_at.signed_duration_since(now);
+    if duration <= chrono::Duration::zero() {
+        return Some(Duration::ZERO);
+    }
+    duration.to_std().ok()
 }
 
 fn is_model_character(character: char) -> bool {

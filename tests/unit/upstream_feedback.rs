@@ -96,6 +96,21 @@ fn retry_after_is_preserved_without_legacy_clipping() {
 }
 
 #[test]
+fn retry_after_http_date_preserves_future_subsecond_deadline() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-27T12:00:00.250Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let future = chrono::DateTime::parse_from_rfc3339("2026-07-27T12:00:01Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    assert_eq!(
+        retry_after_deadline_duration(future, now),
+        Some(std::time::Duration::from_millis(750))
+    );
+}
+
+#[test]
 fn test_429_is_rate_limited() {
     let headers = reqwest::header::HeaderMap::new();
     let classification = UpstreamFeedbackClassification::from_response(429, &headers, None);

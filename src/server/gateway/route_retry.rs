@@ -54,14 +54,29 @@ pub(super) struct RouteRetryPolicy {
     enabled: bool,
     max_wait: Duration,
     max_rounds: u32,
+    concurrency_max_wait: Duration,
+    concurrency_max_rounds: u32,
 }
 
 impl RouteRetryPolicy {
+    #[cfg(test)]
     pub fn new(enabled: bool, max_wait: Duration, max_rounds: u32) -> Self {
+        Self::new_with_concurrency(enabled, max_wait, max_rounds, max_wait, max_rounds)
+    }
+
+    fn new_with_concurrency(
+        enabled: bool,
+        max_wait: Duration,
+        max_rounds: u32,
+        concurrency_max_wait: Duration,
+        concurrency_max_rounds: u32,
+    ) -> Self {
         Self {
             enabled,
             max_wait,
             max_rounds: max_rounds.max(1),
+            concurrency_max_wait,
+            concurrency_max_rounds: concurrency_max_rounds.max(1),
         }
     }
 
@@ -72,19 +87,30 @@ impl RouteRetryPolicy {
         health_recovery: Option<RouteRecovery>,
         request_id: &str,
     ) -> Option<RouteRetryWait> {
-        if !self.enabled || budget.current_round >= self.max_rounds {
+        if !self.enabled {
             return None;
         }
         let TerminalFailure::Temporary { retry_after } = terminal else {
             return None;
         };
+        let concurrency_recovery = health_recovery.is_some_and(|recovery| {
+            recovery.class == crate::state::RouteFailureClass::ConcurrencySaturated
+        });
+        let (max_wait, max_rounds) = if concurrency_recovery {
+            (self.concurrency_max_wait, self.concurrency_max_rounds)
+        } else {
+            (self.max_wait, self.max_rounds)
+        };
+        if budget.current_round >= max_rounds {
+            return None;
+        }
         let required_delay = health_recovery
             .map(|recovery| recovery.retry_after)
             .unwrap_or(retry_after);
         let next_round = budget.current_round.saturating_add(1);
         let jitter = deterministic_jitter(request_id, next_round);
         let sleep_for = required_delay.checked_add(jitter)?;
-        let remaining = self.max_wait.saturating_sub(budget.waited);
+        let remaining = max_wait.saturating_sub(budget.waited);
         if sleep_for > remaining {
             return None;
         }
@@ -101,10 +127,12 @@ impl RouteRetryPolicy {
 
 impl From<&AppConfig> for RouteRetryPolicy {
     fn from(config: &AppConfig) -> Self {
-        Self::new(
+        Self::new_with_concurrency(
             config.upstream_route_exhaustion_retry_enabled,
             Duration::from_millis(config.upstream_route_exhaustion_retry_max_wait_ms),
             config.upstream_route_exhaustion_retry_max_rounds,
+            Duration::from_millis(config.upstream_concurrency_recovery_max_wait_ms),
+            config.upstream_concurrency_recovery_max_rounds,
         )
     }
 }
@@ -240,5 +268,42 @@ mod tests {
 
         assert_eq!(wait.required_delay, Duration::from_secs(7));
         assert!(wait.sleep_for >= recovery.retry_after);
+    }
+
+    #[test]
+    fn concurrency_recovery_uses_its_own_wait_and_round_budget() {
+        let policy = RouteRetryPolicy::new_with_concurrency(
+            true,
+            Duration::from_secs(10),
+            3,
+            Duration::from_secs(30),
+            32,
+        );
+        let terminal = TerminalFailure::Temporary {
+            retry_after: Duration::from_millis(100),
+        };
+        let concurrency = RouteRecovery {
+            class: RouteFailureClass::ConcurrencySaturated,
+            retry_after: Duration::from_millis(100),
+        };
+        let ordinary = RouteRecovery {
+            class: RouteFailureClass::TransientServer,
+            retry_after: Duration::from_millis(100),
+        };
+        let mut budget = RouteRetryBudget::default();
+
+        for _ in 0..2 {
+            let wait = policy
+                .decide(&budget, terminal, Some(concurrency), "concurrency-budget")
+                .expect("concurrency recovery should advance to round three");
+            budget.record_wait(wait);
+        }
+        assert_eq!(budget.current_round(), 3);
+        assert!(policy
+            .decide(&budget, terminal, Some(ordinary), "ordinary-budget")
+            .is_none());
+        assert!(policy
+            .decide(&budget, terminal, Some(concurrency), "concurrency-budget")
+            .is_some());
     }
 }

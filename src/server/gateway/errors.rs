@@ -7,6 +7,14 @@ use axum::extract::Json;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map, Value};
+use std::time::Duration;
+
+fn duration_seconds_ceil(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
+        .max(1)
+}
 
 pub(super) fn terminal_route_failure_error(ledger: &AttemptLedger) -> GatewayError {
     let terminal = ledger.terminal_failure();
@@ -29,7 +37,7 @@ pub(super) fn terminal_route_failure_error(ledger: &AttemptLedger) -> GatewayErr
 
     let (status, message, error_type, code, retry_after_seconds) = match terminal {
         TerminalFailure::Temporary { retry_after } => {
-            let retry_after_seconds = retry_after.as_secs();
+            let retry_after_seconds = duration_seconds_ceil(retry_after);
             details.insert(
                 "retry_after_seconds".to_string(),
                 json!(retry_after_seconds),
@@ -163,11 +171,11 @@ pub(super) enum GatewayError {
     BadRequest(String),
     TooManyRequests {
         message: String,
-        retry_after_seconds: Option<u64>,
+        retry_after: Option<Duration>,
     },
     ConcurrencyFull {
         message: String,
-        retry_after_seconds: Option<u64>,
+        retry_after: Option<Duration>,
     },
     Upstream(String),
     GatewayTimeout(String),
@@ -175,7 +183,7 @@ pub(super) enum GatewayError {
     Classified {
         status: StatusCode,
         message: String,
-        retry_after_seconds: Option<u64>,
+        retry_after: Option<Duration>,
         meta: GatewayErrorMeta,
     },
 }
@@ -222,10 +230,30 @@ impl GatewayError {
         retry_after_seconds: Option<u64>,
         details: Option<Value>,
     ) -> Self {
+        Self::classified_with_retry_after(
+            status,
+            message,
+            error_type,
+            code,
+            category,
+            retry_after_seconds.map(Duration::from_secs),
+            details,
+        )
+    }
+
+    fn classified_with_retry_after(
+        status: StatusCode,
+        message: impl Into<String>,
+        error_type: &'static str,
+        code: &'static str,
+        category: &'static str,
+        retry_after: Option<Duration>,
+        details: Option<Value>,
+    ) -> Self {
         Self::Classified {
             status,
             message: message.into(),
-            retry_after_seconds,
+            retry_after,
             meta: GatewayErrorMeta {
                 error_type,
                 code,
@@ -241,7 +269,7 @@ impl GatewayError {
     ) -> Self {
         let message = message.into();
         let upstream_status = failure.upstream_status;
-        let retry_after_seconds = failure.retry_after.map(|retry_after| retry_after.as_secs());
+        let retry_after = failure.retry_after;
         let details = || {
             let mut details = Map::from_iter([("scope".to_string(), json!("upstream"))]);
             if let Some(status) = upstream_status {
@@ -254,50 +282,54 @@ impl GatewayError {
             FailureClass::CapacityUnavailable if upstream_status == Some(429) => {
                 Self::ConcurrencyFull {
                     message,
-                    retry_after_seconds,
+                    retry_after,
                 }
             }
-            FailureClass::CapacityUnavailable => Self::classified(
+            FailureClass::ConcurrencySaturated => Self::ConcurrencyFull {
+                message,
+                retry_after,
+            },
+            FailureClass::CapacityUnavailable => Self::classified_with_retry_after(
                 StatusCode::SERVICE_UNAVAILABLE,
                 message,
                 "upstream_error",
                 "upstream_capacity_unavailable",
                 "upstream_capacity_unavailable",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
-            FailureClass::TransientServer => Self::classified(
+            FailureClass::TransientServer => Self::classified_with_retry_after(
                 StatusCode::SERVICE_UNAVAILABLE,
                 message,
                 "upstream_error",
                 "upstream_temporary_unavailable",
                 "upstream_temporary_unavailable",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
-            FailureClass::Transport => Self::classified(
+            FailureClass::Transport => Self::classified_with_retry_after(
                 StatusCode::BAD_GATEWAY,
                 message,
                 "upstream_error",
                 "upstream_network_error",
                 "upstream_network_error",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
             FailureClass::RateLimited => Self::TooManyRequests {
                 message,
-                retry_after_seconds,
+                retry_after,
             },
-            FailureClass::KeyQuota => Self::classified(
+            FailureClass::KeyQuota => Self::classified_with_retry_after(
                 StatusCode::TOO_MANY_REQUESTS,
                 message,
                 "upstream_error",
                 "upstream_key_quota_exhausted",
                 "upstream_key_quota_exhausted",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
-            FailureClass::Credentials => Self::classified(
+            FailureClass::Credentials => Self::classified_with_retry_after(
                 match upstream_status {
                     Some(401) => StatusCode::UNAUTHORIZED,
                     Some(403) => StatusCode::FORBIDDEN,
@@ -307,34 +339,34 @@ impl GatewayError {
                 "upstream_error",
                 "upstream_auth_error",
                 "upstream_auth_error",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
-            FailureClass::ModelUnsupported => Self::classified(
+            FailureClass::ModelUnsupported => Self::classified_with_retry_after(
                 StatusCode::BAD_GATEWAY,
                 message,
                 "upstream_error",
                 "upstream_model_unsupported",
                 "upstream_model_unsupported",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
-            FailureClass::FeatureUnsupported => Self::classified(
+            FailureClass::FeatureUnsupported => Self::classified_with_retry_after(
                 StatusCode::BAD_REQUEST,
                 message,
                 "invalid_request_error",
                 "capability_not_supported",
                 "capability_not_supported",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
-            FailureClass::ProtocolUnsupported => Self::classified(
+            FailureClass::ProtocolUnsupported => Self::classified_with_retry_after(
                 StatusCode::BAD_GATEWAY,
                 message,
                 "upstream_error",
                 "upstream_protocol_unsupported",
                 "upstream_protocol_unsupported",
-                retry_after_seconds,
+                retry_after,
                 Some(details()),
             ),
             FailureClass::RequestRejected => Self::upstream_bad_request(
@@ -529,19 +561,14 @@ impl GatewayError {
         }
     }
     pub(super) fn retry_after_seconds(&self) -> Option<u64> {
+        self.retry_after().map(duration_seconds_ceil)
+    }
+
+    pub(super) fn retry_after(&self) -> Option<Duration> {
         match self {
-            GatewayError::TooManyRequests {
-                retry_after_seconds,
-                ..
-            }
-            | GatewayError::ConcurrencyFull {
-                retry_after_seconds,
-                ..
-            } => *retry_after_seconds,
-            GatewayError::Classified {
-                retry_after_seconds,
-                ..
-            } => *retry_after_seconds,
+            GatewayError::TooManyRequests { retry_after, .. }
+            | GatewayError::ConcurrencyFull { retry_after, .. } => *retry_after,
+            GatewayError::Classified { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -690,16 +717,10 @@ impl GatewayError {
                 }
                 details
             }
-            GatewayError::TooManyRequests {
-                retry_after_seconds,
-                ..
-            }
-            | GatewayError::ConcurrencyFull {
-                retry_after_seconds,
-                ..
-            } => json!({
+            GatewayError::TooManyRequests { retry_after, .. }
+            | GatewayError::ConcurrencyFull { retry_after, .. } => json!({
                 "scope": "upstream",
-                "retry_after_seconds": retry_after_seconds,
+                "retry_after_seconds": retry_after.map(duration_seconds_ceil),
             }),
             GatewayError::Upstream(_)
             | GatewayError::GatewayTimeout(_)
