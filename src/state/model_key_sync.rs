@@ -500,7 +500,7 @@ impl AppState {
                 .expect("model key sync runtime lock poisoned")
                 .missing_observations
                 .remove(&observation_key);
-            let current_upstreams = self.snapshot().await.upstreams;
+            let current_upstreams = self.routing_snapshot().await.upstreams;
             self.reconcile_route_health(&current_upstreams).await;
         }
     }
@@ -608,7 +608,7 @@ impl AppState {
                 None => summary.skipped = summary.skipped.saturating_add(1),
             }
         }
-        let current_upstreams = self.snapshot().await.upstreams;
+        let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
         Ok(summary)
     }

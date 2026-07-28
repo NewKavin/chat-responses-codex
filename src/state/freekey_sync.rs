@@ -684,7 +684,7 @@ impl AppState {
                 |e| UpstreamMutationError::Persist(format!("Failed to persist state: {e}")),
             )
             .await?;
-        let current_upstreams = self.snapshot().await.upstreams;
+        let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
         Ok(updated_upstream)
     }

@@ -2609,7 +2609,7 @@ impl AppState {
             Ok(())
         })
         .await?;
-        let current_upstreams = self.snapshot().await.upstreams;
+        let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
         let jobs = self.capability_probe_jobs_for_upstream(&queue_candidate);
         self.submit_capability_probe_jobs(jobs, ProbeReason::ConfigurationChanged)
@@ -2638,10 +2638,10 @@ impl AppState {
             })
             .await?;
         if updated {
-            let current_upstreams = self.snapshot().await.upstreams.clone();
+            let current_upstreams = self.routing_snapshot().await.upstreams;
             self.reconcile_route_health(&current_upstreams).await;
             if let Some(upstream) = self
-                .snapshot()
+                .routing_snapshot()
                 .await
                 .upstreams
                 .iter()
@@ -2669,7 +2669,7 @@ impl AppState {
         if removed {
             self.delete_dialect_profiles_for_upstream(upstream_id)
                 .await?;
-            let current_upstreams = self.snapshot().await.upstreams;
+            let current_upstreams = self.routing_snapshot().await.upstreams;
             self.reconcile_route_health(&current_upstreams).await;
         }
 
@@ -2752,18 +2752,18 @@ impl AppState {
             })
             .await?;
         if updated {
-            let current_upstreams = self.snapshot().await.upstreams;
+            let current_upstreams = self.routing_snapshot().await.upstreams;
             self.reconcile_route_health(&current_upstreams).await;
         }
         Ok(updated)
     }
 
     pub async fn upstreams(&self) -> Vec<UpstreamConfig> {
-        Arc::unwrap_or_clone(self.snapshot().await.upstreams)
+        Arc::unwrap_or_clone(self.routing_snapshot().await.upstreams)
     }
 
     pub async fn downstreams(&self) -> Vec<DownstreamConfig> {
-        Arc::unwrap_or_clone(self.snapshot().await.downstreams)
+        Arc::unwrap_or_clone(self.routing_snapshot().await.downstreams)
     }
 
     pub async fn usage_logs(&self) -> Vec<UsageLog> {
@@ -3750,7 +3750,7 @@ impl AppState {
                 })
             })
             .await?;
-        let current_upstreams = self.snapshot().await.upstreams;
+        let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
         Ok(result)
     }
@@ -4074,7 +4074,7 @@ impl AppState {
             }
             Arc::make_mut(&mut inner.upstreams).push(upstream);
         }
-        let current_upstreams = self.snapshot().await.upstreams;
+        let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
         Ok(())
     }
@@ -4089,7 +4089,7 @@ impl AppState {
                 return Err(format!("Upstream '{}' not found", id));
             }
         }
-        let current_upstreams = self.snapshot().await.upstreams;
+        let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
         Ok(())
     }
@@ -4105,7 +4105,7 @@ impl AppState {
             upstream.active = !upstream.active;
             upstream.active
         };
-        let current_upstreams = self.snapshot().await.upstreams;
+        let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
         Ok(active)
     }
@@ -4237,5 +4237,36 @@ impl AppState {
         downstream.hash = new_hash;
         validate_downstream_plaintext_pair(downstream);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn routing_config_accessors_do_not_wait_for_usage_log_locks() {
+        let state = AppState::new(
+            PersistedState::default(),
+            PathBuf::from("unused-state-path.json"),
+            AppConfig::default(),
+        );
+
+        let pending_guard = state.pending_usage_logs.lock().await;
+        let upstreams = tokio::time::timeout(Duration::from_millis(100), state.upstreams()).await;
+        assert!(
+            upstreams.is_ok(),
+            "upstream config reads must not wait for pending usage logs"
+        );
+        drop(pending_guard);
+
+        let archived_guard = state.archived_usage_logs.lock().await;
+        let downstreams =
+            tokio::time::timeout(Duration::from_millis(100), state.downstreams()).await;
+        assert!(
+            downstreams.is_ok(),
+            "downstream config reads must not wait for archived usage logs"
+        );
+        drop(archived_guard);
     }
 }
