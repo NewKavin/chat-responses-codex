@@ -483,7 +483,7 @@ async fn nonzero_interval_waits_for_deterministic_startup_and_upstream_jitter() 
     tokio::task::yield_now().await;
     tokio::time::advance(startup_delay - std::time::Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
-    assert_eq!(worker.is_finished(), false);
+    assert!(!worker.is_finished());
     assert_eq!(state.periodic_model_sync_cycle_count(), 0);
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     tokio::time::advance(std::time::Duration::from_secs(1)).await;

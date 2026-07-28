@@ -10,6 +10,16 @@ fn profile() -> DialectProfileKey {
     DialectProfileKey::for_key("up-1", "fingerprint-a", "glm-5.2", WireProtocol::Responses)
 }
 
+#[test]
+fn runtime_hints_report_whether_they_are_empty() {
+    let mut hints = RuntimeCapabilityHints::new(8, Duration::from_secs(900));
+    assert!(hints.is_empty());
+
+    let key = CapabilityHintKey::protocol(profile());
+    assert!(hints.insert(key, "configuration-a".into()));
+    assert!(!hints.is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn runtime_hint_is_ttl_bound_and_configuration_scoped() {
     let mut hints = RuntimeCapabilityHints::new(8, Duration::from_secs(900));

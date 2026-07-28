@@ -94,7 +94,7 @@ impl ChatStreamCanonicalizer {
     pub fn push(&mut self, mut event: Value) -> Result<Vec<Value>, ProtocolError> {
         let object = event
             .as_object_mut()
-            .ok_or_else(|| ProtocolError::InvalidUpstreamStream {
+            .ok_or(ProtocolError::InvalidUpstreamStream {
                 kind: UpstreamStreamErrorKind::UpstreamEvent,
                 message: "Chat stream event must be an object",
             })?;
@@ -107,26 +107,24 @@ impl ChatStreamCanonicalizer {
         let choices = object
             .entry("choices")
             .or_insert_with(|| Value::Array(Vec::new()));
-        let choices =
-            choices
-                .as_array_mut()
-                .ok_or_else(|| ProtocolError::InvalidUpstreamStream {
-                    kind: UpstreamStreamErrorKind::UpstreamEvent,
-                    message: "Chat stream choices must be an array",
-                })?;
+        let choices = choices
+            .as_array_mut()
+            .ok_or(ProtocolError::InvalidUpstreamStream {
+                kind: UpstreamStreamErrorKind::UpstreamEvent,
+                message: "Chat stream choices must be an array",
+            })?;
 
         if choices.is_empty() {
             return Ok(Vec::new());
         }
 
         for (position, choice) in choices.iter_mut().enumerate() {
-            let choice =
-                choice
-                    .as_object_mut()
-                    .ok_or_else(|| ProtocolError::InvalidUpstreamStream {
-                        kind: UpstreamStreamErrorKind::UpstreamEvent,
-                        message: "Chat stream choice must be an object",
-                    })?;
+            let choice = choice
+                .as_object_mut()
+                .ok_or(ProtocolError::InvalidUpstreamStream {
+                    kind: UpstreamStreamErrorKind::UpstreamEvent,
+                    message: "Chat stream choice must be an object",
+                })?;
             let incoming_index = choice.get("index").and_then(Value::as_u64);
             let canonical_index = match self.choice_indices.get(position).copied().flatten() {
                 Some(index) => {

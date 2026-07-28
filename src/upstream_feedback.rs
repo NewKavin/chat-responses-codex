@@ -311,7 +311,7 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
         } else {
             FailureClass::TransientServer
         }
-    } else if matches!(input.status, 401 | 402 | 403) {
+    } else if matches!(input.status, 401..=403) {
         FailureClass::Credentials
     } else if input.status == 429 {
         if parsed.is_key_quota() {

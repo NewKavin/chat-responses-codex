@@ -392,16 +392,29 @@ impl CapabilityProbeService {
     }
 }
 
-pub async fn maybe_queue_dialect_error_probe(
+pub(super) struct DialectErrorProbe<'a> {
+    pub(super) upstream_id: &'a str,
+    pub(super) key_fingerprint: &'a str,
+    pub(super) exposed_model_slug: &'a str,
+    pub(super) runtime_model_slug: &'a str,
+    pub(super) protocol: UpstreamProtocol,
+    pub(super) status: StatusCode,
+    pub(super) error_text: &'a str,
+}
+
+pub(super) async fn maybe_queue_dialect_error_probe(
     state: &AppState,
-    upstream_id: &str,
-    key_fingerprint: &str,
-    exposed_model_slug: &str,
-    runtime_model_slug: &str,
-    protocol: UpstreamProtocol,
-    status: StatusCode,
-    error_text: &str,
+    input: DialectErrorProbe<'_>,
 ) -> bool {
+    let DialectErrorProbe {
+        upstream_id,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+        status,
+        error_text,
+    } = input;
     if status != StatusCode::BAD_REQUEST {
         return false;
     }

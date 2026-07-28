@@ -746,17 +746,21 @@ fn send_route_hedge_attempt(
                 .await;
                 if !context.route_attempts.should_attempt(&route_health_key) {
                     super::record_route_attempt(
-                        &context.state,
-                        &context.route_attempts,
-                        &route_health_key,
-                        &context.capability_snapshot,
-                        &context.requested_features,
-                        context.inference_strength.as_deref(),
-                        &context.model,
-                        &candidate.upstream,
-                        &candidate.key_fingerprint,
-                        &route_health_key.runtime_model_slug,
-                        candidate.protocol,
+                        super::RouteAttemptContext {
+                            state: &context.state,
+                            route_attempts: &context.route_attempts,
+                            route_health_key: &route_health_key,
+                            route: super::RouteCapabilityRoute::new(
+                                &context.capability_snapshot,
+                                &candidate.upstream,
+                                &candidate.key_fingerprint,
+                                &context.model,
+                                &route_health_key.runtime_model_slug,
+                                candidate.protocol,
+                            ),
+                            requested: &context.requested_features,
+                            requested_value: context.inference_strength.as_deref(),
+                        },
                         &error,
                     )
                     .await;
@@ -1408,12 +1412,14 @@ pub(super) async fn send_to_upstream(
             ));
         }
         resolved_capabilities = resolve_route_capabilities_with_runtime_hints(
-            &active_capability_snapshot,
-            upstream,
-            &key_fingerprint,
-            request_model,
-            &final_upstream_model,
-            upstream_protocol,
+            RouteCapabilityRoute::new(
+                &active_capability_snapshot,
+                upstream,
+                &key_fingerprint,
+                request_model,
+                &final_upstream_model,
+                upstream_protocol,
+            ),
             requested_features,
             &runtime_capability_hints,
             inference_strength,
@@ -1489,12 +1495,14 @@ pub(super) async fn send_to_upstream(
                 let fresh = state.capability_snapshot();
                 active_capability_snapshot = (*fresh).clone();
                 resolved_capabilities = resolve_route_capabilities_with_runtime_hints(
-                    &active_capability_snapshot,
-                    upstream,
-                    &key_fingerprint,
-                    request_model,
-                    &final_upstream_model,
-                    upstream_protocol,
+                    RouteCapabilityRoute::new(
+                        &active_capability_snapshot,
+                        upstream,
+                        &key_fingerprint,
+                        request_model,
+                        &final_upstream_model,
+                        upstream_protocol,
+                    ),
                     requested_features,
                     &runtime_capability_hints,
                     inference_strength,
@@ -1887,13 +1895,15 @@ pub(super) async fn send_to_upstream(
             );
             let _ = maybe_queue_dialect_error_probe(
                 state,
-                &upstream.id,
-                &key_fingerprint,
-                normalized_model,
-                &final_upstream_model,
-                upstream_protocol,
-                status,
-                &error_text,
+                DialectErrorProbe {
+                    upstream_id: &upstream.id,
+                    key_fingerprint: &key_fingerprint,
+                    exposed_model_slug: normalized_model,
+                    runtime_model_slug: &final_upstream_model,
+                    protocol: upstream_protocol,
+                    status,
+                    error_text: &error_text,
+                },
             )
             .await;
         }

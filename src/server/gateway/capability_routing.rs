@@ -453,63 +453,87 @@ pub(super) fn resolve_route_capabilities_with_snapshot(
     requested: &RequestedFeatures,
 ) -> Option<ResolvedCapabilities> {
     resolve_route_capabilities_with_runtime_hints(
-        snapshot,
-        upstream,
-        key_fingerprint,
-        exposed_model_slug,
-        runtime_model_slug,
-        protocol,
+        RouteCapabilityRoute::new(
+            snapshot,
+            upstream,
+            key_fingerprint,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+        ),
         requested,
         &RuntimeCapabilityHintSnapshot::default(),
         None,
     )
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct RouteCapabilityRoute<'a> {
+    pub(super) snapshot: &'a CapabilityRuntimeSnapshot,
+    pub(super) upstream: &'a UpstreamConfig,
+    pub(super) key_fingerprint: &'a str,
+    pub(super) exposed_model_slug: &'a str,
+    pub(super) runtime_model_slug: &'a str,
+    pub(super) protocol: UpstreamProtocol,
+}
+
+impl<'a> RouteCapabilityRoute<'a> {
+    pub(super) fn new(
+        snapshot: &'a CapabilityRuntimeSnapshot,
+        upstream: &'a UpstreamConfig,
+        key_fingerprint: &'a str,
+        exposed_model_slug: &'a str,
+        runtime_model_slug: &'a str,
+        protocol: UpstreamProtocol,
+    ) -> Self {
+        Self {
+            snapshot,
+            upstream,
+            key_fingerprint,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+        }
+    }
+}
+
 pub(super) fn resolve_route_capabilities_with_runtime_hints(
-    snapshot: &CapabilityRuntimeSnapshot,
-    upstream: &UpstreamConfig,
-    key_fingerprint: &str,
-    exposed_model_slug: &str,
-    runtime_model_slug: &str,
-    protocol: UpstreamProtocol,
+    route: RouteCapabilityRoute<'_>,
     requested: &RequestedFeatures,
     runtime_hints: &RuntimeCapabilityHintSnapshot,
     requested_value: Option<&str>,
 ) -> Option<ResolvedCapabilities> {
     match evaluate_route_capabilities_with_runtime_hints(
+        route,
+        requested,
+        runtime_hints,
+        requested_value,
+    ) {
+        RouteCapabilityResolution::Resolved(resolved) => Some(*resolved),
+        RouteCapabilityResolution::Rejected(_) | RouteCapabilityResolution::Unavailable => None,
+    }
+}
+
+pub(super) enum RouteCapabilityResolution {
+    Resolved(Box<ResolvedCapabilities>),
+    Rejected(CapabilityResolutionError),
+    Unavailable,
+}
+
+pub(super) fn evaluate_route_capabilities_with_runtime_hints(
+    route: RouteCapabilityRoute<'_>,
+    requested: &RequestedFeatures,
+    runtime_hints: &RuntimeCapabilityHintSnapshot,
+    requested_value: Option<&str>,
+) -> RouteCapabilityResolution {
+    let RouteCapabilityRoute {
         snapshot,
         upstream,
         key_fingerprint,
         exposed_model_slug,
         runtime_model_slug,
         protocol,
-        requested,
-        runtime_hints,
-        requested_value,
-    ) {
-        RouteCapabilityResolution::Resolved(resolved) => Some(resolved),
-        RouteCapabilityResolution::Rejected(_) | RouteCapabilityResolution::Unavailable => None,
-    }
-}
-
-pub(super) enum RouteCapabilityResolution {
-    Resolved(ResolvedCapabilities),
-    Rejected(CapabilityResolutionError),
-    Unavailable,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn evaluate_route_capabilities_with_runtime_hints(
-    snapshot: &CapabilityRuntimeSnapshot,
-    upstream: &UpstreamConfig,
-    key_fingerprint: &str,
-    exposed_model_slug: &str,
-    runtime_model_slug: &str,
-    protocol: UpstreamProtocol,
-    requested: &RequestedFeatures,
-    runtime_hints: &RuntimeCapabilityHintSnapshot,
-    requested_value: Option<&str>,
-) -> RouteCapabilityResolution {
+    } = route;
     let mut route = RouteIdentity {
         upstream_id: upstream.id.clone(),
         key_fingerprint: key_fingerprint.to_string(),
@@ -600,7 +624,7 @@ pub(super) fn evaluate_route_capabilities_with_runtime_hints(
             },
         );
     }
-    RouteCapabilityResolution::Resolved(resolved)
+    RouteCapabilityResolution::Resolved(Box::new(resolved))
 }
 
 fn exact_route_effective_profile<'a>(

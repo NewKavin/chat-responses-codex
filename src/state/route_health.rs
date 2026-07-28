@@ -552,8 +552,7 @@ impl RouteHealthRegistry {
     fn reserve_expired_half_open_key(&mut self, key: &KeyHealthKey, now: Instant) -> Option<u64> {
         let can_reserve = self.keys.get(key).is_some_and(|state| {
             state.last_failure_class.is_some()
-                && state.cooldown_until.is_some()
-                && !state.cooldown_until.is_some_and(|until| until > now)
+                && state.cooldown_until.is_some_and(|until| until <= now)
                 && state.half_open_generation.is_none()
         });
         if !can_reserve {
@@ -573,8 +572,7 @@ impl RouteHealthRegistry {
     ) -> Option<u64> {
         let can_reserve = self.routes.get(route).is_some_and(|state| {
             state.last_failure_class.is_some()
-                && state.cooldown_until.is_some()
-                && !state.cooldown_until.is_some_and(|until| until > now)
+                && state.cooldown_until.is_some_and(|until| until <= now)
                 && state.half_open_generation.is_none()
         });
         if !can_reserve {

@@ -160,18 +160,20 @@ fn build_request_route_capability_cache_with_hints(
             for protocol in upstream.supported_protocols() {
                 let route_requested = adapt_requested_features_for_protocol(requested, protocol);
                 let evaluation = evaluate_route_capabilities_with_runtime_hints(
-                    snapshot,
-                    upstream,
-                    &key_fingerprint,
-                    model,
-                    &runtime_model_slug,
-                    protocol,
+                    RouteCapabilityRoute::new(
+                        snapshot,
+                        upstream,
+                        &key_fingerprint,
+                        model,
+                        &runtime_model_slug,
+                        protocol,
+                    ),
                     requested,
                     runtime_hints,
                     requested_value,
                 );
                 let (resolved, mut failed_capability) = match evaluation {
-                    RouteCapabilityResolution::Resolved(resolved) => (Some(resolved), None),
+                    RouteCapabilityResolution::Resolved(resolved) => (Some(*resolved), None),
                     RouteCapabilityResolution::Rejected(error) => (None, Some(error.capability)),
                     RouteCapabilityResolution::Unavailable => (None, None),
                 };
@@ -382,20 +384,33 @@ fn log_route_retry_wait(
     );
 }
 
-async fn record_route_attempt(
-    state: &AppState,
-    route_attempts: &RequestRouteAttempts,
-    route_health_key: &RouteHealthKey,
-    capability_snapshot: &CapabilityRuntimeSnapshot,
-    requested: &RequestedFeatures,
-    requested_value: Option<&str>,
-    exposed_model_slug: &str,
-    upstream: &UpstreamConfig,
-    key_fingerprint: &str,
-    runtime_model_slug: &str,
-    protocol: UpstreamProtocol,
-    error: &GatewayError,
-) {
+#[derive(Clone, Copy)]
+struct RouteAttemptContext<'a> {
+    state: &'a AppState,
+    route_attempts: &'a RequestRouteAttempts,
+    route_health_key: &'a RouteHealthKey,
+    route: RouteCapabilityRoute<'a>,
+    requested: &'a RequestedFeatures,
+    requested_value: Option<&'a str>,
+}
+
+async fn record_route_attempt(input: RouteAttemptContext<'_>, error: &GatewayError) {
+    let RouteAttemptContext {
+        state,
+        route_attempts,
+        route_health_key,
+        route,
+        requested,
+        requested_value,
+    } = input;
+    let RouteCapabilityRoute {
+        snapshot: capability_snapshot,
+        upstream,
+        key_fingerprint,
+        exposed_model_slug,
+        runtime_model_slug,
+        protocol,
+    } = route;
     let Some(class) = error.route_failure_class() else {
         return;
     };
@@ -4874,6 +4889,21 @@ async fn process_gateway_request_inner(
                             Vec::new()
                         };
 
+                        let route_attempt_context = RouteAttemptContext {
+                            state: &state,
+                            route_attempts: &request_route_attempts,
+                            route_health_key: &route_health_key,
+                            route: RouteCapabilityRoute::new(
+                                &capability_snapshot,
+                                &upstream,
+                                &key_fingerprint,
+                                model,
+                                &runtime_model_slug,
+                                protocol,
+                            ),
+                            requested: &requested_features,
+                            requested_value: inference_strength.as_deref(),
+                        };
                         let result = send_to_upstream(
                             &state,
                             &upstream,
@@ -5163,21 +5193,7 @@ async fn process_gateway_request_inner(
                                     route_health_outcome(&error),
                                 )
                                 .await;
-                                record_route_attempt(
-                                    &state,
-                                    &request_route_attempts,
-                                    &route_health_key,
-                                    &capability_snapshot,
-                                    &requested_features,
-                                    inference_strength.as_deref(),
-                                    model,
-                                    &upstream,
-                                    &key_fingerprint,
-                                    &runtime_model_slug,
-                                    protocol,
-                                    &error,
-                                )
-                                .await;
+                                record_route_attempt(route_attempt_context, &error).await;
                                 tracing::warn!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
@@ -5239,17 +5255,7 @@ async fn process_gateway_request_inner(
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
 
                                 record_route_attempt(
-                                    &state,
-                                    &request_route_attempts,
-                                    &route_health_key,
-                                    &capability_snapshot,
-                                    &requested_features,
-                                    inference_strength.as_deref(),
-                                    model,
-                                    &upstream,
-                                    &key_fingerprint,
-                                    &runtime_model_slug,
-                                    protocol,
+                                    route_attempt_context,
                                     &GatewayError::ConcurrencyFull {
                                         message: String::new(),
                                         retry_after,
@@ -5321,17 +5327,7 @@ async fn process_gateway_request_inner(
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
 
                                 record_route_attempt(
-                                    &state,
-                                    &request_route_attempts,
-                                    &route_health_key,
-                                    &capability_snapshot,
-                                    &requested_features,
-                                    inference_strength.as_deref(),
-                                    model,
-                                    &upstream,
-                                    &key_fingerprint,
-                                    &runtime_model_slug,
-                                    protocol,
+                                    route_attempt_context,
                                     &GatewayError::TooManyRequests {
                                         message: String::new(),
                                         retry_after: Some(retry_after),
@@ -5429,21 +5425,7 @@ async fn process_gateway_request_inner(
                                         route_health_outcome(&error),
                                     )
                                     .await;
-                                    record_route_attempt(
-                                        &state,
-                                        &request_route_attempts,
-                                        &route_health_key,
-                                        &capability_snapshot,
-                                        &requested_features,
-                                        inference_strength.as_deref(),
-                                        model,
-                                        &upstream,
-                                        &key_fingerprint,
-                                        &runtime_model_slug,
-                                        protocol,
-                                        &error,
-                                    )
-                                    .await;
+                                    record_route_attempt(route_attempt_context, &error).await;
                                 }
                                 maybe_record_chat_fallback_stage_failure(
                                     &state,
@@ -5521,17 +5503,7 @@ async fn process_gateway_request_inner(
                                 )
                                 .await;
                                 record_route_attempt(
-                                    &state,
-                                    &request_route_attempts,
-                                    &route_health_key,
-                                    &capability_snapshot,
-                                    &requested_features,
-                                    inference_strength.as_deref(),
-                                    model,
-                                    &upstream,
-                                    &key_fingerprint,
-                                    &runtime_model_slug,
-                                    protocol,
+                                    route_attempt_context,
                                     &GatewayError::TemporaryUpstreamUnavailable(message.clone()),
                                 )
                                 .await;
@@ -5559,21 +5531,7 @@ async fn process_gateway_request_inner(
                                     route_health_outcome(&error),
                                 )
                                 .await;
-                                record_route_attempt(
-                                    &state,
-                                    &request_route_attempts,
-                                    &route_health_key,
-                                    &capability_snapshot,
-                                    &requested_features,
-                                    inference_strength.as_deref(),
-                                    model,
-                                    &upstream,
-                                    &key_fingerprint,
-                                    &runtime_model_slug,
-                                    protocol,
-                                    &error,
-                                )
-                                .await;
+                                record_route_attempt(route_attempt_context, &error).await;
                                 last_error = Some(error);
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));

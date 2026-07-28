@@ -1030,7 +1030,7 @@ pub(super) async fn build_model_probe_response(
             .then(left.model.cmp(&right.model))
     });
 
-    let response = ModelProbeResponse {
+    ModelProbeResponse {
         refreshed_at,
         refresh_interval_seconds: state.config.model_probe_refresh_interval_seconds,
         summary: ModelProbeSummary {
@@ -1047,9 +1047,7 @@ pub(super) async fn build_model_probe_response(
         },
         channels,
         models,
-    };
-
-    response
+    }
 }
 
 struct BatchModelConfiguration {

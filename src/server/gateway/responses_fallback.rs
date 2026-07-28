@@ -59,14 +59,14 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
             && resolved.supports(Capability::ReasoningOutput)
             && resolved.supports(Capability::ReasoningReplay)
     });
-    let conversion_context = preserves_reasoning
-        .then(|| {
-            ConversionContext::new(
-                resolved_capabilities.expect("reasoning preservation requires capabilities"),
-                tool_adapter::ToolAdapterRegistry::empty(),
-            )
-        })
-        .unwrap_or_default();
+    let conversion_context = if preserves_reasoning {
+        ConversionContext::new(
+            resolved_capabilities.expect("reasoning preservation requires capabilities"),
+            tool_adapter::ToolAdapterRegistry::empty(),
+        )
+    } else {
+        ConversionContext::default()
+    };
     if !preserves_reasoning && responses_input_contains_reasoning(&sanitized) {
         downgrade_codes.insert("reasoning_history_dropped".to_string());
     }

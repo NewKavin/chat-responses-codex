@@ -235,6 +235,10 @@ impl RuntimeCapabilityHints {
         self.entries.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     fn prune_expired(&mut self, now: Instant) {
         self.entries.retain(|_, entry| entry.expires_at > now);
     }

@@ -1096,7 +1096,7 @@ async fn matrix_profile_details(
     let current_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
         &capability_snapshot,
         upstream,
-        &key_fingerprint,
+        key_fingerprint,
         model,
         &runtime_model_slug,
         *upstream_protocol,
