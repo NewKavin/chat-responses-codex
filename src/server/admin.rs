@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -471,8 +472,7 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         cooldown_remaining: u64,
     }
 
-    let upstreams_with_runtime: Vec<UpstreamWithRuntime> = snapshot
-        .upstreams
+    let upstreams_with_runtime: Vec<UpstreamWithRuntime> = Arc::unwrap_or_clone(snapshot.upstreams)
         .into_iter()
         .map(|config| {
             let runtime_state = runtime_snapshots.get(&config.id).map(|runtime| {
@@ -522,7 +522,7 @@ pub(super) async fn admin_list_models(State(state): State<AppState>) -> impl Int
 
     let mut models: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for upstream in &snapshot.upstreams {
+    for upstream in snapshot.upstreams.iter() {
         if upstream.active {
             for model in upstream.route_models() {
                 models.insert(model);
@@ -1761,7 +1761,7 @@ pub(super) async fn admin_list_downstreams(
 ) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
 
-    let mut downstreams = snapshot.downstreams.clone();
+    let mut downstreams = snapshot.downstreams.as_ref().clone();
 
     // Filter by status
     if let Some(status) = params.get("status") {

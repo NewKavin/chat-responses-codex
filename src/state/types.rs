@@ -1,6 +1,7 @@
 use crate::routing::UpstreamProtocol;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RouteHealthSnapshotDto {
@@ -469,13 +470,17 @@ pub struct AnnouncementConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PersistedState {
-    pub upstreams: Vec<UpstreamConfig>,
-    pub downstreams: Vec<DownstreamConfig>,
+    // Routing-relevant config is `Arc`-wrapped so `routing_snapshot()` (hit once per
+    // request) is a refcount bump instead of a deep clone of every upstream/downstream.
+    // Mutations use `Arc::make_mut` (copy-on-write); the compiler flags any site that
+    // forgets to, so the cache can never silently go stale.
+    pub upstreams: Arc<Vec<UpstreamConfig>>,
+    pub downstreams: Arc<Vec<DownstreamConfig>>,
     pub usage_logs: Vec<UsageLog>,
     #[serde(default)]
     pub announcement: Option<AnnouncementConfig>,
     #[serde(default)]
-    pub global_context_profiles: HashMap<String, GlobalContextProfile>,
+    pub global_context_profiles: Arc<HashMap<String, GlobalContextProfile>>,
 }
 
 fn default_true() -> bool {

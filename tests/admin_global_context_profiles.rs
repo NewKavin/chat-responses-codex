@@ -47,11 +47,11 @@ fn create_test_state() -> AppState {
 
     AppState::new(
         PersistedState {
-            upstreams: vec![],
-            downstreams: vec![],
+            upstreams: std::sync::Arc::new(vec![]),
+            downstreams: std::sync::Arc::new(vec![]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles,
+            global_context_profiles: std::sync::Arc::new(global_context_profiles),
         },
         unique_state_path(),
         config,

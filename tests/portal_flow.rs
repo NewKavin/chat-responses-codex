@@ -44,11 +44,11 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
     };
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![downstream],
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![downstream]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     (

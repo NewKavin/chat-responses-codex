@@ -470,8 +470,8 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![upstream("up-1", "model-a"), upstream("up-2", "model-b")],
-                downstreams: vec![DownstreamConfig {
+                upstreams: std::sync::Arc::new(vec![upstream("up-1", "model-a"), upstream("up-2", "model-b")]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "probe-consumer".into(),
                     hash: "unused".into(),
@@ -488,7 +488,7 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
                     ip_allowlist: Vec::new(),
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 ..PersistedState::default()
             },
             tempdir.path().join("state.json"),
@@ -531,8 +531,8 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![upstream.clone()],
-                downstreams: vec![DownstreamConfig {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "periodic-downstream".into(),
                     name: "periodic-downstream".into(),
                     hash: "unused".into(),
@@ -549,7 +549,7 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
                     ip_allowlist: Vec::new(),
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 ..PersistedState::default()
             },
             tempdir().unwrap().path().join("state.json"),
@@ -679,8 +679,8 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![upstream.clone()],
-                downstreams: vec![DownstreamConfig {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "per-key-downstream".into(),
                     name: "per-key-downstream".into(),
                     hash: "unused".into(),
@@ -697,7 +697,7 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                     ip_allowlist: Vec::new(),
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 ..PersistedState::default()
             },
             tempdir().unwrap().path().join("state.json"),
@@ -802,7 +802,7 @@ async fn stale_per_key_probe_job_redaction_hides_keyed_identity_in_tracing() {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![upstream.clone()],
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
                 ..PersistedState::default()
             },
             tempdir().unwrap().path().join("state.json"),
@@ -2507,7 +2507,7 @@ async fn normal_gateway_request_never_launches_a_probe() {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: mock.base_url.clone(),
@@ -2517,8 +2517,8 @@ async fn normal_gateway_request_never_launches_a_probe() {
                     supported_models: vec!["gpt-4.1-mini".into()],
                     active: true,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -2535,10 +2535,10 @@ async fn normal_gateway_request_never_launches_a_probe() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -2595,7 +2595,7 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: mock.base_url.clone(),
@@ -2605,8 +2605,8 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                     supported_models: vec!["gpt-4.1-mini".into()],
                     active: true,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -2623,10 +2623,10 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig {

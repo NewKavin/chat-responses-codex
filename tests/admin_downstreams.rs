@@ -32,8 +32,8 @@ fn create_test_state() -> AppState {
     };
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![
             DownstreamConfig {
                 id: "downstream-1".to_string(),
                 name: "Test Downstream 1".to_string(),
@@ -74,10 +74,10 @@ fn create_test_state() -> AppState {
                 expires_at: None,
                 active: false,
             },
-        ],
+        ]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     AppState::new(state, unique_state_path(), config)

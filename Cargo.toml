@@ -14,7 +14,7 @@ futures-util = "=0.3.32"
 hmac = "0.12"
 rand = "=0.9.4"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
-serde = { version = "=1.0.228", features = ["derive"] }
+serde = { version = "=1.0.228", features = ["derive", "rc"] }
 serde_json = "=1.0.149"
 serde_urlencoded = "=0.7.1"
 sha2 = "0.10"
@@ -37,6 +37,12 @@ bb8-postgres = "0.8"
 http-body-util = "=0.1.3"
 tempfile = "=3.27.0"
 tokio = { version = "=1.52.1", features = ["test-util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [lib]
 name = "chat_responses_codex"

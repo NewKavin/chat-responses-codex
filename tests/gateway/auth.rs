@@ -8,7 +8,7 @@ async fn mismatched_stored_plaintext_is_rejected_across_gateway_auth_surfaces() 
     let authoritative_hash = generate_argon2_downstream_key("authoritative").hash;
     let state = AppState::new(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-mismatched".into(),
                 name: "mismatched".into(),
                 hash: authoritative_hash,
@@ -25,7 +25,7 @@ async fn mismatched_stored_plaintext_is_rejected_across_gateway_auth_surfaces() 
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             ..Default::default()
         },
         tempdir().unwrap().path().join("state.json"),
@@ -86,7 +86,7 @@ async fn direct_hash_update_clears_mismatched_stored_plaintext() {
     let original = generate_argon2_downstream_key("original");
     let state = AppState::new(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-direct-hash-update".into(),
                 name: "direct-hash-update".into(),
                 hash: original.hash,
@@ -103,7 +103,7 @@ async fn direct_hash_update_clears_mismatched_stored_plaintext() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             ..Default::default()
         },
         tempdir().unwrap().path().join("state.json"),
@@ -125,7 +125,7 @@ async fn rotated_hash_and_plaintext_replace_the_gateway_authentication_secret() 
     let original = generate_argon2_downstream_key("original");
     let state = AppState::new(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-rotated".into(),
                 name: "rotated".into(),
                 hash: original.hash,
@@ -142,14 +142,14 @@ async fn rotated_hash_and_plaintext_replace_the_gateway_authentication_secret() 
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             ..Default::default()
         },
         tempdir().unwrap().path().join("state.json"),
         AppConfig::default(),
     );
     let rotated = generate_argon2_downstream_key("rotated");
-    let mut downstream = state.snapshot().await.downstreams.remove(0);
+    let mut downstream = state.snapshot().await.downstreams[0].clone();
     downstream.hash = rotated.hash;
     downstream.plaintext_key = Some(rotated.plaintext.clone());
     assert!(state
@@ -242,7 +242,7 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
     let downstream_key = generate_argon2_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -253,8 +253,8 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -271,10 +271,10 @@ async fn downstream_secret_from_headers_accepts_case_insensitive_bearer_prefix()
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -361,7 +361,7 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
     let downstream_key = generate_argon2_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -372,8 +372,8 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -392,10 +392,10 @@ async fn downstream_chat_request_is_forwarded_and_logged() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -512,7 +512,7 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
     let downstream_key = generate_argon2_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -523,8 +523,8 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -541,10 +541,10 @@ async fn downstream_chat_request_accepts_x_api_key_header() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -581,8 +581,8 @@ async fn claude_count_tokens_endpoint_accepts_x_api_key() {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -599,10 +599,10 @@ async fn claude_count_tokens_endpoint_accepts_x_api_key() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),

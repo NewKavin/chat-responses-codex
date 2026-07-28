@@ -103,7 +103,7 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
     let model = "arbitrary/fallback-exact";
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "fallback-exact".into(),
                     name: "fallback-exact".into(),
@@ -128,8 +128,8 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
                     active: true,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -146,10 +146,10 @@ async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover()
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig {
@@ -317,7 +317,7 @@ async fn chat_only_fallback_drops_unpinned_reasoning_and_preserves_tool_history(
     let model = "synthetic/chat-only";
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "chat-only".into(),
                 name: "chat-only".into(),
                 base_url: format!("http://{address}"),
@@ -327,8 +327,8 @@ async fn chat_only_fallback_drops_unpinned_reasoning_and_preserves_tool_history(
                 supported_models: vec![model.into()],
                 active: true,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -345,10 +345,10 @@ async fn chat_only_fallback_drops_unpinned_reasoning_and_preserves_tool_history(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -511,7 +511,7 @@ async fn downstream_responses_bad_response_status_preserves_tools_without_retry(
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -522,8 +522,8 @@ async fn downstream_responses_bad_response_status_preserves_tools_without_retry(
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -542,10 +542,10 @@ async fn downstream_responses_bad_response_status_preserves_tools_without_retry(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -650,7 +650,7 @@ async fn chat_only_responses_required_hosted_tools_reject_before_dispatch() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "chat-only".into(),
                 base_url: format!("http://{}", address),
@@ -661,8 +661,8 @@ async fn chat_only_responses_required_hosted_tools_reject_before_dispatch() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -679,10 +679,10 @@ async fn chat_only_responses_required_hosted_tools_reject_before_dispatch() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -805,7 +805,7 @@ async fn chat_only_responses_optional_hosted_tool_reports_downgrade() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "chat-only".into(),
                 base_url: format!("http://{}", address),
@@ -815,8 +815,8 @@ async fn chat_only_responses_optional_hosted_tool_reports_downgrade() {
                 supported_models: vec!["opaque/model".into()],
                 active: true,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -833,10 +833,10 @@ async fn chat_only_responses_optional_hosted_tool_reports_downgrade() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -961,7 +961,7 @@ async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high(
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "chat-only".into(),
                 base_url: format!("http://{}", address),
@@ -972,8 +972,8 @@ async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high(
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -990,10 +990,10 @@ async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1104,7 +1104,7 @@ async fn downstream_responses_request_strips_parallel_tool_calls_for_chat_only_p
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "claude-proxy".into(),
                 base_url: format!("http://{}", address),
@@ -1115,8 +1115,8 @@ async fn downstream_responses_request_strips_parallel_tool_calls_for_chat_only_p
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1133,10 +1133,10 @@ async fn downstream_responses_request_strips_parallel_tool_calls_for_chat_only_p
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1241,7 +1241,7 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -1255,8 +1255,8 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1273,10 +1273,10 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1405,7 +1405,7 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -1416,8 +1416,8 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1434,10 +1434,10 @@ async fn responses_to_chat_persistent_403_with_bad_response_status_is_auth_error
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),

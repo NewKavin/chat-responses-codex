@@ -30,7 +30,7 @@ fn create_test_state(base_url: String) -> AppState {
     config.model_probe_refresh_interval_seconds = 9;
 
     let state = PersistedState {
-        upstreams: vec![
+        upstreams: std::sync::Arc::new(vec![
             UpstreamConfig {
                 id: "upstream-healthy".to_string(),
                 name: "Healthy Upstream".to_string(),
@@ -55,11 +55,11 @@ fn create_test_state(base_url: String) -> AppState {
                 failure_count: 0,
                 ..Default::default()
             },
-        ],
-        downstreams: vec![],
+        ]),
+        downstreams: std::sync::Arc::new(vec![]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     AppState::new(state, unique_state_path(), config)

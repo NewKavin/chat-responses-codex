@@ -7,6 +7,7 @@ use super::{unix_seconds, ApiKeyModelConfig, AppState, RouteHealthKey, UpstreamC
 use crate::capabilities::WireProtocol;
 use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
+use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -464,8 +465,7 @@ impl AppState {
 
         let removed = self
             .mutate_persisted_state_io(|candidate| {
-                let Some(upstream) = candidate
-                    .upstreams
+                let Some(upstream) = Arc::make_mut(&mut candidate.upstreams)
                     .iter_mut()
                     .find(|upstream| upstream.id == snapshot.upstream_id)
                 else {
@@ -569,8 +569,7 @@ impl AppState {
             .mutate_persisted_state_io(|candidate| {
                 let mut applied = Vec::with_capacity(discoveries.len());
                 for discovery in &discoveries {
-                    let Some(upstream) = candidate
-                        .upstreams
+                    let Some(upstream) = Arc::make_mut(&mut candidate.upstreams)
                         .iter_mut()
                         .find(|upstream| upstream.id == discovery.snapshot.upstream_id)
                     else {

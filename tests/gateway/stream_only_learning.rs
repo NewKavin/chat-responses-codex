@@ -150,8 +150,8 @@ impl LearningHarness {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![upstream.clone()],
-                downstreams: vec![DownstreamConfig {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-cold-stream-only".into(),
                     name: "cold-stream-only-client".into(),
                     hash: downstream_key.hash.clone(),
@@ -168,10 +168,10 @@ impl LearningHarness {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(HashMap::new()),
             },
             tempdir().unwrap().path().join("state.json"),
             AppConfig::default(),
@@ -932,8 +932,8 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-cold-stream-only".into(),
                 name: "cold-stream-only-client".into(),
                 hash: downstream_key.hash.clone(),
@@ -950,10 +950,10 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(HashMap::new()),
         },
         tempdir().unwrap().path().join("state.json"),
         AppConfig::default(),
@@ -1100,8 +1100,8 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-cold-stream-only".into(),
                 name: "cold-stream-only-client".into(),
                 hash: downstream_key.hash.clone(),
@@ -1118,10 +1118,10 @@ async fn stream_only_learning_different_exact_route_does_not_wait() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(HashMap::new()),
         },
         tempdir().unwrap().path().join("state.json"),
         AppConfig::default(),
@@ -1247,8 +1247,8 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-cold-stream-only".into(),
                 name: "cold-stream-only-client".into(),
                 hash: downstream_key.hash.clone(),
@@ -1265,10 +1265,10 @@ async fn stream_only_learning_context_fallback_learns_only_final_runtime_route()
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(HashMap::new()),
         },
         tempdir().unwrap().path().join("state.json"),
         AppConfig::default(),
@@ -1438,8 +1438,8 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-cold-stream-only".into(),
                 name: "cold-stream-only-client".into(),
                 hash: downstream_key.hash.clone(),
@@ -1456,10 +1456,10 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(HashMap::new()),
         },
         tempdir().unwrap().path().join("state.json"),
         AppConfig::default(),

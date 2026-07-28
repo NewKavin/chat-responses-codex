@@ -120,8 +120,8 @@ async fn app_with_reasoning_capable_upstream(
         ..UpstreamConfig::default()
     };
     let state = PersistedState {
-        upstreams: vec![upstream.clone()],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: generated.hash,
@@ -138,10 +138,10 @@ async fn app_with_reasoning_capable_upstream(
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     app_state
@@ -249,8 +249,8 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "test".into(),
                 name: "Test".into(),
                 hash: generated.hash,
@@ -267,10 +267,10 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         unique_state_path(),
         troubleshooting_test_config(),
@@ -348,7 +348,7 @@ async fn app_with_image_capable_upstream(upstream_base_url: String) -> (axum::Ro
 fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> axum::Router {
     let generated = generate_downstream_key("sk");
     let state = PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "upstream-1".to_string(),
             name: "Primary".to_string(),
             base_url: upstream_base_url,
@@ -356,8 +356,8 @@ fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> 
             supported_models: vec!["GLM-5.1".to_string()],
             active: true,
             ..UpstreamConfig::default()
-        }],
-        downstreams: vec![DownstreamConfig {
+        }]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: generated.hash,
@@ -374,10 +374,10 @@ fn app_with_custom_upstream_without_plaintext_key(upstream_base_url: String) -> 
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     build_router(app_state)
@@ -402,7 +402,7 @@ fn app_with_custom_upstream_and_ip_allowlist_and_config(
     let generated = generate_downstream_key("sk");
     let portal_key = generated.plaintext.clone();
     let state = PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "upstream-1".to_string(),
             name: "Primary".to_string(),
             base_url: upstream_base_url,
@@ -410,8 +410,8 @@ fn app_with_custom_upstream_and_ip_allowlist_and_config(
             supported_models: vec!["GLM-5.1".to_string()],
             active: true,
             ..UpstreamConfig::default()
-        }],
-        downstreams: vec![DownstreamConfig {
+        }]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: generated.hash,
@@ -428,10 +428,10 @@ fn app_with_custom_upstream_and_ip_allowlist_and_config(
             ip_allowlist,
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), config);
     (build_router(app_state), portal_key, "test".to_string())
@@ -454,7 +454,7 @@ fn app_with_two_downstreams_and_config(
     let first_key = first.plaintext.clone();
     let second_key = second.plaintext.clone();
     let state = PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "upstream-1".to_string(),
             name: "Primary".to_string(),
             base_url: upstream_base_url,
@@ -462,8 +462,8 @@ fn app_with_two_downstreams_and_config(
             supported_models: vec!["GLM-5.1".to_string()],
             active: true,
             ..UpstreamConfig::default()
-        }],
-        downstreams: vec![
+        }]),
+        downstreams: std::sync::Arc::new(vec![
             DownstreamConfig {
                 id: "test".to_string(),
                 name: "Test".to_string(),
@@ -500,10 +500,10 @@ fn app_with_two_downstreams_and_config(
                 expires_at: None,
                 active: true,
             },
-        ],
+        ]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), config);
     (build_router(app_state), first_key, second_key)
@@ -513,7 +513,7 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
     let generated = generate_downstream_key("sk");
     let downstream_secret = generated.plaintext.clone();
     let state = PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "upstream-1".to_string(),
             name: "Primary".to_string(),
             base_url: upstream_base_url,
@@ -521,8 +521,8 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
             supported_models: vec!["GLM-5.1".to_string()],
             active: true,
             ..UpstreamConfig::default()
-        }],
-        downstreams: vec![DownstreamConfig {
+        }]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: generated.hash,
@@ -539,10 +539,10 @@ async fn matrix_fixture_with_expectation(upstream_base_url: String) -> MatrixExp
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     app_state
@@ -1212,7 +1212,7 @@ fn app_with_model_state() -> (axum::Router, String, String) {
     let generated = generate_downstream_key("sk");
     let portal_key = generated.plaintext.clone();
     let state = PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "upstream-1".to_string(),
             name: "Primary".to_string(),
             base_url: "https://example.invalid".to_string(),
@@ -1220,8 +1220,8 @@ fn app_with_model_state() -> (axum::Router, String, String) {
             supported_models: vec!["GLM-5.1".to_string(), "MiniMax/MiniMax-M2.7".to_string()],
             active: true,
             ..UpstreamConfig::default()
-        }],
-        downstreams: vec![DownstreamConfig {
+        }]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: generated.hash,
@@ -1238,10 +1238,10 @@ fn app_with_model_state() -> (axum::Router, String, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())
@@ -1251,7 +1251,7 @@ fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router
     let generated = generate_downstream_key("sk");
     let portal_key = generated.plaintext.clone();
     let state = PersistedState {
-        upstreams: vec![
+        upstreams: std::sync::Arc::new(vec![
             UpstreamConfig {
                 id: "chat-first".to_string(),
                 name: "Chat First".to_string(),
@@ -1274,8 +1274,8 @@ fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router
                 active: true,
                 ..UpstreamConfig::default()
             },
-        ],
-        downstreams: vec![DownstreamConfig {
+        ]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: generated.hash,
@@ -1292,10 +1292,10 @@ fn app_with_protocol_split_upstreams(upstream_base_url: String) -> (axum::Router
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())
@@ -1307,7 +1307,7 @@ fn app_with_priority_ranked_chat_upstreams(
     let generated = generate_downstream_key("sk");
     let portal_key = generated.plaintext.clone();
     let state = PersistedState {
-        upstreams: vec![
+        upstreams: std::sync::Arc::new(vec![
             UpstreamConfig {
                 id: "z-high-priority".to_string(),
                 name: "High Priority".to_string(),
@@ -1332,8 +1332,8 @@ fn app_with_priority_ranked_chat_upstreams(
                 active: true,
                 ..UpstreamConfig::default()
             },
-        ],
-        downstreams: vec![DownstreamConfig {
+        ]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: generated.hash,
@@ -1350,10 +1350,10 @@ fn app_with_priority_ranked_chat_upstreams(
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     let app_state = AppState::new(state, unique_state_path(), troubleshooting_test_config());
     (build_router(app_state), portal_key, "test".to_string())

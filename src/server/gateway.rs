@@ -4147,7 +4147,7 @@ async fn process_gateway_request_inner(
     } else {
         let mut miss_tiers = std::collections::BTreeSet::new();
         for protocol in candidate_protocols.iter().copied() {
-            for upstream in &routing_snapshot.upstreams {
+            for upstream in routing_snapshot.upstreams.iter() {
                 let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                     continue;
                 };
@@ -4224,7 +4224,7 @@ async fn process_gateway_request_inner(
         let mut stream_only_final_attempt = false;
 
         for protocol in candidate_protocols.iter().copied() {
-            for upstream in &routing_snapshot.upstreams {
+            for upstream in routing_snapshot.upstreams.iter() {
                 let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                     continue;
                 };

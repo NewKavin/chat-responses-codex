@@ -292,8 +292,8 @@ impl ClaudeResponsesThinkingFixture {
         config.jwt_secret = "test-jwt-secret".into();
         let state = AppState::new(
             PersistedState {
-                upstreams,
-                downstreams: vec![DownstreamConfig {
+                upstreams: std::sync::Arc::new(upstreams),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -310,10 +310,10 @@ impl ClaudeResponsesThinkingFixture {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             tempdir().unwrap().path().join("state.json"),
             config,
@@ -767,8 +767,8 @@ impl ClaudeThinkingFixture {
             .collect();
         let state = AppState::new(
             PersistedState {
-                upstreams,
-                downstreams: vec![DownstreamConfig {
+                upstreams: std::sync::Arc::new(upstreams),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -785,10 +785,10 @@ impl ClaudeThinkingFixture {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             config,
@@ -1113,7 +1113,7 @@ async fn claude_gateway_error_uses_anthropic_error_envelope() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: "http://127.0.0.1:9".into(),
@@ -1124,8 +1124,8 @@ async fn claude_gateway_error_uses_anthropic_error_envelope() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1142,10 +1142,10 @@ async fn claude_gateway_error_uses_anthropic_error_envelope() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1274,7 +1274,7 @@ async fn claude_response_conversion_error_uses_anthropic_envelope_without_upstre
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -1285,8 +1285,8 @@ async fn claude_response_conversion_error_uses_anthropic_envelope_without_upstre
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -1303,10 +1303,10 @@ async fn claude_response_conversion_error_uses_anthropic_envelope_without_upstre
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -1481,7 +1481,7 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -1492,8 +1492,8 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1510,10 +1510,10 @@ async fn claude_messages_endpoint_is_compatible_with_chat_routing() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1614,7 +1614,7 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -1625,8 +1625,8 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -1643,10 +1643,10 @@ async fn claude_messages_stream_true_returns_anthropic_sse_events() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -1785,7 +1785,7 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -1796,8 +1796,8 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -1814,10 +1814,10 @@ async fn claude_messages_stream_true_emits_tool_use_block_events() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -1952,7 +1952,7 @@ async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -1963,8 +1963,8 @@ async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -1981,10 +1981,10 @@ async fn claude_messages_stream_true_adapts_upstream_chat_chunk_sse_to_anthropic
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -2128,7 +2128,7 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -2138,8 +2138,8 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
                     supported_models: vec!["gpt-4.1-mini".into()],                    active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -2156,10 +2156,10 @@ async fn claude_messages_tool_blocks_are_translated_to_chat_payload() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
     announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -2302,7 +2302,7 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -2313,8 +2313,8 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -2331,10 +2331,10 @@ async fn claude_messages_response_tool_calls_are_mapped_to_tool_use_blocks() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -2440,7 +2440,7 @@ async fn downstream_messages_supports_configured_portal_models() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -2454,8 +2454,8 @@ async fn downstream_messages_supports_configured_portal_models() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -2475,10 +2475,10 @@ async fn downstream_messages_supports_configured_portal_models() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -2593,7 +2593,7 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -2604,8 +2604,8 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -2622,10 +2622,10 @@ async fn claude_messages_stream_translates_reasoning_content_to_thinking_blocks(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -2696,7 +2696,7 @@ async fn claude_messages_stream_preserves_upstream_sse_comment_keepalive() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -2707,8 +2707,8 @@ async fn claude_messages_stream_preserves_upstream_sse_comment_keepalive() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -2725,10 +2725,10 @@ async fn claude_messages_stream_preserves_upstream_sse_comment_keepalive() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -2830,7 +2830,7 @@ async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -2841,8 +2841,8 @@ async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -2859,10 +2859,10 @@ async fn claude_messages_stop_sequences_are_forwarded_to_chat() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),

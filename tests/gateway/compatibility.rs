@@ -9,7 +9,7 @@ async fn v1_models_endpoint_returns_available_models() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: "http://127.0.0.1:9".into(),
@@ -20,8 +20,8 @@ async fn v1_models_endpoint_returns_available_models() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "test-downstream".into(),
                 hash: downstream_key.hash.clone(),
@@ -38,10 +38,10 @@ async fn v1_models_endpoint_returns_available_models() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -73,7 +73,7 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     let model_slug = "opaque/catalog-model";
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "priority-low".into(),
                     name: "priority-low".into(),
@@ -105,8 +105,8 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
                     failure_count: 0,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "test-downstream".into(),
                 hash: downstream_key.hash.clone(),
@@ -123,10 +123,10 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),

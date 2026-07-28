@@ -46,7 +46,7 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -70,8 +70,8 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -88,10 +88,10 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -169,7 +169,7 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -193,8 +193,8 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -211,10 +211,10 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {

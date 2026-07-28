@@ -33,7 +33,7 @@ fn create_test_state() -> AppState {
     let seven_days_ago = now.saturating_sub(7 * 24 * 60 * 60);
 
     let state = PersistedState {
-        upstreams: vec![
+        upstreams: std::sync::Arc::new(vec![
             UpstreamConfig {
                 id: "upstream-1".to_string(),
                 name: "Primary".to_string(),
@@ -70,8 +70,8 @@ fn create_test_state() -> AppState {
                 failure_count: 0,
                 ..Default::default()
             },
-        ],
-        downstreams: vec![
+        ]),
+        downstreams: std::sync::Arc::new(vec![
             DownstreamConfig {
                 id: "downstream-1".to_string(),
                 name: "Team Alpha".to_string(),
@@ -108,7 +108,7 @@ fn create_test_state() -> AppState {
                 expires_at: None,
                 active: false,
             },
-        ],
+        ]),
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
@@ -227,7 +227,7 @@ fn create_test_state() -> AppState {
             },
         ],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -353,7 +353,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
     let _seven_days_ago = now.saturating_sub(7 * 24 * 60 * 60);
 
     let state = PersistedState {
-        upstreams: vec![
+        upstreams: std::sync::Arc::new(vec![
             UpstreamConfig {
                 id: "upstream-1".to_string(),
                 name: "Primary".to_string(),
@@ -378,8 +378,8 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 failure_count: 0,
                 ..Default::default()
             },
-        ],
-        downstreams: vec![
+        ]),
+        downstreams: std::sync::Arc::new(vec![
             DownstreamConfig {
                 id: "downstream-alpha".to_string(),
                 name: "Team Alpha".to_string(),
@@ -416,7 +416,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
                 expires_at: None,
                 active: true,
             },
-        ],
+        ]),
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
@@ -535,7 +535,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
             },
         ],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let app_state = AppState::new(state, unique_state_path(), config);

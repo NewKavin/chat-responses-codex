@@ -82,7 +82,7 @@ async fn upstream_configuration_mutation_reconciles_runtime_hints() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..Default::default()
         },
         tempdir.path().join("state.json"),

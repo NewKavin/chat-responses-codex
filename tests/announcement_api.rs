@@ -24,8 +24,8 @@ fn create_test_state_without_announcement() -> (AppState, String) {
     let generated = generate_downstream_key("sk");
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -42,10 +42,10 @@ fn create_test_state_without_announcement() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -65,8 +65,8 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
     let generated = generate_downstream_key("sk");
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -83,7 +83,7 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: Some(AnnouncementConfig {
             id: "draft-ann".to_string(),
@@ -93,7 +93,7 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
             active: false,
             updated_at: 1_710_000_000,
         }),
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

@@ -881,8 +881,8 @@ async fn stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback(
     let dir = tempdir().unwrap();
     let state = AppState::new(
         crate::state::PersistedState {
-            upstreams,
-            downstreams: vec![crate::state::DownstreamConfig {
+            upstreams: std::sync::Arc::new(upstreams),
+            downstreams: std::sync::Arc::new(vec![crate::state::DownstreamConfig {
                 id: "down-capacity".into(),
                 name: "capacity-client".into(),
                 hash: downstream_key.hash.clone(),
@@ -899,7 +899,7 @@ async fn stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             ..Default::default()
         },
         dir.path().join("state.json"),
@@ -1485,7 +1485,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         crate::state::PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{address}"),
@@ -1500,8 +1500,8 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 active: true,
                 failure_count: 3,
                 ..Default::default()
-            }],
-            downstreams: vec![crate::state::DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![crate::state::DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1518,7 +1518,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             ..Default::default()
         },
         tempdir.path().join("state.json"),

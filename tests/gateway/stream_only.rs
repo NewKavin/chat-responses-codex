@@ -123,7 +123,7 @@ impl StreamOnlyHarness {
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-stream-only".into(),
                     name: "stream-only".into(),
                     base_url: format!("http://{address}"),
@@ -133,8 +133,8 @@ impl StreamOnlyHarness {
                     supported_models: vec![MODEL.into()],
                     active: true,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-stream-only".into(),
                     name: "stream-only-client".into(),
                     hash: downstream_key.hash.clone(),
@@ -151,10 +151,10 @@ impl StreamOnlyHarness {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(HashMap::new()),
             },
             tempdir().unwrap().path().join("state.json"),
             AppConfig::default(),

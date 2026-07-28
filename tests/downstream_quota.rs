@@ -13,7 +13,7 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
 
     let state = AppState::new(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "Team Token".into(),
                 hash: downstream_key.hash.clone(),
@@ -32,7 +32,7 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![UsageLog {
                 id: "log-1".into(),
                 downstream_key_id: "down-1".into(),
@@ -56,7 +56,7 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
                 created_at: now,
                 compatibility: None,
             }],
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -88,7 +88,7 @@ async fn request_quota_usage_remaining_calculation() {
 
     let state = AppState::new(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "Team Token".into(),
                 hash: downstream_key.hash.clone(),
@@ -105,7 +105,7 @@ async fn request_quota_usage_remaining_calculation() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: (0..30)
                 .map(|i| UsageLog {
                     id: format!("log-{}", i),
@@ -131,7 +131,7 @@ async fn request_quota_usage_remaining_calculation() {
                     compatibility: None,
                 })
                 .collect(),
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),
@@ -157,7 +157,7 @@ async fn request_quota_usage_remaining_when_exhausted() {
 
     let state = AppState::new(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "Team Token".into(),
                 hash: downstream_key.hash.clone(),
@@ -174,7 +174,7 @@ async fn request_quota_usage_remaining_when_exhausted() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: (0..15)
                 .map(|i| UsageLog {
                     id: format!("log-{}", i),
@@ -200,7 +200,7 @@ async fn request_quota_usage_remaining_when_exhausted() {
                     compatibility: None,
                 })
                 .collect(),
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

@@ -63,7 +63,7 @@ impl AdminCapabilityFixture {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "Primary".into(),
                     base_url: base_url.into(),
@@ -71,7 +71,7 @@ impl AdminCapabilityFixture {
                     supported_models: vec!["opaque".into()],
                     active: true,
                     ..Default::default()
-                }],
+                }]),
                 ..PersistedState::default()
             },
             tempdir.path().join("state.json"),
@@ -105,7 +105,7 @@ impl AdminCapabilityFixture {
         };
         let state = AppState::new_with_store(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "Primary".into(),
                     base_url: "https://example.invalid".into(),
@@ -113,7 +113,7 @@ impl AdminCapabilityFixture {
                     supported_models: vec!["opaque".into()],
                     active: true,
                     ..UpstreamConfig::default()
-                }],
+                }]),
                 ..PersistedState::default()
             },
             tempfile::tempdir().unwrap().path().join("state.json"),
@@ -687,7 +687,7 @@ async fn admin_resolved_uses_the_first_key_mapped_to_the_requested_model() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..PersistedState::default()
         },
         tempdir.path().join("state.json"),

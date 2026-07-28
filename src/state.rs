@@ -320,7 +320,7 @@ fn validate_downstream_plaintext_pair(downstream: &mut DownstreamConfig) {
 }
 
 fn validate_downstream_plaintext_pairs(state: &mut PersistedState) {
-    for downstream in &mut state.downstreams {
+    for downstream in Arc::make_mut(&mut state.downstreams) {
         validate_downstream_plaintext_pair(downstream);
     }
 }
@@ -558,13 +558,13 @@ impl AppState {
         store_path: impl Into<PathBuf>,
         config: AppConfig,
     ) -> Self {
-        for upstream in &mut state.upstreams {
+        for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
         }
         validate_downstream_plaintext_pairs(&mut state);
-        state.global_context_profiles = normalize_global_context_profiles_for_storage(
-            std::mem::take(&mut state.global_context_profiles),
-        );
+        state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
+            std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
+        ));
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -623,13 +623,13 @@ impl AppState {
         config_store: Arc<dyn StateStore>,
         postgres: Option<Arc<PostgresStateStore>>,
     ) -> Self {
-        for upstream in &mut state.upstreams {
+        for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
         }
         validate_downstream_plaintext_pairs(&mut state);
-        state.global_context_profiles = normalize_global_context_profiles_for_storage(
-            std::mem::take(&mut state.global_context_profiles),
-        );
+        state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
+            std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
+        ));
         let downstream_usage_logs = state
             .usage_logs
             .iter()
@@ -683,13 +683,13 @@ impl AppState {
         config: AppConfig,
         postgres: PostgresStateStore,
     ) -> Self {
-        for upstream in &mut state.upstreams {
+        for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
         }
         validate_downstream_plaintext_pairs(&mut state);
-        state.global_context_profiles = normalize_global_context_profiles_for_storage(
-            std::mem::take(&mut state.global_context_profiles),
-        );
+        state.global_context_profiles = Arc::new(normalize_global_context_profiles_for_storage(
+            std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
+        ));
         let downstream_usage_logs = state.usage_logs.clone();
         let postgres = Arc::new(postgres);
         let config_store: Arc<dyn StateStore> = postgres.clone();
@@ -1719,7 +1719,7 @@ impl AppState {
             normalize_global_context_profiles_for_storage(global_context_profiles);
 
         self.mutate_persisted_state_io(move |state| {
-            state.global_context_profiles = global_context_profiles;
+            state.global_context_profiles = Arc::new(global_context_profiles);
             Ok(())
         })
         .await
@@ -1730,22 +1730,45 @@ impl AppState {
     }
 
     pub async fn downstream_for_secret(&self, secret: &str) -> Option<DownstreamConfig> {
-        let state = self.inner.lock().await;
-        state
-            .downstreams
-            .iter()
-            .find(|downstream| {
-                downstream.active && Self::normalized_downstream_matches(downstream, secret)
-            })
-            .cloned()
+        // Split matching into a cheap in-lock pass and an expensive out-of-lock pass.
+        //
+        // The plaintext fast path is a constant-time byte compare, so it stays under
+        // the lock. Downstreams that carry only an Argon2 hash require `verify_password`,
+        // which is deliberately expensive (CPU-bound, tens of ms). Running that under
+        // `inner.lock()` would serialize every incoming request behind a single auth and
+        // starve the async executor, so we clone those candidates out, release the lock,
+        // and verify them off the async path via `spawn_blocking`.
+        let mut hashed_candidates: Vec<DownstreamConfig> = Vec::new();
+        {
+            let state = self.inner.lock().await;
+            for downstream in state.downstreams.iter().filter(|d| d.active) {
+                match downstream.plaintext_key.as_deref() {
+                    Some(plaintext) => {
+                        if plaintext.as_bytes().ct_eq(secret.as_bytes()).into() {
+                            return Some(downstream.clone());
+                        }
+                    }
+                    None => hashed_candidates.push(downstream.clone()),
+                }
+            }
+        }
+
+        if hashed_candidates.is_empty() {
+            return None;
+        }
+
+        // Argon2 verification is CPU-bound; run it on a blocking thread so it neither
+        // holds the state lock nor blocks the async worker.
+        let secret = secret.to_owned();
+        tokio::task::spawn_blocking(move || {
+            hashed_candidates
+                .into_iter()
+                .find(|downstream| verify_downstream_key(&secret, &downstream.hash))
+        })
+        .await
+        .unwrap_or(None)
     }
 
-    fn normalized_downstream_matches(downstream: &DownstreamConfig, candidate: &str) -> bool {
-        downstream.plaintext_key.as_deref().map_or_else(
-            || verify_downstream_key(candidate, &downstream.hash),
-            |validated| validated.as_bytes().ct_eq(candidate.as_bytes()).into(),
-        )
-    }
 
     pub async fn fetch_models_from_endpoint(
         &self,
@@ -1990,8 +2013,7 @@ impl AppState {
 
     pub async fn mark_upstream_failure(&self, upstream_id: &str) -> io::Result<()> {
         self.mutate_persisted_state_io(|state| {
-            if let Some(upstream) = state
-                .upstreams
+            if let Some(upstream) = Arc::make_mut(&mut state.upstreams)
                 .iter_mut()
                 .find(|upstream| upstream.id == upstream_id)
             {
@@ -2005,8 +2027,7 @@ impl AppState {
     pub async fn mark_upstream_success(&self, upstream_id: &str) -> io::Result<()> {
         let persist_result = self
             .mutate_persisted_state_io(|state| {
-                if let Some(upstream) = state
-                    .upstreams
+                if let Some(upstream) = Arc::make_mut(&mut state.upstreams)
                     .iter_mut()
                     .find(|upstream| upstream.id == upstream_id)
                 {
@@ -2584,7 +2605,7 @@ impl AppState {
                     ),
                 ));
             }
-            state.upstreams.push(upstream);
+            Arc::make_mut(&mut state.upstreams).push(upstream);
             Ok(())
         })
         .await?;
@@ -2602,8 +2623,7 @@ impl AppState {
     ) -> io::Result<bool> {
         let updated = self
             .mutate_persisted_state_io(|state| {
-                let Some(existing) = state
-                    .upstreams
+                let Some(existing) = Arc::make_mut(&mut state.upstreams)
                     .iter_mut()
                     .find(|upstream| upstream.id == upstream_id)
                 else {
@@ -2624,8 +2644,9 @@ impl AppState {
                 .snapshot()
                 .await
                 .upstreams
-                .into_iter()
+                .iter()
                 .find(|upstream| upstream.id == upstream_id)
+                .cloned()
             {
                 let jobs = self.capability_probe_jobs_for_upstream(&upstream);
                 self.submit_capability_probe_jobs(jobs, ProbeReason::ConfigurationChanged)
@@ -2639,8 +2660,7 @@ impl AppState {
         let removed = self
             .mutate_persisted_state_io(|state| {
                 let original_len = state.upstreams.len();
-                state
-                    .upstreams
+                Arc::make_mut(&mut state.upstreams)
                     .retain(|upstream| upstream.id != upstream_id);
                 Ok(state.upstreams.len() != original_len)
             })
@@ -2658,7 +2678,7 @@ impl AppState {
 
     pub async fn insert_downstream(&self, downstream: DownstreamConfig) -> io::Result<()> {
         self.mutate_persisted_state_io(|state| {
-            state.downstreams.push(downstream);
+            Arc::make_mut(&mut state.downstreams).push(downstream);
             Ok(())
         })
         .await
@@ -2670,8 +2690,7 @@ impl AppState {
         downstream: DownstreamConfig,
     ) -> io::Result<bool> {
         self.mutate_persisted_state_io(|state| {
-            let Some(existing) = state
-                .downstreams
+            let Some(existing) = Arc::make_mut(&mut state.downstreams)
                 .iter_mut()
                 .find(|downstream| downstream.id == downstream_id)
             else {
@@ -2690,8 +2709,7 @@ impl AppState {
         let removed = self
             .mutate_persisted_state_io(|state| {
                 let original_len = state.downstreams.len();
-                state
-                    .downstreams
+                Arc::make_mut(&mut state.downstreams)
                     .retain(|downstream| downstream.id != downstream_id);
                 Ok(state.downstreams.len() != original_len)
             })
@@ -2708,8 +2726,7 @@ impl AppState {
         active: bool,
     ) -> io::Result<bool> {
         self.mutate_persisted_state_io(|state| {
-            let Some(downstream) = state
-                .downstreams
+            let Some(downstream) = Arc::make_mut(&mut state.downstreams)
                 .iter_mut()
                 .find(|downstream| downstream.id == downstream_id)
             else {
@@ -2724,8 +2741,7 @@ impl AppState {
     pub async fn set_upstream_active(&self, upstream_id: &str, active: bool) -> io::Result<bool> {
         let updated = self
             .mutate_persisted_state_io(|state| {
-                let Some(upstream) = state
-                    .upstreams
+                let Some(upstream) = Arc::make_mut(&mut state.upstreams)
                     .iter_mut()
                     .find(|upstream| upstream.id == upstream_id)
                 else {
@@ -2743,11 +2759,11 @@ impl AppState {
     }
 
     pub async fn upstreams(&self) -> Vec<UpstreamConfig> {
-        self.snapshot().await.upstreams
+        Arc::unwrap_or_clone(self.snapshot().await.upstreams)
     }
 
     pub async fn downstreams(&self) -> Vec<DownstreamConfig> {
-        self.snapshot().await.downstreams
+        Arc::unwrap_or_clone(self.snapshot().await.downstreams)
     }
 
     pub async fn usage_logs(&self) -> Vec<UsageLog> {
@@ -3399,9 +3415,12 @@ impl AppState {
         let attempted_at = unix_seconds();
         let mut decisions = Vec::new();
 
-        for upstream in routing.upstreams.into_iter().filter(|upstream| {
-            upstream.active && (selected.is_empty() || selected.contains(upstream.id.as_str()))
-        }) {
+        for upstream in Arc::unwrap_or_clone(routing.upstreams)
+            .into_iter()
+            .filter(|upstream| {
+                upstream.active && (selected.is_empty() || selected.contains(upstream.id.as_str()))
+            })
+        {
             let keys = upstream.available_keys();
             let client = self.client_for_url(&upstream.base_url);
             let discovery_results = fetch_models_from_upstream_keys_concurrently(
@@ -3658,8 +3677,7 @@ impl AppState {
                             "duplicate upstream qualification decision",
                         ));
                     }
-                    let upstream = state
-                        .upstreams
+                    let upstream = Arc::make_mut(&mut state.upstreams)
                         .iter_mut()
                         .find(|value| value.id == decision.upstream_id)
                         .ok_or_else(|| {
@@ -3718,8 +3736,7 @@ impl AppState {
                         "qualification would remove the final routable model",
                     ));
                 }
-                let downstream = state
-                    .downstreams
+                let downstream = Arc::make_mut(&mut state.downstreams)
                     .iter_mut()
                     .find(|value| value.id == downstream_id)
                     .ok_or_else(|| {
@@ -4055,7 +4072,7 @@ impl AppState {
             if inner.upstreams.iter().any(|u| u.id == upstream.id) {
                 return Err(format!("Upstream with ID '{}' already exists", upstream.id));
             }
-            inner.upstreams.push(upstream);
+            Arc::make_mut(&mut inner.upstreams).push(upstream);
         }
         let current_upstreams = self.snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams).await;
@@ -4067,7 +4084,7 @@ impl AppState {
         {
             let mut inner = self.inner.lock().await;
             let initial_len = inner.upstreams.len();
-            inner.upstreams.retain(|u| u.id != id);
+            Arc::make_mut(&mut inner.upstreams).retain(|u| u.id != id);
             if inner.upstreams.len() == initial_len {
                 return Err(format!("Upstream '{}' not found", id));
             }
@@ -4081,8 +4098,7 @@ impl AppState {
     pub async fn toggle_upstream_by_id(&self, id: &str) -> Result<bool, String> {
         let active = {
             let mut inner = self.inner.lock().await;
-            let upstream = inner
-                .upstreams
+            let upstream = Arc::make_mut(&mut inner.upstreams)
                 .iter_mut()
                 .find(|u| u.id == id)
                 .ok_or_else(|| format!("Upstream '{}' not found", id))?;
@@ -4104,7 +4120,7 @@ impl AppState {
                 downstream.id
             ));
         }
-        inner.downstreams.push(downstream);
+        Arc::make_mut(&mut inner.downstreams).push(downstream);
         Ok(())
     }
 
@@ -4116,8 +4132,7 @@ impl AppState {
     ) -> Result<DownstreamConfig, String> {
         self.mutate_persisted_state(
             |candidate_state| {
-                let downstream = candidate_state
-                    .downstreams
+                let downstream = Arc::make_mut(&mut candidate_state.downstreams)
                     .iter_mut()
                     .find(|d| d.id == id)
                     .ok_or_else(|| format!("Downstream '{}' not found", id))?;
@@ -4193,7 +4208,7 @@ impl AppState {
     pub async fn delete_downstream_by_id(&self, id: &str) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
         let initial_len = inner.downstreams.len();
-        inner.downstreams.retain(|d| d.id != id);
+        Arc::make_mut(&mut inner.downstreams).retain(|d| d.id != id);
         if inner.downstreams.len() < initial_len {
             Ok(())
         } else {
@@ -4204,8 +4219,7 @@ impl AppState {
     /// Toggle downstream active status
     pub async fn toggle_downstream_by_id(&self, id: &str) -> Result<bool, String> {
         let mut inner = self.inner.lock().await;
-        let downstream = inner
-            .downstreams
+        let downstream = Arc::make_mut(&mut inner.downstreams)
             .iter_mut()
             .find(|d| d.id == id)
             .ok_or_else(|| format!("Downstream '{}' not found", id))?;
@@ -4216,8 +4230,7 @@ impl AppState {
     /// Update downstream hash (for key rotation)
     pub async fn update_downstream_hash(&self, id: &str, new_hash: String) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
-        let downstream = inner
-            .downstreams
+        let downstream = Arc::make_mut(&mut inner.downstreams)
             .iter_mut()
             .find(|d| d.id == id)
             .ok_or_else(|| format!("Downstream '{}' not found", id))?;

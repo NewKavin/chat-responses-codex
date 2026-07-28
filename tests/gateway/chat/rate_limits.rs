@@ -10,7 +10,7 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-a".into(),
                 name: "primary-a".into(),
                 base_url: upstream,
@@ -35,8 +35,8 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -55,10 +55,10 @@ async fn upstream_reference_quota_does_not_block_single_account_when_upstream_ac
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -114,7 +114,7 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "up-a".into(),
                     name: "primary-a".into(),
@@ -173,8 +173,8 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                     failure_count: 0,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -193,10 +193,10 @@ async fn upstream_429_keeps_the_account_cool_and_uses_backup_account_on_next_req
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -257,7 +257,7 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-a".into(),
                 name: "primary-a".into(),
                 base_url: upstream,
@@ -285,8 +285,8 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -305,10 +305,10 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {
@@ -365,7 +365,7 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-a".into(),
                 name: "primary-a".into(),
                 base_url: upstream,
@@ -389,8 +389,8 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -407,10 +407,10 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {
@@ -519,7 +519,7 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-a".into(),
                 name: "primary-a".into(),
                 base_url: format!("http://{}", address),
@@ -543,8 +543,8 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -561,10 +561,10 @@ async fn upstream_concurrency_full_429_recovers_on_short_probe_schedule() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {
@@ -648,15 +648,15 @@ async fn upstream_concurrency_retry_after_is_not_probed_early() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![route_retry_upstream_config(
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
                 "up-a",
                 "primary-a",
                 format!("http://{}", address),
-            )],
-            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -738,11 +738,11 @@ async fn concurrent_waiters_share_one_concurrency_probe() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream],
-            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            upstreams: std::sync::Arc::new(vec![upstream]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {
@@ -860,7 +860,7 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-account".into(),
                 name: "primary-account".into(),
                 base_url: format!("http://{}", address),
@@ -885,8 +885,8 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -903,10 +903,10 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1010,7 +1010,7 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-a".into(),
                 name: "primary-a".into(),
                 base_url: format!("http://{}", address),
@@ -1034,8 +1034,8 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1052,10 +1052,10 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1258,11 +1258,11 @@ async fn short_temporary_route_exhaustion_succeeds_in_second_round() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![route_retry_upstream_config("up-a", "primary-a", base_url)],
-            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config("up-a", "primary-a", base_url)]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {
@@ -1320,11 +1320,11 @@ async fn long_retry_after_returns_immediately_without_second_round() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![route_retry_upstream_config("up-a", "primary-a", base_url)],
-            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config("up-a", "primary-a", base_url)]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1368,11 +1368,11 @@ async fn route_retry_wait_budget_and_round_limit_are_bounded() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![route_retry_upstream_config("up-a", "primary-a", base_url)],
-            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config("up-a", "primary-a", base_url)]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {
@@ -1434,15 +1434,15 @@ async fn non_temporary_exhaustion_never_waits() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![route_retry_upstream_config(
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
                 "up-a",
                 "primary-a",
                 format!("http://{}", address),
-            )],
-            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            )]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1503,18 +1503,18 @@ async fn mixed_credentials_and_short_temporary_retries_only_the_temporary_route(
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 route_retry_upstream_config(
                     "up-cred",
                     "credentials-broken",
                     format!("http://{}", credential_address),
                 ),
                 route_retry_upstream_config("up-temp", "temporary", temporary_url),
-            ],
-            downstreams: vec![route_retry_downstream_config(&downstream_key)],
+            ]),
+            downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig {

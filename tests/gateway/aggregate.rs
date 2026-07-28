@@ -117,11 +117,11 @@ impl ContextFallbackHarness {
         let tempdir = tempdir().unwrap();
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![upstream.clone()],
-                downstreams: vec![downstream.clone()],
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![downstream.clone()]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(HashMap::new()),
             },
             tempdir.path().join("state.json"),
             AppConfig::default(),
@@ -301,11 +301,11 @@ impl AggregateHarness {
         let tempdir = tempdir().unwrap();
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![upstream.clone()],
-                downstreams: vec![downstream.clone()],
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![downstream.clone()]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(HashMap::new()),
             },
             tempdir.path().join("state.json"),
             config,
@@ -884,11 +884,11 @@ async fn aggregate_learned_singleflight_follower_uses_actual_mode_for_cancellati
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![downstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![downstream.clone()]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),

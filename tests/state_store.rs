@@ -36,7 +36,7 @@ async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_ha
     let authoritative_hash = generate_downstream_key("authoritative").hash;
     let state = AppState::new(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "downstream-mismatched-credential".to_string(),
                 name: "Mismatched credential".to_string(),
                 hash: authoritative_hash,
@@ -53,7 +53,7 @@ async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_ha
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             ..Default::default()
         },
         unique_state_path(),
@@ -164,11 +164,11 @@ async fn file_store_persists_announcement_payload() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![],
-            downstreams: vec![],
+            upstreams: std::sync::Arc::new(vec![]),
+            downstreams: std::sync::Arc::new(vec![]),
             usage_logs: vec![],
             announcement: Some(announcement.clone()),
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path.clone(),
         AppConfig::default(),
@@ -219,8 +219,8 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
     let now = chat_responses_codex::state::unix_seconds();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![],
-            downstreams: vec![],
+            upstreams: std::sync::Arc::new(vec![]),
+            downstreams: std::sync::Arc::new(vec![]),
             usage_logs: vec![
                 usage_log("log-1", "downstream-1", "gpt-4o", 200, 150, now - 60),
                 usage_log("log-2", "downstream-2", "gpt-4.1-mini", 400, 120, now - 120),
@@ -231,7 +231,7 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
                 usage_log("log-7", "downstream-1", "gpt-4", 200, 50, now - 8 * 86_400),
             ],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         unique_state_path(),
         AppConfig::default(),
@@ -281,8 +281,8 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
     let now = chat_responses_codex::state::unix_seconds();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![],
-            downstreams: vec![],
+            upstreams: std::sync::Arc::new(vec![]),
+            downstreams: std::sync::Arc::new(vec![]),
             usage_logs: vec![
                 UsageLog {
                     id: "z-log".to_string(),
@@ -332,7 +332,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                 },
             ],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         unique_state_path(),
         AppConfig::default(),
@@ -364,8 +364,8 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
     let generated = generate_downstream_key("sk");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![],
-            downstreams: vec![
+            upstreams: std::sync::Arc::new(vec![]),
+            downstreams: std::sync::Arc::new(vec![
                 DownstreamConfig {
                     id: "downstream-2".to_string(),
                     name: "No Token Limit".to_string(),
@@ -402,14 +402,14 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
                     expires_at: None,
                     active: true,
                 },
-            ],
+            ]),
             usage_logs: vec![
                 usage_log("log-a", "downstream-2", "gpt-4", 200, 100, now - 600),
                 usage_log("log-b", "downstream-2", "gpt-4", 200, 120, now - 300),
                 usage_log("log-c", "downstream-3", "gpt-4.1-mini", 200, 999, now - 60),
             ],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         unique_state_path(),
         AppConfig::default(),
@@ -517,13 +517,13 @@ async fn routing_snapshot_does_not_publish_before_slow_config_persist_commits() 
     let slow_store = SlowStore::new();
     let state = AppState::new_with_store(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".to_string(),
                 name: "Upstream 1".to_string(),
                 active: true,
                 ..UpstreamConfig::default()
-            }],
-            global_context_profiles: std::collections::HashMap::new(),
+            }]),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             ..PersistedState::default()
         },
         unique_state_path(),
@@ -711,7 +711,7 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
     );
     let state = AppState::new_with_store(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: generate_downstream_key("pending").hash,
@@ -728,9 +728,9 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             ..PersistedState::default()
         },
         unique_state_path(),
@@ -774,7 +774,7 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
     );
     let state = AppState::new_with_store(
         PersistedState {
-            downstreams: vec![DownstreamConfig {
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: generate_downstream_key("pending").hash,
@@ -791,9 +791,9 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             ..PersistedState::default()
         },
         unique_state_path(),

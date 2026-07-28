@@ -14,6 +14,7 @@ use crate::capabilities::{
 use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
 use serde_json::{Map, Value};
+use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
@@ -291,9 +292,9 @@ impl PostgresStateStore {
         let announcement = load_announcement(&conn).await?;
 
         Ok(PersistedState {
-            upstreams,
-            downstreams,
-            global_context_profiles,
+            upstreams: Arc::new(upstreams),
+            downstreams: Arc::new(downstreams),
+            global_context_profiles: Arc::new(global_context_profiles),
             usage_logs,
             announcement,
         })

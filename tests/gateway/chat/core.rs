@@ -12,7 +12,7 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: "http://127.0.0.1:9".into(),
@@ -23,8 +23,8 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -41,10 +41,10 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -143,8 +143,8 @@ async fn missing_model_with_valid_key_is_logged_as_invalid_request() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -161,10 +161,10 @@ async fn missing_model_with_valid_key_is_logged_as_invalid_request() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -239,7 +239,7 @@ async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -250,8 +250,8 @@ async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -268,10 +268,10 @@ async fn upstream_400_echoed_payload_is_not_returned_or_persisted() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -372,7 +372,7 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -383,8 +383,8 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -401,10 +401,10 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),
@@ -535,7 +535,7 @@ async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_erro
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-multi-key-capacity".into(),
                     name: "multi-key-capacity".into(),
                     base_url: format!("http://{address}"),
@@ -556,8 +556,8 @@ async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_erro
                     supported_models: vec!["glm-5.2".into()],
                     active: true,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-multi-key-capacity".into(),
                     name: "capacity-client".into(),
                     hash: downstream_key.hash.clone(),
@@ -574,7 +574,7 @@ async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_erro
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 ..Default::default()
             },
             tempdir.path().join("state.json"),
@@ -1502,7 +1502,7 @@ async fn downstream_chat_completions_supports_configured_portal_models() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -1516,8 +1516,8 @@ async fn downstream_chat_completions_supports_configured_portal_models() {
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1537,10 +1537,10 @@ async fn downstream_chat_completions_supports_configured_portal_models() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),

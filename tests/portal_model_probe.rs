@@ -30,7 +30,7 @@ fn create_test_state(base_url: String) -> (AppState, String) {
     let generated = generate_downstream_key("portal");
 
     let state = PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "upstream-1".to_string(),
             name: "Primary Upstream".to_string(),
             base_url,
@@ -41,8 +41,8 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             active: true,
             failure_count: 0,
             ..Default::default()
-        }],
-        downstreams: vec![DownstreamConfig {
+        }]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash.clone(),
@@ -59,10 +59,10 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

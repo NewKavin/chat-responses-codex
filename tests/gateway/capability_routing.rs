@@ -141,8 +141,8 @@ fn catalog_state(
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams,
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(upstreams),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "catalog-downstream".into(),
                 name: "catalog-downstream".into(),
                 hash: downstream_key.hash,
@@ -159,10 +159,10 @@ fn catalog_state(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -1532,7 +1532,7 @@ async fn required_image_never_routes_to_text_only_candidate() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "text-only".into(),
                 name: "text-only".into(),
                 base_url: format!("http://{}", address),
@@ -1542,8 +1542,8 @@ async fn required_image_never_routes_to_text_only_candidate() {
                 supported_models: vec!["opaque/model".into()],
                 active: true,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1560,10 +1560,10 @@ async fn required_image_never_routes_to_text_only_candidate() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1634,7 +1634,7 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "text-only".into(),
                 name: "text-only".into(),
                 base_url: "http://127.0.0.1:9".into(),
@@ -1644,8 +1644,8 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
                 supported_models: vec!["opaque/model".into()],
                 active: true,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1662,10 +1662,10 @@ async fn streaming_capability_rejection_releases_downstream_concurrency() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1746,7 +1746,7 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "priority-low".into(),
                     name: "priority-low".into(),
@@ -1769,8 +1769,8 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
                     active: true,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "test-downstream".into(),
                 hash: downstream_key.hash.clone(),
@@ -1787,10 +1787,10 @@ async fn codex_catalog_uses_data_url_capability_from_one_deterministic_witness()
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1867,7 +1867,7 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: "http://127.0.0.1:9".into(),
@@ -1877,8 +1877,8 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
                 supported_models: vec!["opaque/model".into()],
                 active: true,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "test-downstream".into(),
                 hash: downstream_key.hash.clone(),
@@ -1895,10 +1895,10 @@ async fn catalog_capability_flags_use_exact_route_overrides_over_probe_rejection
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -1982,7 +1982,7 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "raw-strong".into(),
                     name: "raw-strong".into(),
@@ -2005,8 +2005,8 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
                     active: true,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "test-downstream".into(),
                 hash: downstream_key.hash.clone(),
@@ -2023,10 +2023,10 @@ async fn catalog_witness_ranking_uses_resolved_capabilities() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -2133,7 +2133,7 @@ async fn catalog_witness_considers_every_supported_protocol() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "multi-protocol".into(),
                 name: "multi-protocol".into(),
                 base_url: "http://127.0.0.1:9".into(),
@@ -2146,8 +2146,8 @@ async fn catalog_witness_considers_every_supported_protocol() {
                 supported_models: vec!["opaque/model".into()],
                 active: true,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "test-downstream".into(),
                 hash: downstream_key.hash.clone(),
@@ -2164,10 +2164,10 @@ async fn catalog_witness_considers_every_supported_protocol() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -2285,7 +2285,7 @@ async fn codex_function_tool_request_falls_back_across_catalog_witness_protocols
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "responses-weak".into(),
                     name: "responses-weak".into(),
@@ -2308,8 +2308,8 @@ async fn codex_function_tool_request_falls_back_across_catalog_witness_protocols
                     active: true,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -2326,10 +2326,10 @@ async fn codex_function_tool_request_falls_back_across_catalog_witness_protocols
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -2491,7 +2491,7 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "a-other".into(),
                     name: "a-other".into(),
@@ -2514,8 +2514,8 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
                     active: true,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -2532,10 +2532,10 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),

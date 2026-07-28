@@ -23,11 +23,11 @@ fn unique_state_path() -> PathBuf {
 fn create_test_state() -> AppState {
     let config = AppConfig::default();
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![],
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
     AppState::new(state, unique_state_path(), config)
 }

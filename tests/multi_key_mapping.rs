@@ -106,7 +106,7 @@ async fn file_roundtrip_preserves_authoritative_empty_key_mapping() {
     let state_path = tempdir.path().join("state.json");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![authoritative_upstream()],
+            upstreams: std::sync::Arc::new(vec![authoritative_upstream()]),
             ..PersistedState::default()
         },
         &state_path,

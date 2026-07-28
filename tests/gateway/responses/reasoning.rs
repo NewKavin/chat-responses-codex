@@ -127,7 +127,7 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: format!("http://{}", address),
@@ -138,8 +138,8 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -156,10 +156,10 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),
@@ -419,7 +419,7 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
     let model = "arbitrary/exact-continuation";
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![
+            upstreams: std::sync::Arc::new(vec![
                 UpstreamConfig {
                     id: "exact-route".into(),
                     name: "exact-route".into(),
@@ -444,8 +444,8 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
                     active: true,
                     ..Default::default()
                 },
-            ],
-            downstreams: vec![DownstreamConfig {
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -462,10 +462,10 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -684,8 +684,8 @@ async fn responses_continuation_keeps_chat_profile_when_responses_becomes_eligib
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -702,10 +702,10 @@ async fn responses_continuation_keeps_chat_profile_when_responses_becomes_eligib
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -926,8 +926,8 @@ async fn responses_continuation_rejects_same_profile_key_after_fingerprint_drift
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -944,10 +944,10 @@ async fn responses_continuation_rejects_same_profile_key_after_fingerprint_drift
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -1140,8 +1140,8 @@ async fn responses_continuation_rejects_same_profile_key_after_probe_or_fingerpr
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1158,10 +1158,10 @@ async fn responses_continuation_rejects_same_profile_key_after_probe_or_fingerpr
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -1337,8 +1337,8 @@ async fn responses_continuation_rejects_deleted_exact_profile_before_dispatch() 
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![DownstreamConfig {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1355,10 +1355,10 @@ async fn responses_continuation_rejects_deleted_exact_profile_before_dispatch() 
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         tempdir.path().join("state.json"),
         AppConfig::default(),
@@ -1468,7 +1468,7 @@ async fn downstream_responses_request_requires_verified_reasoning_carrier_before
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: "http://127.0.0.1:9".into(),
@@ -1479,8 +1479,8 @@ async fn downstream_responses_request_requires_verified_reasoning_carrier_before
                 active: true,
                 failure_count: 0,
                 ..Default::default()
-            }],
-            downstreams: vec![DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: downstream_key.hash.clone(),
@@ -1497,10 +1497,10 @@ async fn downstream_responses_request_requires_verified_reasoning_carrier_before
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         state_path,
         AppConfig::default(),

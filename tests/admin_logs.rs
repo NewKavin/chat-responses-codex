@@ -34,8 +34,8 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
     let now = chat_responses_codex::state::unix_seconds();
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![],
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![]),
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
@@ -154,7 +154,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
             },
         ],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -806,8 +806,8 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
     };
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![],
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![]),
         usage_logs: vec![
             UsageLog {
                 id: "recent-1".to_string(),
@@ -857,7 +857,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
             },
         ],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let app = AppState::new(state, unique_state_path(), config);
@@ -884,8 +884,8 @@ async fn test_prune_expired_usage_logs_respects_zero_retention() {
     };
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![],
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![]),
         usage_logs: vec![UsageLog {
             id: "ancient".to_string(),
             downstream_key_id: "ds".to_string(),
@@ -910,7 +910,7 @@ async fn test_prune_expired_usage_logs_respects_zero_retention() {
             compatibility: None,
         }],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let app = AppState::new(state, unique_state_path(), config);

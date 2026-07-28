@@ -35,7 +35,7 @@ fn canonical_upstream_state() -> (AppState, String) {
     let now = stable_today_noon();
 
     let state = PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "upstream-1".to_string(),
             name: "Primary Upstream".to_string(),
             base_url: "https://example.invalid".to_string(),
@@ -46,8 +46,8 @@ fn canonical_upstream_state() -> (AppState, String) {
             ],
             active: true,
             ..UpstreamConfig::default()
-        }],
-        downstreams: vec![DownstreamConfig {
+        }]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -67,7 +67,7 @@ fn canonical_upstream_state() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
@@ -163,7 +163,7 @@ fn canonical_upstream_state() -> (AppState, String) {
             },
         ],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -179,8 +179,8 @@ fn create_test_state() -> (AppState, String) {
     let now = chat_responses_codex::state::unix_seconds();
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -199,7 +199,7 @@ fn create_test_state() -> (AppState, String) {
             ip_allowlist: vec!["192.168.1.0/24".to_string()],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![
             UsageLog {
                 id: "log-1".to_string(),
@@ -249,7 +249,7 @@ fn create_test_state() -> (AppState, String) {
             },
         ],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -263,8 +263,8 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
     let now = chat_responses_codex::state::unix_seconds();
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-2".to_string(),
             name: "No Token Limit".to_string(),
             hash: generated.hash,
@@ -281,7 +281,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![
             UsageLog {
                 id: "log-a".to_string(),
@@ -331,7 +331,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             },
         ],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -371,8 +371,8 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
         .collect::<Vec<_>>();
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -389,10 +389,10 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs,
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1128,8 +1128,8 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
     let generated = generate_downstream_key("sk");
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -1146,10 +1146,10 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1397,7 +1397,7 @@ fn create_state_with_context_limits() -> (AppState, String) {
     let generated = generate_downstream_key("sk");
 
     let state = PersistedState {
-        upstreams: vec![
+        upstreams: std::sync::Arc::new(vec![
             UpstreamConfig {
                 id: "upstream-large".to_string(),
                 name: "Large Window".to_string(),
@@ -1458,8 +1458,8 @@ fn create_state_with_context_limits() -> (AppState, String) {
                 active: false,
                 ..UpstreamConfig::default()
             },
-        ],
-        downstreams: vec![DownstreamConfig {
+        ]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-ctx".to_string(),
             name: "Ctx Test Downstream".to_string(),
             hash: generated.hash,
@@ -1479,10 +1479,10 @@ fn create_state_with_context_limits() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

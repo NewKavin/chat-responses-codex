@@ -105,7 +105,7 @@ fn sync_state_with_auto_discovery(
     let tempdir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "sync-upstream".into(),
                 name: "sync upstream".into(),
                 base_url,
@@ -117,7 +117,7 @@ fn sync_state_with_auto_discovery(
                 supported_models: vec!["old-a".into(), "old-b".into()],
                 active: true,
                 ..Default::default()
-            }],
+            }]),
             ..Default::default()
         },
         tempdir.path().join("state.json"),

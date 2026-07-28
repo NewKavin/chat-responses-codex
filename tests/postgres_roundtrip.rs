@@ -681,8 +681,9 @@ async fn postgres_roundtrips_two_key_profiles_for_the_same_model_protocol() {
                     .snapshot()
                     .await
                     .upstreams
-                    .into_iter()
+                    .iter()
                     .find(|upstream| upstream.id == "up-keyed-roundtrip")
+                    .cloned()
                     .unwrap(),
                 &key_fingerprint,
                 "glm-5.2",

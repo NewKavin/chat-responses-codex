@@ -166,7 +166,7 @@ impl DialectRetryFixture {
         let downstream_key = generate_downstream_key("gw");
         let state = AppState::new(
             PersistedState {
-                upstreams: vec![UpstreamConfig {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                     id: "up-1".into(),
                     name: "primary".into(),
                     base_url: format!("http://{}", address),
@@ -177,8 +177,8 @@ impl DialectRetryFixture {
                     active: true,
                     failure_count: 0,
                     ..Default::default()
-                }],
-                downstreams: vec![DownstreamConfig {
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "team-a".into(),
                     hash: downstream_key.hash.clone(),
@@ -195,10 +195,10 @@ impl DialectRetryFixture {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
-                }],
+                }]),
                 usage_logs: vec![],
                 announcement: None,
-                global_context_profiles: std::collections::HashMap::new(),
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
             },
             state_path,
             AppConfig::default(),

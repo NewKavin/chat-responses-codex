@@ -4,6 +4,7 @@ use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -221,7 +222,8 @@ impl AppState {
                             if let Some(index) =
                                 find_auto_upstream(&candidate_state.upstreams, base_url)
                             {
-                                let upstream = &mut candidate_state.upstreams[index];
+                                let upstream =
+                                    &mut Arc::make_mut(&mut candidate_state.upstreams)[index];
                                 upstream.api_keys = Vec::new();
                                 upstream.api_key = String::new();
                                 upstream.api_key_models = Vec::new();
@@ -243,7 +245,8 @@ impl AppState {
                         if let Some(index) =
                             find_auto_upstream(&candidate_state.upstreams, base_url)
                         {
-                            let upstream = &mut candidate_state.upstreams[index];
+                            let upstream =
+                                &mut Arc::make_mut(&mut candidate_state.upstreams)[index];
                             // Replace semantics: the submitted valid key set is the
                             // new source of truth. Keys absent from the payload are
                             // removed (the external script is responsible for
@@ -333,7 +336,7 @@ impl AppState {
                         };
                         upstream.normalize_for_storage();
                         touched_upstream_ids.insert(upstream.id.clone());
-                        candidate_state.upstreams.push(upstream);
+                        Arc::make_mut(&mut candidate_state.upstreams).push(upstream);
                         result.created = result
                             .created
                             .saturating_add(items.iter().filter(|i| i.valid).count());
@@ -372,8 +375,7 @@ impl AppState {
         let updated_upstream = self
             .mutate_persisted_state(
                 |candidate_state| {
-                    let upstream = candidate_state
-                        .upstreams
+                    let upstream = Arc::make_mut(&mut candidate_state.upstreams)
                         .iter_mut()
                         .find(|u| u.id == id)
                         .ok_or_else(|| {

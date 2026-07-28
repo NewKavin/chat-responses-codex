@@ -198,7 +198,7 @@ async fn disabled_capability_probe_configuration_rejects_jobs_and_reconciliation
     let upstream = learning_upstream("up-disabled-probe", "Lab/Disabled");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..PersistedState::default()
         },
         dir.path().join("state.json"),
@@ -244,8 +244,8 @@ async fn default_runtime_does_not_queue_automatic_capability_probes() {
     let upstream = learning_upstream("up-default-no-auto-probe", "glm-5.2");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream],
-            downstreams: vec![startup_downstream()],
+            upstreams: std::sync::Arc::new(vec![upstream]),
+            downstreams: std::sync::Arc::new(vec![startup_downstream()]),
             ..PersistedState::default()
         },
         dir.path().join("state.json"),
@@ -310,8 +310,8 @@ async fn targeted_probe_job_is_bound_to_the_requested_key_fingerprint() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
-            downstreams: vec![startup_downstream()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![startup_downstream()]),
             ..PersistedState::default()
         },
         dir.path().join("state.json"),
@@ -341,7 +341,7 @@ async fn probe_job_rejects_same_revision_when_immutable_configuration_changes() 
     let upstream = learning_upstream("up-binding", "Lab/Binding");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..PersistedState::default()
         },
         dir.path().join("state.json"),
@@ -398,7 +398,7 @@ async fn queued_probe_plan_keeps_configuration_snapshot_after_import() {
     let upstream = learning_upstream("up-plan-snapshot", "Lab/Plan");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..PersistedState::default()
         },
         dir.path().join("state.json"),
@@ -522,7 +522,7 @@ async fn profile_round_trip_uses_exact_case_sensitive_key() {
     let upstream = learning_upstream("up-1", "Lab/Case-Sensitive");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..PersistedState::default()
         },
         &path,
@@ -565,7 +565,7 @@ async fn file_roundtrips_two_key_profiles_for_the_same_model_protocol() {
     let upstream = startup_keyed_upstream(&[("key-a", &["glm-5.2"]), ("key-b", &["glm-5.2"])]);
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..PersistedState::default()
         },
         &path,
@@ -745,8 +745,8 @@ async fn write_legacy_startup_fixture(
         ..CapabilityStateDocument::default()
     };
     let state = PersistedState {
-        upstreams: vec![upstream],
-        downstreams: vec![startup_downstream()],
+        upstreams: std::sync::Arc::new(vec![upstream]),
+        downstreams: std::sync::Arc::new(vec![startup_downstream()]),
         ..PersistedState::default()
     };
     tokio::fs::write(path, serde_json::to_vec(&state).unwrap())
@@ -853,7 +853,7 @@ async fn stream_only_learning_and_configuration_replace_do_not_lose_updates() {
     let upstream = learning_upstream("up-learning", "Lab/Atomic");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..Default::default()
         },
         &path,
@@ -912,7 +912,7 @@ async fn stream_only_learning_reloads_latest_sidecar_before_single_publish() {
     let upstream = learning_upstream("up-learning", "Lab/Target");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..Default::default()
         },
         &path,
@@ -987,7 +987,7 @@ async fn stream_only_learning_rejects_fingerprint_and_schema_mismatches() {
     let upstream = learning_upstream("up-learning", "Lab/Stale");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..Default::default()
         },
         &path,
@@ -1051,7 +1051,7 @@ async fn stream_only_learning_rejects_fingerprint_stale_against_latest_configura
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..Default::default()
         },
         &path,
@@ -1130,7 +1130,7 @@ async fn stream_only_learning_does_not_recreate_a_deleted_upstream_profile() {
     };
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![upstream.clone()],
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
             ..Default::default()
         },
         &path,
@@ -1317,7 +1317,7 @@ async fn updating_upstream_clears_legacy_failure_count() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![chat_responses_codex::state::UpstreamConfig {
                 id: "up-health-reset".into(),
                 name: "before update".into(),
                 base_url: "https://health-reset.example/v1".into(),
@@ -1326,7 +1326,7 @@ async fn updating_upstream_clears_legacy_failure_count() {
                 active: false,
                 failure_count: 3,
                 ..Default::default()
-            }],
+            }]),
             ..PersistedState::default()
         },
         dir.path().join("state.json"),
@@ -1355,7 +1355,7 @@ async fn updating_upstream_clears_legacy_failure_count() {
         .await
         .unwrap();
 
-    let upstream = state.snapshot().await.upstreams.remove(0);
+    let upstream = state.snapshot().await.upstreams[0].clone();
     assert_eq!(upstream.failure_count, 0);
 }
 
@@ -1418,14 +1418,14 @@ async fn updating_upstream_does_not_wait_for_full_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![chat_responses_codex::state::UpstreamConfig {
                 id: "up-update".into(),
                 name: "before update".into(),
                 base_url: "https://update.example/v1".into(),
                 api_key: "fixture-secret".into(),
                 active: false,
                 ..Default::default()
-            }],
+            }]),
             ..Default::default()
         },
         dir.path().join("state.json"),
@@ -1479,8 +1479,9 @@ async fn updating_upstream_does_not_wait_for_full_probe_queue() {
             .snapshot()
             .await
             .upstreams
-            .into_iter()
+            .iter()
             .find(|upstream| upstream.id == "up-update")
+            .cloned()
             .unwrap()
             .name,
         "after update"
@@ -1521,14 +1522,14 @@ async fn updating_upstream_succeeds_with_closed_probe_queue() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![chat_responses_codex::state::UpstreamConfig {
                 id: "up-closed".into(),
                 name: "before update".into(),
                 base_url: "https://closed.example/v1".into(),
                 api_key: "fixture-secret".into(),
                 active: false,
                 ..Default::default()
-            }],
+            }]),
             ..Default::default()
         },
         dir.path().join("state.json"),
@@ -1557,8 +1558,9 @@ async fn updating_upstream_succeeds_with_closed_probe_queue() {
         .snapshot()
         .await
         .upstreams
-        .into_iter()
+        .iter()
         .find(|upstream| upstream.id == "up-closed")
+        .cloned()
         .unwrap();
     assert_eq!(upstream.name, "after update");
 }
@@ -1660,7 +1662,7 @@ async fn inserting_same_upstream_id_with_different_configuration_is_rejected() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![chat_responses_codex::state::UpstreamConfig {
                 id: "up-conflict".into(),
                 name: "original".into(),
                 base_url: "https://original.example/v1".into(),
@@ -1669,7 +1671,7 @@ async fn inserting_same_upstream_id_with_different_configuration_is_rejected() {
                 active: true,
                 failure_count: 3,
                 ..Default::default()
-            }],
+            }]),
             ..Default::default()
         },
         dir.path().join("state.json"),
@@ -1701,14 +1703,14 @@ async fn updating_upstream_succeeds_after_probe_queue_closes() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![chat_responses_codex::state::UpstreamConfig {
                 id: "up-atomic-close".into(),
                 name: "before update".into(),
                 base_url: "https://atomic-close.example/v1".into(),
                 api_key: "fixture-secret".into(),
                 active: false,
                 ..Default::default()
-            }],
+            }]),
             ..Default::default()
         },
         dir.path().join("state.json"),
@@ -1737,8 +1739,9 @@ async fn updating_upstream_succeeds_after_probe_queue_closes() {
             .snapshot()
             .await
             .upstreams
-            .into_iter()
+            .iter()
             .find(|upstream| upstream.id == "up-atomic-close")
+            .cloned()
             .unwrap()
             .name,
         "after update"
@@ -1784,8 +1787,9 @@ async fn freekey_sync_queues_capability_probe_for_created_route() {
         .snapshot()
         .await
         .upstreams
-        .into_iter()
+        .iter()
         .find(|upstream| upstream.base_url == "https://managed.example/v1")
+        .cloned()
         .unwrap();
     let job = single_probe_job(
         tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
@@ -1840,8 +1844,9 @@ async fn freekey_sync_does_not_requeue_current_route_profile() {
         .snapshot()
         .await
         .upstreams
-        .into_iter()
+        .iter()
         .find(|upstream| upstream.base_url == "https://managed.example/v1")
+        .cloned()
         .unwrap();
     let fingerprint = state
         .route_configuration_fingerprint(
@@ -2084,7 +2089,7 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
     let path = dir.path().join("state.json");
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![chat_responses_codex::state::UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![chat_responses_codex::state::UpstreamConfig {
                 id: "up-1".into(),
                 name: "primary".into(),
                 base_url: "https://upstream.example/v1".into(),
@@ -2097,8 +2102,8 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
                 supported_models: vec!["Lab/Case-Sensitive".into()],
                 active: true,
                 ..Default::default()
-            }],
-            downstreams: vec![chat_responses_codex::state::DownstreamConfig {
+            }]),
+            downstreams: std::sync::Arc::new(vec![chat_responses_codex::state::DownstreamConfig {
                 id: "down-1".into(),
                 name: "team-a".into(),
                 hash: "hash".into(),
@@ -2115,10 +2120,10 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
-            }],
+            }]),
             usage_logs: vec![],
             announcement: None,
-            global_context_profiles: std::collections::HashMap::new(),
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
         },
         &path,
         AppConfig::default(),

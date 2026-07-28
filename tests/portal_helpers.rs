@@ -55,8 +55,8 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
     let generated = generate_downstream_key("sk");
 
     let state = PersistedState {
-        upstreams: vec![],
-        downstreams: vec![DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -75,10 +75,10 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: logs,
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -1342,8 +1342,8 @@ async fn test_compute_model_stats_empty_allowlist() {
     let generated = chat_responses_codex::keys::generate_downstream_key("sk");
 
     let state = chat_responses_codex::state::PersistedState {
-        upstreams: vec![],
-        downstreams: vec![chat_responses_codex::state::DownstreamConfig {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![chat_responses_codex::state::DownstreamConfig {
             id: "downstream-1".to_string(),
             name: "Test Downstream".to_string(),
             hash: generated.hash,
@@ -1360,10 +1360,10 @@ async fn test_compute_model_stats_empty_allowlist() {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         usage_logs: logs,
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     let app_state = chat_responses_codex::state::AppState::new(state, unique_state_path(), config);

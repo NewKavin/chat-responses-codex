@@ -59,7 +59,7 @@ fn create_test_state() -> AppState {
     };
 
     let state = PersistedState {
-        upstreams: vec![
+        upstreams: std::sync::Arc::new(vec![
             UpstreamConfig {
                 id: "upstream-1".to_string(),
                 name: "Test Upstream 1".to_string(),
@@ -80,11 +80,11 @@ fn create_test_state() -> AppState {
                 active: false,
                 ..Default::default()
             },
-        ],
-        downstreams: vec![],
+        ]),
+        downstreams: std::sync::Arc::new(vec![]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
@@ -107,11 +107,11 @@ fn create_test_state_with_upstreams_and_config(
     config: AppConfig,
 ) -> AppState {
     let state = PersistedState {
-        upstreams,
-        downstreams: vec![],
+        upstreams: std::sync::Arc::new(upstreams),
+        downstreams: std::sync::Arc::new(vec![]),
         usage_logs: vec![],
         announcement: None,
-        global_context_profiles: std::collections::HashMap::new(),
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
     };
 
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
@@ -302,7 +302,7 @@ impl StateStore for FailingQualificationStore {
 
 fn qualification_persisted_state() -> PersistedState {
     PersistedState {
-        upstreams: vec![UpstreamConfig {
+        upstreams: std::sync::Arc::new(vec![UpstreamConfig {
             id: "qualified-upstream".to_string(),
             name: "Qualified Upstream".to_string(),
             base_url: "https://example.invalid".to_string(),
@@ -311,8 +311,8 @@ fn qualification_persisted_state() -> PersistedState {
             supported_models: vec!["old".to_string()],
             active: true,
             ..Default::default()
-        }],
-        downstreams: vec![DownstreamConfig {
+        }]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
             id: "test".to_string(),
             name: "Test".to_string(),
             hash: String::new(),
@@ -329,7 +329,7 @@ fn qualification_persisted_state() -> PersistedState {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
-        }],
+        }]),
         ..Default::default()
     }
 }
@@ -445,7 +445,7 @@ async fn qualification_app() -> (axum::Router, AppState, String) {
     let mock = spawn_qualification_upstream().await;
     let state = AppState::new(
         PersistedState {
-            upstreams: vec![UpstreamConfig {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "qualified-upstream".to_string(),
                 name: "Qualified Upstream".to_string(),
                 base_url: mock.clone(),
@@ -454,7 +454,7 @@ async fn qualification_app() -> (axum::Router, AppState, String) {
                 supported_models: vec!["old".to_string()],
                 active: true,
                 ..Default::default()
-            }],
+            }]),
             ..qualification_persisted_state()
         },
         unique_state_path(),
