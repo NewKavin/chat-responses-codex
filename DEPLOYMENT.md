@@ -156,6 +156,11 @@ upstream 5xx retries the same exact route once before another route is selected.
 An upstream 429 stores the full `Retry-After` on the exact route and switches to
 another eligible route. A new round starts only after temporary all-route
 exhaustion and only when exact recovery fits the remaining request wait budget.
+If the budget cannot fit another round, the terminal `Retry-After` comes from
+the health registry's live earliest route recovery. Pure upstream rate-limit,
+concurrency, or key-quota exhaustion returns 429; a mix containing 5xx,
+transport, or generic capacity failure remains 503. The safe message includes
+failure causes, route counts, and time already spent in gateway retries.
 Automatic replay before usable output reuses the same idempotency identifier,
 but remains at-least-once when the provider does not honor an idempotency header,
 so retries can duplicate inference or provider-side storage.
@@ -169,7 +174,8 @@ Stable client outcomes:
 
 | HTTP / code | Operator action |
 |-------------|-----------------|
-| 503 `upstream_routes_exhausted` | Routes are temporary or cooling; retry using `Retry-After` |
+| 429 `upstream_routes_exhausted` | Every route is upstream rate-limited, concurrency-saturated, or key-quota exhausted; retry using `Retry-After` |
+| 503 `upstream_routes_exhausted` | Temporary exhaustion includes a 5xx, transport, or generic capacity failure; retry using `Retry-After` |
 | 502 `upstream_credentials_exhausted` | Every eligible key has a credential, balance, or billing failure |
 | 502 `upstream_model_unsupported` | Every attempted route rejected the requested model |
 | 400 `capability_not_supported` | No route can preserve an explicitly required feature |

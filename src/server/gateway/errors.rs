@@ -1,5 +1,5 @@
-use super::route_attempts::{AttemptLedger, TerminalFailure};
-use crate::state::DownstreamAdmissionRejection;
+use super::route_attempts::{AttemptLedger, FailureClassSummary, TerminalFailure};
+use crate::state::{DownstreamAdmissionRejection, RouteRecovery};
 use crate::upstream_feedback::{
     ClassifiedUpstreamFailure, FailureClass, UpstreamFeedbackClassification,
 };
@@ -16,8 +16,64 @@ fn duration_seconds_ceil(duration: Duration) -> u64 {
         .max(1)
 }
 
-pub(super) fn terminal_route_failure_error(ledger: &AttemptLedger) -> GatewayError {
+/// Human phrasing for a failure class in client-facing error messages.
+fn failure_class_phrase(class: FailureClass) -> &'static str {
+    match class {
+        FailureClass::RateLimited => "rate limited by upstream",
+        FailureClass::ConcurrencySaturated => "upstream concurrency limit saturated",
+        FailureClass::CapacityUnavailable => "upstream at capacity",
+        FailureClass::KeyQuota => "upstream API key quota exhausted",
+        FailureClass::TransientServer => "transient upstream server errors",
+        FailureClass::Transport => "upstream network errors",
+        FailureClass::Credentials => "upstream rejected credentials",
+        FailureClass::ModelUnsupported => "model unsupported by upstream",
+        FailureClass::FeatureUnsupported => "requested capability unsupported",
+        FailureClass::ProtocolUnsupported => "protocol unsupported by upstream",
+        FailureClass::RequestRejected => "request rejected by upstream",
+    }
+}
+
+/// Compact cause breakdown, e.g.
+/// "rate limited by upstream (2 routes, upstream HTTP 429), upstream
+/// concurrency limit saturated (1 route)".
+fn ledger_failure_summary(summaries: &[FailureClassSummary]) -> String {
+    summaries
+        .iter()
+        .map(|summary| {
+            let routes = if summary.routes == 1 {
+                "1 route".to_string()
+            } else {
+                format!("{} routes", summary.routes)
+            };
+            match summary.upstream_status {
+                Some(status) => format!(
+                    "{} ({routes}, upstream HTTP {status})",
+                    failure_class_phrase(summary.class)
+                ),
+                None => format!("{} ({routes})", failure_class_phrase(summary.class)),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn message_with_summary(base: &str, summary: &str) -> String {
+    if summary.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}: {summary}")
+    }
+}
+
+pub(super) fn terminal_route_failure_error(
+    ledger: &AttemptLedger,
+    routing_rounds: u32,
+    waited: Duration,
+    live_recovery: Option<RouteRecovery>,
+) -> GatewayError {
     let terminal = ledger.terminal_failure();
+    let summaries = ledger.class_summaries();
+    let failure_summary = ledger_failure_summary(&summaries);
     let mut class_counts = Map::new();
     for class in FailureClass::ALL {
         class_counts.insert(class.as_str().to_string(), json!(ledger.class_count(class)));
@@ -33,54 +89,106 @@ pub(super) fn terminal_route_failure_error(ledger: &AttemptLedger) -> GatewayErr
             json!(ledger.cooled_candidate_count()),
         ),
         ("class_counts".to_string(), Value::Object(class_counts)),
+        ("routing_rounds".to_string(), json!(routing_rounds)),
+        ("waited_ms".to_string(), json!(waited.as_millis() as u64)),
     ]);
 
     let (status, message, error_type, code, retry_after_seconds) = match terminal {
         TerminalFailure::Temporary { retry_after } => {
+            // The ledger keeps the smallest upstream-provided Retry-After,
+            // which can badly understate the local cooldown (an upstream
+            // "retry in 1s" turns into a 30s route cooldown). Prefer the
+            // health registry's live earliest recovery so clients wait long
+            // enough to actually succeed on their next attempt.
+            let retry_after = live_recovery
+                .map(|recovery| recovery.retry_after)
+                .unwrap_or(retry_after);
             let retry_after_seconds = duration_seconds_ceil(retry_after);
             details.insert(
                 "retry_after_seconds".to_string(),
                 json!(retry_after_seconds),
             );
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
+            // A pure rate-limit/concurrency/quota exhaustion is a 429 for the
+            // client: codex-style clients honor Retry-After on 429 and keep
+            // the task alive instead of surfacing an opaque upstream error.
+            // CapacityUnavailable counts only when the upstream actually
+            // answered 429 (concurrency-flavored); 5xx "no available channel"
+            // capacity failures stay 503.
+            let rate_limit_family = ledger.is_pure_rate_limit_exhaustion();
+            let mut message = message_with_summary(
                 "all eligible upstream routes are temporarily unavailable",
-                "upstream_error",
+                &failure_summary,
+            );
+            // "please try again in Ns" mirrors the OpenAI rate-limit phrasing
+            // that clients like codex parse for an automatic retry delay; on
+            // the SSE path this message is the only carrier (no Retry-After
+            // header reaches the client once streaming has started).
+            message.push_str(&format!("; please try again in {retry_after_seconds}s"));
+            if routing_rounds > 1 || waited > Duration::ZERO {
+                message.push_str(&format!(
+                    "; gateway already retried for {:.1}s across {routing_rounds} routing rounds",
+                    waited.as_secs_f64(),
+                ));
+            }
+            let (status, error_type) = if rate_limit_family {
+                (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "upstream_error")
+            };
+            (
+                status,
+                message,
+                error_type,
                 "upstream_routes_exhausted",
                 Some(retry_after_seconds),
             )
         }
         TerminalFailure::Credentials => (
             StatusCode::BAD_GATEWAY,
-            "all eligible upstream routes rejected their credentials",
+            message_with_summary(
+                "all eligible upstream routes rejected their credentials",
+                &failure_summary,
+            ),
             "upstream_error",
             "upstream_credentials_exhausted",
             None,
         ),
         TerminalFailure::ModelUnsupported => (
             StatusCode::BAD_GATEWAY,
-            "the requested model is unsupported by all eligible upstream routes",
+            message_with_summary(
+                "the requested model is unsupported by all eligible upstream routes",
+                &failure_summary,
+            ),
             "upstream_error",
             "upstream_model_unsupported",
             None,
         ),
         TerminalFailure::CapabilityUnsupported => (
             StatusCode::BAD_REQUEST,
-            "the requested capability is unsupported by all eligible upstream routes",
+            message_with_summary(
+                "the requested capability is unsupported by all eligible upstream routes",
+                &failure_summary,
+            ),
             "invalid_request_error",
             "capability_not_supported",
             None,
         ),
         TerminalFailure::ProtocolUnsupported => (
             StatusCode::BAD_GATEWAY,
-            "the requested protocol is unsupported by all eligible upstream routes",
+            message_with_summary(
+                "the requested protocol is unsupported by all eligible upstream routes",
+                &failure_summary,
+            ),
             "upstream_error",
             "upstream_protocol_unsupported",
             None,
         ),
         TerminalFailure::MixedRoutesExhausted => (
             StatusCode::BAD_GATEWAY,
-            "all eligible upstream routes were exhausted",
+            message_with_summary(
+                "all eligible upstream routes were exhausted",
+                &failure_summary,
+            ),
             "upstream_error",
             "upstream_routes_exhausted",
             None,

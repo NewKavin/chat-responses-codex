@@ -269,6 +269,32 @@ fn message_is_capacity_unavailable(message: &str) -> bool {
         "provider is busy",
         "temporarily overloaded",
         "capacity unavailable",
+        // Chinese providers (GLM/Zhipu, one-api/new-api relays) report
+        // concurrency saturation in Chinese; missing these downgrades the
+        // failure to a generic rate limit with a much longer cooldown.
+        "并发",
+        "繁忙",
+        "过载",
+        "超载",
+        "负载饱和",
+        "负载已饱和",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn message_is_rate_limited(message: &str) -> bool {
+    [
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "限流",
+        "限速",
+        "频率过高",
+        "请求过于频繁",
+        "请求太频繁",
+        "请求过多",
+        "速率限制",
     ]
     .iter()
     .any(|pattern| message.contains(pattern))
@@ -311,6 +337,7 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
         FailureClass::Credentials
     } else if parsed.has_status(429)
         || parsed.has_code(&["rate_limit_error", "rate_limited", "too_many_requests"])
+        || message_is_rate_limited(&message)
     {
         FailureClass::RateLimited
     } else if parsed.has_code(&[
@@ -384,6 +411,7 @@ impl UpstreamFeedbackClassification {
                 if body_lower.contains("concurrency")
                     || body_lower.contains("concurrent")
                     || body_lower.contains("in-flight")
+                    || body_lower.contains("并发")
                 {
                     return Self::ConcurrencyFull;
                 }
@@ -396,6 +424,11 @@ impl UpstreamFeedbackClassification {
                     || body_lower.contains("quota_failed")
                     || body_lower.contains("quota exceeded")
                     || body_lower.contains("quota_exceeded")
+                    || body_lower.contains("限流")
+                    || body_lower.contains("限速")
+                    || body_lower.contains("频率过高")
+                    || body_lower.contains("请求过多")
+                    || body_lower.contains("速率限制")
                 {
                     return Self::RateLimited;
                 }
@@ -404,6 +437,11 @@ impl UpstreamFeedbackClassification {
                     || body_lower.contains("overloaded")
                     || body_lower.contains("capacity")
                     || body_lower.contains("throttle")
+                    || body_lower.contains("繁忙")
+                    || body_lower.contains("过载")
+                    || body_lower.contains("超载")
+                    || body_lower.contains("负载饱和")
+                    || body_lower.contains("负载已饱和")
                 {
                     return Self::ProviderBusy;
                 }
@@ -454,6 +492,11 @@ impl UpstreamFeedbackClassification {
                 || body_lower.contains("quota_failed")
                 || body_lower.contains("quota exceeded")
                 || body_lower.contains("quota_exceeded")
+                || body_lower.contains("限流")
+                || body_lower.contains("限速")
+                || body_lower.contains("频率过高")
+                || body_lower.contains("请求过多")
+                || body_lower.contains("速率限制")
             {
                 return Self::RateLimited;
             }
@@ -463,6 +506,11 @@ impl UpstreamFeedbackClassification {
                 || body_lower.contains("overloaded")
                 || body_lower.contains("capacity")
                 || body_lower.contains("throttle")
+                || body_lower.contains("繁忙")
+                || body_lower.contains("过载")
+                || body_lower.contains("超载")
+                || body_lower.contains("负载饱和")
+                || body_lower.contains("负载已饱和")
             {
                 return Self::ProviderBusy;
             }
@@ -471,6 +519,7 @@ impl UpstreamFeedbackClassification {
             if body_lower.contains("concurrency")
                 || body_lower.contains("concurrent")
                 || body_lower.contains("in-flight")
+                || body_lower.contains("并发")
             {
                 return Self::ConcurrencyFull;
             }

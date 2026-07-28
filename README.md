@@ -202,7 +202,7 @@ flowchart LR
 
 `/v1/models` 只读取持久化模型目录，不读取运行时健康状态。精确路由健康状态只保存在当前进程：重启会清空冷却/半开记录并以 fail-open 方式重新尝试，但不会新增或删除目录模型。因此，共享同一数据库时只支持一个活跃网关实例。
 
-请求失败时使用有界切路：普通上游 5xx 在同一精确路由最多重试一次；429 保存上游完整的 `Retry-After`、冷却该路由并立即尝试下一条候选路由。明确识别为上游并发已满、但没有 `Retry-After` 的 429 使用 `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS` 短探测序列，同一路由同一时刻只允许一个半开探测。全部候选路由都因临时故障耗尽后，只有最早恢复时间（含不超过 100 毫秒的抖动）能放进剩余等待预算时才开始新一轮，且绝不会早于供应商的 `Retry-After`。否则网关立即返回终态 503 和完整等待时间。自动重放只发生在首个可用输出交付之前，并复用同一个幂等标识；如果供应商不支持该幂等头，交付语义仍是 at-least-once，可能产生重复推理或供应商侧存储。
+请求失败时使用有界切路：普通上游 5xx 在同一精确路由最多重试一次；429 保存上游完整的 `Retry-After`、冷却该路由并立即尝试下一条候选路由。明确识别为上游并发已满、但没有 `Retry-After` 的 429 使用 `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS` 短探测序列，同一路由同一时刻只允许一个半开探测。全部候选路由都因临时故障耗尽后，只有最早恢复时间（含不超过 100 毫秒的抖动）能放进剩余等待预算时才开始新一轮，且绝不会早于供应商的 `Retry-After`。否则网关使用健康注册表中的实时最早恢复时间作为终态 `Retry-After`：纯上游限流、并发饱和或 Key 配额耗尽返回 429，混合了 5xx、网络错误或普通容量不足时仍返回 503。安全错误文案会列出失败原因、路由数量和已消耗的网关重试时间。自动重放只发生在首个可用输出交付之前，并复用同一个幂等标识；如果供应商不支持该幂等头，交付语义仍是 at-least-once，可能产生重复推理或供应商侧存储。
 
 `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=0` means zero disables waiting, and total rounds include the initial round. The gateway preserves the full `Retry-After`; configured priority cannot make an unhealthy route eligible; output or tool calls are never replayed after delivery.
 
@@ -210,7 +210,8 @@ flowchart LR
 
 | HTTP / code | 含义 |
 |-------------|------|
-| 503 `upstream_routes_exhausted` | 候选路由暂时冷却或不可用；客户端按 `Retry-After` 重试 |
+| 429 `upstream_routes_exhausted` | 所有候选均为上游限流、并发饱和或 Key 配额耗尽；错误类型为 `rate_limit_error`，客户端按 `Retry-After` 重试 |
+| 503 `upstream_routes_exhausted` | 临时耗尽中混有 5xx、网络错误或普通容量不足；客户端按 `Retry-After` 重试 |
 | 502 `upstream_credentials_exhausted` | 所有候选 Key 均发生凭证、余额或计费失败 |
 | 502 `upstream_model_unsupported` | 所有已尝试路由均拒绝该模型 |
 | 400 `capability_not_supported` | 没有路由能保留客户端明确要求的能力 |
@@ -480,7 +481,7 @@ Configuration model:
 
 Each key under one upstream account has its own persisted model mapping and is scheduled as an exact route. A successful discovery that returns no models is an authoritative empty mapping: that key supports no models and does not inherit the account-level list. As an upgrade step, a deployment with empty persisted `supported_models` must complete one explicit discovery, or one full background legacy discovery, before `/v1/models` advertises those models. The endpoint reads only the persisted model catalog.
 
-Runtime failures never rewrite capability data. A generic upstream 5xx retries the same exact route once before moving on. An upstream 429 stores the full `Retry-After` as route cooldown and switches immediately to another eligible route. A concurrency-specific 429 without `Retry-After` uses `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS`, with one half-open probe per exact route at a time. After temporary all-route exhaustion, the gateway starts a fresh round only when the earliest exact-route recovery plus jitter fits the remaining logical-request wait budget; it never probes before provider recovery. Automatic replay before usable output reuses the same idempotency identifier, but delivery remains at-least-once when a provider ignores or does not support the idempotency header; duplicate inference or provider-side storage is still possible.
+Runtime failures never rewrite capability data. A generic upstream 5xx retries the same exact route once before moving on. An upstream 429 stores the full `Retry-After` as route cooldown and switches immediately to another eligible route. A concurrency-specific 429 without `Retry-After` uses `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS`, with one half-open probe per exact route at a time. After temporary all-route exhaustion, the gateway starts a fresh round only when the earliest exact-route recovery plus jitter fits the remaining logical-request wait budget; it never probes before provider recovery. A terminal response uses the health registry's live earliest recovery for `Retry-After`: pure upstream rate-limit, concurrency, or key-quota exhaustion returns 429, while any mixed 5xx, transport, or generic capacity failure remains 503. The safe message includes cause counts and gateway retry time. Automatic replay before usable output reuses the same idempotency identifier, but delivery remains at-least-once when a provider ignores or does not support the idempotency header; duplicate inference or provider-side storage is still possible.
 
 `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=0` means zero disables waiting, and total rounds include the initial round. The gateway preserves the full `Retry-After`; configured priority cannot make an unhealthy route eligible; output or tool calls are never replayed after delivery.
 
@@ -490,7 +491,8 @@ Stable client outcomes:
 
 | HTTP / code | Meaning |
 |-------------|---------|
-| 503 `upstream_routes_exhausted` | Routes are temporarily unavailable or cooling; retry using `Retry-After` |
+| 429 `upstream_routes_exhausted` | Every route is upstream rate-limited, concurrency-saturated, or key-quota exhausted; type is `rate_limit_error` |
+| 503 `upstream_routes_exhausted` | Temporary exhaustion includes a 5xx, transport, or generic capacity failure |
 | 502 `upstream_credentials_exhausted` | Every eligible key failed credentials, balance, or billing checks |
 | 502 `upstream_model_unsupported` | Every attempted route rejected the requested model |
 | 400 `capability_not_supported` | No route can preserve an explicitly required capability |

@@ -274,6 +274,16 @@ impl RequestRouteAttempts {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FailureClassSummary {
+    pub class: FailureClass,
+    pub routes: usize,
+    /// Most common upstream HTTP status physically observed for this class in
+    /// the current request. Pre-existing cooldowns carry no real status, so
+    /// they contribute to `routes` but never to this field.
+    pub upstream_status: Option<u16>,
+}
+
 impl AttemptLedger {
     pub fn record(&mut self, failure: AttemptFailure) {
         self.cooled_candidates
@@ -339,6 +349,62 @@ impl AttemptLedger {
             .chain(self.cooled_candidates.iter())
             .filter(|failure| failure.class == class)
             .count()
+    }
+
+    /// Whether every exhausted route has rate-limit semantics suitable for a
+    /// downstream 429. Capacity failures are ambiguous unless the physical
+    /// upstream response was itself a 429; a single 5xx keeps the aggregate
+    /// response on the 503 path.
+    pub fn is_pure_rate_limit_exhaustion(&self) -> bool {
+        !self.is_empty()
+            && self
+                .failures
+                .iter()
+                .chain(self.cooled_candidates.iter())
+                .all(|failure| match failure.class {
+                    FailureClass::RateLimited
+                    | FailureClass::KeyQuota
+                    | FailureClass::ConcurrencySaturated => true,
+                    FailureClass::CapacityUnavailable => failure.upstream_status == Some(429),
+                    _ => false,
+                })
+    }
+
+    /// Per-class breakdown across attempted and cooled routes, largest class
+    /// first, for the client-facing terminal error message.
+    pub fn class_summaries(&self) -> Vec<FailureClassSummary> {
+        let mut summaries = Vec::new();
+        for class in FailureClass::ALL {
+            let routes = self.class_count(class);
+            if routes == 0 {
+                continue;
+            }
+            let mut status_counts: HashMap<u16, usize> = HashMap::new();
+            for failure in self
+                .failures
+                .iter()
+                .filter(|failure| failure.class == class)
+            {
+                if let Some(status) = failure.upstream_status {
+                    *status_counts.entry(status).or_default() += 1;
+                }
+            }
+            let upstream_status = status_counts
+                .into_iter()
+                .max_by_key(|(status, count)| (*count, std::cmp::Reverse(*status)))
+                .map(|(status, _)| status);
+            summaries.push(FailureClassSummary {
+                class,
+                routes,
+                upstream_status,
+            });
+        }
+        summaries.sort_by(|a, b| {
+            b.routes
+                .cmp(&a.routes)
+                .then_with(|| a.class.as_str().cmp(b.class.as_str()))
+        });
+        summaries
     }
 
     pub fn terminal_observation(&self) -> Option<AttemptFailure> {

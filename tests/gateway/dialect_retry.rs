@@ -520,7 +520,7 @@ async fn responses_to_chat_auth_and_quota_errors_never_drop_tools_or_retry() {
 
         let expected_status = match status {
             401 | 403 => 502,
-            429 => 503,
+            429 => 429,
             _ => status,
         };
         assert_eq!(response.status().as_u16(), expected_status);

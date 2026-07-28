@@ -275,7 +275,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
     .expect("429 cooldown test should not wait for retry-after")
     .expect("429 cooldown test request should complete");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
     let snapshots = state.upstream_runtime_snapshots().await;
     let snapshot = snapshots.get("up-1").unwrap();
@@ -396,13 +396,13 @@ async fn upstream_429_does_not_poison_downstream_per_minute_window() {
     };
 
     let first = app.clone().oneshot(request()).await.unwrap();
-    assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
     let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
     let first_payload: Value = serde_json::from_slice(&first_body).unwrap();
     assert_eq!(first_payload["error"]["code"], "upstream_routes_exhausted");
 
     let second = app.oneshot(request()).await.unwrap();
-    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
     let second_payload: Value = serde_json::from_slice(&second_body).unwrap();
     let second_error = second_payload["error"]["message"]
@@ -565,7 +565,7 @@ async fn upstream_429_clears_routing_affinity_for_the_failed_upstream() {
     );
 
     let second = app.oneshot(request()).await.unwrap();
-    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
         state.get_affinity_upstream("down-1", "gpt-4.1-mini"),
         None,

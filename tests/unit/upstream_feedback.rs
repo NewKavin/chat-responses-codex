@@ -80,6 +80,39 @@ fn key_quota_requires_structured_key_scope() {
 }
 
 #[test]
+fn chinese_concurrency_429_is_capacity_unavailable() {
+    // GLM/Zhipu concurrency saturation (error code 1302 family) reports in
+    // Chinese; it must ride the fast concurrency recovery path instead of the
+    // 30s+ exponential rate-limit cooldown.
+    assert_class(
+        429,
+        r#"{"error":{"code":"1302","message":"您当前使用该API的并发数过高，请降低并发，或联系客服增加限额"}}"#,
+        FailureClass::CapacityUnavailable,
+    );
+    assert_class(
+        429,
+        r#"{"error":{"message":"当前分组上游负载已饱和，请稍后再试"}}"#,
+        FailureClass::CapacityUnavailable,
+    );
+}
+
+#[test]
+fn chinese_rate_limit_bodies_classify_as_rate_limited() {
+    assert_class(
+        429,
+        r#"{"error":{"message":"您当前使用该API的调用频率过高，请稍后重试"}}"#,
+        FailureClass::RateLimited,
+    );
+    // Relay wrappers sometimes hide the 429 behind another status; the
+    // Chinese rate-limit phrasing still identifies the failure.
+    assert_class(
+        400,
+        r#"{"error":{"message":"触发限流策略，请稍后重试"}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
 fn retry_after_is_preserved_without_legacy_clipping() {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(reqwest::header::RETRY_AFTER, "86400".parse().unwrap());
@@ -124,6 +157,22 @@ fn test_429_with_concurrency_body_is_concurrency_full() {
         429,
         &headers,
         Some(r#"{"error": {"message": "concurrency limit exceeded"}}"#),
+    );
+    assert_eq!(
+        classification,
+        UpstreamFeedbackClassification::ConcurrencyFull
+    );
+}
+
+#[test]
+fn test_429_with_chinese_concurrency_body_is_concurrency_full() {
+    let headers = reqwest::header::HeaderMap::new();
+    let classification = UpstreamFeedbackClassification::from_response(
+        429,
+        &headers,
+        Some(
+            r#"{"error": {"code": "1302", "message": "您当前使用该API的并发数过高，请降低并发"}}"#,
+        ),
     );
     assert_eq!(
         classification,

@@ -95,7 +95,7 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
                 .then(|| Duration::from_secs(11 + index as u64)),
         });
     }
-    terminal_route_failure_error(&ledger)
+    terminal_route_failure_error(&ledger, 1, Duration::ZERO, None)
 }
 
 #[test]
@@ -165,9 +165,141 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         retry_after: Some(Duration::from_millis(1_001)),
     });
 
-    let error = terminal_route_failure_error(&ledger);
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None);
     assert_eq!(error.retry_after_seconds(), Some(2));
     assert_eq!(error.safe_details()["retry_after_seconds"], 2);
+}
+
+#[test]
+fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(429),
+        class: FailureClass::RateLimited,
+        retry_after: Some(Duration::from_secs(24)),
+    });
+    ledger.record_cooled(AttemptFailure {
+        route_id: "route-b".into(),
+        upstream_status: Some(503),
+        class: FailureClass::ConcurrencySaturated,
+        retry_after: Some(Duration::from_secs(2)),
+    });
+
+    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(9_800), None);
+
+    assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.error_type(), "rate_limit_error");
+    assert_eq!(error.error_code(), "upstream_routes_exhausted");
+    assert_eq!(error.retry_after_seconds(), Some(2));
+    let message = error.message();
+    assert!(
+        message.contains("rate limited by upstream (1 route, upstream HTTP 429)"),
+        "message must name the rate limit cause: {message}"
+    );
+    assert!(
+        message.contains("upstream concurrency limit saturated (1 route)"),
+        "message must name the concurrency cause without a synthetic status: {message}"
+    );
+    assert!(
+        message.contains("please try again in 2s"),
+        "message must include the recovery estimate: {message}"
+    );
+    assert!(
+        message.contains("retried for 9.8s across 3 routing rounds"),
+        "message must include the retry budget spent: {message}"
+    );
+    let details = error.safe_details();
+    assert_eq!(details["routing_rounds"], 3);
+    assert_eq!(details["waited_ms"], 9_800);
+}
+
+#[test]
+fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(429),
+        class: FailureClass::RateLimited,
+        retry_after: Some(Duration::from_secs(24)),
+    });
+    ledger.record(AttemptFailure {
+        route_id: "route-b".into(),
+        upstream_status: Some(502),
+        class: FailureClass::TransientServer,
+        retry_after: Some(Duration::from_secs(10)),
+    });
+
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None);
+
+    assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.error_type(), "upstream_error");
+    let message = error.message();
+    assert!(
+        message.contains("rate limited by upstream (1 route, upstream HTTP 429)"),
+        "message must name each cause: {message}"
+    );
+    assert!(
+        message.contains("transient upstream server errors (1 route, upstream HTTP 502)"),
+        "message must name each cause: {message}"
+    );
+    assert!(
+        !message.contains("retried for"),
+        "single-round exhaustion must not claim a retry wait: {message}"
+    );
+}
+
+#[test]
+fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route-a".into(),
+        upstream_status: Some(429),
+        class: FailureClass::CapacityUnavailable,
+        retry_after: Some(Duration::from_secs(2)),
+    });
+    ledger.record(AttemptFailure {
+        route_id: "route-b".into(),
+        upstream_status: Some(503),
+        class: FailureClass::CapacityUnavailable,
+        retry_after: Some(Duration::from_secs(10)),
+    });
+
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None);
+
+    assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.error_type(), "upstream_error");
+}
+
+#[test]
+fn live_recovery_overrides_understated_upstream_retry_after() {
+    // Upstream said "retry in 1s" but the local cooldown is ~27s; the client
+    // must be told the number that will actually succeed.
+    let mut ledger = AttemptLedger::default();
+    ledger.record(AttemptFailure {
+        route_id: "route".into(),
+        upstream_status: Some(429),
+        class: FailureClass::RateLimited,
+        retry_after: Some(Duration::from_secs(1)),
+    });
+
+    let error = terminal_route_failure_error(
+        &ledger,
+        1,
+        Duration::ZERO,
+        Some(RouteRecovery {
+            class: FailureClass::RateLimited,
+            retry_after: Duration::from_secs(27),
+        }),
+    );
+
+    assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.retry_after_seconds(), Some(27));
+    let message = error.message();
+    assert!(
+        message.contains("please try again in 27s"),
+        "message must carry the live recovery estimate: {message}"
+    );
 }
 
 #[test]

@@ -343,7 +343,9 @@ async fn upstream_rate_limited_high_cost_model_returns_without_waiting_for_coold
         .unwrap()
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Rate-limit-only exhaustion is reported as 429 so OpenAI-compatible
+    // clients apply their rate-limit retry behavior.
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
@@ -443,7 +445,7 @@ async fn upstream_rate_limited_single_candidate_returns_without_waiting_for_cool
         .unwrap()
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
@@ -1084,7 +1086,7 @@ async fn upstream_rate_limited_single_candidate_does_not_retry_in_place() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
@@ -1337,7 +1339,7 @@ async fn long_retry_after_returns_immediately_without_second_round() {
     .expect("long provider Retry-After must not schedule a retry wait")
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let retry_after_header = response
         .headers()
         .get(header::RETRY_AFTER)

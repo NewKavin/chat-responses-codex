@@ -486,7 +486,7 @@ async fn upstream_model_not_supported_message_is_aggregated_as_model_unsupported
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn multi_key_capacity_exhaustion_uses_shortest_retry_and_safe_terminal_error() {
+async fn multi_key_capacity_exhaustion_uses_live_recovery_and_safe_terminal_error() {
     with_proxy_env_cleared(|| async move {
         let tempdir = tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -610,7 +610,7 @@ async fn multi_key_capacity_exhaustion_uses_shortest_retry_and_safe_terminal_err
                 .headers()
                 .get(header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok()),
-            Some("7")
+            Some("13")
         );
         let payload: Value = serde_json::from_slice(
             &to_bytes(response.into_body(), usize::MAX).await.unwrap(),

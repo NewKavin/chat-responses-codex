@@ -5647,7 +5647,15 @@ async fn process_gateway_request_inner(
                     )
                 ));
         let error = if should_aggregate {
-            terminal_route_failure_error(&attempt_ledger)
+            let live_recovery = state
+                .earliest_temporary_route_recovery(&request_route_attempts.eligible_routes())
+                .await;
+            terminal_route_failure_error(
+                &attempt_ledger,
+                request_route_attempts.routing_round(),
+                route_retry_budget.waited(),
+                live_recovery,
+            )
         } else {
             last_route_error
         };

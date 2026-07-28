@@ -1245,7 +1245,7 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
         .expect("upstream Retry-After must not block the downstream request")
         .unwrap();
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             response
                 .headers()
