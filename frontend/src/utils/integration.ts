@@ -98,8 +98,6 @@ const tomlEscape = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g,
 
 const tomlString = (value: string) => `"${tomlEscape(value)}"`
 
-const shellSingleQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
-
 const comparePortalModelStats = (left: PortalModelStat, right: PortalModelStat) => {
   if (left.month_count !== right.month_count) {
     return right.month_count - left.month_count
@@ -271,6 +269,20 @@ export const buildIntegrationCatalogViewState = ({
   }
 }
 
+export const resolveCodexModelSelection = (
+  catalog: CodexCatalogResponse | null,
+  modelSlugs: string[],
+  selectedModelSlug?: string
+) => {
+  const modelSlug = choosePrimaryModelSlug(modelSlugs, selectedModelSlug)
+  return {
+    modelSlug,
+    modelReasoningEffort: catalog && modelSlug
+      ? chooseCodexReasoningEffort(catalog, modelSlug)
+      : 'none'
+  }
+}
+
 export const buildCodexModelCatalogJson = (catalog?: CodexCatalogResponse) => {
   if (!catalog || !Array.isArray(catalog.models)) {
     throw new Error('live Codex catalog is unavailable')
@@ -302,8 +314,8 @@ tool_suggest = true
 multi_agent = true
 
 [agents]
-max_threads = 8
-max_depth = 3
+max_threads = 4
+max_depth = 2
 
 [model_providers.gateway]
 name = "Chat Responses Gateway"
@@ -316,8 +328,13 @@ stream_max_retries = 8
 
 export const buildCodexDoctorCommand = () => 'codex --strict-config doctor --summary'
 
-export const buildCodexAuthLoginCommand = (portalKey: string) =>
-  `printf '%s' ${shellSingleQuote(portalKey)} | codex login --with-api-key`
+export const buildCodexAuthLoginCommand = () =>
+  [
+    "read -rsp 'Gateway downstream key: ' CHAT2RESPONSES_DOWNSTREAM_KEY",
+    "printf '\\n'",
+    `printf '%s' "$CHAT2RESPONSES_DOWNSTREAM_KEY" | codex login --with-api-key`,
+    'unset CHAT2RESPONSES_DOWNSTREAM_KEY'
+  ].join('\n')
 
 export const buildHermesConfigYaml = (input: HermesConfigInput) => {
   const gatewayApiBaseUrl = `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`

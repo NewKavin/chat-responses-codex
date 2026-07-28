@@ -16,6 +16,7 @@ import {
   buildOpenCodeConfig,
   extractGatewayModelSlugs,
   rankModelSlugsByUsage,
+  resolveCodexModelSelection,
   sortPortalModelStats
 } from '../../src/utils/integration'
 
@@ -245,6 +246,36 @@ describe('integration config generators', () => {
     expect(state.primaryModelReasoningEffort).toBe('none')
   })
 
+  it('resolves an explicit Codex model with its live reasoning default', () => {
+    const catalog = {
+      models: [
+        { slug: 'most-used/model', default_reasoning_level: 'medium' },
+        { slug: 'selected/model', default_reasoning_level: 'high' }
+      ]
+    }
+
+    expect(
+      resolveCodexModelSelection(
+        catalog,
+        ['most-used/model', 'selected/model'],
+        'selected/model'
+      )
+    ).toEqual({
+      modelSlug: 'selected/model',
+      modelReasoningEffort: 'high'
+    })
+    expect(
+      resolveCodexModelSelection(
+        catalog,
+        ['most-used/model', 'selected/model'],
+        'removed/model'
+      )
+    ).toEqual({
+      modelSlug: 'most-used/model',
+      modelReasoningEffort: 'medium'
+    })
+  })
+
   it('builds a codex config that keeps the key out of config.toml', () => {
     const input = {
       gatewayBaseUrl: 'https://portal.example.com',
@@ -261,8 +292,8 @@ describe('integration config generators', () => {
     expect(toml).toContain('model_catalog_json = "model-catalog.json"')
     expect(toml).toContain('cli_auth_credentials_store = "file"')
     expect(toml).toContain('multi_agent = true')
-    expect(toml).toContain('max_threads = 8')
-    expect(toml).toContain('max_depth = 3')
+    expect(toml).toContain('max_threads = 4')
+    expect(toml).toContain('max_depth = 2')
     expect(toml).toContain('base_url = "https://portal.example.com/v1"')
     expect(toml).toContain('stream_max_retries = 8')
     expect(toml.indexOf('web_search = "disabled"')).toBeLessThan(toml.indexOf('[features]'))
@@ -376,10 +407,16 @@ describe('integration config generators', () => {
     expect(settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('lab/opaque')
   })
 
-  it('builds a codex login command that seeds auth.json', () => {
-    expect(buildCodexAuthLoginCommand('sk-downstream-123')).toBe(
-      `printf '%s' 'sk-downstream-123' | codex login --with-api-key`
+  it('builds a Codex login command that keeps the key out of shell history', () => {
+    const command = buildCodexAuthLoginCommand()
+
+    expect(command).toBe(
+      `read -rsp 'Gateway downstream key: ' CHAT2RESPONSES_DOWNSTREAM_KEY\n` +
+      `printf '\\n'\n` +
+      `printf '%s' "$CHAT2RESPONSES_DOWNSTREAM_KEY" | codex login --with-api-key\n` +
+      `unset CHAT2RESPONSES_DOWNSTREAM_KEY`
     )
+    expect(command).not.toContain('sk-downstream-123')
   })
 
   it('builds the strict-config doctor command for Codex', () => {
