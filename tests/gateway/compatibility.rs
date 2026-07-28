@@ -2,8 +2,7 @@ use super::common::*;
 use chat_responses_codex::capabilities::*;
 use serde_json::json;
 
-#[tokio::test]
-async fn v1_models_endpoint_returns_available_models() {
+async fn basic_models_payload(uri: &str) -> Value {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.json");
     let downstream_key = generate_downstream_key("gw");
@@ -47,11 +46,10 @@ async fn v1_models_endpoint_returns_available_models() {
         AppConfig::default(),
     );
 
-    let app = build_router(state);
-    let response = app
+    let response = build_router(state)
         .oneshot(
             Request::builder()
-                .uri("/v1/models")
+                .uri(uri)
                 .header(
                     header::AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
@@ -63,6 +61,40 @@ async fn v1_models_endpoint_returns_available_models() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn v1_models_endpoint_returns_available_models() {
+    let payload = basic_models_payload("/v1/models").await;
+
+    assert_eq!(payload["object"], "list");
+    assert_eq!(
+        payload["data"],
+        json!([{
+            "id": "opaque/catalog-model",
+            "object": "model"
+        }])
+    );
+    assert!(payload.get("models").is_none());
+}
+
+#[tokio::test]
+async fn v1_models_endpoint_returns_codex_model_catalog_for_format() {
+    let payload = basic_models_payload("/v1/models?format=codex").await;
+
+    assert!(payload["models"].is_array());
+    assert!(payload.get("data").is_none());
+}
+
+#[tokio::test]
+async fn v1_models_endpoint_returns_standard_catalog_for_unknown_format() {
+    let payload = basic_models_payload("/v1/models?format=unknown").await;
+
+    assert_eq!(payload["object"], "list");
+    assert!(payload["data"].is_array());
+    assert!(payload.get("models").is_none());
 }
 
 #[tokio::test]
@@ -240,7 +272,7 @@ async fn v1_models_endpoint_returns_codex_model_catalog_for_client_version() {
     assert_eq!(model["supports_parallel_tool_calls"], true);
     assert_eq!(model["supports_image_detail_original"], false);
     assert_eq!(model["context_window"], 272_000);
-    assert_eq!(model["effective_context_window_percent"], 95);
+    assert_eq!(model["effective_context_window_percent"], 80);
     assert_eq!(model["truncation_policy"]["mode"], "bytes");
     assert_eq!(model["truncation_policy"]["limit"], 10_000);
     assert_eq!(model["experimental_supported_tools"], json!([]));

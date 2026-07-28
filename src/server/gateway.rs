@@ -1770,11 +1770,9 @@ async fn list_models(
             .into_response();
     };
 
-    // Codex sends `?client_version=x.y.z` when fetching its model catalog.
-    // Return the Codex-compatible `{"models": [ModelInfo]}` shape so Codex
-    // can display context-window usage and reasoning levels for custom
-    // models served through the gateway.
-    if query.client_version.is_some() {
+    // Codex sends `?client_version=x.y.z`; portal callers opt in explicitly
+    // with `?format=codex` without pinning a browser-side client version.
+    if query.client_version.is_some() || query.format.as_deref() == Some("codex") {
         return list_models_codex_format(&state, &secret).await;
     }
 
@@ -1793,6 +1791,7 @@ async fn list_models(
 #[derive(serde::Deserialize)]
 struct ModelsQuery {
     client_version: Option<String>,
+    format: Option<String>,
 }
 
 struct CodexReasoningMetadata {
@@ -1996,7 +1995,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "supports_image_detail_original": false,
                 "context_window": context_window,
                 "max_context_window": context_window,
-                "effective_context_window_percent": 95,
+                "effective_context_window_percent": 80,
                 "additional_speed_tiers": [],
                 "service_tiers": [],
                 "experimental_supported_tools": [],
