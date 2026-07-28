@@ -24,7 +24,7 @@
         <el-descriptions-item label="可用模型数">
           <code>{{ allModelSlugs.length }}</code>
         </el-descriptions-item>
-        <el-descriptions-item label="默认模型">
+        <el-descriptions-item label="历史最常用模型">
           <code>{{ primaryModelSlug || '未发现模型' }}</code>
         </el-descriptions-item>
       </el-descriptions>
@@ -144,7 +144,7 @@
               type="success"
               effect="plain"
             >
-              默认
+              历史最常用
             </el-tag>
           </div>
           <span class="model-ranking__metrics">
@@ -196,6 +196,26 @@
               <code>max_threads</code> 表示并发代理线程，<code>max_depth</code> 表示嵌套委派深度；这些本地限制不覆盖网关 quota。
             </p>
 
+            <div class="codex-model-selector">
+              <div class="codex-model-selector__label">
+                <strong>Codex 默认模型</strong>
+                <span>初始选择为门户历史使用量最高的模型</span>
+              </div>
+              <el-select
+                v-model="selectedCodexModelSlug"
+                aria-label="Codex 默认模型"
+                filterable
+                placeholder="选择 Codex 模型"
+              >
+                <el-option
+                  v-for="modelSlug in allModelSlugs"
+                  :key="modelSlug"
+                  :label="modelSlug"
+                  :value="modelSlug"
+                />
+              </el-select>
+            </div>
+
             <div class="step-card">
               <div class="step-head">
                 <div>
@@ -222,7 +242,7 @@
                     这个文件包含当前下游白名单中的完整模型目录，route 与能力元数据由网关生成。
                     已配置的 <code>context_window</code> 会写入对应模型，
                     Codex 默认会在累计 token 达到该窗口的
-                    <strong>95%</strong> 时自动压缩历史，无需在 <code>config.toml</code>
+                    <strong>80%</strong> 时自动压缩历史，无需在 <code>config.toml</code>
                     再设全局阈值；切换模型时压缩点会跟着模型的实际窗口变。
                   </p>
                 </div>
@@ -259,7 +279,7 @@
               type="success"
               :closable="false"
               show-icon
-              title="完成后直接启动 Codex。默认模型已经按门户统计排好顺序，Codex 会优先使用最常用的模型。运行 codex --strict-config doctor --summary 可检查配置。"
+              title="完成后直接启动 Codex。初始模型是门户历史使用量最高的模型，也可以在上方切换。运行 codex --strict-config doctor --summary 可检查配置。"
             />
           </div>
         </el-tab-pane>
@@ -521,7 +541,8 @@ import {
   buildAnthropicCompatibleConfig,
   buildHermesConfigYaml,
   buildOpenAiCompatibleConfig,
-  buildOpenCodeConfig
+  buildOpenCodeConfig,
+  resolveCodexModelSelection
 } from '@/utils/integration'
 
 const activeTab = ref('codex')
@@ -531,6 +552,7 @@ const portalKey = ref('')
 const portalModelStats = ref<PortalModelStat[]>([])
 const modelAllowlist = ref<string[]>([])
 const codexCatalog = ref<CodexCatalogResponse | null>(null)
+const selectedCodexModelSlug = ref('')
 const modelContexts = ref<Record<string, ModelContextEntry>>({})
 const loadWarnings = ref<string[]>([])
 const fatalError = ref('')
@@ -549,8 +571,12 @@ const catalogViewState = computed(() =>
 
 const allModelSlugs = computed(() => catalogViewState.value.allModelSlugs)
 const primaryModelSlug = computed(() => catalogViewState.value.primaryModelSlug)
-const primaryModelReasoningEffort = computed(
-  () => catalogViewState.value.primaryModelReasoningEffort
+const codexModelSelection = computed(() =>
+  resolveCodexModelSelection(
+    codexCatalog.value,
+    allModelSlugs.value,
+    selectedCodexModelSlug.value
+  )
 )
 
 const hermesInstallNpm = computed(() => `# 在项目根目录
@@ -593,8 +619,8 @@ const codexConfigToml = computed(() =>
   canGenerateConfigContent.value
     ? buildCodexConfigToml({
         gatewayBaseUrl: gatewayBaseUrl.value,
-        modelSlug: primaryModelSlug.value,
-        modelReasoningEffort: primaryModelReasoningEffort.value
+        modelSlug: codexModelSelection.value.modelSlug,
+        modelReasoningEffort: codexModelSelection.value.modelReasoningEffort
       })
     : ''
 )
@@ -605,7 +631,7 @@ const codexModelCatalogJson = computed(() => {
 })
 
 const codexAuthLoginCommand = computed(() =>
-  canGenerateConfigContent.value ? buildCodexAuthLoginCommand(portalKey.value) : ''
+  canGenerateConfigContent.value ? buildCodexAuthLoginCommand() : ''
 )
 
 const opencodeConfig = computed(() =>
@@ -653,7 +679,7 @@ const openAiCompatibleConfig = computed(() =>
 )
 
 const fetchGatewayCodexCatalog = async (key: string) => {
-  const response = await fetch(`${buildGatewayModelsEndpoint(gatewayBaseUrl.value)}?client_version=0.144.6`, {
+  const response = await fetch(`${buildGatewayModelsEndpoint(gatewayBaseUrl.value)}?format=codex`, {
     headers: {
       Authorization: `Bearer ${key}`
     }
@@ -675,6 +701,11 @@ const fetchGatewayCodexCatalog = async (key: string) => {
 
 const applyCodexCatalog = (catalog: CodexCatalogResponse) => {
   codexCatalog.value = catalog
+  selectedCodexModelSlug.value = resolveCodexModelSelection(
+    catalog,
+    allModelSlugs.value,
+    selectedCodexModelSlug.value
+  ).modelSlug
 }
 
 const loadIntegrationData = async () => {
@@ -912,6 +943,32 @@ p {
   border-radius: var(--crc-radius-sm);
 }
 
+.codex-model-selector {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--crc-border);
+}
+
+.codex-model-selector__label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.codex-model-selector__label strong {
+  color: var(--crc-text-strong);
+  font-size: 14px;
+}
+
+.codex-model-selector__label span {
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
 .step-card {
   padding: 18px 0;
   border-top: 1px solid var(--crc-border);
@@ -978,6 +1035,10 @@ p {
 }
 
 @media (max-width: 768px) {
+  .codex-model-selector {
+    grid-template-columns: 1fr;
+  }
+
   .step-head,
   .section-head {
     flex-direction: column;

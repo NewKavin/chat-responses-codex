@@ -11,6 +11,8 @@ describe('admin ui structure', () => {
     const dashboard = source('views/admin/Dashboard.vue')
 
     expect(dashboard).toContain('crc-page dashboard-page')
+    expect(dashboard).toContain("const chartRange = ref<ChartRange>('1d')")
+    expect(dashboard).toContain("range: '1d'")
     expect(dashboard).not.toContain('hero-panel')
   })
 

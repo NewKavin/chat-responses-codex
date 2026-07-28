@@ -20,9 +20,17 @@ describe('portal integration live catalog wiring', () => {
     )
   })
 
-  it('uses the Codex compatibility version and exposes strict doctor guidance', () => {
-    expect(integrationView).toContain('client_version=0.144.6')
-    expect(integrationView).not.toContain('client_version=0.144.4')
+  it('uses the explicit Codex catalog format and exposes model selection', () => {
+    expect(integrationView).toContain('?format=codex')
+    expect(integrationView).not.toContain('client_version=0.144.6')
+    expect(integrationView).toContain('v-model="selectedCodexModelSlug"')
+    expect(integrationView).toContain('v-for="modelSlug in allModelSlugs"')
+    expect(integrationView).toContain('resolveCodexModelSelection')
+    expect(integrationView).toContain('modelSlug: codexModelSelection.value.modelSlug')
+    expect(integrationView).toContain('buildCodexAuthLoginCommand()')
+    expect(integrationView).toContain('label="历史最常用模型"')
+    expect(integrationView).toContain('历史最常用')
+    expect(integrationView).not.toContain('label="默认模型"')
     expect(integrationView).toContain('codex --strict-config doctor --summary')
     expect(integrationView).toContain('max_threads')
     expect(integrationView).toContain('并发代理线程')

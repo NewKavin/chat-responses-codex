@@ -369,7 +369,7 @@ const { resolvedTheme } = useTheme()
 const loading = ref(false)
 const modelProbeLoading = ref(false)
 const modelProbeError = ref('')
-const chartRange = ref<ChartRange>('7d')
+const chartRange = ref<ChartRange>('1d')
 const lastRefreshedAt = ref(0)
 
 const showKpiSkeleton = computed(() => loading.value && lastRefreshedAt.value === 0)
@@ -387,7 +387,7 @@ const dashboard = ref<DashboardData>({
 })
 
 const analytics = ref<DashboardAnalyticsRange>({
-  range: '7d',
+  range: '1d',
   summary: {
     total_requests: 0,
     success_rate: 0,

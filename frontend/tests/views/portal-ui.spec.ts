@@ -32,6 +32,7 @@ describe('portal ui structure', () => {
     expect(history).toContain('crc-table-shell')
     expect(history).toContain('buildChartTheme')
     expect(history).toContain('watch(resolvedTheme')
+    expect(history).toContain("const timeRange = ref<ChartRange>('7d')")
     expect(history).not.toContain('history-card')
   })
 
