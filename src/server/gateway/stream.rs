@@ -769,8 +769,14 @@ struct ProxiedStreamState {
 
 impl ProxiedStreamState {
     fn drain_usage_from_buffer(&mut self) -> Result<(), GatewayError> {
-        while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
+        // Advance a cursor as frames are consumed and drain the buffer once at
+        // the end, instead of front-draining per frame. Front-draining memmoves
+        // the remaining bytes on every frame, so a poll that delivers N coalesced
+        // frames costs O(N^2); a single trailing drain makes it O(remainder).
+        let mut consumed = 0usize;
+        while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer[consumed..]) {
             if let Some(error) = named_upstream_sse_failure(&frame) {
+                self.buffer.drain(..consumed);
                 return Err(protocol_error_to_gateway_with_usage_diagnostics(
                     error,
                     "canonicalize_push",
@@ -778,39 +784,55 @@ impl ProxiedStreamState {
                 ));
             }
             let payload =
-                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error())? {
-                    Some(payload) => payload,
-                    None => {
+                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error()) {
+                    Ok(Some(payload)) => payload,
+                    Ok(None) => {
                         if self.rewrite_responses_events
                             || (self.canonicalizer.is_some() && is_sse_comment_frame(&frame))
                         {
                             self.pending
                                 .push_back(serialize_raw_sse_frame(frame.clone(), delimiter_len));
                         }
-                        self.buffer.drain(..frame.len() + delimiter_len);
+                        consumed += frame.len() + delimiter_len;
                         continue;
+                    }
+                    Err(error) => {
+                        self.buffer.drain(..consumed);
+                        return Err(error);
                     }
                 };
 
-            self.buffer.drain(..frame.len() + delimiter_len);
+            consumed += frame.len() + delimiter_len;
 
             if payload.trim() == "[DONE]" {
                 if self.rewrite_responses_events {
                     self.pending
                         .push_back(serialize_raw_sse_frame(frame.clone(), delimiter_len));
                 }
+                // finish_stream clears the buffer; zero the cursor so the
+                // trailing drain below is a no-op rather than an out-of-range.
+                consumed = 0;
                 self.finish_stream(true)?;
                 break;
             }
 
-            let mut event: Value =
-                serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error())?;
+            let mut event: Value = match serde_json::from_str(&payload)
+                .map_err(|_| upstream_sse_decode_error())
+            {
+                Ok(event) => event,
+                Err(error) => {
+                    self.buffer.drain(..consumed);
+                    return Err(error);
+                }
+            };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
-                return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
                     "canonicalize_push",
                     self.log_context.as_ref(),
-                ));
+                );
+                self.buffer.drain(..consumed);
+                return Err(err);
             }
             let responses_usage_normalized = normalize_responses_event_usage(&mut event);
             if let Some(usage) = stream_usage_from_value(&event) {
@@ -821,13 +843,18 @@ impl ProxiedStreamState {
             }
             let log_context = self.log_context.as_ref();
             let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
-                canonicalizer.push(event).map_err(|error| {
-                    protocol_error_to_gateway_with_usage_diagnostics(
-                        error,
-                        "canonicalize_push",
-                        log_context,
-                    )
-                })?
+                match canonicalizer.push(event) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        let err = protocol_error_to_gateway_with_usage_diagnostics(
+                            error,
+                            "canonicalize_push",
+                            log_context,
+                        );
+                        self.buffer.drain(..consumed);
+                        return Err(err);
+                    }
+                }
             } else {
                 vec![event]
             };
@@ -855,8 +882,15 @@ impl ProxiedStreamState {
                     self.pending.push_back(serialize_sse_data(&event));
                 } else if self.rewrite_responses_events {
                     let frame = if responses_usage_normalized {
-                        rewrite_sse_data_payload(&frame, delimiter_len, &event)
-                            .map_err(|_| upstream_sse_decode_error())?
+                        match rewrite_sse_data_payload(&frame, delimiter_len, &event)
+                            .map_err(|_| upstream_sse_decode_error())
+                        {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                self.buffer.drain(..consumed);
+                                return Err(error);
+                            }
+                        }
                     } else {
                         serialize_raw_sse_frame(frame.clone(), delimiter_len)
                     };
@@ -864,6 +898,10 @@ impl ProxiedStreamState {
                 }
             }
         }
+
+        // Drop all consumed frames in one shot; any incomplete trailing frame
+        // remains at the front of the buffer for the next poll.
+        self.buffer.drain(..consumed);
 
         if self.rewrite_responses_events && self.pending.len() > 1 {
             let mut merged = Vec::new();
@@ -1301,65 +1339,100 @@ impl TranslatedStreamState {
     }
 
     fn drain_buffer(&mut self) -> Result<(), GatewayError> {
-        while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer) {
+        // Cursor-based consumption: see drain_usage_from_buffer for rationale.
+        // Front-draining per frame is O(N^2) when frames coalesce in one poll;
+        // a single trailing drain is O(remainder).
+        let mut consumed = 0usize;
+        while let Some((frame, delimiter_len)) = next_sse_frame(&self.buffer[consumed..]) {
             if let Some(error) = named_upstream_sse_failure(&frame) {
-                return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
                     "canonicalize_push",
                     self.log_context.as_ref(),
-                ));
+                );
+                self.buffer.drain(..consumed);
+                return Err(err);
             }
-            let payload =
-                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error())? {
-                    Some(payload) => payload,
-                    None => {
-                        if is_sse_comment_frame(&frame) {
-                            self.pending.push_back(TranslatedPendingFrame {
-                                bytes: serialize_raw_sse_frame(frame.clone(), delimiter_len),
-                                usable_output: false,
-                            });
-                        }
-                        self.buffer.drain(..frame.len() + delimiter_len);
-                        continue;
+            let payload = match parse_sse_data_payload(&frame)
+                .map_err(|_| upstream_sse_decode_error())
+            {
+                Ok(Some(payload)) => payload,
+                Ok(None) => {
+                    if is_sse_comment_frame(&frame) {
+                        self.pending.push_back(TranslatedPendingFrame {
+                            bytes: serialize_raw_sse_frame(frame.clone(), delimiter_len),
+                            usable_output: false,
+                        });
                     }
-                };
+                    consumed += frame.len() + delimiter_len;
+                    continue;
+                }
+                Err(error) => {
+                    self.buffer.drain(..consumed);
+                    return Err(error);
+                }
+            };
 
-            self.buffer.drain(..frame.len() + delimiter_len);
+            consumed += frame.len() + delimiter_len;
 
             if payload.trim() == "[DONE]" {
+                // finish_stream clears the buffer; zero the cursor so the
+                // trailing drain below is a no-op rather than out-of-range.
+                consumed = 0;
                 self.finish_stream(true)?;
                 break;
             }
 
-            let event: Value =
-                serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error())?;
+            let event: Value = match serde_json::from_str(&payload)
+                .map_err(|_| upstream_sse_decode_error())
+            {
+                Ok(event) => event,
+                Err(error) => {
+                    self.buffer.drain(..consumed);
+                    return Err(error);
+                }
+            };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
-                return Err(protocol_error_to_gateway_with_usage_diagnostics(
+                let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
                     "canonicalize_push",
                     self.log_context.as_ref(),
-                ));
+                );
+                self.buffer.drain(..consumed);
+                return Err(err);
             }
             if let Some(usage) = stream_usage_from_value(&event) {
                 self.usage = Some(usage);
             }
             let log_context = self.log_context.as_ref();
             let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
-                canonicalizer.push(event).map_err(|error| {
-                    protocol_error_to_gateway_with_usage_diagnostics(
-                        error,
-                        "canonicalize_push",
-                        log_context,
-                    )
-                })?
+                match canonicalizer.push(event) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        let err = protocol_error_to_gateway_with_usage_diagnostics(
+                            error,
+                            "canonicalize_push",
+                            log_context,
+                        );
+                        self.buffer.drain(..consumed);
+                        return Err(err);
+                    }
+                }
             } else {
                 vec![event]
             };
             for event in events {
-                let translated = self
+                let translated = match self
                     .translator
                     .translate_event(&event)
-                    .map_err(|_| upstream_stream_translation_error())?;
+                    .map_err(|_| upstream_stream_translation_error())
+                {
+                    Ok(translated) => translated,
+                    Err(error) => {
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                };
                 if translated.iter().any(|item| {
                     item.get("type").and_then(Value::as_str) == Some("response.completed")
                 }) {
@@ -1380,6 +1453,10 @@ impl TranslatedStreamState {
                 }
             }
         }
+
+        // Drop all consumed frames in one shot; any incomplete trailing frame
+        // remains at the front of the buffer for the next poll.
+        self.buffer.drain(..consumed);
 
         Ok(())
     }
@@ -1771,16 +1848,27 @@ pub(super) fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
 }
 
 pub(super) fn next_sse_frame(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
-    let lf_pos = buffer.windows(2).position(|window| window == b"\n\n");
-    let crlf_pos = buffer.windows(4).position(|window| window == b"\r\n\r\n");
-    let (position, delimiter_len) = match (lf_pos, crlf_pos) {
-        (Some(lf), Some(crlf)) if lf <= crlf => (lf, 2),
-        (Some(_), Some(crlf)) => (crlf, 4),
-        (Some(lf), None) => (lf, 2),
-        (None, Some(crlf)) => (crlf, 4),
-        (None, None) => return None,
-    };
-    Some((buffer[..position].to_vec(), delimiter_len))
+    // Single left-to-right scan for the earliest frame delimiter. `\n\n` (LF)
+    // and `\r\n\r\n` (CRLF) can never begin at the same index (a byte is either
+    // `\n` or `\r`), so returning whichever matches first is equivalent to the
+    // previous "earliest position wins, ties prefer LF" tie-break while scanning
+    // the buffer once instead of twice.
+    let len = buffer.len();
+    for i in 0..len {
+        if buffer[i] == b'\n' {
+            if i + 1 < len && buffer[i + 1] == b'\n' {
+                return Some((buffer[..i].to_vec(), 2));
+            }
+        } else if buffer[i] == b'\r'
+            && i + 3 < len
+            && buffer[i + 1] == b'\n'
+            && buffer[i + 2] == b'\r'
+            && buffer[i + 3] == b'\n'
+        {
+            return Some((buffer[..i].to_vec(), 4));
+        }
+    }
+    None
 }
 
 fn named_upstream_sse_failure(frame: &[u8]) -> Option<ProtocolError> {
@@ -2050,5 +2138,79 @@ mod diagnostic_tests {
         assert!(enveloped_upstream_sse_failure(&json!({"type": "error"})).is_some());
         assert!(enveloped_upstream_sse_failure(&json!({"type": "response.failed"})).is_some());
         assert!(enveloped_upstream_sse_failure(&json!({"type": "Error"})).is_none());
+    }
+
+    // Reference implementation matching the original two-pass logic, used to
+    // cross-check the single-pass scanner across randomized and edge inputs.
+    fn next_sse_frame_reference(buffer: &[u8]) -> Option<(Vec<u8>, usize)> {
+        let lf_pos = buffer.windows(2).position(|window| window == b"\n\n");
+        let crlf_pos = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+        let (position, delimiter_len) = match (lf_pos, crlf_pos) {
+            (Some(lf), Some(crlf)) if lf <= crlf => (lf, 2),
+            (Some(_), Some(crlf)) => (crlf, 4),
+            (Some(lf), None) => (lf, 2),
+            (None, Some(crlf)) => (crlf, 4),
+            (None, None) => return None,
+        };
+        Some((buffer[..position].to_vec(), delimiter_len))
+    }
+
+    #[test]
+    fn next_sse_frame_handles_lf_crlf_and_incomplete_frames() {
+        // LF-delimited frame
+        assert_eq!(
+            next_sse_frame(b"data: a\n\ndata: b"),
+            Some((b"data: a".to_vec(), 2))
+        );
+        // CRLF-delimited frame
+        assert_eq!(
+            next_sse_frame(b"data: a\r\n\r\nrest"),
+            Some((b"data: a".to_vec(), 4))
+        );
+        // Empty frame with LF delimiter at the very start
+        assert_eq!(next_sse_frame(b"\n\nx"), Some((Vec::new(), 2)));
+        // CRLF delimiter exactly at end of buffer
+        assert_eq!(next_sse_frame(b"data\r\n\r\n"), Some((b"data".to_vec(), 4)));
+        // LF delimiter exactly at end of buffer
+        assert_eq!(next_sse_frame(b"data\n\n"), Some((b"data".to_vec(), 2)));
+        // No complete delimiter yet -> None (incomplete trailing frame)
+        assert_eq!(next_sse_frame(b"data: partial"), None);
+        assert_eq!(next_sse_frame(b"data\r\n"), None);
+        assert_eq!(next_sse_frame(b"data\n"), None);
+        assert_eq!(next_sse_frame(b""), None);
+        // When an LF pair precedes a CRLF pair, the earlier LF wins
+        assert_eq!(
+            next_sse_frame(b"a\n\nb\r\n\r\n"),
+            Some((b"a".to_vec(), 2))
+        );
+        // When a CRLF pair precedes an LF pair, the earlier CRLF wins
+        assert_eq!(
+            next_sse_frame(b"a\r\n\r\nb\n\n"),
+            Some((b"a".to_vec(), 4))
+        );
+    }
+
+    #[test]
+    fn next_sse_frame_matches_reference_over_fuzzed_inputs() {
+        // Deterministic pseudo-random byte sequences drawn from the SSE alphabet
+        // ({\r, \n, x}) to stress delimiter boundaries; must match the original.
+        let alphabet = [b'\r', b'\n', b'x'];
+        let mut seed: u64 = 0x9e3779b97f4a7c15;
+        for _ in 0..20_000 {
+            let mut buf = Vec::new();
+            let len = {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (seed >> 33) as usize % 12
+            };
+            for _ in 0..len {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                buf.push(alphabet[(seed >> 33) as usize % alphabet.len()]);
+            }
+            assert_eq!(
+                next_sse_frame(&buf),
+                next_sse_frame_reference(&buf),
+                "mismatch for input {buf:?}"
+            );
+        }
     }
 }
