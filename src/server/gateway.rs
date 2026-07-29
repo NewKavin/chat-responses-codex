@@ -2439,14 +2439,14 @@ impl UpstreamRequestGuard {
     async fn release(&self) -> Result<(), RuntimeCoordinationError> {
         match self.inner.spawn_release()? {
             Some(task) => match task.await {
-                Ok(result) => return result,
+                Ok(result) => result,
                 Err(error) => {
                     tracing::error!(
                         upstream_id = %self.inner.lease.upstream_id(),
                         error = %error,
                         "upstream request release task failed"
                     );
-                    return Err(RuntimeCoordinationError);
+                    Err(RuntimeCoordinationError)
                 }
             },
             None => Ok(()),
