@@ -156,9 +156,7 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
     assert!(text.contains(
         "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\""
     ));
-    assert!(text.contains(
-        "event: response.completed\r\ndata: {\"type\":\"response.completed\""
-    ));
+    assert!(text.contains("event: response.completed\r\ndata: {\"type\":\"response.completed\""));
     assert!(text.contains(
         ": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]"
     ));

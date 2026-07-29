@@ -84,9 +84,7 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                     HeaderValue::from_static("application/json"),
                 );
                 if let Some(context) = usage_log_context.take() {
-                    if let Err(error) =
-                        context.emit_fail_closed(status, None, None, usage).await
-                    {
+                    if let Err(error) = context.emit_fail_closed(status, None, None, usage).await {
                         return error.into_anthropic_response();
                     }
                 }

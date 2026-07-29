@@ -557,7 +557,10 @@ fn deployment_surfaces_document_model_key_sync_and_optional_redis_coordination()
         "REDIS_URL: ${REDIS_URL:-redis://redis:6379}",
         "REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-chat2responses}",
     ] {
-        assert!(compose.contains(marker), "docker-compose.yml should contain `{marker}`");
+        assert!(
+            compose.contains(marker),
+            "docker-compose.yml should contain `{marker}`"
+        );
     }
     assert!(dotenv.contains("REDIS_ENABLED=false"));
     assert!(dotenv.contains("REDIS_URL=redis://redis:6379"));
@@ -567,12 +570,17 @@ fn deployment_surfaces_document_model_key_sync_and_optional_redis_coordination()
     assert!(!compose.contains("depends_on:\n      redis:"));
     assert!(!compose.contains("16379"));
 
-    let redis_start = compose.find("\n  redis:\n").expect("Redis service should exist");
+    let redis_start = compose
+        .find("\n  redis:\n")
+        .expect("Redis service should exist");
     let redis_tail = &compose[redis_start + 1..];
     let redis_end = redis_tail[1..]
         .find("\n  ")
         .map(|offset| offset + 1)
         .unwrap_or(redis_tail.len());
     let redis_service = &redis_tail[..redis_end];
-    assert!(!redis_service.contains("ports:"), "Redis must not expose a host port");
+    assert!(
+        !redis_service.contains("ports:"),
+        "Redis must not expose a host port"
+    );
 }

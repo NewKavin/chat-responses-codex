@@ -502,10 +502,7 @@ async fn failed_local_downstream_removal_keeps_runtime_windows() {
         AppConfig::default(),
         Arc::new(FailingPersistStore),
     );
-    state
-        .reserve_downstream_request(&downstream)
-        .await
-        .unwrap();
+    state.reserve_downstream_request(&downstream).await.unwrap();
 
     state
         .remove_downstream(&downstream.id)
@@ -518,10 +515,7 @@ async fn failed_local_downstream_removal_keeps_runtime_windows() {
         .downstreams
         .iter()
         .any(|entry| entry.id == downstream.id));
-    assert!(state
-        .reserve_downstream_request(&downstream)
-        .await
-        .is_err());
+    assert!(state.reserve_downstream_request(&downstream).await.is_err());
 }
 
 impl StateStore for CountingStore {

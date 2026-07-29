@@ -470,7 +470,10 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
         };
         let state = AppState::new(
             PersistedState {
-                upstreams: std::sync::Arc::new(vec![upstream("up-1", "model-a"), upstream("up-2", "model-b")]),
+                upstreams: std::sync::Arc::new(vec![
+                    upstream("up-1", "model-a"),
+                    upstream("up-2", "model-b"),
+                ]),
                 downstreams: std::sync::Arc::new(vec![DownstreamConfig {
                     id: "down-1".into(),
                     name: "probe-consumer".into(),

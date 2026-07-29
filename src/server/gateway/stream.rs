@@ -874,15 +874,14 @@ impl ProxiedStreamState {
                 break;
             }
 
-            let mut event: Value = match serde_json::from_str(&payload)
-                .map_err(|_| upstream_sse_decode_error())
-            {
-                Ok(event) => event,
-                Err(error) => {
-                    self.buffer.drain(..consumed);
-                    return Err(error);
-                }
-            };
+            let mut event: Value =
+                match serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error()) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
                 let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
@@ -1487,25 +1486,24 @@ impl TranslatedStreamState {
                 self.buffer.drain(..consumed);
                 return Err(err);
             }
-            let payload = match parse_sse_data_payload(&frame)
-                .map_err(|_| upstream_sse_decode_error())
-            {
-                Ok(Some(payload)) => payload,
-                Ok(None) => {
-                    if is_sse_comment_frame(&frame) {
-                        self.pending.push_back(TranslatedPendingFrame {
-                            bytes: serialize_raw_sse_frame(frame.clone(), delimiter_len),
-                            usable_output: false,
-                        });
+            let payload =
+                match parse_sse_data_payload(&frame).map_err(|_| upstream_sse_decode_error()) {
+                    Ok(Some(payload)) => payload,
+                    Ok(None) => {
+                        if is_sse_comment_frame(&frame) {
+                            self.pending.push_back(TranslatedPendingFrame {
+                                bytes: serialize_raw_sse_frame(frame.clone(), delimiter_len),
+                                usable_output: false,
+                            });
+                        }
+                        consumed += frame.len() + delimiter_len;
+                        continue;
                     }
-                    consumed += frame.len() + delimiter_len;
-                    continue;
-                }
-                Err(error) => {
-                    self.buffer.drain(..consumed);
-                    return Err(error);
-                }
-            };
+                    Err(error) => {
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                };
 
             consumed += frame.len() + delimiter_len;
 
@@ -1517,15 +1515,14 @@ impl TranslatedStreamState {
                 break;
             }
 
-            let event: Value = match serde_json::from_str(&payload)
-                .map_err(|_| upstream_sse_decode_error())
-            {
-                Ok(event) => event,
-                Err(error) => {
-                    self.buffer.drain(..consumed);
-                    return Err(error);
-                }
-            };
+            let event: Value =
+                match serde_json::from_str(&payload).map_err(|_| upstream_sse_decode_error()) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        self.buffer.drain(..consumed);
+                        return Err(error);
+                    }
+                };
             if let Some(error) = enveloped_upstream_sse_failure(&event) {
                 let err = protocol_error_to_gateway_with_usage_diagnostics(
                     error,
@@ -2328,15 +2325,9 @@ mod diagnostic_tests {
         assert_eq!(next_sse_frame(b"data\n"), None);
         assert_eq!(next_sse_frame(b""), None);
         // When an LF pair precedes a CRLF pair, the earlier LF wins
-        assert_eq!(
-            next_sse_frame(b"a\n\nb\r\n\r\n"),
-            Some((b"a".to_vec(), 2))
-        );
+        assert_eq!(next_sse_frame(b"a\n\nb\r\n\r\n"), Some((b"a".to_vec(), 2)));
         // When a CRLF pair precedes an LF pair, the earlier CRLF wins
-        assert_eq!(
-            next_sse_frame(b"a\r\n\r\nb\n\n"),
-            Some((b"a".to_vec(), 4))
-        );
+        assert_eq!(next_sse_frame(b"a\r\n\r\nb\n\n"), Some((b"a".to_vec(), 4)));
     }
 
     #[test]

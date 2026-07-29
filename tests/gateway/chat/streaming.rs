@@ -1118,10 +1118,7 @@ async fn hedge_admission_rejects_a_full_extra_candidate() {
     assert_eq!(runtime.minute_cost, 1.0);
     assert_eq!(runtime.five_hour_cost, 1.0);
 
-    state
-        .release_upstream_request(lease.clone())
-        .await
-        .unwrap();
+    state.release_upstream_request(lease.clone()).await.unwrap();
     state.release_upstream_request(lease).await.unwrap();
     wait_for_upstream_in_flight(&state, &upstream.id, 0).await;
     let runtime = state.upstream_runtime_snapshots().await.unwrap();
@@ -1766,10 +1763,7 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
         .try_reserve_downstream_concurrency(&downstream)
         .await
         .unwrap();
-    state
-        .release_downstream_concurrency(lease)
-        .await
-        .unwrap();
+    state.release_downstream_concurrency(lease).await.unwrap();
 }
 
 #[tokio::test]
@@ -4385,10 +4379,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
     .await
     .expect("upstream request should start");
 
-    state
-        .mark_upstream_rate_limited("up-1", 60)
-        .await
-        .unwrap();
+    state.mark_upstream_rate_limited("up-1", 60).await.unwrap();
     let cooldown_before_cancel = state
         .upstream_runtime_snapshots()
         .await
@@ -4408,10 +4399,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
                 .is_some_and(|runtime| runtime.in_flight == 0);
             if upstream_released {
                 if let Ok(lease) = state.try_reserve_downstream_concurrency(&downstream).await {
-                    state
-                        .release_downstream_concurrency(lease)
-                        .await
-                        .unwrap();
+                    state.release_downstream_concurrency(lease).await.unwrap();
                     break;
                 }
             }
@@ -4618,10 +4606,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
     })
     .await
     .expect("upstream request should start");
-    state
-        .mark_upstream_rate_limited("up-1", 60)
-        .await
-        .unwrap();
+    state.mark_upstream_rate_limited("up-1", 60).await.unwrap();
     let cooldown_before_headers = state
         .upstream_runtime_snapshots()
         .await
@@ -4665,10 +4650,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
         .try_reserve_downstream_concurrency(&downstream)
         .await
         .unwrap();
-    state
-        .release_downstream_concurrency(lease)
-        .await
-        .unwrap();
+    state.release_downstream_concurrency(lease).await.unwrap();
 
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
@@ -4730,10 +4712,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
     })
     .await
     .expect("terminal upstream request should start");
-    state
-        .mark_upstream_rate_limited("up-1", 60)
-        .await
-        .unwrap();
+    state.mark_upstream_rate_limited("up-1", 60).await.unwrap();
     let cooldown_before_terminal = state
         .upstream_runtime_snapshots()
         .await
@@ -4800,10 +4779,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
     })
     .await
     .expect("immediate JSON upstream request should start");
-    state
-        .mark_upstream_rate_limited("up-1", 60)
-        .await
-        .unwrap();
+    state.mark_upstream_rate_limited("up-1", 60).await.unwrap();
     let cooldown_before_json = state
         .upstream_runtime_snapshots()
         .await
@@ -5475,10 +5451,7 @@ async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
         .try_reserve_downstream_concurrency(&downstream)
         .await
         .unwrap();
-    state
-        .release_downstream_concurrency(lease)
-        .await
-        .unwrap();
+    state.release_downstream_concurrency(lease).await.unwrap();
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));
@@ -5597,10 +5570,7 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
         .try_reserve_downstream_concurrency(&downstream)
         .await
         .unwrap();
-    state
-        .release_downstream_concurrency(lease)
-        .await
-        .unwrap();
+    state.release_downstream_concurrency(lease).await.unwrap();
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));

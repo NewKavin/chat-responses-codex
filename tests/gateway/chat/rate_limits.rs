@@ -1259,7 +1259,11 @@ async fn short_temporary_route_exhaustion_succeeds_in_second_round() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config("up-a", "primary-a", base_url)]),
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
             downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
@@ -1321,7 +1325,11 @@ async fn long_retry_after_returns_immediately_without_second_round() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config("up-a", "primary-a", base_url)]),
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
             downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
@@ -1369,7 +1377,11 @@ async fn route_retry_wait_budget_and_round_limit_are_bounded() {
     let downstream_key = generate_downstream_key("gw");
     let state = AppState::new(
         PersistedState {
-            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config("up-a", "primary-a", base_url)]),
+            upstreams: std::sync::Arc::new(vec![route_retry_upstream_config(
+                "up-a",
+                "primary-a",
+                base_url,
+            )]),
             downstreams: std::sync::Arc::new(vec![route_retry_downstream_config(&downstream_key)]),
             usage_logs: vec![],
             announcement: None,
