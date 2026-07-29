@@ -1098,6 +1098,315 @@ async fn native_drop_after_response_incomplete_is_not_499() {
     assert_eq!(snapshot.upstreams[0].failure_count, 0);
 }
 
+async fn native_responses_response_for_chunks(
+    chunks: Vec<Bytes>,
+    stall_after_chunks: bool,
+) -> (
+    axum::response::Response,
+    AppState,
+    tempfile::TempDir,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let tempdir = tempdir().unwrap();
+    let first_hits = Arc::new(AtomicUsize::new(0));
+    let second_hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let chunks = Arc::new(chunks);
+    let first_hits_for_handler = first_hits.clone();
+
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let chunks = chunks.clone();
+            let first_hits = first_hits_for_handler.clone();
+            async move {
+                first_hits.fetch_add(1, Ordering::SeqCst);
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                let output = stream::iter(
+                    chunks
+                        .as_ref()
+                        .clone()
+                        .into_iter()
+                        .map(Ok::<Bytes, std::io::Error>),
+                );
+                let body = if stall_after_chunks {
+                    Body::from_stream(
+                        output.chain(stream::pending::<Result<Bytes, std::io::Error>>()),
+                    )
+                } else {
+                    Body::from_stream(output)
+                };
+                (StatusCode::OK, headers, body)
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let second_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second_address = second_listener.local_addr().unwrap();
+    let second_hits_for_handler = second_hits.clone();
+    let second_app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let second_hits = second_hits_for_handler.clone();
+            async move {
+                second_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"type\":\"response.output_text.delta\",",
+                        "\"response_id\":\"resp-replay\",\"item_id\":\"msg-replay\",",
+                        "\"output_index\":0,\"content_index\":0,",
+                        "\"delta\":\"unexpected-replay\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{",
+                        "\"id\":\"resp-replay\",\"object\":\"response\",",
+                        "\"created_at\":1,\"status\":\"completed\",",
+                        "\"model\":\"gpt-4\",\"output\":[]}}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(second_listener, second_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![
+                UpstreamConfig {
+                    id: "up-1".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "upstream-secret".into(),
+                    protocol: UpstreamProtocol::Responses,
+                    protocols: vec![UpstreamProtocol::Responses],
+                    supported_models: vec!["gpt-4".into()],
+                    priority: 100,
+                    active: true,
+                    ..Default::default()
+                },
+                UpstreamConfig {
+                    id: "up-2".into(),
+                    name: "fallback".into(),
+                    base_url: format!("http://{second_address}"),
+                    api_key: "fallback-secret".into(),
+                    protocol: UpstreamProtocol::Responses,
+                    protocols: vec![UpstreamProtocol::Responses],
+                    supported_models: vec!["gpt-4".into()],
+                    priority: 0,
+                    active: true,
+                    ..Default::default()
+                },
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            ..Default::default()
+        },
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-4", "input": "Hello", "stream": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    (response, state, tempdir, first_hits, second_hits)
+}
+
+#[tokio::test]
+async fn native_responses_clean_eof_without_terminal_is_typed_502() {
+    let (response, state, _tempdir, first_hits, second_hits) =
+        native_responses_response_for_chunks(
+            vec![Bytes::from_static(
+                concat!(
+                    "event: response.created\n",
+                    "data: {\"type\":\"response.created\",\"response\":{",
+                    "\"id\":\"resp-eof\",\"object\":\"response\",\"created_at\":1,",
+                    "\"status\":\"in_progress\",\"model\":\"gpt-4\",\"output\":[]}}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",",
+                    "\"response_id\":\"resp-eof\",\"item_id\":\"msg-1\",",
+                    "\"output_index\":0,\"content_index\":0,",
+                    "\"delta\":\"partial-before-eof\"}\n\n"
+                )
+                .as_bytes(),
+            )],
+            false,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("incomplete EOF should become a typed Responses error")
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("partial-before-eof"), "{body}");
+    assert!(body.contains("event: response.failed"), "{body}");
+    assert!(body.contains("stream_upstream_incomplete_eof"), "{body}");
+    assert!(!body.contains("unexpected-replay"), "{body}");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(
+        snapshot.usage_logs[0].status_code,
+        StatusCode::BAD_GATEWAY.as_u16()
+    );
+    assert_eq!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("stream_upstream_incomplete_eof")
+    );
+}
+
+#[tokio::test]
+async fn native_responses_done_without_terminal_is_incomplete() {
+    let (response, state, _tempdir, first_hits, second_hits) =
+        native_responses_response_for_chunks(
+            vec![Bytes::from_static(
+                concat!(
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",",
+                    "\"response_id\":\"resp-done\",\"item_id\":\"msg-1\",",
+                    "\"output_index\":0,\"content_index\":0,",
+                    "\"delta\":\"partial-before-done\"}\n\n",
+                    "data: [DONE]\n\n"
+                )
+                .as_bytes(),
+            )],
+            false,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("premature DONE should become a typed Responses error")
+            .to_vec(),
+    )
+    .unwrap();
+    let error_position = body
+        .find("upstream_stream_incomplete")
+        .expect("missing semantic terminal must have a stable category");
+    let done_position = body
+        .find("data: [DONE]")
+        .expect("gateway error sequence must end with DONE");
+    assert!(body.contains("partial-before-done"), "{body}");
+    assert!(body.contains("event: response.failed"), "{body}");
+    assert!(error_position < done_position, "{body}");
+    assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+    assert!(!body.contains("unexpected-replay"), "{body}");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(
+        snapshot.usage_logs[0].status_code,
+        StatusCode::BAD_GATEWAY.as_u16()
+    );
+    assert_eq!(
+        snapshot.usage_logs[0].error_category.as_deref(),
+        Some("upstream_stream_incomplete")
+    );
+}
+
+#[tokio::test]
+async fn native_responses_terminal_followed_by_eof_is_valid() {
+    for terminal_type in ["response.completed", "response.incomplete"] {
+        let terminal_status = if terminal_type == "response.completed" {
+            "completed"
+        } else {
+            "incomplete"
+        };
+        let terminal = format!(
+            concat!(
+                "data: {{\"type\":\"response.output_text.delta\",",
+                "\"response_id\":\"resp-terminal\",\"item_id\":\"msg-1\",",
+                "\"output_index\":0,\"content_index\":0,\"delta\":\"valid\"}}\n\n",
+                "data: {{\"type\":\"{}\",\"response\":{{",
+                "\"id\":\"resp-terminal\",\"object\":\"response\",",
+                "\"created_at\":1,\"status\":\"{}\",",
+                "\"model\":\"gpt-4\",\"output\":[]}}}}\n\n"
+            ),
+            terminal_type, terminal_status
+        );
+        let (response, state, _tempdir, first_hits, second_hits) =
+            native_responses_response_for_chunks(vec![Bytes::from(terminal)], false).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("explicit Responses terminal followed by EOF must remain valid")
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains(terminal_type), "{body}");
+        assert!(!body.contains("event: response.failed"), "{body}");
+        assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+
+        wait_for_upstream_in_flight(&state, "up-1", 0).await;
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.usage_logs.len(), 1);
+        assert_eq!(snapshot.usage_logs[0].status_code, StatusCode::OK.as_u16());
+        assert_eq!(snapshot.usage_logs[0].error_category, None);
+        assert_eq!(snapshot.upstreams[0].failure_count, 0);
+    }
+}
+
 #[tokio::test]
 async fn translated_stream_disconnect_releases_runtime_state() {
     let tempdir = tempdir().unwrap();

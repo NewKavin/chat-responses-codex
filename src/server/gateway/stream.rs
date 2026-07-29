@@ -677,7 +677,7 @@ pub(super) fn proxied_stream_body(
                     return Ok(Some((chunk, state)));
                 }
                 StreamReadOutcome::Chunk(Ok(None)) => {
-                    if let Err(error) = state.finish_stream(false) {
+                    if let Err(error) = state.finish_stream(StreamEnd::Eof) {
                         let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
@@ -764,6 +764,12 @@ pub(super) fn proxied_stream_body(
     Ok(Body::from_stream(stream))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamEnd {
+    Done,
+    Eof,
+}
+
 struct ProxiedStreamState {
     reader: UpstreamStreamReader,
     buffer: Vec<u8>,
@@ -847,14 +853,14 @@ impl ProxiedStreamState {
             consumed += frame.len() + delimiter_len;
 
             if payload.trim() == "[DONE]" {
+                // finish_stream clears the buffer; zero the cursor so the
+                // trailing drain below is a no-op rather than an out-of-range.
+                consumed = 0;
+                self.finish_stream(StreamEnd::Done)?;
                 if self.rewrite_responses_events {
                     self.pending
                         .push_back(serialize_raw_sse_frame(frame.clone(), delimiter_len));
                 }
-                // finish_stream clears the buffer; zero the cursor so the
-                // trailing drain below is a no-op rather than an out-of-range.
-                consumed = 0;
-                self.finish_stream(true)?;
                 break;
             }
 
@@ -963,13 +969,27 @@ impl ProxiedStreamState {
             && stream_output_tokens_are_zero_or_unknown(self.usage)
     }
 
-    fn finish_stream(&mut self, allow_missing_terminal: bool) -> Result<(), GatewayError> {
+    fn finish_stream(&mut self, end: StreamEnd) -> Result<(), GatewayError> {
         if self.finished {
             return Ok(());
         }
 
+        if self.canonicalizer.is_none()
+            && self.rewrite_responses_events
+            && !self.semantic_terminal_emitted
+        {
+            return Err(match end {
+                StreamEnd::Done => stream_gateway_error(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream SSE emitted [DONE] before a required semantic terminal",
+                    "upstream_stream_incomplete",
+                ),
+                StreamEnd::Eof => upstream_incomplete_eof_error(),
+            });
+        }
+
         if let Some(mut canonicalizer) = self.canonicalizer.take() {
-            let result = if allow_missing_terminal {
+            let result = if end == StreamEnd::Done {
                 canonicalizer.finish_after_done()
             } else {
                 canonicalizer.finish()
@@ -977,7 +997,7 @@ impl ProxiedStreamState {
             let events = match result {
                 Ok(events) => events,
                 Err(_)
-                    if allow_missing_terminal
+                    if end == StreamEnd::Done
                         && !self.usable_output_seen
                         && stream_output_tokens_are_zero_or_unknown(self.usage) =>
                 {
@@ -1274,7 +1294,7 @@ pub(super) fn translated_stream_body(
                     }
                 }
                 StreamReadOutcome::Chunk(Ok(None)) => {
-                    if let Err(error) = state.finish_stream(false) {
+                    if let Err(error) = state.finish_stream(StreamEnd::Eof) {
                         let frame = state.finish_with_gateway_error_after_pending(error).await;
                         return Ok(Some((frame, state)));
                     }
@@ -1475,7 +1495,7 @@ impl TranslatedStreamState {
                 // finish_stream clears the buffer; zero the cursor so the
                 // trailing drain below is a no-op rather than out-of-range.
                 consumed = 0;
-                self.finish_stream(true)?;
+                self.finish_stream(StreamEnd::Done)?;
                 break;
             }
 
@@ -1555,13 +1575,13 @@ impl TranslatedStreamState {
         Ok(())
     }
 
-    fn finish_stream(&mut self, allow_missing_terminal: bool) -> Result<(), GatewayError> {
+    fn finish_stream(&mut self, end: StreamEnd) -> Result<(), GatewayError> {
         if self.finished {
             return Ok(());
         }
 
         if let Some(mut canonicalizer) = self.canonicalizer.take() {
-            let result = if allow_missing_terminal {
+            let result = if end == StreamEnd::Done {
                 canonicalizer.finish_after_done()
             } else {
                 canonicalizer.finish()
@@ -1569,7 +1589,7 @@ impl TranslatedStreamState {
             let events = match result {
                 Ok(events) => events,
                 Err(_)
-                    if allow_missing_terminal
+                    if end == StreamEnd::Done
                         && !self.usable_output_observed
                         && stream_output_tokens_are_zero_or_unknown(self.usage) =>
                 {
@@ -1770,6 +1790,14 @@ fn upstream_sse_decode_error() -> GatewayError {
         StatusCode::BAD_GATEWAY,
         "failed to decode upstream SSE event",
         "stream_upstream_body_decode_error",
+    )
+}
+
+fn upstream_incomplete_eof_error() -> GatewayError {
+    stream_gateway_error(
+        StatusCode::BAD_GATEWAY,
+        "upstream SSE ended before a required semantic terminal",
+        "stream_upstream_incomplete_eof",
     )
 }
 

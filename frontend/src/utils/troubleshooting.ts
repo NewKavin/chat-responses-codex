@@ -111,6 +111,9 @@ export const getTroubleshootingSuggestion = (category?: string | null) => {
   if (category === 'upstream_temporary_unavailable') {
     return '上游临时不可用；稍后重试或在管理端检查上游健康。'
   }
+  if (category === 'stream_upstream_incomplete_eof') {
+    return '上游 Responses 流未完整结束；检查事件序列是否包含 response.completed 或 response.incomplete 终态。'
+  }
   if (category.startsWith('stream_')) {
     return '流式响应异常；查看最后增量时间、上游耗时和客户端是否断开。'
   }

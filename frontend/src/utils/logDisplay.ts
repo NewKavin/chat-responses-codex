@@ -81,6 +81,7 @@ export const errorCategoryGroups: ErrorCategoryGroup[] = [
       { value: 'stream_upstream_body_decode_error', label: '上游响应解码失败' },
       { value: 'stream_upstream_read_error', label: '上游流读取失败' },
       { value: 'stream_upstream_timeout', label: '上游流超时' },
+      { value: 'stream_upstream_incomplete_eof', label: '上游流未完整结束' },
       { value: 'stream_idle_timeout', label: '空闲超时' },
       { value: 'stream_max_duration', label: '最大时长' }
     ]

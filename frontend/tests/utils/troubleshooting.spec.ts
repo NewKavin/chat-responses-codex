@@ -81,6 +81,12 @@ describe('troubleshooting utils', () => {
     expect(getTroubleshootingSuggestion('gateway_daily_token_quota_exceeded')).toContain('Token 限额')
     expect(getTroubleshootingSuggestion('upstream_rate_limited')).toContain('上游限流')
     expect(getTroubleshootingSuggestion('stream_idle_timeout')).toContain('流式')
+    const incompleteEof = getTroubleshootingSuggestion('stream_upstream_incomplete_eof')
+    expect(incompleteEof).toContain('Responses')
+    expect(incompleteEof).toContain('response.completed')
+    expect(incompleteEof).toContain('response.incomplete')
+    expect(incompleteEof).not.toContain('客户端')
+    expect(incompleteEof).not.toContain('超时')
   })
 
   it('formats compatibility matrix fallback stage labels', () => {

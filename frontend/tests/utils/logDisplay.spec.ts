@@ -27,12 +27,14 @@ describe('error category display', () => {
     expect(values).toContain('upstream_temporary_unavailable')
     expect(values).toContain('stream_processing_error')
     expect(values).toContain('stream_idle_timeout')
+    expect(values).toContain('stream_upstream_incomplete_eof')
   })
 
   it('formats known and unknown categories', () => {
     expect(formatErrorCategory('gateway_access_denied')).toBe('访问被拒绝')
     expect(formatErrorCategory('gateway_daily_token_quota_exceeded')).toBe('日 Token 限额')
     expect(formatErrorCategory('stream_processing_error')).toBe('流式处理错误')
+    expect(formatErrorCategory('stream_upstream_incomplete_eof')).toBe('上游流未完整结束')
     expect(formatErrorCategory('custom_error')).toBe('custom_error')
     expect(formatErrorCategory('')).toBe('-')
   })
