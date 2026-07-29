@@ -20,6 +20,19 @@ if #expired_events > 0 then
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms - (retention_seconds * 1000))
 
+local existing_lease = redis.call('ZSCORE', KEYS[1], lease_id)
+local existing_event = redis.call('ZSCORE', KEYS[2], event_id)
+local existing_cost = redis.call('HGET', KEYS[3], event_id)
+if existing_lease and existing_event and existing_cost then
+  if existing_cost == ARGV[3] then
+    return {'0'}
+  end
+  return {'4', '1'}
+end
+if existing_lease or existing_event or existing_cost then
+  return {'4', '1'}
+end
+
 local function cost_since(start_ms)
   local ids = redis.call('ZRANGEBYSCORE', KEYS[2], start_ms, '+inf')
   local total = 0

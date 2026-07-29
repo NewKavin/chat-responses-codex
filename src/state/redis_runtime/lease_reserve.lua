@@ -4,6 +4,9 @@ local lease_id = ARGV[1]
 local limit = tonumber(ARGV[2])
 local lease_duration_ms = tonumber(ARGV[3])
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+if redis.call('ZSCORE', KEYS[1], lease_id) then
+  return {0}
+end
 if redis.call('ZCARD', KEYS[1]) >= limit then
   local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
   local retry_after = 1

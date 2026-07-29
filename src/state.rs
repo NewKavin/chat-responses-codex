@@ -53,7 +53,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -268,7 +268,7 @@ pub struct DownstreamRequestReservation {
 pub struct DownstreamConcurrencyLease {
     downstream_id: String,
     lease_id: Option<String>,
-    released: Arc<AtomicBool>,
+    release_state: Arc<AtomicU8>,
 }
 
 impl std::fmt::Debug for DownstreamConcurrencyLease {
@@ -291,7 +291,7 @@ impl DownstreamConcurrencyLease {
 pub struct UpstreamRequestLease {
     upstream_id: String,
     lease_id: String,
-    released: Arc<AtomicBool>,
+    release_state: Arc<AtomicU8>,
 }
 
 impl std::fmt::Debug for UpstreamRequestLease {
@@ -306,6 +306,46 @@ impl std::fmt::Debug for UpstreamRequestLease {
 impl UpstreamRequestLease {
     pub fn upstream_id(&self) -> &str {
         &self.upstream_id
+    }
+}
+
+const LEASE_RELEASE_ACTIVE: u8 = 0;
+const LEASE_RELEASE_RELEASING: u8 = 1;
+const LEASE_RELEASED: u8 = 2;
+
+struct LeaseReleaseGuard {
+    state: Arc<AtomicU8>,
+    completed: bool,
+}
+
+impl LeaseReleaseGuard {
+    fn acquire(state: &Arc<AtomicU8>) -> Result<Option<Self>, RuntimeCoordinationError> {
+        match state.compare_exchange(
+            LEASE_RELEASE_ACTIVE,
+            LEASE_RELEASE_RELEASING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(Some(Self {
+                state: state.clone(),
+                completed: false,
+            })),
+            Err(LEASE_RELEASED) => Ok(None),
+            Err(_) => Err(RuntimeCoordinationError),
+        }
+    }
+
+    fn complete(mut self) {
+        self.state.store(LEASE_RELEASED, Ordering::Release);
+        self.completed = true;
+    }
+}
+
+impl Drop for LeaseReleaseGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state.store(LEASE_RELEASE_ACTIVE, Ordering::Release);
+        }
     }
 }
 
@@ -324,7 +364,7 @@ pub struct AppState {
     runtime_capability_hints: Arc<StdMutex<RuntimeCapabilityHints>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamRequestEvent>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
-    downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
+    downstream_in_flight: Arc<StdMutex<HashMap<String, HashSet<String>>>>,
     active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
     response_history: Arc<StdMutex<ResponseHistoryStore>>,
     fallback_stage_failures: Arc<StdMutex<HashMap<String, u8>>>,
@@ -1995,7 +2035,7 @@ impl AppState {
             return Ok(UpstreamRequestLease {
                 upstream_id: upstream.id.clone(),
                 lease_id,
-                released: Arc::new(AtomicBool::new(false)),
+                release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
         }
 
@@ -2012,7 +2052,8 @@ impl AppState {
             upstream.request_quota_window_seconds(),
         );
 
-        state.in_flight = state.in_flight.saturating_add(1);
+        let lease_id = Uuid::new_v4().to_string();
+        state.active_leases.insert(lease_id.clone());
         state.minute_events.push_back(QuotaEvent {
             created_at: now,
             cost: request_cost,
@@ -2023,8 +2064,8 @@ impl AppState {
         });
         Ok(UpstreamRequestLease {
             upstream_id: upstream.id.clone(),
-            lease_id: Uuid::new_v4().to_string(),
-            released: Arc::new(AtomicBool::new(false)),
+            lease_id,
+            release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
         })
     }
 
@@ -2055,7 +2096,7 @@ impl AppState {
             return Ok(UpstreamRequestLease {
                 upstream_id: upstream.id.clone(),
                 lease_id,
-                released: Arc::new(AtomicBool::new(false)),
+                release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
         }
 
@@ -2071,7 +2112,7 @@ impl AppState {
             upstream.request_quota_window_seconds(),
         );
 
-        if state.in_flight >= upstream.max_concurrency.max(1) {
+        if state.active_leases.len() >= upstream.max_concurrency.max(1) as usize {
             return Err(UpstreamAdmissionError::new(
                 "upstream hedge concurrency capacity is full".into(),
                 1,
@@ -2096,7 +2137,8 @@ impl AppState {
             ));
         }
 
-        state.in_flight = state.in_flight.saturating_add(1);
+        let lease_id = Uuid::new_v4().to_string();
+        state.active_leases.insert(lease_id.clone());
         state.minute_events.push_back(QuotaEvent {
             created_at: now,
             cost: request_cost,
@@ -2107,8 +2149,8 @@ impl AppState {
         });
         Ok(UpstreamRequestLease {
             upstream_id: upstream.id.clone(),
-            lease_id: Uuid::new_v4().to_string(),
-            released: Arc::new(AtomicBool::new(false)),
+            lease_id,
+            release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
         })
     }
 
@@ -2161,7 +2203,7 @@ impl AppState {
                 (
                     upstream_id.clone(),
                     UpstreamRuntimeSnapshot {
-                        in_flight: state.in_flight,
+                        in_flight: state.active_leases.len() as u32,
                         minute_cost: quota_event_cost(&state.minute_events),
                         five_hour_cost: quota_event_cost(&state.five_hour_events),
                         cooldown_until: state.cooldown_until,
@@ -2175,19 +2217,25 @@ impl AppState {
         &self,
         lease: UpstreamRequestLease,
     ) -> Result<(), RuntimeCoordinationError> {
-        if lease.released.swap(true, Ordering::AcqRel) {
+        let Some(release_guard) = LeaseReleaseGuard::acquire(&lease.release_state)? else {
             return Ok(());
+        };
+        let result =
+            if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+                coordinator
+                    .release_upstream_lease(&lease.upstream_id, &lease.lease_id)
+                    .await
+            } else {
+                let mut runtime_state = self.upstream_runtime_state.lock().await;
+                if let Some(state) = runtime_state.get_mut(&lease.upstream_id) {
+                    state.active_leases.remove(&lease.lease_id);
+                }
+                Ok(())
+            };
+        if result.is_ok() {
+            release_guard.complete();
         }
-        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-            return coordinator
-                .release_upstream_lease(&lease.upstream_id, &lease.lease_id)
-                .await;
-        }
-        let mut runtime_state = self.upstream_runtime_state.lock().await;
-        if let Some(state) = runtime_state.get_mut(&lease.upstream_id) {
-            state.in_flight = state.in_flight.saturating_sub(1);
-        }
-        Ok(())
+        result
     }
 
     pub async fn mark_upstream_failure(&self, upstream_id: &str) -> io::Result<()> {
@@ -2327,7 +2375,7 @@ impl AppState {
                 let five_hour_cost = state.five_hour_events.iter().map(|event| event.cost).sum();
 
                 let snapshot = UpstreamRuntimeSnapshotWithFeedback {
-                    in_flight: state.in_flight,
+                    in_flight: state.active_leases.len() as u32,
                     minute_cost,
                     five_hour_cost,
                     cooldown_until: state.cooldown_until,
@@ -2734,7 +2782,7 @@ impl AppState {
             return Ok(DownstreamConcurrencyLease {
                 downstream_id: downstream.id.clone(),
                 lease_id: None,
-                released: Arc::new(AtomicBool::new(false)),
+                release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
         }
 
@@ -2746,27 +2794,28 @@ impl AppState {
             return Ok(DownstreamConcurrencyLease {
                 downstream_id: downstream.id.clone(),
                 lease_id: Some(lease_id),
-                released: Arc::new(AtomicBool::new(false)),
+                release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
         }
 
+        let lease_id = Uuid::new_v4().to_string();
         let mut in_flight = self
             .downstream_in_flight
             .lock()
             .expect("downstream in_flight lock poisoned");
-        let current = in_flight.entry(downstream.id.clone()).or_insert(0);
-        if *current >= downstream.max_concurrency.max(1) {
+        let current = in_flight.entry(downstream.id.clone()).or_default();
+        if current.len() >= downstream.max_concurrency.max(1) as usize {
             return Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
                 retry_after_seconds: 1,
                 limit: downstream.max_concurrency.max(1),
             });
         }
 
-        *current = current.saturating_add(1);
+        current.insert(lease_id.clone());
         Ok(DownstreamConcurrencyLease {
             downstream_id: downstream.id.clone(),
-            lease_id: Some(Uuid::new_v4().to_string()),
-            released: Arc::new(AtomicBool::new(false)),
+            lease_id: Some(lease_id),
+            release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
         })
     }
 
@@ -2774,28 +2823,37 @@ impl AppState {
         &self,
         lease: DownstreamConcurrencyLease,
     ) -> Result<(), RuntimeCoordinationError> {
-        if lease.released.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let Some(lease_id) = lease.lease_id else {
+        let Some(release_guard) = LeaseReleaseGuard::acquire(&lease.release_state)? else {
             return Ok(());
         };
-        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-            return coordinator
-                .release_downstream_lease(&lease.downstream_id, &lease_id)
-                .await;
-        }
-        let mut in_flight = self
-            .downstream_in_flight
-            .lock()
-            .expect("downstream in_flight lock poisoned");
-        if let Some(count) = in_flight.get_mut(&lease.downstream_id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                in_flight.remove(&lease.downstream_id);
+        let result = if let Some(lease_id) = lease.lease_id {
+            if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+                coordinator
+                    .release_downstream_lease(&lease.downstream_id, &lease_id)
+                    .await
+            } else {
+                let mut in_flight = self
+                    .downstream_in_flight
+                    .lock()
+                    .expect("downstream in_flight lock poisoned");
+                let remove_entry = in_flight
+                    .get_mut(&lease.downstream_id)
+                    .is_some_and(|leases| {
+                        leases.remove(&lease_id);
+                        leases.is_empty()
+                    });
+                if remove_entry {
+                    in_flight.remove(&lease.downstream_id);
+                }
+                Ok(())
             }
+        } else {
+            Ok(())
+        };
+        if result.is_ok() {
+            release_guard.complete();
         }
-        Ok(())
+        result
     }
 
     pub async fn clear_downstream_runtime(
@@ -3020,6 +3078,7 @@ impl AppState {
             .await?;
 
         if removed {
+            self.upstream_runtime_state.lock().await.remove(upstream_id);
             self.delete_dialect_profiles_for_upstream(upstream_id)
                 .await?;
             let current_upstreams = self.routing_snapshot().await.upstreams;
@@ -4263,7 +4322,7 @@ fn truncate_active_request_user_agent(user_agent: String) -> String {
 
 #[derive(Debug, Clone, Default)]
 struct UpstreamRuntimeState {
-    in_flight: u32,
+    active_leases: HashSet<String>,
     minute_events: VecDeque<QuotaEvent>,
     five_hour_events: VecDeque<QuotaEvent>,
     cooldown_until: u64,

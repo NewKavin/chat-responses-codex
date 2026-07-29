@@ -180,11 +180,15 @@ fn redis_test_health_route(upstream_id: &str, fingerprint: &str, model: &str) ->
     }
 }
 
-fn redis_bulk_u64(response: &str) -> u64 {
+fn redis_bulk_string(response: &str) -> &str {
     response
         .split("\r\n")
         .nth(1)
         .expect("bulk Redis response must include a value")
+}
+
+fn redis_bulk_u64(response: &str) -> u64 {
+    redis_bulk_string(response)
         .parse()
         .expect("bulk Redis value must be an integer")
 }
@@ -196,6 +200,18 @@ fn redis_integer(response: &str) -> i64 {
         .expect("Redis response must be an integer")
         .parse()
         .expect("Redis integer response must contain a number")
+}
+
+fn redis_command_calls(response: &str, command: &str) -> u64 {
+    let prefix = format!("cmdstat_{command}:");
+    response
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .and_then(|line| line.strip_prefix(&prefix))
+        .and_then(|stats| stats.split(',').find(|field| field.starts_with("calls=")))
+        .and_then(|field| field.strip_prefix("calls="))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 async fn redis_route_health_state_key(config: &AppConfig) -> String {
@@ -281,7 +297,7 @@ async fn redis_test_command(config: &AppConfig, arguments: &[String]) -> String 
         request.extend_from_slice(b"\r\n");
     }
     stream.write_all(&request).await.unwrap();
-    let mut response = vec![0_u8; 1_024];
+    let mut response = vec![0_u8; 64 * 1_024];
     let length = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut response))
         .await
         .unwrap()
@@ -301,6 +317,226 @@ async fn pause_test_redis(config: &AppConfig, milliseconds: u64) {
     )
     .await;
     assert_eq!(response, "+OK\r\n");
+}
+
+#[tokio::test]
+async fn stale_upstream_lease_does_not_release_recreated_capacity() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let upstream = redis_test_upstream("local-stale-upstream-release");
+    state.insert_upstream(upstream.clone()).await.unwrap();
+
+    let stale = state
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    assert!(state.remove_upstream(&upstream.id).await.unwrap());
+    state.insert_upstream(upstream.clone()).await.unwrap();
+    let replacement = state
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .unwrap()
+            .in_flight,
+        1,
+        "removing an upstream must clear the old runtime generation"
+    );
+    state.release_upstream_request(stale).await.unwrap();
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .unwrap()
+            .in_flight,
+        1,
+        "a stale lease must not release replacement capacity"
+    );
+
+    state.release_upstream_request(replacement).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_reserve_replays_preserve_original_scores_and_costs() {
+    let config = redis_test_config();
+    let request_key = format!("{}:replay:requests", config.redis_key_prefix);
+    let token_key = format!("{}:replay:tokens", config.redis_key_prefix);
+    let token_values_key = format!("{}:replay:token-values", config.redis_key_prefix);
+    let downstream_lease_key = format!("{}:replay:downstream-leases", config.redis_key_prefix);
+    let upstream_lease_key = format!("{}:replay:upstream-leases", config.redis_key_prefix);
+    let upstream_event_key = format!("{}:replay:upstream-events", config.redis_key_prefix);
+    let upstream_cost_key = format!("{}:replay:upstream-costs", config.redis_key_prefix);
+
+    let downstream_args = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/downstream_reserve.lua").into(),
+        "3".into(),
+        request_key.clone(),
+        token_key,
+        token_values_key,
+        "event-id".into(),
+        "10".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+        "0".into(),
+    ];
+    redis_test_command(&config, &downstream_args).await;
+    let request_score = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &["ZSCORE".into(), request_key.clone(), "event-id".into()],
+        )
+        .await,
+    );
+
+    let lease_args = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/lease_reserve.lua").into(),
+        "1".into(),
+        downstream_lease_key.clone(),
+        "lease-id".into(),
+        "10".into(),
+        "120000".into(),
+    ];
+    redis_test_command(&config, &lease_args).await;
+    let downstream_lease_score = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &[
+                "ZSCORE".into(),
+                downstream_lease_key.clone(),
+                "lease-id".into(),
+            ],
+        )
+        .await,
+    );
+
+    let upstream_args = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/upstream_reserve.lua").into(),
+        "3".into(),
+        upstream_lease_key.clone(),
+        upstream_event_key.clone(),
+        upstream_cost_key.clone(),
+        "upstream-event-id".into(),
+        "upstream-lease-id".into(),
+        "2.5".into(),
+        "0".into(),
+        "10".into(),
+        "100".into(),
+        "3600".into(),
+        "100".into(),
+        "120000".into(),
+    ];
+    redis_test_command(&config, &upstream_args).await;
+    let upstream_lease_score = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &[
+                "ZSCORE".into(),
+                upstream_lease_key.clone(),
+                "upstream-lease-id".into(),
+            ],
+        )
+        .await,
+    );
+    let upstream_event_score = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &[
+                "ZSCORE".into(),
+                upstream_event_key.clone(),
+                "upstream-event-id".into(),
+            ],
+        )
+        .await,
+    );
+    let upstream_cost = redis_bulk_string(
+        &redis_test_command(
+            &config,
+            &[
+                "HGET".into(),
+                upstream_cost_key.clone(),
+                "upstream-event-id".into(),
+            ],
+        )
+        .await,
+    )
+    .to_string();
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    redis_test_command(&config, &downstream_args).await;
+    redis_test_command(&config, &lease_args).await;
+    redis_test_command(&config, &upstream_args).await;
+
+    assert_eq!(
+        request_score,
+        redis_bulk_u64(
+            &redis_test_command(&config, &["ZSCORE".into(), request_key, "event-id".into()],).await,
+        )
+    );
+    assert_eq!(
+        downstream_lease_score,
+        redis_bulk_u64(
+            &redis_test_command(
+                &config,
+                &["ZSCORE".into(), downstream_lease_key, "lease-id".into(),],
+            )
+            .await,
+        )
+    );
+    assert_eq!(
+        upstream_lease_score,
+        redis_bulk_u64(
+            &redis_test_command(
+                &config,
+                &[
+                    "ZSCORE".into(),
+                    upstream_lease_key,
+                    "upstream-lease-id".into(),
+                ],
+            )
+            .await,
+        )
+    );
+    assert_eq!(
+        upstream_event_score,
+        redis_bulk_u64(
+            &redis_test_command(
+                &config,
+                &[
+                    "ZSCORE".into(),
+                    upstream_event_key,
+                    "upstream-event-id".into(),
+                ],
+            )
+            .await,
+        )
+    );
+    assert_eq!(
+        upstream_cost,
+        redis_bulk_string(
+            &redis_test_command(
+                &config,
+                &["HGET".into(), upstream_cost_key, "upstream-event-id".into(),],
+            )
+            .await,
+        )
+    );
 }
 
 #[tokio::test]
@@ -541,6 +777,141 @@ async fn redis_release_and_rollback_retry_once_after_timeout() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_reserves_retry_commit_after_response_loss_without_double_counting() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+
+    let downstream = redis_test_downstream("reserve-replay-request");
+    pause_test_redis(&config, 2_100).await;
+    let reservation = first
+        .reserve_downstream_request(&downstream)
+        .await
+        .expect("request reserve must replay the same event after a lost response");
+    let rejection = second
+        .reserve_downstream_request(&downstream)
+        .await
+        .expect_err("a replayed request event must count exactly once");
+    assert!(matches!(
+        rejection,
+        DownstreamAdmissionRejection::PerMinuteLimitExceeded { used: 1, .. }
+    ));
+    first
+        .rollback_downstream_request_reservation(reservation)
+        .await
+        .unwrap();
+
+    let downstream = redis_test_downstream("reserve-replay-lease");
+    pause_test_redis(&config, 2_100).await;
+    let downstream_lease = first
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .expect("downstream lease reserve must replay the same lease after a lost response");
+    assert!(matches!(
+        second.try_reserve_downstream_concurrency(&downstream).await,
+        Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded { .. })
+    ));
+    first
+        .release_downstream_concurrency(downstream_lease)
+        .await
+        .unwrap();
+
+    let upstream = redis_test_upstream("reserve-replay-upstream");
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream.clone()).await.unwrap();
+    pause_test_redis(&config, 2_100).await;
+    let upstream_lease = first
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .expect("upstream reserve must replay the same event and lease after a lost response");
+    let snapshot = second
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .remove(&upstream.id)
+        .unwrap();
+    assert_eq!(snapshot.in_flight, 1);
+    assert_eq!(snapshot.minute_cost, 2.5);
+    assert_eq!(snapshot.five_hour_cost, 2.5);
+    first
+        .release_upstream_request(upstream_lease)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn failed_redis_releases_can_be_retried_by_a_clone() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let downstream = redis_test_downstream("release-clone-retry");
+    let upstream = redis_test_upstream("upstream-release-clone-retry");
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream.clone()).await.unwrap();
+
+    let downstream_lease = first
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    let downstream_retry_during_outage = downstream_lease.clone();
+    let downstream_retry_after_recovery = downstream_lease.clone();
+    let upstream_lease = first
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    let upstream_retry_during_outage = upstream_lease.clone();
+    let upstream_retry_after_recovery = upstream_lease.clone();
+
+    pause_test_redis(&config, 5_000).await;
+    let (downstream_result, upstream_result) = tokio::join!(
+        first.release_downstream_concurrency(downstream_lease),
+        first.release_upstream_request(upstream_lease),
+    );
+    assert!(downstream_result.is_err());
+    assert!(upstream_result.is_err());
+
+    let (downstream_result, upstream_result) = tokio::join!(
+        first.release_downstream_concurrency(downstream_retry_during_outage),
+        first.release_upstream_request(upstream_retry_during_outage),
+    );
+    assert!(
+        downstream_result.is_err(),
+        "a retained downstream clone must retry Redis instead of returning false success"
+    );
+    assert!(
+        upstream_result.is_err(),
+        "a retained upstream clone must retry Redis instead of returning false success"
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (downstream_result, upstream_result) = tokio::join!(
+        first.release_downstream_concurrency(downstream_retry_after_recovery),
+        first.release_upstream_request(upstream_retry_after_recovery),
+    );
+    downstream_result.unwrap();
+    upstream_result.unwrap();
+
+    let replacement = second
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    second
+        .release_downstream_concurrency(replacement)
+        .await
+        .unwrap();
+    assert_eq!(
+        second
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .unwrap()
+            .in_flight,
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
     let config = redis_test_config();
     let (first, _second, _directory) = redis_test_states(&config).await;
@@ -550,7 +921,7 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
     first.insert_downstream(downstream.clone()).await.unwrap();
     let log = redis_test_usage_log("retryable-token-log", &downstream.id, 10);
 
-    pause_test_redis(&config, 2_500).await;
+    pause_test_redis(&config, 5_000).await;
     let error = first
         .append_usage_log(log.clone())
         .await
@@ -566,7 +937,7 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
         "a failed Redis write must not leave a pending durable log"
     );
 
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     first.append_usage_log(log.clone()).await.unwrap();
     let matching_logs = first
         .snapshot()
@@ -576,6 +947,132 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
         .filter(|entry| entry.id == log.id)
         .count();
     assert_eq!(matching_logs, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_token_recording_retries_commit_after_response_loss() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let mut downstream = redis_test_downstream("token-record-response-loss");
+    downstream.per_minute_limit = 60;
+    downstream.daily_token_limit = Some(100);
+    first.insert_downstream(downstream.clone()).await.unwrap();
+    let log = redis_test_usage_log("token-record-response-loss", &downstream.id, 10);
+
+    first
+        .append_usage_log(redis_test_usage_log(
+            "token-record-warmup",
+            &downstream.id,
+            1,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        redis_test_command(&config, &["CONFIG".into(), "RESETSTAT".into()]).await,
+        "+OK\r\n"
+    );
+
+    pause_test_redis(&config, 2_100).await;
+    first
+        .append_usage_log(log.clone())
+        .await
+        .expect("token recording must replay the same event after a lost response");
+
+    let command_stats = redis_test_command(&config, &["INFO".into(), "commandstats".into()]).await;
+    assert_eq!(
+        redis_command_calls(&command_stats, "evalsha"),
+        2,
+        "token recording must execute exactly one initial attempt and one replay: {command_stats:?}"
+    );
+
+    assert_eq!(
+        first
+            .snapshot()
+            .await
+            .usage_logs
+            .iter()
+            .filter(|entry| entry.id == log.id)
+            .count(),
+        1
+    );
+    let identity = format!("{:x}", Sha256::digest(downstream.id.as_bytes()));
+    let token_key = format!(
+        "{}:v1:downstream:{{{identity}}}:tokens",
+        config.redis_key_prefix
+    );
+    let token_values_key = format!(
+        "{}:v1:downstream:{{{identity}}}:token_values",
+        config.redis_key_prefix
+    );
+    let member = format!("history:{}", log.id);
+    assert_eq!(
+        redis_integer(&redis_test_command(&config, &["ZCARD".into(), token_key]).await),
+        2
+    );
+    assert_eq!(
+        redis_bulk_u64(
+            &redis_test_command(&config, &["HGET".into(), token_values_key, member],).await,
+        ),
+        10
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_token_replay_preserves_original_score_and_value() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let mut downstream = redis_test_downstream("token-replay-first-write-wins");
+    downstream.per_minute_limit = 60;
+    downstream.daily_token_limit = Some(1_000);
+    first.insert_downstream(downstream.clone()).await.unwrap();
+
+    let log_id = "replayed-token-event";
+    first
+        .append_usage_log(redis_test_usage_log(log_id, &downstream.id, 10))
+        .await
+        .unwrap();
+    let identity = format!("{:x}", Sha256::digest(downstream.id.as_bytes()));
+    let token_key = format!(
+        "{}:v1:downstream:{{{identity}}}:tokens",
+        config.redis_key_prefix
+    );
+    let token_values_key = format!(
+        "{}:v1:downstream:{{{identity}}}:token_values",
+        config.redis_key_prefix
+    );
+    let member = format!("history:{log_id}");
+    let original_score = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &["ZSCORE".into(), token_key.clone(), member.clone()],
+        )
+        .await,
+    );
+    let original_value = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &["HGET".into(), token_values_key.clone(), member.clone()],
+        )
+        .await,
+    );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    first
+        .append_usage_log(redis_test_usage_log(log_id, &downstream.id, 99))
+        .await
+        .unwrap();
+
+    let replayed_score = redis_bulk_u64(
+        &redis_test_command(&config, &["ZSCORE".into(), token_key, member.clone()]).await,
+    );
+    let replayed_value = redis_bulk_u64(
+        &redis_test_command(&config, &["HGET".into(), token_values_key, member]).await,
+    );
+    assert_eq!(original_score, replayed_score);
+    assert_eq!(original_value, 10);
+    assert_eq!(original_value, replayed_value);
 }
 
 #[tokio::test]

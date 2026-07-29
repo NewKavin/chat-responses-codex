@@ -199,6 +199,58 @@ async fn downstream_concurrency_release_is_idempotent_across_clones() {
 }
 
 #[tokio::test]
+async fn stale_downstream_lease_does_not_release_recreated_capacity() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let downstream = DownstreamConfig {
+        id: "down-stale-release".into(),
+        name: "Stale release".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 60,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    };
+
+    let stale = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    state
+        .clear_downstream_runtime(&downstream.id)
+        .await
+        .unwrap();
+    let replacement = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+
+    state.release_downstream_concurrency(stale).await.unwrap();
+    assert!(matches!(
+        state.try_reserve_downstream_concurrency(&downstream).await,
+        Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded { .. })
+    ));
+
+    state
+        .release_downstream_concurrency(replacement)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn request_quota_usage_remaining_calculation() {
     let tempdir = tempdir().unwrap();
     let downstream_key = generate_downstream_key("gw");

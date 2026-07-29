@@ -38,7 +38,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -2237,14 +2237,59 @@ async fn claude_count_tokens(
     .into_response()
 }
 
+const GUARD_RELEASE_ACTIVE: u8 = 0;
+const GUARD_RELEASE_RELEASING: u8 = 1;
+const GUARD_RELEASED: u8 = 2;
+
+struct GatewayReleaseGuard {
+    state: Arc<AtomicU8>,
+    completed: bool,
+}
+
+impl GatewayReleaseGuard {
+    fn acquire(state: &Arc<AtomicU8>) -> Result<Option<Self>, RuntimeCoordinationError> {
+        match state.compare_exchange(
+            GUARD_RELEASE_ACTIVE,
+            GUARD_RELEASE_RELEASING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(Some(Self {
+                state: state.clone(),
+                completed: false,
+            })),
+            Err(GUARD_RELEASED) => Ok(None),
+            Err(_) => Err(RuntimeCoordinationError),
+        }
+    }
+
+    fn complete(mut self) {
+        self.state.store(GUARD_RELEASED, Ordering::Release);
+        self.completed = true;
+    }
+}
+
+impl Drop for GatewayReleaseGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state.store(GUARD_RELEASE_ACTIVE, Ordering::Release);
+        }
+    }
+}
+
 struct DownstreamConcurrencyGuardInner {
     state: AppState,
     lease: DownstreamConcurrencyLease,
-    released: AtomicBool,
+    release_state: Arc<AtomicU8>,
 }
 
 impl DownstreamConcurrencyGuardInner {
-    fn spawn_release(&self) -> Option<tokio::task::JoinHandle<()>> {
+    fn spawn_release(
+        &self,
+    ) -> Result<
+        Option<tokio::task::JoinHandle<Result<(), RuntimeCoordinationError>>>,
+        RuntimeCoordinationError,
+    > {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -2253,28 +2298,34 @@ impl DownstreamConcurrencyGuardInner {
                     error = %error,
                     "downstream concurrency guard dropped outside Tokio runtime"
                 );
-                return None;
+                return Ok(None);
             }
         };
-        if self.released.swap(true, Ordering::AcqRel) {
-            return None;
-        }
+        let Some(release_guard) = GatewayReleaseGuard::acquire(&self.release_state)? else {
+            return Ok(None);
+        };
         let state = self.state.clone();
         let lease = self.lease.clone();
-        Some(runtime.spawn(async move {
-            if let Err(error) = state.release_downstream_concurrency(lease).await {
+        Ok(Some(runtime.spawn(async move {
+            let result = state.release_downstream_concurrency(lease).await;
+            if let Err(error) = &result {
                 tracing::warn!(
                     error = %error,
                     "failed to release downstream concurrency lease"
                 );
+            } else {
+                release_guard.complete();
             }
-        }))
+            result
+        })))
     }
 }
 
 impl Drop for DownstreamConcurrencyGuardInner {
     fn drop(&mut self) {
-        drop(self.spawn_release());
+        if let Ok(Some(task)) = self.spawn_release() {
+            drop(task);
+        }
     }
 }
 
@@ -2289,20 +2340,28 @@ impl DownstreamConcurrencyGuard {
             inner: Arc::new(DownstreamConcurrencyGuardInner {
                 state,
                 lease,
-                released: AtomicBool::new(false),
+                release_state: Arc::new(AtomicU8::new(GUARD_RELEASE_ACTIVE)),
             }),
         }
     }
 
     async fn release(&self) {
-        if let Some(task) = self.inner.spawn_release() {
-            if let Err(error) = task.await {
-                tracing::error!(
-                    downstream_id = %self.inner.lease.downstream_id(),
-                    error = %error,
-                    "downstream concurrency release task failed"
-                );
+        match self.inner.spawn_release() {
+            Ok(Some(task)) => {
+                if let Err(error) = task.await {
+                    tracing::error!(
+                        downstream_id = %self.inner.lease.downstream_id(),
+                        error = %error,
+                        "downstream concurrency release task failed"
+                    );
+                }
             }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                downstream_id = %self.inner.lease.downstream_id(),
+                error = %error,
+                "downstream concurrency release already in progress"
+            ),
         }
     }
 }
@@ -2310,13 +2369,16 @@ impl DownstreamConcurrencyGuard {
 struct UpstreamRequestGuardInner {
     state: AppState,
     lease: UpstreamRequestLease,
-    released: AtomicBool,
+    release_state: Arc<AtomicU8>,
 }
 
 impl UpstreamRequestGuardInner {
     fn spawn_release(
         &self,
-    ) -> Option<tokio::task::JoinHandle<Result<(), RuntimeCoordinationError>>> {
+    ) -> Result<
+        Option<tokio::task::JoinHandle<Result<(), RuntimeCoordinationError>>>,
+        RuntimeCoordinationError,
+    > {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -2325,16 +2387,16 @@ impl UpstreamRequestGuardInner {
                     error = %error,
                     "upstream request guard dropped outside Tokio runtime"
                 );
-                return None;
+                return Ok(None);
             }
         };
-        if self.released.swap(true, Ordering::AcqRel) {
-            return None;
-        }
+        let Some(release_guard) = GatewayReleaseGuard::acquire(&self.release_state)? else {
+            return Ok(None);
+        };
         let state = self.state.clone();
         let lease = self.lease.clone();
         let upstream_id = lease.upstream_id().to_string();
-        Some(runtime.spawn(async move {
+        Ok(Some(runtime.spawn(async move {
             let result = state.release_upstream_request(lease).await;
             if let Err(error) = &result {
                 tracing::error!(
@@ -2342,15 +2404,19 @@ impl UpstreamRequestGuardInner {
                     error = %error,
                     "failed to release upstream request lease"
                 );
+            } else {
+                release_guard.complete();
             }
             result
-        }))
+        })))
     }
 }
 
 impl Drop for UpstreamRequestGuardInner {
     fn drop(&mut self) {
-        drop(self.spawn_release());
+        if let Ok(Some(task)) = self.spawn_release() {
+            drop(task);
+        }
     }
 }
 
@@ -2365,14 +2431,14 @@ impl UpstreamRequestGuard {
             inner: Arc::new(UpstreamRequestGuardInner {
                 state,
                 lease,
-                released: AtomicBool::new(false),
+                release_state: Arc::new(AtomicU8::new(GUARD_RELEASE_ACTIVE)),
             }),
         }
     }
 
     async fn release(&self) -> Result<(), RuntimeCoordinationError> {
-        if let Some(task) = self.inner.spawn_release() {
-            match task.await {
+        match self.inner.spawn_release()? {
+            Some(task) => match task.await {
                 Ok(result) => return result,
                 Err(error) => {
                     tracing::error!(
@@ -2382,9 +2448,9 @@ impl UpstreamRequestGuard {
                     );
                     return Err(RuntimeCoordinationError);
                 }
-            }
+            },
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -2401,12 +2467,20 @@ impl UpstreamRequestReservation {
     }
 
     async fn release(&self) -> Result<(), RuntimeCoordinationError> {
-        let guard = self.guard.lock().await.take();
-        if let Some(guard) = guard {
-            guard.release().await
-        } else {
-            Ok(())
+        let guard = self.guard.lock().await.clone();
+        let Some(guard) = guard else {
+            return Ok(());
+        };
+        guard.release().await?;
+
+        let mut slot = self.guard.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.inner, &guard.inner))
+        {
+            slot.take();
         }
+        Ok(())
     }
 
     async fn reserve_next(

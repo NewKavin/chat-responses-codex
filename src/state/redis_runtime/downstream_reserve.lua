@@ -24,6 +24,10 @@ if #expired_tokens > 0 then
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_ms - (token_retention_seconds * 1000))
 
+if redis.call('ZSCORE', KEYS[1], event_id) then
+  return {0}
+end
+
 local function retry_after(key, start_ms, window_seconds)
   local oldest = redis.call('ZRANGEBYSCORE', key, start_ms, '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
   if #oldest < 2 then

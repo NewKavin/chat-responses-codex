@@ -166,27 +166,32 @@ impl RedisRuntimeCoordinator {
             .then_some(downstream.monthly_token_limit)
             .flatten()
             .unwrap_or(0);
-        let mut connection = self.connection();
-        let script = redis::Script::new(include_str!("redis_runtime/downstream_reserve.lua"));
-        let mut invocation = script.prepare_invoke();
-        invocation
-            .key(request_key)
-            .key(token_key)
-            .key(token_values_key)
-            .arg(event_id)
-            .arg(downstream.per_minute_limit)
-            .arg(request_window_seconds)
-            .arg(request_quota)
-            .arg(daily_limit)
-            .arg(monthly_limit);
-        let operation = invocation.invoke_async::<Vec<i64>>(&mut connection);
-        let result = match tokio::time::timeout(REDIS_OPERATION_TIMEOUT, operation).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) | Err(_) => {
-                let _ = self.refresh_manager().await;
-                return Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable);
-            }
-        };
+        let result = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let request_key = request_key.clone();
+                let token_key = token_key.clone();
+                let token_values_key = token_values_key.clone();
+                let event_id = event_id.to_string();
+                async move {
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/downstream_reserve.lua"));
+                    let mut invocation = script.prepare_invoke();
+                    invocation
+                        .key(request_key)
+                        .key(token_key)
+                        .key(token_values_key)
+                        .arg(event_id)
+                        .arg(downstream.per_minute_limit)
+                        .arg(request_window_seconds)
+                        .arg(request_quota)
+                        .arg(daily_limit)
+                        .arg(monthly_limit);
+                    timeout_coordination(invocation.invoke_async::<Vec<i64>>(&mut connection)).await
+                }
+            })
+            .await
+            .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
         parse_downstream_reservation(result)
     }
 
@@ -222,22 +227,29 @@ impl RedisRuntimeCoordinator {
         retention_seconds: u64,
     ) -> Result<(), RuntimeCoordinationError> {
         let identity = stable_identity(downstream_id);
-        let mut connection = self.connection();
-        let script = redis::Script::new(include_str!("redis_runtime/downstream_record_tokens.lua"));
-        let mut invocation = script.prepare_invoke();
-        invocation
-            .key(self.key(&identity, "tokens"))
-            .key(self.key(&identity, "token_values"))
-            .arg(event_id)
-            .arg(tokens)
-            .arg(retention_seconds);
-        let result = timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
-            .await
-            .map(|_| ());
-        if result.is_err() {
-            let _ = self.refresh_manager().await;
-        }
-        result
+        let token_key = self.key(&identity, "tokens");
+        let token_values_key = self.key(&identity, "token_values");
+        self.retry_coordination_once(|| {
+            let mut connection = self.connection();
+            let token_key = token_key.clone();
+            let token_values_key = token_values_key.clone();
+            let event_id = event_id.to_string();
+            async move {
+                let script =
+                    redis::Script::new(include_str!("redis_runtime/downstream_record_tokens.lua"));
+                let mut invocation = script.prepare_invoke();
+                invocation
+                    .key(token_key)
+                    .key(token_values_key)
+                    .arg(event_id)
+                    .arg(tokens)
+                    .arg(retention_seconds);
+                timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
     }
 
     pub(super) async fn reserve_downstream_lease(
@@ -246,22 +258,26 @@ impl RedisRuntimeCoordinator {
         lease_id: &str,
     ) -> Result<(), DownstreamAdmissionRejection> {
         let identity = stable_identity(&downstream.id);
-        let mut connection = self.connection();
-        let script = redis::Script::new(include_str!("redis_runtime/lease_reserve.lua"));
-        let mut invocation = script.prepare_invoke();
-        invocation
-            .key(self.key(&identity, "leases"))
-            .arg(lease_id)
-            .arg(downstream.max_concurrency.max(1))
-            .arg(self.lease_duration_ms);
-        let operation = invocation.invoke_async::<Vec<i64>>(&mut connection);
-        let result = match tokio::time::timeout(REDIS_OPERATION_TIMEOUT, operation).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) | Err(_) => {
-                let _ = self.refresh_manager().await;
-                return Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable);
-            }
-        };
+        let lease_key = self.key(&identity, "leases");
+        let result = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let lease_key = lease_key.clone();
+                let lease_id = lease_id.to_string();
+                async move {
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/lease_reserve.lua"));
+                    let mut invocation = script.prepare_invoke();
+                    invocation
+                        .key(lease_key)
+                        .arg(lease_id)
+                        .arg(downstream.max_concurrency.max(1))
+                        .arg(self.lease_duration_ms);
+                    timeout_coordination(invocation.invoke_async::<Vec<i64>>(&mut connection)).await
+                }
+            })
+            .await
+            .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
         match result.first().copied() {
             Some(0) => Ok(()),
             Some(1) => Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
@@ -326,30 +342,40 @@ impl RedisRuntimeCoordinator {
         hedge: bool,
     ) -> Result<(), UpstreamAdmissionError> {
         let identity = stable_identity(&upstream.id);
-        let mut connection = self.connection();
-        let script = redis::Script::new(include_str!("redis_runtime/upstream_reserve.lua"));
-        let mut invocation = script.prepare_invoke();
-        invocation
-            .key(self.upstream_key(&identity, "leases"))
-            .key(self.upstream_key(&identity, "events"))
-            .key(self.upstream_key(&identity, "event_costs"))
-            .arg(event_id)
-            .arg(lease_id)
-            .arg(request_cost.to_string())
-            .arg(if hedge { 1 } else { 0 })
-            .arg(upstream.max_concurrency.max(1))
-            .arg(upstream.requests_per_minute)
-            .arg(upstream.request_quota_window_seconds())
-            .arg(upstream.request_quota_requests)
-            .arg(self.lease_duration_ms);
-        let operation = invocation.invoke_async::<Vec<String>>(&mut connection);
-        let result = match tokio::time::timeout(REDIS_OPERATION_TIMEOUT, operation).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) | Err(_) => {
-                let _ = self.refresh_manager().await;
-                return Err(UpstreamAdmissionError::runtime_coordination_unavailable());
-            }
-        };
+        let lease_key = self.upstream_key(&identity, "leases");
+        let event_key = self.upstream_key(&identity, "events");
+        let cost_key = self.upstream_key(&identity, "event_costs");
+        let result = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let lease_key = lease_key.clone();
+                let event_key = event_key.clone();
+                let cost_key = cost_key.clone();
+                let event_id = event_id.to_string();
+                let lease_id = lease_id.to_string();
+                async move {
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/upstream_reserve.lua"));
+                    let mut invocation = script.prepare_invoke();
+                    invocation
+                        .key(lease_key)
+                        .key(event_key)
+                        .key(cost_key)
+                        .arg(event_id)
+                        .arg(lease_id)
+                        .arg(request_cost.to_string())
+                        .arg(if hedge { 1 } else { 0 })
+                        .arg(upstream.max_concurrency.max(1))
+                        .arg(upstream.requests_per_minute)
+                        .arg(upstream.request_quota_window_seconds())
+                        .arg(upstream.request_quota_requests)
+                        .arg(self.lease_duration_ms);
+                    timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
+                        .await
+                }
+            })
+            .await
+            .map_err(|_| UpstreamAdmissionError::runtime_coordination_unavailable())?;
         parse_upstream_reservation(result)
     }
 
