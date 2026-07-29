@@ -505,7 +505,12 @@ pub(super) async fn prefetch_first_usable_output(
                     .map_err(protocol_error_to_gateway)?
                 {
                     FirstUsableOutputResult::Pending => {}
-                    FirstUsableOutputResult::Ready => return Ok(reader),
+                    FirstUsableOutputResult::Ready => {
+                        diagnostic_context
+                            .first_token_latency
+                            .observe(diagnostic_context.started);
+                        return Ok(reader);
+                    }
                     FirstUsableOutputResult::CompleteWithoutOutput => {
                         return Err(upstream_empty_response_error());
                     }
@@ -516,7 +521,12 @@ pub(super) async fn prefetch_first_usable_output(
                     .finish(sse_event_has_usable_output)
                     .map_err(protocol_error_to_gateway)?
                 {
-                    FirstUsableOutputResult::Ready => Ok(reader),
+                    FirstUsableOutputResult::Ready => {
+                        diagnostic_context
+                            .first_token_latency
+                            .observe(diagnostic_context.started);
+                        Ok(reader)
+                    }
                     FirstUsableOutputResult::CompleteWithoutOutput => {
                         Err(upstream_empty_response_error())
                     }
@@ -914,6 +924,9 @@ impl ProxiedStreamState {
                     );
                 }
                 if stream_event_has_usable_output(&event) {
+                    self.body_read_diagnostic_context
+                        .first_token_latency
+                        .observe(self.body_read_diagnostic_context.started);
                     self.usable_output_seen = true;
                 }
                 if responses_event_is_terminal(&event) {
@@ -1438,6 +1451,11 @@ impl TranslatedStreamState {
 
     fn pop_pending(&mut self) -> Option<Bytes> {
         let frame = self.pending.pop_front()?;
+        if frame.usable_output {
+            self.body_read_diagnostic_context
+                .first_token_latency
+                .observe(self.body_read_diagnostic_context.started);
+        }
         self.usable_output_delivered |= frame.usable_output;
         Some(frame.bytes)
     }
@@ -2130,6 +2148,7 @@ mod diagnostic_tests {
             error_message: Some("tool-argument-secret".into()),
             error_category: Some("excluded-error-category-marker".into()),
             started: Instant::now(),
+            first_token_latency: FirstTokenLatency::default(),
             hedge_control: None,
         };
         assert_eq!(usage_context.model, "prompt-secret");
@@ -2212,6 +2231,7 @@ mod diagnostic_tests {
             endpoint: "/v1/responses".into(),
             started: Instant::now(),
             route_attempts,
+            first_token_latency: FirstTokenLatency::default(),
         };
 
         tracing::subscriber::with_default(subscriber, || {

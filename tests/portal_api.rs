@@ -88,6 +88,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
+                first_token_latency_ms: None,
                 latency_ms: 500,
                 created_at: now - 3600,
                 compatibility: None,
@@ -111,6 +112,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 prompt_tokens: 50,
                 completion_tokens: 25,
                 total_tokens: 75,
+                first_token_latency_ms: None,
                 latency_ms: 300,
                 created_at: now - 7200,
                 compatibility: None,
@@ -134,6 +136,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 prompt_tokens: 80,
                 completion_tokens: 20,
                 total_tokens: 100,
+                first_token_latency_ms: None,
                 latency_ms: 200,
                 created_at: now - 1800,
                 compatibility: None,
@@ -157,6 +160,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                first_token_latency_ms: None,
                 latency_ms: 120,
                 created_at: now - 900,
                 compatibility: None,
@@ -220,7 +224,8 @@ fn create_test_state() -> (AppState, String) {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
-                latency_ms: 500,
+                first_token_latency_ms: Some(10_650),
+                latency_ms: 15_120,
                 created_at: now - 3600,
                 compatibility: None,
             },
@@ -243,6 +248,7 @@ fn create_test_state() -> (AppState, String) {
                 prompt_tokens: 50,
                 completion_tokens: 25,
                 total_tokens: 75,
+                first_token_latency_ms: None,
                 latency_ms: 300,
                 created_at: now - 7200,
                 compatibility: None,
@@ -302,6 +308,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 prompt_tokens: 80,
                 completion_tokens: 20,
                 total_tokens: 100,
+                first_token_latency_ms: None,
                 latency_ms: 200,
                 created_at: now - 600,
                 compatibility: None,
@@ -325,6 +332,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 prompt_tokens: 96,
                 completion_tokens: 24,
                 total_tokens: 120,
+                first_token_latency_ms: None,
                 latency_ms: 210,
                 created_at: now - 300,
                 compatibility: None,
@@ -364,6 +372,7 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            first_token_latency_ms: None,
             latency_ms: 120,
             created_at: now.saturating_sub(index as u64),
             compatibility: None,
@@ -808,6 +817,16 @@ async fn test_portal_usage_history_returns_recent_logs() {
 
     let recent_logs = result["recent_logs"].as_array().unwrap();
     assert!(!recent_logs.is_empty());
+    let with_latency = recent_logs
+        .iter()
+        .find(|log| log["id"] == "log-1")
+        .unwrap();
+    let without_latency = recent_logs
+        .iter()
+        .find(|log| log["id"] == "log-2")
+        .unwrap();
+    assert_eq!(with_latency["first_token_latency_ms"], 10_650);
+    assert!(without_latency["first_token_latency_ms"].is_null());
 }
 
 #[tokio::test]
@@ -1084,7 +1103,7 @@ async fn test_portal_models_calculates_avg_latency() {
     assert!(gpt4.is_some());
 
     let gpt4 = gpt4.unwrap();
-    assert_eq!(gpt4["avg_latency_ms"], 500); // Only one log with 500ms latency
+    assert_eq!(gpt4["avg_latency_ms"], 15_120); // Only one log with 15.12s latency
 }
 
 #[tokio::test]

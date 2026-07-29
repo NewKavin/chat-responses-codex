@@ -187,6 +187,10 @@ async fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream() 
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert_eq!(snapshot.usage_logs[0].upstream_key_id, "responses-fast");
     assert_eq!(snapshot.usage_logs[0].status_code, 200);
+    let first = snapshot.usage_logs[0]
+        .first_token_latency_ms
+        .expect("the winning physical attempt should carry its first-token timing");
+    assert!(first <= snapshot.usage_logs[0].latency_ms);
     assert!(snapshot
         .upstreams
         .iter()
@@ -792,7 +796,9 @@ async fn translated_truncated_chunked_body_after_usable_output_is_not_retried() 
     );
 }
 
-async fn translated_drop_after_event(event_type: &str) -> (Vec<String>, u16, String) {
+async fn translated_drop_after_event(
+    event_type: &str,
+) -> (Vec<String>, u16, String, Option<u64>) {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -928,26 +934,30 @@ async fn translated_drop_after_event(event_type: &str) -> (Vec<String>, u16, Str
         delivered,
         log.status_code,
         log.error_category.clone().unwrap_or_default(),
+        log.first_token_latency_ms,
     )
 }
 
 #[tokio::test]
 async fn translated_drop_after_response_created_is_cancelled_before_usable_output() {
-    let (delivered, status, category) = translated_drop_after_event("response.created").await;
+    let (delivered, status, category, first_token_latency_ms) =
+        translated_drop_after_event("response.created").await;
 
     assert_eq!(delivered.len(), 1);
     assert_eq!(status, 499);
     assert_eq!(category, "stream_client_cancelled");
+    assert_eq!(first_token_latency_ms, None);
 }
 
 #[tokio::test]
 async fn translated_drop_after_text_delta_is_incomplete_close() {
-    let (delivered, status, category) =
+    let (delivered, status, category, first_token_latency_ms) =
         translated_drop_after_event("response.output_text.delta").await;
 
     assert!(delivered.len() > 1);
     assert_eq!(status, 499);
     assert_eq!(category, "stream_incomplete_close");
+    assert!(first_token_latency_ms.is_some());
 }
 
 #[tokio::test]
@@ -1099,7 +1109,7 @@ async fn native_drop_after_response_incomplete_is_not_499() {
 }
 
 async fn native_responses_response_for_chunks(
-    chunks: Vec<Bytes>,
+    chunks: Vec<(Duration, Bytes)>,
     stall_after_chunks: bool,
 ) -> (
     axum::response::Response,
@@ -1128,13 +1138,10 @@ async fn native_responses_response_for_chunks(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("text/event-stream"),
                 );
-                let output = stream::iter(
-                    chunks
-                        .as_ref()
-                        .clone()
-                        .into_iter()
-                        .map(Ok::<Bytes, std::io::Error>),
-                );
+                let output = stream::iter(chunks.as_ref().clone()).then(|(delay, chunk)| async move {
+                    tokio::time::sleep(delay).await;
+                    Ok::<Bytes, std::io::Error>(chunk)
+                });
                 let body = if stall_after_chunks {
                     Body::from_stream(
                         output.chain(stream::pending::<Result<Bytes, std::io::Error>>()),
@@ -1262,7 +1269,9 @@ async fn native_responses_response_for_chunks(
 async fn native_responses_clean_eof_without_terminal_is_typed_502() {
     let (response, state, _tempdir, first_hits, second_hits) =
         native_responses_response_for_chunks(
-            vec![Bytes::from_static(
+        vec![(
+            Duration::ZERO,
+            Bytes::from_static(
                 concat!(
                     "event: response.created\n",
                     "data: {\"type\":\"response.created\",\"response\":{",
@@ -1275,7 +1284,8 @@ async fn native_responses_clean_eof_without_terminal_is_typed_502() {
                     "\"delta\":\"partial-before-eof\"}\n\n"
                 )
                 .as_bytes(),
-            )],
+            ),
+        )],
             false,
         )
         .await;
@@ -1306,22 +1316,26 @@ async fn native_responses_clean_eof_without_terminal_is_typed_502() {
         snapshot.usage_logs[0].error_category.as_deref(),
         Some("stream_upstream_incomplete_eof")
     );
+    assert!(snapshot.usage_logs[0].first_token_latency_ms.is_some());
 }
 
 #[tokio::test]
 async fn native_responses_done_without_terminal_is_incomplete() {
     let (response, state, _tempdir, first_hits, second_hits) =
         native_responses_response_for_chunks(
-            vec![Bytes::from_static(
-                concat!(
-                    "event: response.output_text.delta\n",
-                    "data: {\"type\":\"response.output_text.delta\",",
-                    "\"response_id\":\"resp-done\",\"item_id\":\"msg-1\",",
-                    "\"output_index\":0,\"content_index\":0,",
-                    "\"delta\":\"partial-before-done\"}\n\n",
-                    "data: [DONE]\n\n"
-                )
-                .as_bytes(),
+            vec![(
+                Duration::ZERO,
+                Bytes::from_static(
+                    concat!(
+                        "event: response.output_text.delta\n",
+                        "data: {\"type\":\"response.output_text.delta\",",
+                        "\"response_id\":\"resp-done\",\"item_id\":\"msg-1\",",
+                        "\"output_index\":0,\"content_index\":0,",
+                        "\"delta\":\"partial-before-done\"}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                    .as_bytes(),
+                ),
             )],
             false,
         )
@@ -1383,7 +1397,11 @@ async fn native_responses_terminal_followed_by_eof_is_valid() {
             terminal_type, terminal_status
         );
         let (response, state, _tempdir, first_hits, second_hits) =
-            native_responses_response_for_chunks(vec![Bytes::from(terminal)], false).await;
+            native_responses_response_for_chunks(
+                vec![(Duration::ZERO, Bytes::from(terminal))],
+                false,
+            )
+            .await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = String::from_utf8(
@@ -1405,6 +1423,63 @@ async fn native_responses_terminal_followed_by_eof_is_valid() {
         assert_eq!(snapshot.usage_logs[0].error_category, None);
         assert_eq!(snapshot.upstreams[0].failure_count, 0);
     }
+}
+
+#[tokio::test]
+async fn native_responses_records_first_token_latency_on_first_usable_output() {
+    let metadata = Bytes::from_static(
+        concat!(
+            ": upstream keepalive\n\n",
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{",
+            "\"id\":\"resp-latency\",\"object\":\"response\",\"created_at\":1,",
+            "\"status\":\"in_progress\",\"model\":\"gpt-4\",\"output\":[]}}\n\n"
+        )
+        .as_bytes(),
+    );
+    let usable_output = Bytes::from_static(
+        concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",",
+            "\"response_id\":\"resp-latency\",\"item_id\":\"msg-1\",",
+            "\"output_index\":0,\"content_index\":0,\"delta\":\"delayed\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{",
+            "\"id\":\"resp-latency\",\"object\":\"response\",\"created_at\":1,",
+            "\"status\":\"completed\",\"model\":\"gpt-4\",\"output\":[]}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .as_bytes(),
+    );
+    let (response, state, _tempdir, first_hits, second_hits) =
+        native_responses_response_for_chunks(
+            vec![
+                (Duration::ZERO, metadata),
+                (Duration::from_millis(80), usable_output),
+            ],
+            false,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("delayed"), "{body}");
+    assert_eq!(first_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(second_hits.load(Ordering::SeqCst), 0);
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    let log = &snapshot.usage_logs[0];
+    let first = log
+        .first_token_latency_ms
+        .expect("stream should record first usable output latency");
+    assert!(first >= 40, "first usable output was recorded too early: {first}");
+    assert!(first <= log.latency_ms);
 }
 
 #[tokio::test]

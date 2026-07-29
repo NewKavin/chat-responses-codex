@@ -1483,17 +1483,31 @@ fn downstream_disconnect_stays_499() {
 
 #[test]
 fn drop_message_without_observed_output_means_cancelled_before_output() {
+    let interruption = StreamInterruption::DownstreamBodyDropped {
+        usable_output_delivered: false,
+    };
     assert_eq!(
-        stream_drop_interruption_message(false),
-        "client disconnected before any upstream output"
+        interruption.message(),
+        "downstream response body dropped before semantic completion"
+    );
+    assert_eq!(
+        interruption.status_and_category(),
+        (StatusCode::from_u16(499).unwrap(), "stream_client_cancelled")
     );
 }
 
 #[test]
 fn drop_message_with_observed_output_means_partial_output() {
+    let interruption = StreamInterruption::DownstreamBodyDropped {
+        usable_output_delivered: true,
+    };
     assert_eq!(
-        stream_drop_interruption_message(true),
-        "client disconnected during stream (partial output received)"
+        interruption.message(),
+        "downstream response body dropped before semantic completion (partial output delivered)"
+    );
+    assert_eq!(
+        interruption.status_and_category(),
+        (StatusCode::from_u16(499).unwrap(), "stream_incomplete_close")
     );
 }
 

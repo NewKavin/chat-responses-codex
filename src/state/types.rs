@@ -469,6 +469,8 @@ pub struct UsageLog {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub first_token_latency_ms: Option<u64>,
     pub latency_ms: u64,
     pub created_at: u64,
     #[serde(default)]

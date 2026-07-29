@@ -232,7 +232,7 @@ async fn downstream_responses_allows_function_call_success_with_zero_output_toke
         AppConfig::default(),
     );
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -276,6 +276,9 @@ async fn downstream_responses_allows_function_call_success_with_zero_output_toke
     );
     assert_eq!(payload["output"][0]["type"], "function_call");
     assert_eq!(payload["output"][0]["name"], "exec_command");
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    assert_eq!(snapshot.usage_logs[0].first_token_latency_ms, None);
 }
 
 #[tokio::test]

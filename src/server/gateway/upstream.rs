@@ -1112,6 +1112,7 @@ async fn prefetch_stream_with_hedges(
                         endpoint: endpoint.path().to_string(),
                         started,
                         route_attempts: route_attempts.clone(),
+                        first_token_latency: FirstTokenLatency::default(),
                     };
                     let future = send_hedge_stream_attempt(HedgeStreamAttempt {
                         state: state.clone(),
@@ -2107,8 +2108,9 @@ pub(super) async fn send_to_upstream(
                 endpoint: endpoint.path().to_string(),
                 started,
                 route_attempts: route_attempts.clone(),
+                first_token_latency: FirstTokenLatency::default(),
             };
-            let (reader, body_read_diagnostic_context) =
+            let (reader, mut body_read_diagnostic_context) =
                 if attempt_mode == UpstreamAttemptMode::SsePassThrough {
                     let route_hedge_context =
                         stream_completion_context
@@ -2164,6 +2166,9 @@ pub(super) async fn send_to_upstream(
                 } else {
                     (reader, primary_body_read_diagnostic_context)
                 };
+            if upstream_protocol != endpoint.native_protocol() {
+                body_read_diagnostic_context.first_token_latency = FirstTokenLatency::default();
+            }
             let stream_log_context = StreamUsageLogContext {
                 state: state.clone(),
                 request_id: request_id.to_string(),
@@ -2182,6 +2187,9 @@ pub(super) async fn send_to_upstream(
                 error_message: None,
                 error_category: None,
                 started,
+                first_token_latency: body_read_diagnostic_context
+                    .first_token_latency
+                    .clone(),
                 hedge_control: hedge_control.clone(),
             };
             if upstream_protocol == endpoint.native_protocol() {

@@ -254,6 +254,7 @@ fn redis_test_usage_log(id: &str, downstream_id: &str, total_tokens: u64) -> Usa
         prompt_tokens: total_tokens,
         completion_tokens: 0,
         total_tokens,
+        first_token_latency_ms: None,
         latency_ms: 1,
         created_at: 0,
         compatibility: None,

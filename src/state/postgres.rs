@@ -279,7 +279,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
                  endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
-                 status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at \
+                 status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at \
                  FROM usage_logs WHERE created_at >= $1 ORDER BY created_at, request_id, id",
                 &[&runtime_usage_start],
             )
@@ -516,7 +516,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
+                        status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at <= $2
@@ -1197,6 +1197,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
         let prompt_tokens = log.prompt_tokens as i64;
         let completion_tokens = log.completion_tokens as i64;
         let total_tokens = log.total_tokens as i64;
+        let first_token_latency_ms = log.first_token_latency_ms.map(u64_to_i64);
         let latency_ms = log.latency_ms as i64;
         let created_at = log.created_at as i64;
         let status_code = log.status_code as i32;
@@ -1220,6 +1221,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
             &prompt_tokens,
             &completion_tokens,
             &total_tokens,
+            &first_token_latency_ms,
             &latency_ms,
             &created_at,
         ];
@@ -1229,13 +1231,13 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
                 id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                 endpoint, model, inference_strength, billing_mode, request_count,
                 user_agent, request_id, status_code, error_message, error_category,
-                compatibility, prompt_tokens, completion_tokens, total_tokens, latency_ms, created_at
+                compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15,
                 $16, $17, $18, $19, $20,
-                $21
+                $21, $22
             ) ON CONFLICT (id) DO NOTHING",
             params,
         )
@@ -1310,8 +1312,9 @@ fn usage_log_from_row(row: &Row) -> UsageLog {
         prompt_tokens: i64_to_u64(row.get::<_, i64>(16)),
         completion_tokens: i64_to_u64(row.get::<_, i64>(17)),
         total_tokens: i64_to_u64(row.get::<_, i64>(18)),
-        latency_ms: i64_to_u64(row.get::<_, i64>(19)),
-        created_at: i64_to_u64(row.get::<_, i64>(20)),
+        first_token_latency_ms: row.get::<_, Option<i64>>(19).map(i64_to_u64),
+        latency_ms: i64_to_u64(row.get::<_, i64>(20)),
+        created_at: i64_to_u64(row.get::<_, i64>(21)),
     }
 }
 
@@ -1569,6 +1572,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     prompt_tokens BIGINT NOT NULL,
     completion_tokens BIGINT NOT NULL,
     total_tokens BIGINT NOT NULL,
+    first_token_latency_ms BIGINT NULL,
     latency_ms BIGINT NOT NULL,
     created_at BIGINT NOT NULL
 );
@@ -1591,6 +1595,8 @@ ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS error_category TEXT NULL;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS compatibility TEXT NULL;
+ALTER TABLE usage_logs
+    ADD COLUMN IF NOT EXISTS first_token_latency_ms BIGINT NULL;
 
 CREATE TABLE IF NOT EXISTS capability_configuration (
     singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),

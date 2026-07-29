@@ -56,7 +56,8 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
-                latency_ms: 500,
+                first_token_latency_ms: Some(10_650),
+                latency_ms: 15_120,
                 created_at: now,
                 compatibility: None,
             },
@@ -79,6 +80,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 50,
                 completion_tokens: 25,
                 total_tokens: 75,
+                first_token_latency_ms: None,
                 latency_ms: 300,
                 created_at: now - 3600, // 1 hour ago
                 compatibility: None,
@@ -102,6 +104,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                first_token_latency_ms: None,
                 latency_ms: 100,
                 created_at: now - 7200, // 2 hours ago
                 compatibility: None,
@@ -125,6 +128,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                first_token_latency_ms: None,
                 latency_ms: 50,
                 created_at: now - 86000, // within 1 day
                 compatibility: None,
@@ -148,6 +152,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 200,
                 completion_tokens: 100,
                 total_tokens: 300,
+                first_token_latency_ms: None,
                 latency_ms: 800,
                 created_at: now - 604000, // within 7 days
                 compatibility: None,
@@ -226,6 +231,12 @@ async fn test_logs_list_returns_recent_logs() {
     assert!(result["page"].is_number());
     assert!(result["page_size"].is_number());
     assert!(result["total_pages"].is_number());
+
+    let logs = result["logs"].as_array().unwrap();
+    let with_latency = logs.iter().find(|log| log["id"] == "log-1").unwrap();
+    let without_latency = logs.iter().find(|log| log["id"] == "log-2").unwrap();
+    assert_eq!(with_latency["first_token_latency_ms"], 10_650);
+    assert!(without_latency["first_token_latency_ms"].is_null());
 }
 
 #[tokio::test]
@@ -828,6 +839,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                first_token_latency_ms: None,
                 latency_ms: 100,
                 created_at: now,
                 compatibility: None,
@@ -851,6 +863,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                first_token_latency_ms: None,
                 latency_ms: 100,
                 created_at: now - 15 * 86400,
                 compatibility: None,
@@ -905,6 +918,7 @@ async fn test_prune_expired_usage_logs_respects_zero_retention() {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            first_token_latency_ms: None,
             latency_ms: 100,
             created_at: now - 999 * 86400,
             compatibility: None,

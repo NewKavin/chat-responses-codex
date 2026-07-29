@@ -1158,6 +1158,21 @@ struct StreamBodyReadDiagnosticContext {
     endpoint: String,
     started: Instant,
     route_attempts: RequestRouteAttempts,
+    first_token_latency: FirstTokenLatency,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FirstTokenLatency(Arc<OnceLock<u64>>);
+
+impl FirstTokenLatency {
+    fn observe(&self, started: Instant) {
+        let elapsed = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        let _ = self.0.set(elapsed);
+    }
+
+    fn get(&self) -> Option<u64> {
+        self.0.get().copied()
+    }
 }
 
 #[derive(Clone)]
@@ -1179,6 +1194,7 @@ struct StreamUsageLogContext {
     error_message: Option<String>,
     error_category: Option<String>,
     started: Instant,
+    first_token_latency: FirstTokenLatency,
     hedge_control: Option<HedgeAttemptControl>,
 }
 
@@ -1249,6 +1265,7 @@ impl StreamUsageLogContext {
             error_message,
             error_category,
             started,
+            first_token_latency,
             hedge_control: _,
         } = self;
 
@@ -1275,6 +1292,7 @@ impl StreamUsageLogContext {
             prompt_tokens: usage.0,
             completion_tokens: usage.1,
             total_tokens: usage.2,
+            first_token_latency_ms: first_token_latency.get(),
             latency_ms: started.elapsed().as_millis() as u64,
             created_at: unix_seconds(),
             compatibility,
@@ -1448,6 +1466,7 @@ async fn append_gateway_usage_log(
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        first_token_latency_ms: None,
         latency_ms: started.elapsed().as_millis() as u64,
         created_at: unix_seconds(),
         compatibility,
@@ -4916,6 +4935,7 @@ async fn process_gateway_request_inner(
                                     error_message: None,
                                     error_category: None,
                                     started,
+                                    first_token_latency: FirstTokenLatency::default(),
                                     hedge_control: None,
                                 },
                             );

@@ -30,6 +30,27 @@ async fn persisted_state_without_announcement_still_deserializes() {
     assert!(state.announcement.is_none());
 }
 
+#[test]
+fn usage_log_without_first_token_latency_still_deserializes() {
+    let value = serde_json::json!({
+        "id": "old-log",
+        "downstream_key_id": "down",
+        "upstream_key_id": "up",
+        "endpoint": "/v1/responses",
+        "model": "gpt-4",
+        "request_id": "req-old",
+        "status_code": 200,
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "latency_ms": 100,
+        "created_at": 1
+    });
+
+    let log: UsageLog = serde_json::from_value(value).unwrap();
+    assert_eq!(log.first_token_latency_ms, None);
+}
+
 #[tokio::test]
 async fn app_state_rejects_and_clears_plaintext_that_mismatches_authoritative_hash() {
     let stored_plaintext = generate_downstream_key("stored").plaintext;
@@ -208,6 +229,7 @@ fn usage_log(
         prompt_tokens: total_tokens / 2,
         completion_tokens: total_tokens / 2,
         total_tokens,
+        first_token_latency_ms: None,
         latency_ms: 100,
         created_at,
         compatibility: None,
@@ -303,6 +325,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     prompt_tokens: 10,
                     completion_tokens: 10,
                     total_tokens: 20,
+                    first_token_latency_ms: None,
                     latency_ms: 100,
                     created_at: now - 60,
                     compatibility: None,
@@ -326,6 +349,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     prompt_tokens: 15,
                     completion_tokens: 15,
                     total_tokens: 30,
+                    first_token_latency_ms: None,
                     latency_ms: 100,
                     created_at: now - 60,
                     compatibility: None,
@@ -647,6 +671,7 @@ async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
             prompt_tokens: 1,
             completion_tokens: 1,
             total_tokens: 2,
+            first_token_latency_ms: None,
             latency_ms: 10,
             created_at: chat_responses_codex::state::unix_seconds(),
             compatibility: None,

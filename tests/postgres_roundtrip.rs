@@ -184,6 +184,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         prompt_tokens: 11,
         completion_tokens: 13,
         total_tokens: 24,
+        first_token_latency_ms: None,
         latency_ms: 78,
         created_at: 1_725_000_001,
         compatibility: None,
@@ -259,7 +260,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
 }
 
 #[tokio::test]
-async fn postgres_roundtrip_preserves_compatibility_metadata() {
+async fn postgres_roundtrip_preserves_compatibility_metadata_and_first_token_latency() {
     let _guard = env_lock().lock().await;
     let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
         eprintln!(
@@ -298,6 +299,7 @@ async fn postgres_roundtrip_preserves_compatibility_metadata() {
         prompt_tokens: 13,
         completion_tokens: 7,
         total_tokens: 20,
+        first_token_latency_ms: Some(42),
         latency_ms: 44,
         created_at: 1_725_000_101,
         compatibility: Some(CompatibilityUsageMetadata {
@@ -318,6 +320,17 @@ async fn postgres_roundtrip_preserves_compatibility_metadata() {
         .append_usage_log(log.clone())
         .await
         .expect("should persist compatibility usage log rows");
+    let log_without_first_token = UsageLog {
+        id: "compat-log-2".into(),
+        request_id: "req-compat-2".into(),
+        first_token_latency_ms: None,
+        created_at: log.created_at.saturating_sub(1),
+        ..log.clone()
+    };
+    state
+        .append_usage_log(log_without_first_token.clone())
+        .await
+        .expect("should persist nullable first-token latency");
     state
         .flush_usage_logs_for_test()
         .await
@@ -339,8 +352,21 @@ async fn postgres_roundtrip_preserves_compatibility_metadata() {
         .await
         .expect("PostgreSQL store-backed query should return compatibility usage logs");
 
-    assert_eq!(page.total, 1);
-    assert_eq!(page.logs[0].log.compatibility, log.compatibility);
+    assert_eq!(page.total, 2);
+    let persisted_with_latency = page.logs.iter().find(|entry| entry.log.id == log.id).unwrap();
+    let persisted_without_latency = page
+        .logs
+        .iter()
+        .find(|entry| entry.log.id == log_without_first_token.id)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&persisted_with_latency.log).unwrap(),
+        serde_json::to_value(&log).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&persisted_without_latency.log).unwrap(),
+        serde_json::to_value(&log_without_first_token).unwrap()
+    );
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");
@@ -968,6 +994,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         prompt_tokens: 11,
         completion_tokens: 13,
         total_tokens: 24,
+        first_token_latency_ms: None,
         latency_ms: 78,
         created_at: 1_725_000_001,
         compatibility: None,
@@ -1092,6 +1119,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         prompt_tokens: 11,
         completion_tokens: 13,
         total_tokens: 24,
+        first_token_latency_ms: None,
         latency_ms: 78,
         created_at: 1_725_000_001,
         compatibility: None,
@@ -1217,6 +1245,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             prompt_tokens: 1,
             completion_tokens: 1,
             total_tokens: 2,
+            first_token_latency_ms: None,
             latency_ms: 1,
             created_at: 1_725_000_001,
             compatibility: None,
