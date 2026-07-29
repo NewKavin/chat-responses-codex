@@ -47,6 +47,11 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
                             )),
                             Ok(Bytes::from_static(
                                 concat!(
+                                    "event: response.completed\r\n",
+                                    "data: {\"type\":\"response.completed\",\"response\":{",
+                                    "\"id\":\"resp-stream\",\"object\":\"response\",",
+                                    "\"created_at\":1,\"status\":\"completed\",",
+                                    "\"model\":\"gpt-4.1-mini\",\"output\":[]}}\r\n\r\n",
                                     ": done-comment\r\nevent: terminal\r\n",
                                     "id: done-42\r\nretry: 2500\r\ndata: [DONE]\r\n\r"
                                 )
@@ -152,11 +157,15 @@ async fn downstream_responses_stream_is_proxied_as_event_stream() {
         "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\""
     ));
     assert!(text.contains(
+        "event: response.completed\r\ndata: {\"type\":\"response.completed\""
+    ));
+    assert!(text.contains(
         ": done-comment\r\nevent: terminal\r\nid: done-42\r\nretry: 2500\r\ndata: [DONE]"
     ));
     assert_eq!(text.matches("event: custom-response-event").count(), 1);
     assert_eq!(text.matches("event: metadata-only").count(), 1);
     assert_eq!(text.matches("event: response.output_text.delta").count(), 1);
+    assert_eq!(text.matches("event: response.completed").count(), 1);
     assert_eq!(text.matches("event: terminal").count(), 1);
 
     let captured = capture.lock().unwrap().clone();
