@@ -19,7 +19,7 @@ use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, ActiveGatewayRequestStart, AppConfig,
     AppState, CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile,
     KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, UpstreamConfig, UpstreamRequestLease, UsageLog,
+    RouteSetAggregateKey, RuntimeCoordinationError, UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -982,7 +982,7 @@ impl GatewayUsageLogContext {
         error_message: Option<String>,
         error_category: Option<String>,
         usage: (u64, u64, u64),
-    ) {
+    ) -> std::io::Result<()> {
         append_gateway_usage_log(
             &self.state,
             &self.request_id,
@@ -1003,7 +1003,23 @@ impl GatewayUsageLogContext {
             usage.2,
             self.started,
         )
-        .await;
+        .await
+    }
+
+    async fn emit_fail_closed(
+        self,
+        status_code: StatusCode,
+        error_message: Option<String>,
+        error_category: Option<String>,
+        usage: (u64, u64, u64),
+    ) -> Result<(), GatewayError> {
+        match self
+            .emit(status_code, error_message, error_category, usage)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => runtime_coordination_gateway_error(&error).map_or(Ok(()), Err),
+        }
     }
 }
 
@@ -1075,7 +1091,7 @@ impl Drop for ActiveGatewayRequestGuard {
             self.fail_and_finish("stream_client_cancelled");
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    context
+                    let _ = context
                         .usage_log
                         .emit(
                             StatusCode::from_u16(499).expect("499 is a valid HTTP status code"),
@@ -1204,7 +1220,7 @@ impl StreamUsageLogContext {
         self.finish_active_request();
     }
 
-    async fn emit(self, usage: (u64, u64, u64)) {
+    async fn emit(self, usage: (u64, u64, u64)) -> std::io::Result<()> {
         let StreamUsageLogContext {
             state,
             request_id,
@@ -1254,7 +1270,8 @@ impl StreamUsageLogContext {
             compatibility,
         };
 
-        if let Err(error) = state.append_usage_log(log).await {
+        let result = state.append_usage_log(log).await;
+        if let Err(error) = &result {
             tracing::error!(
                 request_id = %request_id,
                 downstream_key_id = %downstream_key_id,
@@ -1267,6 +1284,7 @@ impl StreamUsageLogContext {
                 "failed to save usage log"
             );
         }
+        result
     }
 }
 
@@ -1396,7 +1414,7 @@ async fn append_gateway_usage_log(
     completion_tokens: u64,
     total_tokens: u64,
     started: Instant,
-) {
+) -> std::io::Result<()> {
     let log = UsageLog {
         id: request_id.to_string(),
         downstream_key_id: downstream_id.to_string(),
@@ -1425,7 +1443,8 @@ async fn append_gateway_usage_log(
         compatibility,
     };
 
-    if let Err(error) = state.append_usage_log(log).await {
+    let result = state.append_usage_log(log).await;
+    if let Err(error) = &result {
         tracing::error!(
             request_id = %request_id,
             downstream_key_id = %downstream_id,
@@ -1435,6 +1454,31 @@ async fn append_gateway_usage_log(
             error = %error,
             "failed to save usage log"
         );
+    }
+    result
+}
+
+fn runtime_coordination_gateway_error(error: &std::io::Error) -> Option<GatewayError> {
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<RuntimeCoordinationError>())
+        .then(|| {
+            GatewayError::downstream_admission_rejection(
+                crate::state::DownstreamAdmissionRejection::RuntimeCoordinationUnavailable,
+            )
+        })
+}
+
+fn replace_error_on_runtime_rollback_failure(
+    original: GatewayError,
+    rollback: Result<(), RuntimeCoordinationError>,
+) -> GatewayError {
+    if rollback.is_err() {
+        GatewayError::downstream_admission_rejection(
+            crate::state::DownstreamAdmissionRejection::RuntimeCoordinationUnavailable,
+        )
+    } else {
+        original
     }
 }
 
@@ -2176,7 +2220,12 @@ impl DownstreamConcurrencyGuardInner {
         let state = self.state.clone();
         let lease = self.lease.clone();
         Some(runtime.spawn(async move {
-            let _ = state.release_downstream_concurrency(lease).await;
+            if let Err(error) = state.release_downstream_concurrency(lease).await {
+                tracing::warn!(
+                    error = %error,
+                    "failed to release downstream concurrency lease"
+                );
+            }
         }))
     }
 }
@@ -3134,7 +3183,7 @@ async fn finalize_stream_error(
         log_context.status = status;
         log_context.error_message = Some(error_message);
         log_context.error_category = Some(error_category.to_string());
-        log_context.emit(usage.unwrap_or((0, 0, 0))).await;
+        let _ = log_context.emit(usage.unwrap_or((0, 0, 0))).await;
     }
 }
 
@@ -3210,7 +3259,7 @@ fn spawn_stream_normal_completion_cleanup(
                 ctx.status = StatusCode::OK;
                 ctx.error_message = None;
                 ctx.error_category = None;
-                ctx.emit(usage.unwrap_or((0, 0, 0))).await;
+                let _ = ctx.emit(usage.unwrap_or((0, 0, 0))).await;
             }
             if let Some(context) = completion_context {
                 context.release_all().await;
@@ -3446,7 +3495,7 @@ async fn process_gateway_request_inner(
         Some(model) => model.to_string(),
         None => {
             let error = GatewayError::BadRequest("missing model".into());
-            append_gateway_usage_log(
+            let _ = append_gateway_usage_log(
                 &state,
                 &request_id,
                 &downstream.id,
@@ -3509,7 +3558,7 @@ async fn process_gateway_request_inner(
             );
             let error =
                 GatewayError::gateway_forbidden("downstream key expired", "gateway_key_expired");
-            append_gateway_usage_log(
+            let _ = append_gateway_usage_log(
                 &state,
                 &request_id,
                 &downstream.id,
@@ -3552,7 +3601,7 @@ async fn process_gateway_request_inner(
                 "client IP not allowed"
             );
             let error = GatewayError::gateway_forbidden("ip not allowed", "gateway_ip_not_allowed");
-            append_gateway_usage_log(
+            let _ = append_gateway_usage_log(
                 &state,
                 &request_id,
                 &downstream.id,
@@ -3589,7 +3638,7 @@ async fn process_gateway_request_inner(
         );
         let error =
             GatewayError::gateway_forbidden("model not allowed", "gateway_model_not_allowed");
-        append_gateway_usage_log(
+        let _ = append_gateway_usage_log(
             &state,
             &request_id,
             &downstream.id,
@@ -3624,7 +3673,7 @@ async fn process_gateway_request_inner(
             None,
             Some(json!({ "scope": "gateway" })),
         );
-        append_gateway_usage_log(
+        let _ = append_gateway_usage_log(
             &state,
             &request_id,
             &downstream.id,
@@ -3664,7 +3713,7 @@ async fn process_gateway_request_inner(
                     "downstream request admission rejected"
                 );
                 let error = GatewayError::downstream_admission_rejection(rejection);
-                append_gateway_usage_log(
+                let _ = append_gateway_usage_log(
                     &state,
                     &request_id,
                     &downstream.id,
@@ -3693,13 +3742,19 @@ async fn process_gateway_request_inner(
     let downstream_concurrency_lease =
         match state.try_reserve_downstream_concurrency(&downstream).await {
             Ok(lease) => lease,
-            Err(retry_after_seconds) => {
-                state
+            Err(rejection) => {
+                let rollback_failed = state
                     .rollback_downstream_request_reservation(
                         downstream_request_reservation.clone(),
                     )
                     .await
-                    .expect("local downstream request rollback cannot fail");
+                    .is_err();
+                let rejection = if rollback_failed {
+                    crate::state::DownstreamAdmissionRejection::RuntimeCoordinationUnavailable
+                } else {
+                    rejection
+                };
+                let retry_after_seconds = rejection.retry_after_seconds();
                 tracing::warn!(
                     request_id = %request_id,
                     downstream_key_id = %downstream.id,
@@ -3708,23 +3763,10 @@ async fn process_gateway_request_inner(
                     normalized_model = %normalized_model,
                     retry_after_seconds,
                     max_concurrency = downstream.max_concurrency,
-                    "downstream concurrency limit exceeded"
+                    "downstream concurrency admission rejected"
                 );
-                let error = GatewayError::classified(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "downstream concurrency limit exceeded",
-                    "gateway_quota_exceeded",
-                    "gateway_concurrency_full",
-                    "gateway_concurrency_full",
-                    Some(retry_after_seconds),
-                    Some(json!({
-                        "scope": "gateway",
-                        "quota": "concurrent_requests",
-                        "limit": downstream.max_concurrency.max(1),
-                        "retry_after_seconds": retry_after_seconds,
-                    })),
-                );
-                append_gateway_usage_log(
+                let error = GatewayError::downstream_admission_rejection(rejection);
+                let _ = append_gateway_usage_log(
                     &state,
                     &request_id,
                     &downstream.id,
@@ -3757,7 +3799,7 @@ async fn process_gateway_request_inner(
         match prepare_response_history_context(&state, &mut body).await {
             Ok(context) => Some(context),
             Err(error) => {
-                append_gateway_usage_log(
+                let _ = append_gateway_usage_log(
                     &state,
                     &request_id,
                     &downstream.id,
@@ -3969,9 +4011,17 @@ async fn process_gateway_request_inner(
         &body,
     );
     if claude_replay_route == ClaudeThinkingReplayRoute::InvalidOrUnavailable {
-        let error =
+        let mut error =
             GatewayError::BadRequest("invalid or unavailable Claude thinking replay route".into());
-        append_gateway_usage_log(
+        if should_rollback_downstream_reservation(&error) {
+            let rollback = state
+                .rollback_downstream_request_reservation(
+                    downstream_request_reservation.clone(),
+                )
+                .await;
+            error = replace_error_on_runtime_rollback_failure(error, rollback);
+        }
+        let _ = append_gateway_usage_log(
             &state,
             &request_id,
             &downstream.id,
@@ -3992,12 +4042,6 @@ async fn process_gateway_request_inner(
             started,
         )
         .await;
-        if should_rollback_downstream_reservation(&error) {
-            state
-                .rollback_downstream_request_reservation(downstream_request_reservation.clone())
-                .await
-                .expect("local downstream request rollback cannot fail");
-        }
         downstream_concurrency_guard.release().await;
         active_request_guard.fail_and_finish(error.error_category());
         return Err(error);
@@ -4112,7 +4156,7 @@ async fn process_gateway_request_inner(
             None,
             Some(json!({ "scope": "gateway" })),
         );
-        append_gateway_usage_log(
+        let _ = append_gateway_usage_log(
             &state,
             &request_id,
             &downstream.id,
@@ -4811,7 +4855,7 @@ async fn process_gateway_request_inner(
                                         {
                                             cancellation.disarm();
                                         }
-                                        append_gateway_usage_log(
+                                        let _ = append_gateway_usage_log(
                                             &state,
                                             &request_id,
                                             &downstream.id,
@@ -5179,8 +5223,19 @@ async fn process_gateway_request_inner(
                                     };
                                     if defer_success_usage_log {
                                         result.usage_log_context = Some(context);
-                                    } else {
-                                        context.emit(result.status, None, None, result.usage).await;
+                                    } else if let Err(error) = context
+                                        .emit_fail_closed(
+                                            result.status,
+                                            None,
+                                            None,
+                                            result.usage,
+                                        )
+                                        .await
+                                    {
+                                        downstream_concurrency_guard.release().await;
+                                        active_request_guard
+                                            .fail_and_finish(error.error_category());
+                                        return Err(error);
                                     }
                                 }
                                 if matches!(
@@ -5644,7 +5699,7 @@ async fn process_gateway_request_inner(
                             | FailureClass::ProtocolUnsupported
                     )
                 ));
-        let error = if should_aggregate {
+        let mut error = if should_aggregate {
             let live_recovery = state
                 .earliest_temporary_route_recovery(&request_route_attempts.eligible_routes())
                 .await;
@@ -5657,11 +5712,17 @@ async fn process_gateway_request_inner(
         } else {
             last_route_error
         };
+        if should_rollback_downstream_reservation(&error) {
+            let rollback = state
+                .rollback_downstream_request_reservation(downstream_request_reservation)
+                .await;
+            error = replace_error_on_runtime_rollback_failure(error, rollback);
+        }
         let (upstream_id, upstream_name) = last_failure_upstream
             .as_ref()
             .map(|(id, name)| (id.as_str(), name.as_deref()))
             .unwrap_or(("", None));
-        append_gateway_usage_log(
+        let _ = append_gateway_usage_log(
             &state,
             &request_id,
             &downstream.id,
@@ -5682,12 +5743,6 @@ async fn process_gateway_request_inner(
             started,
         )
         .await;
-        if should_rollback_downstream_reservation(&error) {
-            state
-                .rollback_downstream_request_reservation(downstream_request_reservation)
-                .await
-                .expect("local downstream request rollback cannot fail");
-        }
         downstream_concurrency_guard.release().await;
         active_request_guard.fail_and_finish(error.error_category());
         let terminal_observation = (!attempt_ledger.is_empty())
@@ -5741,7 +5796,7 @@ async fn process_gateway_request_inner(
     }
 
     let error = no_routable_model_error(&routing_snapshot, model);
-    append_gateway_usage_log(
+    let _ = append_gateway_usage_log(
         &state,
         &request_id,
         &downstream.id,

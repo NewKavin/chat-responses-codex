@@ -319,6 +319,43 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
     );
 }
 
+#[test]
+fn rollback_coordination_failure_replaces_the_original_gateway_error() {
+    let original = GatewayError::BadRequest("invalid request".into());
+
+    let error = replace_error_on_runtime_rollback_failure(
+        original,
+        Err(crate::state::RuntimeCoordinationError),
+    );
+
+    assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.error_category(), "runtime_coordination_unavailable");
+    assert_eq!(error.retry_after_seconds(), Some(1));
+}
+
+#[test]
+fn only_runtime_coordination_usage_errors_become_gateway_503s() {
+    let coordination_error = std::io::Error::other(crate::state::RuntimeCoordinationError);
+    let persistence_error = std::io::Error::other("disk unavailable");
+
+    let error = runtime_coordination_gateway_error(&coordination_error)
+        .expect("runtime coordination failures must fail closed");
+
+    assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.error_category(), "runtime_coordination_unavailable");
+    assert!(runtime_coordination_gateway_error(&persistence_error).is_none());
+}
+
+#[test]
+fn runtime_coordination_stream_error_uses_a_stable_public_code() {
+    let frame = runtime_coordination_sse_error_frame(EndpointKind::ChatCompletions, 1);
+    let body = String::from_utf8(frame.to_vec()).unwrap();
+
+    assert!(body.contains("\"code\":\"runtime_coordination_unavailable\""));
+    assert!(body.contains("\"category\":\"runtime_coordination_unavailable\""));
+    assert!(body.ends_with("data: [DONE]\n\n"));
+}
+
 fn tracked_route(fingerprint: &str) -> RouteHealthKey {
     RouteHealthKey {
         upstream_id: "up-1".into(),

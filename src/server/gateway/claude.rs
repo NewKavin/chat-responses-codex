@@ -21,14 +21,17 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                     Ok(claude_body) => claude_body,
                     Err(error) => {
                         if let Some(context) = usage_log_context.take() {
-                            context
-                                .emit(
+                            if let Err(coordination_error) = context
+                                .emit_fail_closed(
                                     error.status_code(),
                                     Some(error.to_string()),
                                     Some(error.error_category().to_string()),
                                     usage,
                                 )
-                                .await;
+                                .await
+                            {
+                                return coordination_error.into_anthropic_response();
+                            }
                         }
                         return error.into_anthropic_response();
                     }
@@ -50,20 +53,27 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                 match claude_message_to_sse_body(&claude_body) {
                     Ok(body) => {
                         if let Some(context) = usage_log_context.take() {
-                            context.emit(status, None, None, usage).await;
+                            if let Err(error) =
+                                context.emit_fail_closed(status, None, None, usage).await
+                            {
+                                return error.into_anthropic_response();
+                            }
                         }
                         (status, headers, body).into_response()
                     }
                     Err(error) => {
                         if let Some(context) = usage_log_context.take() {
-                            context
-                                .emit(
+                            if let Err(coordination_error) = context
+                                .emit_fail_closed(
                                     error.status_code(),
                                     Some(error.to_string()),
                                     Some(error.error_category().to_string()),
                                     usage,
                                 )
-                                .await;
+                                .await
+                            {
+                                return coordination_error.into_anthropic_response();
+                            }
                         }
                         error.into_anthropic_response()
                     }
@@ -74,7 +84,11 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                     HeaderValue::from_static("application/json"),
                 );
                 if let Some(context) = usage_log_context.take() {
-                    context.emit(status, None, None, usage).await;
+                    if let Err(error) =
+                        context.emit_fail_closed(status, None, None, usage).await
+                    {
+                        return error.into_anthropic_response();
+                    }
                 }
                 (status, headers, Json(claude_body)).into_response()
             }
@@ -85,14 +99,17 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                     "upstream returned a stream for a non-stream Claude request".into(),
                 );
                 if let Some(context) = usage_log_context.take() {
-                    context
-                        .emit(
+                    if let Err(coordination_error) = context
+                        .emit_fail_closed(
                             error.status_code(),
                             Some(error.to_string()),
                             Some(error.error_category().to_string()),
                             usage,
                         )
-                        .await;
+                        .await
+                    {
+                        return coordination_error.into_anthropic_response();
+                    }
                 }
                 return error.into_anthropic_response();
             }
@@ -110,7 +127,9 @@ pub(super) async fn dispatch_claude_success(result: DispatchResult, stream: bool
                 HeaderValue::from_static("no"),
             );
             if let Some(context) = usage_log_context.take() {
-                context.emit(status, None, None, usage).await;
+                if let Err(error) = context.emit_fail_closed(status, None, None, usage).await {
+                    return error.into_anthropic_response();
+                }
             }
             (
                 status,

@@ -187,6 +187,16 @@ fn sse_gateway_error_frame(error: &GatewayError) -> Bytes {
     )
 }
 
+pub(super) fn runtime_coordination_sse_error_frame(
+    endpoint: EndpointKind,
+    responses_sequence_number: u64,
+) -> Bytes {
+    let error = GatewayError::downstream_admission_rejection(
+        crate::state::DownstreamAdmissionRejection::RuntimeCoordinationUnavailable,
+    );
+    sse_gateway_error_frame_for_endpoint(endpoint, &error, responses_sequence_number)
+}
+
 fn sse_error_frame_for_endpoint(
     endpoint: EndpointKind,
     message: &str,
@@ -624,7 +634,9 @@ pub(super) fn proxied_stream_body(
                 )));
             }
             if state.finished {
-                state.flush_usage_log().await?;
+                if let Some(frame) = state.flush_usage_log_or_error_frame().await? {
+                    return Ok(Some((frame, state)));
+                }
                 state.finalize_completion().await?;
                 return Ok(None);
             }
@@ -649,7 +661,9 @@ pub(super) fn proxied_stream_body(
                                 .await;
                             return Ok(Some((frame, state)));
                         }
-                        state.flush_usage_log().await?;
+                        if let Some(frame) = state.flush_usage_log_or_error_frame().await? {
+                            return Ok(Some((frame, state)));
+                        }
                         state.finalize_completion().await?;
                     } else if state.should_emit_empty_response_error() {
                         let frame = state
@@ -673,7 +687,9 @@ pub(super) fn proxied_stream_body(
                             .await;
                         return Ok(Some((frame, state)));
                     }
-                    state.flush_usage_log().await?;
+                    if let Some(frame) = state.flush_usage_log_or_error_frame().await? {
+                        return Ok(Some((frame, state)));
+                    }
                     state.finalize_completion().await?;
                     if let Some(frame) = state.pending.pop_front() {
                         return Ok(Some((frame, state)));
@@ -768,6 +784,32 @@ struct ProxiedStreamState {
 }
 
 impl ProxiedStreamState {
+    async fn flush_usage_log_or_error_frame(&mut self) -> Result<Option<Bytes>, std::io::Error> {
+        match self.flush_usage_log().await {
+            Ok(()) => Ok(None),
+            Err(error) if runtime_coordination_gateway_error(&error).is_some() => {
+                if let Some(context) = self.completion_context.take() {
+                    context.release_all().await;
+                    context.mark_cancelled().await;
+                }
+                self.finished = true;
+                self.pending.clear();
+                self.canonicalizer.take();
+                self.buffer.clear();
+                let endpoint = if self.rewrite_responses_events {
+                    EndpointKind::Responses
+                } else {
+                    EndpointKind::ChatCompletions
+                };
+                Ok(Some(runtime_coordination_sse_error_frame(
+                    endpoint,
+                    self.next_responses_sequence_number,
+                )))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn drain_usage_from_buffer(&mut self) -> Result<(), GatewayError> {
         // Advance a cursor as frames are consumed and drain the buffer once at
         // the end, instead of front-draining per frame. Front-draining memmoves
@@ -967,8 +1009,15 @@ impl ProxiedStreamState {
 
         self.usage_log_flushed = true;
         if let Some(log_context) = self.log_context.take() {
-            log_context.finish_active_request();
-            log_context.emit(self.usage.unwrap_or((0, 0, 0))).await;
+            let active_request = log_context.clone();
+            match log_context.emit(self.usage.unwrap_or((0, 0, 0))).await {
+                Ok(()) => active_request.finish_active_request(),
+                Err(error) if runtime_coordination_gateway_error(&error).is_some() => {
+                    active_request.fail_active_request("runtime_coordination_unavailable");
+                    return Err(error);
+                }
+                Err(_) => active_request.finish_active_request(),
+            }
         }
 
         Ok(())
@@ -1182,14 +1231,22 @@ pub(super) fn translated_stream_body(
 
             if let Some(bytes) = state.pop_pending() {
                 if state.finished {
-                    state.flush_usage_log().await?;
-                    state.finalize_completion().await?;
+                    if let Some(frame) = state.flush_usage_log_or_error_frame().await? {
+                        state.pending.push_back(TranslatedPendingFrame {
+                            bytes: frame,
+                            usable_output: false,
+                        });
+                    } else {
+                        state.finalize_completion().await?;
+                    }
                 }
                 return Ok(Some((bytes, state)));
             }
 
             if state.finished {
-                state.flush_usage_log().await?;
+                if let Some(frame) = state.flush_usage_log_or_error_frame().await? {
+                    return Ok(Some((frame, state)));
+                }
                 state.finalize_completion().await?;
                 return Ok(None);
             }
@@ -1217,11 +1274,19 @@ pub(super) fn translated_stream_body(
                         return Ok(Some((frame, state)));
                     }
                     if let Some(bytes) = state.pop_pending() {
-                        state.flush_usage_log().await?;
-                        state.finalize_completion().await?;
+                        if let Some(frame) = state.flush_usage_log_or_error_frame().await? {
+                            state.pending.push_back(TranslatedPendingFrame {
+                                bytes: frame,
+                                usable_output: false,
+                            });
+                        } else {
+                            state.finalize_completion().await?;
+                        }
                         return Ok(Some((bytes, state)));
                     }
-                    state.flush_usage_log().await?;
+                    if let Some(frame) = state.flush_usage_log_or_error_frame().await? {
+                        return Ok(Some((frame, state)));
+                    }
                     state.finalize_completion().await?;
                     return Ok(None);
                 }
@@ -1320,6 +1385,26 @@ struct TranslatedStreamState {
 }
 
 impl TranslatedStreamState {
+    async fn flush_usage_log_or_error_frame(&mut self) -> Result<Option<Bytes>, std::io::Error> {
+        match self.flush_usage_log().await {
+            Ok(()) => Ok(None),
+            Err(error) if runtime_coordination_gateway_error(&error).is_some() => {
+                if let Some(context) = self.completion_context.take() {
+                    context.release_all().await;
+                    context.mark_cancelled().await;
+                }
+                self.finished = true;
+                self.pending.clear();
+                self.buffer.clear();
+                Ok(Some(runtime_coordination_sse_error_frame(
+                    self.endpoint,
+                    self.next_responses_sequence_number,
+                )))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn pop_pending(&mut self) -> Option<Bytes> {
         let frame = self.pending.pop_front()?;
         self.usable_output_delivered |= frame.usable_output;
@@ -1546,8 +1631,15 @@ impl TranslatedStreamState {
 
         self.usage_log_flushed = true;
         if let Some(log_context) = self.log_context.take() {
-            log_context.finish_active_request();
-            log_context.emit(self.usage.unwrap_or((0, 0, 0))).await;
+            let active_request = log_context.clone();
+            match log_context.emit(self.usage.unwrap_or((0, 0, 0))).await {
+                Ok(()) => active_request.finish_active_request(),
+                Err(error) if runtime_coordination_gateway_error(&error).is_some() => {
+                    active_request.fail_active_request("runtime_coordination_unavailable");
+                    return Err(error);
+                }
+                Err(_) => active_request.finish_active_request(),
+            }
         }
 
         Ok(())

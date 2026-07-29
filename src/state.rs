@@ -2232,18 +2232,49 @@ impl AppState {
             log.created_at = unix_seconds();
         }
 
+        self.record_downstream_usage_event(&log)
+            .await
+            .map_err(io::Error::other)?;
+
         {
             let mut pending = self.pending_usage_logs.lock().await;
             pending.push(log.clone());
         }
 
-        self.record_downstream_usage_event(&log).await;
-
         self.schedule_usage_log_flush();
         Ok(())
     }
 
-    async fn record_downstream_usage_event(&self, log: &UsageLog) {
+    async fn record_downstream_usage_event(
+        &self,
+        log: &UsageLog,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let retention_seconds = {
+                let state = self.inner.lock().await;
+                state
+                    .downstreams
+                    .iter()
+                    .find(|downstream| downstream.id == log.downstream_key_id)
+                    .filter(|downstream| {
+                        downstream.rate_limit_enabled
+                            && downstream.uses_token_quota()
+                            && !downstream.uses_request_quota()
+                    })
+                    .map(downstream_token_retention_seconds)
+            };
+            let Some(retention_seconds) = retention_seconds else {
+                return Ok(());
+            };
+            return coordinator
+                .record_downstream_tokens(
+                    &log.downstream_key_id,
+                    &format!("history:{}", log.id),
+                    log.total_tokens,
+                    retention_seconds,
+                )
+                .await;
+        }
         let mut windows = self.downstream_token_windows.lock().await;
         windows
             .entry(log.downstream_key_id.clone())
@@ -2252,6 +2283,7 @@ impl AppState {
                 created_at: log.created_at,
                 tokens: log.total_tokens,
             });
+        Ok(())
     }
 
     fn schedule_usage_log_flush(&self) {
@@ -2415,6 +2447,17 @@ impl AppState {
             });
         }
 
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let event_id = Uuid::new_v4().to_string();
+            coordinator
+                .reserve_downstream_request(downstream, &event_id)
+                .await?;
+            return Ok(DownstreamRequestReservation {
+                downstream_id: downstream.id.clone(),
+                event_id: Some(event_id),
+            });
+        }
+
         let mut windows = self.downstream_request_windows.lock().await;
         let window = windows
             .entry(downstream.id.clone())
@@ -2569,11 +2612,23 @@ impl AppState {
     pub async fn try_reserve_downstream_concurrency(
         &self,
         downstream: &DownstreamConfig,
-    ) -> Result<DownstreamConcurrencyLease, u64> {
+    ) -> Result<DownstreamConcurrencyLease, DownstreamAdmissionRejection> {
         if !downstream.rate_limit_enabled {
             return Ok(DownstreamConcurrencyLease {
                 downstream_id: downstream.id.clone(),
                 lease_id: None,
+                released: Arc::new(AtomicBool::new(false)),
+            });
+        }
+
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let lease_id = Uuid::new_v4().to_string();
+            coordinator
+                .reserve_downstream_lease(downstream, &lease_id)
+                .await?;
+            return Ok(DownstreamConcurrencyLease {
+                downstream_id: downstream.id.clone(),
+                lease_id: Some(lease_id),
                 released: Arc::new(AtomicBool::new(false)),
             });
         }
@@ -2584,7 +2639,10 @@ impl AppState {
             .expect("downstream in_flight lock poisoned");
         let current = in_flight.entry(downstream.id.clone()).or_insert(0);
         if *current >= downstream.max_concurrency.max(1) {
-            return Err(1);
+            return Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+                retry_after_seconds: 1,
+                limit: downstream.max_concurrency.max(1),
+            });
         }
 
         *current = current.saturating_add(1);
@@ -2599,8 +2657,16 @@ impl AppState {
         &self,
         lease: DownstreamConcurrencyLease,
     ) -> Result<(), RuntimeCoordinationError> {
-        if lease.released.swap(true, Ordering::AcqRel) || lease.lease_id.is_none() {
+        if lease.released.swap(true, Ordering::AcqRel) {
             return Ok(());
+        }
+        let Some(lease_id) = lease.lease_id else {
+            return Ok(());
+        };
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .release_downstream_lease(&lease.downstream_id, &lease_id)
+                .await;
         }
         let mut in_flight = self
             .downstream_in_flight
@@ -2619,6 +2685,9 @@ impl AppState {
         &self,
         downstream_id: &str,
     ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.clear_downstream(downstream_id).await;
+        }
         self.downstream_request_windows
             .lock()
             .await
@@ -2641,6 +2710,11 @@ impl AppState {
         let Some(event_id) = reservation.event_id else {
             return Ok(());
         };
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .rollback_downstream_request(&reservation.downstream_id, &event_id)
+                .await;
+        }
         let mut windows = self.downstream_request_windows.lock().await;
         if let Some(window) = windows.get_mut(&reservation.downstream_id) {
             window.retain(|event| event.event_id != event_id);
@@ -2865,6 +2939,25 @@ impl AppState {
     }
 
     pub async fn remove_downstream(&self, downstream_id: &str) -> io::Result<bool> {
+        let redis_runtime = matches!(
+            &self.runtime_coordination,
+            RuntimeCoordinationBackend::Redis(_)
+        );
+        if redis_runtime {
+            let exists = {
+                let state = self.inner.lock().await;
+                state
+                    .downstreams
+                    .iter()
+                    .any(|downstream| downstream.id == downstream_id)
+            };
+            if !exists {
+                return Ok(false);
+            }
+            self.clear_downstream_runtime(downstream_id)
+                .await
+                .map_err(io::Error::other)?;
+        }
         let removed = self
             .mutate_persisted_state_io(|state| {
                 let original_len = state.downstreams.len();
@@ -2873,7 +2966,7 @@ impl AppState {
                 Ok(state.downstreams.len() != original_len)
             })
             .await?;
-        if removed {
+        if removed && !redis_runtime {
             self.clear_downstream_runtime(downstream_id)
                 .await
                 .map_err(io::Error::other)?;
@@ -4142,6 +4235,11 @@ pub(crate) struct QuotaEvent {
 
 #[derive(Debug, Clone)]
 pub enum DownstreamAdmissionRejection {
+    RuntimeCoordinationUnavailable,
+    ConcurrencyLimitExceeded {
+        retry_after_seconds: u64,
+        limit: u32,
+    },
     PerMinuteLimitExceeded {
         retry_after_seconds: u64,
         limit: u32,
@@ -4168,7 +4266,12 @@ pub enum DownstreamAdmissionRejection {
 impl DownstreamAdmissionRejection {
     pub fn retry_after_seconds(&self) -> u64 {
         match self {
-            DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+            DownstreamAdmissionRejection::RuntimeCoordinationUnavailable => 1,
+            DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+                retry_after_seconds,
+                ..
+            }
+            | DownstreamAdmissionRejection::PerMinuteLimitExceeded {
                 retry_after_seconds,
                 ..
             }

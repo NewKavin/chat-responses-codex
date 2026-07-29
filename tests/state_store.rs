@@ -440,6 +440,66 @@ struct CountingStore {
     append_count: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Default)]
+struct FailingPersistStore;
+
+impl StateStore for FailingPersistStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Err(io::Error::other("persist failed")) })
+    }
+}
+
+#[tokio::test]
+async fn failed_local_downstream_removal_keeps_runtime_windows() {
+    let downstream = DownstreamConfig {
+        id: "local-removal-failure".into(),
+        name: "Local removal failure".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 1,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    };
+    let state = AppState::new_with_store(
+        PersistedState {
+            downstreams: Arc::new(vec![downstream.clone()]),
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        AppConfig::default(),
+        Arc::new(FailingPersistStore),
+    );
+    state
+        .reserve_downstream_request(&downstream)
+        .await
+        .unwrap();
+
+    state
+        .remove_downstream(&downstream.id)
+        .await
+        .expect_err("the failing store must reject removal");
+
+    assert!(state
+        .snapshot()
+        .await
+        .downstreams
+        .iter()
+        .any(|entry| entry.id == downstream.id));
+    assert!(state
+        .reserve_downstream_request(&downstream)
+        .await
+        .is_err());
+}
+
 impl StateStore for CountingStore {
     fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async move {

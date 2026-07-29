@@ -497,6 +497,32 @@ impl GatewayError {
     }
     pub(super) fn downstream_admission_rejection(rejection: DownstreamAdmissionRejection) -> Self {
         match rejection {
+            DownstreamAdmissionRejection::RuntimeCoordinationUnavailable => Self::classified(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime coordination unavailable",
+                "gateway_unavailable",
+                "runtime_coordination_unavailable",
+                "runtime_coordination_unavailable",
+                Some(1),
+                Some(json!({ "scope": "gateway" })),
+            ),
+            DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+                retry_after_seconds,
+                limit,
+            } => Self::classified(
+                StatusCode::TOO_MANY_REQUESTS,
+                "downstream concurrency limit exceeded",
+                "gateway_quota_exceeded",
+                "gateway_concurrency_full",
+                "gateway_concurrency_full",
+                Some(retry_after_seconds),
+                Some(json!({
+                    "scope": "gateway",
+                    "quota": "concurrent_requests",
+                    "limit": limit,
+                    "retry_after_seconds": retry_after_seconds,
+                })),
+            ),
             DownstreamAdmissionRejection::PerMinuteLimitExceeded {
                 retry_after_seconds,
                 limit,
