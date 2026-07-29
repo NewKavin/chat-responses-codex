@@ -632,6 +632,10 @@ fn hedge_extra_attempt_limit(config: &AppConfig, available_accounts: usize) -> u
         .min(available_accounts)
 }
 
+pub(super) fn hedge_error_is_terminal(error: &GatewayError) -> bool {
+    error.error_category() == "runtime_coordination_unavailable"
+}
+
 fn send_route_hedge_attempt(
     context: RouteHedgeContext,
     candidate: RouteHedgeCandidate,
@@ -670,10 +674,14 @@ fn send_route_hedge_attempt(
             Err(error) => {
                 super::finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled)
                     .await;
-                return Err(GatewayError::upstream_temporary_unavailable(
-                    error.message,
-                    "upstream_hedge_capacity_unavailable",
-                ));
+                return Err(if error.is_runtime_coordination_unavailable() {
+                    super::runtime_coordination_unavailable_gateway_error()
+                } else {
+                    GatewayError::upstream_temporary_unavailable(
+                        error.message,
+                        "upstream_hedge_capacity_unavailable",
+                    )
+                });
             }
         };
         let upstream_request_guard = UpstreamRequestReservation::new(UpstreamRequestGuard::new(
@@ -806,10 +814,14 @@ async fn send_hedge_stream_attempt(
         .try_reserve_upstream_hedge(&upstream, &request_model)
         .await
         .map_err(|error| {
-            GatewayError::upstream_temporary_unavailable(
-                error.message,
-                "upstream_hedge_capacity_unavailable",
-            )
+            if error.is_runtime_coordination_unavailable() {
+                super::runtime_coordination_unavailable_gateway_error()
+            } else {
+                GatewayError::upstream_temporary_unavailable(
+                    error.message,
+                    "upstream_hedge_capacity_unavailable",
+                )
+            }
         })?;
     let reservation = UpstreamRequestGuard::new(state.clone(), upstream_request_lease);
     route_attempts.record_physical_send();
@@ -962,7 +974,9 @@ async fn prefetch_stream_with_hedges(
                         let winner = match ready {
                             HedgeWinnerReady::Stream(mut ready) => {
                                 if let Some(reservation) = ready.reservation.take() {
-                                    reservation.release().await;
+                                    reservation.release().await.map_err(|_| {
+                                        super::runtime_coordination_unavailable_gateway_error()
+                                    })?;
                                 }
                                 tracing::info!(
                                     request_id,
@@ -998,6 +1012,13 @@ async fn prefetch_stream_with_hedges(
                         return Ok(winner);
                     }
                     Err(error) => {
+                        if hedge_error_is_terminal(&error) {
+                            for (_, control) in &route_controls {
+                                control.cancel_as_loser();
+                            }
+                            drop(attempts);
+                            return Err(error);
+                        }
                         if attempt_index == 0
                             && (error.is_stream_only_recovery_candidate()
                                 || should_retry_without_stream(&error))

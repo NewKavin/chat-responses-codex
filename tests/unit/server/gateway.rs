@@ -356,6 +356,18 @@ fn runtime_coordination_stream_error_uses_a_stable_public_code() {
     assert!(body.ends_with("data: [DONE]\n\n"));
 }
 
+#[test]
+fn hedge_coordination_failure_is_terminal_but_capacity_rejection_is_not() {
+    let coordination = runtime_coordination_unavailable_gateway_error();
+    let capacity = GatewayError::upstream_temporary_unavailable(
+        "upstream hedge concurrency capacity is full",
+        "upstream_hedge_capacity_unavailable",
+    );
+
+    assert!(upstream::hedge_error_is_terminal(&coordination));
+    assert!(!upstream::hedge_error_is_terminal(&capacity));
+}
+
 fn tracked_route(fingerprint: &str) -> RouteHealthKey {
     RouteHealthKey {
         upstream_id: "up-1".into(),
@@ -1628,6 +1640,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get("up-1")
             .expect("upstream runtime should exist")
             .in_flight,
@@ -1635,10 +1648,14 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
     );
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
 
-    state.mark_upstream_rate_limited("up-1", 60).await;
+    state
+        .mark_upstream_rate_limited("up-1", 60)
+        .await
+        .unwrap();
     let cooldown_before_cancel = state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get("up-1")
         .expect("upstream runtime should exist")
         .cooldown_until;
@@ -1649,14 +1666,12 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
             let upstream_released = state
                 .upstream_runtime_snapshots()
                 .await
+                .unwrap()
                 .get("up-1")
                 .is_some_and(|runtime| runtime.in_flight == 0);
             if upstream_released {
                 if let Ok(lease) = state.try_reserve_downstream_concurrency(&downstream).await {
-                    state
-                        .release_downstream_concurrency(lease)
-                        .await
-                        .unwrap();
+                    state.release_downstream_concurrency(lease).await.unwrap();
                     break;
                 }
             }
@@ -1695,6 +1710,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,

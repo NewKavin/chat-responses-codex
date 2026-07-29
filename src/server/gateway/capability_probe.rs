@@ -24,7 +24,8 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, unix_seconds, AppState, UpstreamConfig, UpstreamRequestLease,
+    join_upstream_url, unix_seconds, AppState, RuntimeCoordinationError, UpstreamConfig,
+    UpstreamRequestLease,
 };
 
 #[derive(Clone, Debug)]
@@ -1784,7 +1785,13 @@ impl ProbeExecutor {
         let lease = state
             .try_reserve_upstream_request(upstream, &self.runtime_model_slug)
             .await
-            .map_err(|error| io::Error::other(error.message))?;
+            .map_err(|error| {
+                if error.is_runtime_coordination_unavailable() {
+                    io::Error::other(RuntimeCoordinationError)
+                } else {
+                    io::Error::other(error.message)
+                }
+            })?;
         Ok(Some(ProbeUpstreamRequestGuard {
             state: state.clone(),
             lease,
@@ -1882,8 +1889,15 @@ impl Drop for ProbeUpstreamRequestGuard {
         if let Ok(handle) = Handle::try_current() {
             let state = self.state.clone();
             let lease = self.lease.clone();
+            let upstream_id = lease.upstream_id().to_string();
             handle.spawn(async move {
-                let _ = state.release_upstream_request(lease).await;
+                if let Err(error) = state.release_upstream_request(lease).await {
+                    tracing::error!(
+                        upstream_id = %upstream_id,
+                        error = %error,
+                        "failed to release capability probe upstream lease"
+                    );
+                }
             });
         }
     }

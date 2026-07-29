@@ -427,7 +427,7 @@ async fn dialect_correction_reserves_admission_for_each_physical_attempt() {
 
     assert_eq!(fixture.send().await.status(), StatusCode::OK);
     assert_eq!(fixture.upstream_hits(), 2);
-    let runtime = fixture.state.upstream_runtime_snapshots().await;
+    let runtime = fixture.state.upstream_runtime_snapshots().await.unwrap();
     let upstream = runtime.get("up-1").expect("upstream runtime should exist");
     assert_eq!(upstream.minute_cost, 2.0);
     assert_eq!(upstream.in_flight, 0);

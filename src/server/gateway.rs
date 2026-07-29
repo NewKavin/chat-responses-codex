@@ -18,8 +18,9 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, ActiveGatewayRequestStart, AppConfig,
     AppState, CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile,
-    KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, RuntimeCoordinationError, UpstreamConfig, UpstreamRequestLease, UsageLog,
+    KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome,
+    RouteRecovery, RouteSetAggregateKey, RuntimeCoordinationError, UpstreamConfig,
+    UpstreamRequestLease, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -1462,11 +1463,24 @@ fn runtime_coordination_gateway_error(error: &std::io::Error) -> Option<GatewayE
     error
         .get_ref()
         .is_some_and(|source| source.is::<RuntimeCoordinationError>())
-        .then(|| {
-            GatewayError::downstream_admission_rejection(
-                crate::state::DownstreamAdmissionRejection::RuntimeCoordinationUnavailable,
-            )
-        })
+        .then(runtime_coordination_unavailable_gateway_error)
+}
+
+fn runtime_coordination_unavailable_gateway_error() -> GatewayError {
+    GatewayError::downstream_admission_rejection(
+        crate::state::DownstreamAdmissionRejection::RuntimeCoordinationUnavailable,
+    )
+}
+
+fn upstream_admission_gateway_error(
+    error: crate::state::UpstreamAdmissionError,
+    capacity_message: &str,
+) -> GatewayError {
+    if error.is_runtime_coordination_unavailable() {
+        runtime_coordination_unavailable_gateway_error()
+    } else {
+        GatewayError::Upstream(capacity_message.into())
+    }
 }
 
 fn replace_error_on_runtime_rollback_failure(
@@ -2272,7 +2286,9 @@ struct UpstreamRequestGuardInner {
 }
 
 impl UpstreamRequestGuardInner {
-    fn spawn_release(&self) -> Option<tokio::task::JoinHandle<()>> {
+    fn spawn_release(
+        &self,
+    ) -> Option<tokio::task::JoinHandle<Result<(), RuntimeCoordinationError>>> {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -2289,8 +2305,17 @@ impl UpstreamRequestGuardInner {
         }
         let state = self.state.clone();
         let lease = self.lease.clone();
+        let upstream_id = lease.upstream_id().to_string();
         Some(runtime.spawn(async move {
-            let _ = state.release_upstream_request(lease).await;
+            let result = state.release_upstream_request(lease).await;
+            if let Err(error) = &result {
+                tracing::error!(
+                    upstream_id = %upstream_id,
+                    error = %error,
+                    "failed to release upstream request lease"
+                );
+            }
+            result
         }))
     }
 }
@@ -2317,16 +2342,21 @@ impl UpstreamRequestGuard {
         }
     }
 
-    async fn release(&self) {
+    async fn release(&self) -> Result<(), RuntimeCoordinationError> {
         if let Some(task) = self.inner.spawn_release() {
-            if let Err(error) = task.await {
-                tracing::error!(
-                    upstream_id = %self.inner.lease.upstream_id(),
-                    error = %error,
-                    "upstream request release task failed"
-                );
+            match task.await {
+                Ok(result) => return result,
+                Err(error) => {
+                    tracing::error!(
+                        upstream_id = %self.inner.lease.upstream_id(),
+                        error = %error,
+                        "upstream request release task failed"
+                    );
+                    return Err(RuntimeCoordinationError);
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -2342,10 +2372,12 @@ impl UpstreamRequestReservation {
         }
     }
 
-    async fn release(&self) {
+    async fn release(&self) -> Result<(), RuntimeCoordinationError> {
         let guard = self.guard.lock().await.take();
         if let Some(guard) = guard {
-            guard.release().await;
+            guard.release().await
+        } else {
+            Ok(())
         }
     }
 
@@ -2355,13 +2387,16 @@ impl UpstreamRequestReservation {
         upstream: &UpstreamConfig,
         model: &str,
     ) -> Result<(), GatewayError> {
-        self.release().await;
+        self.release()
+            .await
+            .map_err(|_| runtime_coordination_unavailable_gateway_error())?;
         let lease = state
             .try_reserve_upstream_request(upstream, model)
             .await
-            .map_err(|_| {
-                GatewayError::Upstream(
-                    "failed to reserve capacity for an internal upstream retry".into(),
+            .map_err(|error| {
+                upstream_admission_gateway_error(
+                    error,
+                    "failed to reserve capacity for an internal upstream retry",
                 )
             })?;
         *self.guard.lock().await = Some(UpstreamRequestGuard::new(state.clone(), lease));
@@ -2385,7 +2420,7 @@ impl StreamCompletionContext {
         if !self.is_hedge_loser() {
             self.downstream_concurrency_guard.release().await;
         }
-        self.upstream_request_guard.release().await;
+        let _ = self.upstream_request_guard.release().await;
     }
 
     fn is_hedge_loser(&self) -> bool {
@@ -4315,7 +4350,10 @@ async fn process_gateway_request_inner(
     let mut any_same_route_retry = false;
 
     'routing_rounds: loop {
-        let upstream_runtime_snapshots = state.upstream_runtime_snapshots().await;
+        let upstream_runtime_snapshots = state
+            .upstream_runtime_snapshots()
+            .await
+            .map_err(|_| runtime_coordination_unavailable_gateway_error())?;
         last_error = None;
         last_failure_upstream = None;
         let mut stream_only_final_attempt = false;
@@ -4731,12 +4769,15 @@ async fn process_gateway_request_inner(
                             .await
                         {
                             Ok(lease) => lease,
-                            Err(_) => {
+                            Err(error) => {
                                 finish_route_health_permit(
                                     &route_health_permit,
                                     RouteOutcome::Cancelled,
                                 )
                                 .await;
+                                if error.is_runtime_coordination_unavailable() {
+                                    return Err(runtime_coordination_unavailable_gateway_error());
+                                }
                                 last_error = Some(GatewayError::Upstream(
                                     "failed to reserve upstream request capacity".into(),
                                 ));
@@ -4878,8 +4919,12 @@ async fn process_gateway_request_inner(
                                         .await;
                                         active_request_guard
                                             .fail_and_finish(error.error_category());
-                                        upstream_request_guard.release().await;
-                                        return Err(error);
+                                        let release = upstream_request_guard.release().await;
+                                        return Err(if release.is_err() {
+                                            runtime_coordination_unavailable_gateway_error()
+                                        } else {
+                                            error
+                                        });
                                     }
                                 }
                             } else {
@@ -4988,7 +5033,7 @@ async fn process_gateway_request_inner(
                             requested: &requested_features,
                             requested_value: inference_strength.as_deref(),
                         };
-                        let result = send_to_upstream(
+                        let mut result = send_to_upstream(
                             &state,
                             &upstream,
                             api_key,
@@ -5033,8 +5078,10 @@ async fn process_gateway_request_inner(
                         // Non-streaming requests and failed streaming attempts should
                         // release upstream capacity immediately because no long-lived
                         // stream body is handed to the caller.
-                        if !request_stream || result.is_err() {
-                            upstream_request_guard.release().await;
+                        if (!request_stream || result.is_err())
+                            && upstream_request_guard.release().await.is_err()
+                        {
+                            result = Err(runtime_coordination_unavailable_gateway_error());
                         }
 
                         if result
@@ -5066,8 +5113,10 @@ async fn process_gateway_request_inner(
                                     )
                                     .await;
                                 }
-                                if selected_upstream_id != upstream.id {
-                                    upstream_request_guard.release().await;
+                                if selected_upstream_id != upstream.id
+                                    && upstream_request_guard.release().await.is_err()
+                                {
+                                    return Err(runtime_coordination_unavailable_gateway_error());
                                 }
                                 state.mark_active_gateway_request_upstream(
                                     &request_id,
@@ -5134,7 +5183,11 @@ async fn process_gateway_request_inner(
                                 if request_stream
                                     && matches!(result.usage_log_timing, UsageLogTiming::Immediate)
                                 {
-                                    upstream_request_guard.release().await;
+                                    if upstream_request_guard.release().await.is_err() {
+                                        return Err(
+                                            runtime_coordination_unavailable_gateway_error(),
+                                        );
+                                    }
                                     downstream_concurrency_guard.release().await;
                                 }
 
@@ -5334,13 +5387,24 @@ async fn process_gateway_request_inner(
                                     state.clear_affinity_upstream(&downstream.id, normalized_model);
                                 }
                                 if let Some(retry_after) = retry_after {
-                                    state
+                                    if state
                                         .mark_upstream_concurrency_full(
                                             &upstream.id,
                                             retry_after.as_millis().min(u128::from(u64::MAX))
                                                 as u64,
                                         )
+                                        .await
+                                        .is_err()
+                                    {
+                                        finish_route_health_permit(
+                                            &route_health_permit,
+                                            RouteOutcome::Cancelled,
+                                        )
                                         .await;
+                                        return Err(
+                                            runtime_coordination_unavailable_gateway_error(),
+                                        );
+                                    }
                                 }
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message,
@@ -5411,9 +5475,18 @@ async fn process_gateway_request_inner(
                                 if state.config.routing_affinity_enabled {
                                     state.clear_affinity_upstream(&downstream.id, normalized_model);
                                 }
-                                state
+                                if state
                                     .mark_upstream_rate_limited(&upstream.id, retry_after_seconds)
+                                    .await
+                                    .is_err()
+                                {
+                                    finish_route_health_permit(
+                                        &route_health_permit,
+                                        RouteOutcome::Cancelled,
+                                    )
                                     .await;
+                                    return Err(runtime_coordination_unavailable_gateway_error());
+                                }
                                 last_error = Some(GatewayError::TooManyRequests {
                                     message,
                                     retry_after: Some(retry_after),

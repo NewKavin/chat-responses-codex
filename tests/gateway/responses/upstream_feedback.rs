@@ -277,7 +277,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
-    let snapshots = state.upstream_runtime_snapshots().await;
+    let snapshots = state.upstream_runtime_snapshots().await.unwrap();
     let snapshot = snapshots.get("up-1").unwrap();
     assert!(
         snapshot.cooldown_until > 0,

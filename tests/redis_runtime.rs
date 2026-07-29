@@ -1,12 +1,17 @@
+use axum::body::{to_bytes, Body};
+use axum::http::{Request, StatusCode};
+use chat_responses_codex::keys::generate_downstream_key;
+use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamAdmissionRejection, DownstreamConfig, PersistedState,
-    RuntimeCoordinationBackend, UsageLog,
+    AppConfig, AppState, DownstreamAdmissionRejection, DownstreamConfig, ModelRequestCostConfig,
+    PersistedState, RuntimeCoordinationBackend, UpstreamConfig, UsageLog,
 };
 use sha2::{Digest, Sha256};
 use std::io;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 #[test]
@@ -136,6 +141,23 @@ fn redis_test_downstream(id: &str) -> DownstreamConfig {
     }
 }
 
+fn redis_test_upstream(id: &str) -> UpstreamConfig {
+    UpstreamConfig {
+        id: id.into(),
+        name: "Redis test upstream".into(),
+        active: true,
+        max_concurrency: 1,
+        requests_per_minute: 100,
+        request_quota_window_hours: 1,
+        request_quota_requests: 100,
+        model_request_costs: vec![ModelRequestCostConfig {
+            slug: "model-a".into(),
+            cost: 2.5,
+        }],
+        ..UpstreamConfig::default()
+    }
+}
+
 async fn redis_test_states(config: &AppConfig) -> (AppState, AppState, tempfile::TempDir) {
     let directory = tempdir().unwrap();
     let first = AppState::load_from_path(directory.path().join("first.json"), config.clone())
@@ -222,17 +244,18 @@ async fn redis_downstream_request_reservations_are_shared_and_exact() {
     let (first, second, _directory) = redis_test_states(&config).await;
     let downstream = redis_test_downstream("shared-request-limit");
 
-    let reservation = first
-        .reserve_downstream_request(&downstream)
-        .await
-        .unwrap();
+    let reservation = first.reserve_downstream_request(&downstream).await.unwrap();
     let rejection = second
         .reserve_downstream_request(&downstream)
         .await
         .expect_err("the second coordinator must observe the first reservation");
     assert!(matches!(
         rejection,
-        DownstreamAdmissionRejection::PerMinuteLimitExceeded { limit: 1, used: 1, .. }
+        DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+            limit: 1,
+            used: 1,
+            ..
+        }
     ));
 
     first
@@ -438,10 +461,7 @@ async fn redis_release_and_rollback_retry_once_after_timeout() {
         .await
         .unwrap();
 
-    let reservation = first
-        .reserve_downstream_request(&downstream)
-        .await
-        .unwrap();
+    let reservation = first.reserve_downstream_request(&downstream).await.unwrap();
     pause_test_redis(&config, 2_100).await;
     first
         .rollback_downstream_request_reservation(reservation)
@@ -500,10 +520,7 @@ async fn failed_redis_cleanup_leaves_downstream_available_for_retry() {
     let mut downstream = redis_test_downstream("cleanup-retry");
     downstream.per_minute_limit = 1;
     first.insert_downstream(downstream.clone()).await.unwrap();
-    first
-        .reserve_downstream_request(&downstream)
-        .await
-        .unwrap();
+    first.reserve_downstream_request(&downstream).await.unwrap();
 
     pause_test_redis(&config, 2_500).await;
     first
@@ -526,4 +543,221 @@ async fn failed_redis_cleanup_leaves_downstream_available_for_retry() {
         .reserve_downstream_request(&downstream)
         .await
         .expect("retrying removal must clear the old request reservation");
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_reservations_snapshots_and_exact_release_are_shared() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let mut upstream = redis_test_upstream("shared-upstream-admission");
+    upstream.requests_per_minute = 2;
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream.clone()).await.unwrap();
+
+    let first_lease = first
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    let snapshots = second.upstream_runtime_snapshots().await.unwrap();
+    let snapshot = snapshots.get(&upstream.id).unwrap();
+    assert_eq!(snapshot.in_flight, 1);
+    assert_eq!(snapshot.minute_cost, 2.5);
+    assert_eq!(snapshot.five_hour_cost, 2.5);
+
+    let concurrency_rejection = second
+        .try_reserve_upstream_hedge(&upstream, "model-a")
+        .await
+        .expect_err("the second coordinator must observe the shared lease");
+    assert!(!concurrency_rejection.is_runtime_coordination_unavailable());
+
+    first
+        .release_upstream_request(first_lease.clone())
+        .await
+        .unwrap();
+    let snapshots = second.upstream_runtime_snapshots().await.unwrap();
+    let snapshot = snapshots.get(&upstream.id).unwrap();
+    assert_eq!(snapshot.in_flight, 0);
+    assert_eq!(snapshot.minute_cost, 2.5);
+    assert_eq!(snapshot.five_hour_cost, 2.5);
+
+    let minute_rejection = second
+        .try_reserve_upstream_hedge(&upstream, "model-a")
+        .await
+        .expect_err("releasing a lease must not erase its quota event");
+    assert!(!minute_rejection.is_runtime_coordination_unavailable());
+
+    upstream.requests_per_minute = 100;
+    upstream.request_quota_requests = 2;
+    let window_rejection = second
+        .try_reserve_upstream_hedge(&upstream, "model-a")
+        .await
+        .expect_err("the configured request window must be shared");
+    assert!(!window_rejection.is_runtime_coordination_unavailable());
+
+    let replacement = second
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    first.release_upstream_request(first_lease).await.unwrap();
+    assert_eq!(
+        first
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .unwrap()
+            .in_flight,
+        1,
+        "releasing a stale clone must not remove the replacement lease"
+    );
+    second.release_upstream_request(replacement).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_snapshot_round_trips_precise_fractional_costs() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let mut upstream = redis_test_upstream("precise-upstream-costs");
+    let request_cost = 1.234_567_890_123_456_7;
+    upstream.model_request_costs[0].cost = request_cost;
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream.clone()).await.unwrap();
+
+    let first_lease = first
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    let second_lease = second
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+
+    let snapshot = first
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .remove(&upstream.id)
+        .unwrap();
+    assert_eq!(snapshot.minute_cost, request_cost + request_cost);
+    assert_eq!(snapshot.five_hour_cost, request_cost + request_cost);
+
+    first.release_upstream_request(first_lease).await.unwrap();
+    second.release_upstream_request(second_lease).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_cooldown_is_shared_and_success_clears_it() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("shared-upstream-cooldown");
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream.clone()).await.unwrap();
+
+    first
+        .mark_upstream_rate_limited(&upstream.id, 30)
+        .await
+        .unwrap();
+    let snapshots = second.upstream_runtime_snapshots().await.unwrap();
+    let cooldown_until = snapshots.get(&upstream.id).unwrap().cooldown_until;
+    assert!(cooldown_until > 0);
+
+    second
+        .mark_upstream_concurrency_full(&upstream.id, 1_000)
+        .await
+        .unwrap();
+    let feedback = first
+        .upstream_runtime_snapshots_with_feedback()
+        .await
+        .unwrap();
+    let feedback = feedback.get(&upstream.id).unwrap();
+    assert_eq!(feedback.cooldown_until, cooldown_until);
+    assert_eq!(
+        feedback.last_feedback_type.as_deref(),
+        Some("concurrency_full")
+    );
+    assert_eq!(feedback.last_retry_after_seconds, Some(1));
+
+    second.mark_upstream_success(&upstream.id).await.unwrap();
+    let snapshots = first.upstream_runtime_snapshots().await.unwrap();
+    assert_eq!(snapshots.get(&upstream.id).unwrap().cooldown_until, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_admission_distinguishes_capacity_from_coordination_failure() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("upstream-coordination-failure");
+
+    let lease = first
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    let capacity = second
+        .try_reserve_upstream_hedge(&upstream, "model-a")
+        .await
+        .expect_err("the shared concurrency limit must reject the hedge");
+    assert!(!capacity.is_runtime_coordination_unavailable());
+    first.release_upstream_request(lease).await.unwrap();
+
+    pause_test_redis(&config, 2_500).await;
+    let coordination = second
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .expect_err("Redis timeout must fail closed");
+    assert!(coordination.is_runtime_coordination_unavailable());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_snapshot_failure_returns_stable_gateway_503() {
+    let config = redis_test_config();
+    let directory = tempdir().unwrap();
+    let state = AppState::load_from_path(directory.path().join("gateway.json"), config.clone())
+        .await
+        .unwrap();
+    let mut upstream = redis_test_upstream("upstream-snapshot-503");
+    upstream.base_url = "http://127.0.0.1:1".into();
+    upstream.api_key = "unused-upstream-key".into();
+    upstream.supported_models = vec!["model-a".into()];
+    state.insert_upstream(upstream).await.unwrap();
+
+    let downstream_key = generate_downstream_key("redis-test");
+    let mut downstream = redis_test_downstream("snapshot-503-downstream");
+    downstream.hash = downstream_key.hash;
+    downstream.model_allowlist = vec!["model-a".into()];
+    downstream.rate_limit_enabled = false;
+    state.insert_downstream(downstream).await.unwrap();
+
+    pause_test_redis(&config, 2_500).await;
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", format!("Bearer {}", downstream_key.plaintext))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "model-a",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("\"code\":\"runtime_coordination_unavailable\""));
 }

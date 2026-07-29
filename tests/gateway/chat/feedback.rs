@@ -255,7 +255,7 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
     // Check that runtime state shows cooldown
-    let snapshots = state.upstream_runtime_snapshots().await;
+    let snapshots = state.upstream_runtime_snapshots().await.unwrap();
     let up1_snapshot = snapshots.get("up-1").unwrap();
     assert!(
         up1_snapshot.cooldown_until > 0,

@@ -1,4 +1,7 @@
-use super::{AppConfig, DownstreamAdmissionRejection, DownstreamConfig};
+use super::{
+    AppConfig, DownstreamAdmissionRejection, DownstreamConfig, UpstreamAdmissionError,
+    UpstreamConfig, UpstreamRuntimeSnapshot, UpstreamRuntimeSnapshotWithFeedback,
+};
 use redis::aio::ConnectionManager;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -300,8 +303,150 @@ impl RedisRuntimeCoordinator {
         result
     }
 
+    pub(super) async fn reserve_upstream_request(
+        &self,
+        upstream: &UpstreamConfig,
+        request_cost: f64,
+        event_id: &str,
+        lease_id: &str,
+        hedge: bool,
+    ) -> Result<(), UpstreamAdmissionError> {
+        let identity = stable_identity(&upstream.id);
+        let mut connection = self.connection();
+        let script = redis::Script::new(include_str!("redis_runtime/upstream_reserve.lua"));
+        let mut invocation = script.prepare_invoke();
+        invocation
+            .key(self.upstream_key(&identity, "leases"))
+            .key(self.upstream_key(&identity, "events"))
+            .key(self.upstream_key(&identity, "event_costs"))
+            .arg(event_id)
+            .arg(lease_id)
+            .arg(request_cost.to_string())
+            .arg(if hedge { 1 } else { 0 })
+            .arg(upstream.max_concurrency.max(1))
+            .arg(upstream.requests_per_minute)
+            .arg(upstream.request_quota_window_seconds())
+            .arg(upstream.request_quota_requests)
+            .arg(self.lease_duration_ms);
+        let operation = invocation.invoke_async::<Vec<String>>(&mut connection);
+        let result = match tokio::time::timeout(REDIS_OPERATION_TIMEOUT, operation).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) | Err(_) => {
+                let _ = self.refresh_manager().await;
+                return Err(UpstreamAdmissionError::runtime_coordination_unavailable());
+            }
+        };
+        parse_upstream_reservation(result)
+    }
+
+    pub(super) async fn upstream_snapshot(
+        &self,
+        upstream: &UpstreamConfig,
+    ) -> Result<UpstreamRuntimeSnapshot, RuntimeCoordinationError> {
+        parse_upstream_snapshot(self.query_upstream_snapshot(upstream).await?)
+    }
+
+    pub(super) async fn upstream_snapshot_with_feedback(
+        &self,
+        upstream: &UpstreamConfig,
+    ) -> Result<UpstreamRuntimeSnapshotWithFeedback, RuntimeCoordinationError> {
+        parse_upstream_snapshot_with_feedback(self.query_upstream_snapshot(upstream).await?)
+    }
+
+    async fn query_upstream_snapshot(
+        &self,
+        upstream: &UpstreamConfig,
+    ) -> Result<Vec<String>, RuntimeCoordinationError> {
+        let identity = stable_identity(&upstream.id);
+        let mut connection = self.connection();
+        let script = redis::Script::new(include_str!("redis_runtime/upstream_snapshot.lua"));
+        let mut invocation = script.prepare_invoke();
+        invocation
+            .key(self.upstream_key(&identity, "leases"))
+            .key(self.upstream_key(&identity, "events"))
+            .key(self.upstream_key(&identity, "event_costs"))
+            .key(self.upstream_key(&identity, "cooldown"))
+            .arg(upstream.request_quota_window_seconds());
+        let result =
+            timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
+        if result.is_err() {
+            let _ = self.refresh_manager().await;
+        }
+        result
+    }
+
+    pub(super) async fn release_upstream_lease(
+        &self,
+        upstream_id: &str,
+        lease_id: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let identity = stable_identity(upstream_id);
+        let lease_key = self.upstream_key(&identity, "leases");
+        self.retry_coordination_once(|| {
+            let mut connection = self.connection();
+            let lease_key = lease_key.clone();
+            let lease_id = lease_id.to_string();
+            async move {
+                let script = redis::Script::new(include_str!("redis_runtime/lease_release.lua"));
+                let mut invocation = script.prepare_invoke();
+                invocation.key(lease_key).arg(lease_id);
+                timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
+    }
+
+    pub(super) async fn mark_upstream_cooldown(
+        &self,
+        upstream_id: &str,
+        cooldown_seconds: u64,
+        feedback_type: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        self.update_upstream_cooldown(upstream_id, "set", cooldown_seconds.max(1), feedback_type)
+            .await
+    }
+
+    pub(super) async fn clear_upstream_cooldown(
+        &self,
+        upstream_id: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        self.update_upstream_cooldown(upstream_id, "clear", 0, "")
+            .await
+    }
+
+    async fn update_upstream_cooldown(
+        &self,
+        upstream_id: &str,
+        action: &str,
+        cooldown_seconds: u64,
+        feedback_type: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let identity = stable_identity(upstream_id);
+        let mut connection = self.connection();
+        let script = redis::Script::new(include_str!("redis_runtime/upstream_cooldown.lua"));
+        let mut invocation = script.prepare_invoke();
+        invocation
+            .key(self.upstream_key(&identity, "cooldown"))
+            .arg(action)
+            .arg(cooldown_seconds)
+            .arg(feedback_type);
+        let result = timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
+            .await
+            .map(|_| ());
+        if result.is_err() {
+            let _ = self.refresh_manager().await;
+        }
+        result
+    }
+
     fn key(&self, identity: &str, suffix: &str) -> String {
         format!("{}:v1:downstream:{{{identity}}}:{suffix}", self.key_prefix)
+    }
+
+    fn upstream_key(&self, identity: &str, suffix: &str) -> String {
+        format!("{}:v1:upstream:{{{identity}}}:{suffix}", self.key_prefix)
     }
 
     fn connection(&self) -> ConnectionManager {
@@ -390,6 +535,94 @@ fn parse_downstream_reservation(
         }),
         _ => Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable),
     }
+}
+
+fn parse_upstream_reservation(result: Vec<String>) -> Result<(), UpstreamAdmissionError> {
+    let retry_after_seconds = result
+        .get(1)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1)
+        .max(1);
+    match result.first().map(String::as_str) {
+        Some("0") => Ok(()),
+        Some("1") => Err(UpstreamAdmissionError::new(
+            "upstream hedge concurrency capacity is full".into(),
+            retry_after_seconds,
+        )),
+        Some("2") => Err(UpstreamAdmissionError::new(
+            "upstream hedge minute quota is exhausted".into(),
+            retry_after_seconds,
+        )),
+        Some("3") => Err(UpstreamAdmissionError::new(
+            "upstream hedge request quota is exhausted".into(),
+            retry_after_seconds,
+        )),
+        _ => Err(UpstreamAdmissionError::runtime_coordination_unavailable()),
+    }
+}
+
+fn parse_upstream_snapshot(
+    result: Vec<String>,
+) -> Result<UpstreamRuntimeSnapshot, RuntimeCoordinationError> {
+    if result.len() < 4 {
+        return Err(RuntimeCoordinationError);
+    }
+    let in_flight = result[0]
+        .parse::<u32>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let minute_cost = result[1]
+        .parse::<f64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let five_hour_cost = result[2]
+        .parse::<f64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    let cooldown_until = result[3]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    if !minute_cost.is_finite()
+        || minute_cost < 0.0
+        || !five_hour_cost.is_finite()
+        || five_hour_cost < 0.0
+    {
+        return Err(RuntimeCoordinationError);
+    }
+    Ok(UpstreamRuntimeSnapshot {
+        in_flight,
+        minute_cost,
+        five_hour_cost,
+        cooldown_until,
+    })
+}
+
+fn parse_upstream_snapshot_with_feedback(
+    result: Vec<String>,
+) -> Result<UpstreamRuntimeSnapshotWithFeedback, RuntimeCoordinationError> {
+    if result.len() < 7 {
+        return Err(RuntimeCoordinationError);
+    }
+    let snapshot = parse_upstream_snapshot(result.clone())?;
+    let last_feedback_type = (!result[4].is_empty()).then(|| result[4].clone());
+    let last_retry_after_seconds = if result[5].is_empty() {
+        None
+    } else {
+        Some(
+            result[5]
+                .parse::<u64>()
+                .map_err(|_| RuntimeCoordinationError)?,
+        )
+    };
+    let now = result[6]
+        .parse::<u64>()
+        .map_err(|_| RuntimeCoordinationError)?;
+    Ok(UpstreamRuntimeSnapshotWithFeedback {
+        in_flight: snapshot.in_flight,
+        minute_cost: snapshot.minute_cost,
+        five_hour_cost: snapshot.five_hour_cost,
+        cooldown_until: snapshot.cooldown_until,
+        cooldown_remaining: snapshot.cooldown_until.saturating_sub(now),
+        last_feedback_type,
+        last_retry_after_seconds,
+    })
 }
 
 fn valid_key_prefix(prefix: &str) -> bool {

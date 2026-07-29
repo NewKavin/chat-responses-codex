@@ -1861,7 +1861,6 @@ impl AppState {
         .unwrap_or(None)
     }
 
-
     pub async fn fetch_models_from_endpoint(
         &self,
         base_url: &str,
@@ -1971,6 +1970,24 @@ impl AppState {
             ));
         }
 
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let lease_id = Uuid::new_v4().to_string();
+            coordinator
+                .reserve_upstream_request(
+                    upstream,
+                    request_cost,
+                    &Uuid::new_v4().to_string(),
+                    &lease_id,
+                    false,
+                )
+                .await?;
+            return Ok(UpstreamRequestLease {
+                upstream_id: upstream.id.clone(),
+                lease_id,
+                released: Arc::new(AtomicBool::new(false)),
+            });
+        }
+
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         let state = runtime_state
             .entry(upstream.id.clone())
@@ -2011,6 +2028,24 @@ impl AppState {
                 "invalid upstream model request cost".into(),
                 1,
             ));
+        }
+
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let lease_id = Uuid::new_v4().to_string();
+            coordinator
+                .reserve_upstream_request(
+                    upstream,
+                    request_cost,
+                    &Uuid::new_v4().to_string(),
+                    &lease_id,
+                    true,
+                )
+                .await?;
+            return Ok(UpstreamRequestLease {
+                upstream_id: upstream.id.clone(),
+                lease_id,
+                released: Arc::new(AtomicBool::new(false)),
+            });
         }
 
         let mut runtime_state = self.upstream_runtime_state.lock().await;
@@ -2066,19 +2101,40 @@ impl AppState {
         })
     }
 
-    pub async fn upstream_runtime_snapshots(&self) -> HashMap<String, UpstreamRuntimeSnapshot> {
-        let upstream_windows = {
+    pub async fn upstream_runtime_snapshots(
+        &self,
+    ) -> Result<HashMap<String, UpstreamRuntimeSnapshot>, RuntimeCoordinationError> {
+        let upstreams = {
             let state = self.inner.lock().await;
             state
                 .upstreams
                 .iter()
-                .map(|upstream| (upstream.id.clone(), upstream.request_quota_window_seconds()))
-                .collect::<HashMap<String, u64>>()
+                .cloned()
+                .collect::<Vec<UpstreamConfig>>()
         };
+
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let mut snapshots = HashMap::with_capacity(upstreams.len());
+            for upstream in &upstreams {
+                snapshots.insert(
+                    upstream.id.clone(),
+                    coordinator.upstream_snapshot(upstream).await?,
+                );
+            }
+            return Ok(snapshots);
+        }
+
+        let upstream_windows = upstreams
+            .into_iter()
+            .map(|upstream| {
+                let window_seconds = upstream.request_quota_window_seconds();
+                (upstream.id, window_seconds)
+            })
+            .collect::<HashMap<String, u64>>();
 
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         let now = unix_seconds();
-        runtime_state
+        Ok(runtime_state
             .iter_mut()
             .map(|(upstream_id, state)| {
                 let request_quota_window_seconds = upstream_windows
@@ -2101,7 +2157,7 @@ impl AppState {
                     },
                 )
             })
-            .collect()
+            .collect())
     }
 
     pub async fn release_upstream_request(
@@ -2111,7 +2167,11 @@ impl AppState {
         if lease.released.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        let _lease_id = lease.lease_id;
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .release_upstream_lease(&lease.upstream_id, &lease.lease_id)
+                .await;
+        }
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         if let Some(state) = runtime_state.get_mut(&lease.upstream_id) {
             state.in_flight = state.in_flight.saturating_sub(1);
@@ -2145,23 +2205,41 @@ impl AppState {
             })
             .await;
 
-        let mut runtime_state = self.upstream_runtime_state.lock().await;
-        if let Some(runtime) = runtime_state.get_mut(upstream_id) {
-            runtime.cooldown_until = 0;
-        }
+        let cooldown_result =
+            if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+                coordinator
+                    .clear_upstream_cooldown(upstream_id)
+                    .await
+                    .map_err(io::Error::other)
+            } else {
+                let mut runtime_state = self.upstream_runtime_state.lock().await;
+                if let Some(runtime) = runtime_state.get_mut(upstream_id) {
+                    runtime.cooldown_until = 0;
+                }
+                Ok(())
+            };
 
+        cooldown_result?;
         persist_result
     }
 
-    pub async fn mark_upstream_rate_limited(&self, upstream_id: &str, retry_after_seconds: u64) {
+    pub async fn mark_upstream_rate_limited(
+        &self,
+        upstream_id: &str,
+        retry_after_seconds: u64,
+    ) -> Result<(), RuntimeCoordinationError> {
         self.mark_upstream_cooldown(upstream_id, retry_after_seconds, "rate_limited")
-            .await;
+            .await
     }
 
-    pub async fn mark_upstream_concurrency_full(&self, upstream_id: &str, cooldown_ms: u64) {
+    pub async fn mark_upstream_concurrency_full(
+        &self,
+        upstream_id: &str,
+        cooldown_ms: u64,
+    ) -> Result<(), RuntimeCoordinationError> {
         let cooldown_seconds = cooldown_ms.saturating_add(999) / 1000;
         self.mark_upstream_cooldown(upstream_id, cooldown_seconds.max(1), "concurrency_full")
-            .await;
+            .await
     }
 
     async fn mark_upstream_cooldown(
@@ -2169,7 +2247,12 @@ impl AppState {
         upstream_id: &str,
         cooldown_seconds: u64,
         feedback_type: &str,
-    ) {
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .mark_upstream_cooldown(upstream_id, cooldown_seconds.max(1), feedback_type)
+                .await;
+        }
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         let state = runtime_state
             .entry(upstream_id.to_string())
@@ -2179,24 +2262,46 @@ impl AppState {
         state.cooldown_until = state.cooldown_until.max(cooldown_until);
         state.last_feedback_type = Some(feedback_type.to_string());
         state.last_retry_after_seconds = Some(cooldown_seconds.max(1));
+        Ok(())
     }
 
     pub async fn upstream_runtime_snapshots_with_feedback(
         &self,
-    ) -> HashMap<String, UpstreamRuntimeSnapshotWithFeedback> {
-        let upstream_windows = {
+    ) -> Result<HashMap<String, UpstreamRuntimeSnapshotWithFeedback>, RuntimeCoordinationError> {
+        let upstreams = {
             let state = self.inner.lock().await;
             state
                 .upstreams
                 .iter()
-                .map(|upstream| (upstream.id.clone(), upstream.request_quota_window_seconds()))
-                .collect::<HashMap<String, u64>>()
+                .cloned()
+                .collect::<Vec<UpstreamConfig>>()
         };
+
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let mut snapshots = HashMap::with_capacity(upstreams.len());
+            for upstream in &upstreams {
+                snapshots.insert(
+                    upstream.id.clone(),
+                    coordinator
+                        .upstream_snapshot_with_feedback(upstream)
+                        .await?,
+                );
+            }
+            return Ok(snapshots);
+        }
+
+        let upstream_windows = upstreams
+            .into_iter()
+            .map(|upstream| {
+                let window_seconds = upstream.request_quota_window_seconds();
+                (upstream.id, window_seconds)
+            })
+            .collect::<HashMap<String, u64>>();
 
         let mut runtime_state = self.upstream_runtime_state.lock().await;
         let now = unix_seconds();
 
-        upstream_windows
+        Ok(upstream_windows
             .into_iter()
             .map(|(upstream_id, window_seconds)| {
                 let state = runtime_state
@@ -2221,7 +2326,7 @@ impl AppState {
 
                 (upstream_id, snapshot)
             })
-            .collect()
+            .collect())
     }
 
     pub async fn append_usage_log(&self, mut log: UsageLog) -> io::Result<()> {
@@ -4295,6 +4400,7 @@ impl DownstreamAdmissionRejection {
 pub struct UpstreamAdmissionError {
     pub message: String,
     pub retry_after_seconds: u64,
+    runtime_coordination_unavailable: bool,
 }
 
 impl UpstreamAdmissionError {
@@ -4302,7 +4408,20 @@ impl UpstreamAdmissionError {
         Self {
             message,
             retry_after_seconds: retry_after_seconds.max(1),
+            runtime_coordination_unavailable: false,
         }
+    }
+
+    fn runtime_coordination_unavailable() -> Self {
+        Self {
+            message: "runtime coordination unavailable".into(),
+            retry_after_seconds: 1,
+            runtime_coordination_unavailable: true,
+        }
+    }
+
+    pub fn is_runtime_coordination_unavailable(&self) -> bool {
+        self.runtime_coordination_unavailable
     }
 }
 

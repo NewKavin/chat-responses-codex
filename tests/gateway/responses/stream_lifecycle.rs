@@ -629,10 +629,7 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
         .try_reserve_downstream_concurrency(&downstream)
         .await
         .unwrap();
-    state
-        .release_downstream_concurrency(lease)
-        .await
-        .unwrap();
+    state.release_downstream_concurrency(lease).await.unwrap();
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));
@@ -2212,7 +2209,7 @@ async fn synthesized_stream_response_releases_runtime_state() {
     assert_eq!(first.status(), StatusCode::OK);
     let _ = to_bytes(first.into_body(), usize::MAX).await.unwrap();
 
-    let snapshots = state.upstream_runtime_snapshots().await;
+    let snapshots = state.upstream_runtime_snapshots().await.unwrap();
     let up1_snapshot = snapshots.get("up-1").unwrap();
     assert_eq!(
         up1_snapshot.in_flight, 0,

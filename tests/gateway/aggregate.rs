@@ -391,6 +391,7 @@ impl AggregateHarness {
                     .state
                     .upstream_runtime_snapshots()
                     .await
+                    .unwrap()
                     .get(UPSTREAM_ID)
                     .is_some_and(|runtime| runtime.in_flight == 0);
                 if upstream_released && self.state.active_gateway_requests(None).is_empty() {
@@ -406,6 +407,7 @@ impl AggregateHarness {
             self.state
                 .upstream_runtime_snapshots()
                 .await
+                .unwrap()
                 .get(UPSTREAM_ID)
                 .unwrap()
                 .in_flight,
@@ -518,6 +520,7 @@ async fn assert_cancelled_request_cleanup(
             let upstream_released = state
                 .upstream_runtime_snapshots()
                 .await
+                .unwrap()
                 .get(UPSTREAM_ID)
                 .is_some_and(|runtime| runtime.in_flight == 0);
             if upstream_released && state.active_gateway_requests(None).is_empty() {
@@ -533,6 +536,7 @@ async fn assert_cancelled_request_cleanup(
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .in_flight,
@@ -556,10 +560,7 @@ async fn assert_cancelled_request_cleanup(
         "downstream capacity probe must reach the configured limit"
     );
     for lease in leases {
-        state
-            .release_downstream_concurrency(lease)
-            .await
-            .unwrap();
+        state.release_downstream_concurrency(lease).await.unwrap();
     }
     assert!(state.response_history(PARTIAL_RESPONSE_ID).await.is_none());
 }
@@ -570,12 +571,16 @@ async fn preset_and_capture_upstream_health(state: &AppState) -> u64 {
     for _ in failure_count..3 {
         state.mark_upstream_failure(UPSTREAM_ID).await.unwrap();
     }
-    state.mark_upstream_rate_limited(UPSTREAM_ID, 60).await;
+    state
+        .mark_upstream_rate_limited(UPSTREAM_ID, 60)
+        .await
+        .unwrap();
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams[0].failure_count, 3);
     state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get(UPSTREAM_ID)
         .unwrap()
         .cooldown_until
@@ -587,6 +592,7 @@ async fn assert_upstream_health_unchanged(state: &AppState, cooldown_until: u64)
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .cooldown_until,
@@ -807,6 +813,7 @@ async fn run_context_fallback_cancellation(
             .state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .in_flight,
@@ -940,6 +947,7 @@ async fn aggregate_learned_singleflight_follower_uses_actual_mode_for_cancellati
             let both_reserved = state
                 .upstream_runtime_snapshots()
                 .await
+                .unwrap()
                 .get(UPSTREAM_ID)
                 .is_some_and(|runtime| runtime.in_flight == 2);
             if both_reserved
@@ -1165,6 +1173,7 @@ async fn aggregate_cancellation_rearms_after_retryable_first_key_error() {
             .state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .in_flight,
@@ -1174,11 +1183,13 @@ async fn aggregate_cancellation_rearms_after_retryable_first_key_error() {
     harness
         .state
         .mark_upstream_rate_limited(UPSTREAM_ID, 60)
-        .await;
+        .await
+        .unwrap();
     let cooldown_before_cancel = harness
         .state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get(UPSTREAM_ID)
         .unwrap()
         .cooldown_until;
@@ -1193,6 +1204,7 @@ async fn aggregate_cancellation_rearms_after_retryable_first_key_error() {
             .state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .cooldown_until,
@@ -1234,11 +1246,13 @@ async fn aggregate_cancellation_arms_after_json_to_sse_recovery() {
     harness
         .state
         .mark_upstream_rate_limited(UPSTREAM_ID, 60)
-        .await;
+        .await
+        .unwrap();
     let cooldown_before_cancel = harness
         .state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get(UPSTREAM_ID)
         .unwrap()
         .cooldown_until;
@@ -1269,6 +1283,7 @@ async fn aggregate_cancellation_arms_after_json_to_sse_recovery() {
             .state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .cooldown_until,
@@ -1304,6 +1319,7 @@ async fn aggregate_future_cancellation_cleans_up_and_logs_once_without_changing_
             .state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .in_flight,
@@ -1313,11 +1329,13 @@ async fn aggregate_future_cancellation_cleans_up_and_logs_once_without_changing_
     harness
         .state
         .mark_upstream_rate_limited(UPSTREAM_ID, 60)
-        .await;
+        .await
+        .unwrap();
     let cooldown_before_cancel = harness
         .state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get(UPSTREAM_ID)
         .unwrap()
         .cooldown_until;
@@ -1332,6 +1350,7 @@ async fn aggregate_future_cancellation_cleans_up_and_logs_once_without_changing_
             .state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get(UPSTREAM_ID)
             .unwrap()
             .cooldown_until,

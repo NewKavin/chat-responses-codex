@@ -444,7 +444,21 @@ fn classify_user_agent(user_agent: Option<&str>) -> Option<String> {
 /// List all upstreams
 pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
-    let runtime_snapshots = state.upstream_runtime_snapshots().await;
+    let runtime_snapshots = match state.upstream_runtime_snapshots().await {
+        Ok(snapshots) => snapshots,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": {
+                        "message": "runtime coordination unavailable",
+                        "code": "runtime_coordination_unavailable"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
     let route_health_snapshots = state.route_health_snapshots(&snapshot.upstreams).await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

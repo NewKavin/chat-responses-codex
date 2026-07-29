@@ -1112,7 +1112,7 @@ async fn hedge_admission_rejects_a_full_extra_candidate() {
         .await
         .expect_err("a hedge must not exceed the candidate's hard capacity");
     assert!(rejection.message.contains("concurrency capacity is full"));
-    let runtime = state.upstream_runtime_snapshots().await;
+    let runtime = state.upstream_runtime_snapshots().await.unwrap();
     let runtime = runtime.get(&upstream.id).unwrap();
     assert_eq!(runtime.in_flight, 1);
     assert_eq!(runtime.minute_cost, 1.0);
@@ -1124,7 +1124,7 @@ async fn hedge_admission_rejects_a_full_extra_candidate() {
         .unwrap();
     state.release_upstream_request(lease).await.unwrap();
     wait_for_upstream_in_flight(&state, &upstream.id, 0).await;
-    let runtime = state.upstream_runtime_snapshots().await;
+    let runtime = state.upstream_runtime_snapshots().await.unwrap();
     let runtime = runtime.get(&upstream.id).unwrap();
     assert_eq!(runtime.minute_cost, 1.0);
     assert_eq!(runtime.five_hour_cost, 1.0);
@@ -1737,6 +1737,7 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
             let upstream_released = state
                 .upstream_runtime_snapshots()
                 .await
+                .unwrap()
                 .values()
                 .all(|runtime| runtime.in_flight == 0);
             let usage_recorded = state.snapshot().await.usage_logs.len() == 1;
@@ -3148,7 +3149,7 @@ async fn upstream_429_triggers_cooldown_from_retry_after() {
 
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
-    let snapshots = state.upstream_runtime_snapshots().await;
+    let snapshots = state.upstream_runtime_snapshots().await.unwrap();
     let snapshot = snapshots.get("up-1").unwrap();
     assert!(
         snapshot.cooldown_until > 0,
@@ -4384,10 +4385,14 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
     .await
     .expect("upstream request should start");
 
-    state.mark_upstream_rate_limited("up-1", 60).await;
+    state
+        .mark_upstream_rate_limited("up-1", 60)
+        .await
+        .unwrap();
     let cooldown_before_cancel = state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get("up-1")
         .expect("upstream runtime should exist")
         .cooldown_until;
@@ -4398,6 +4403,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
             let upstream_released = state
                 .upstream_runtime_snapshots()
                 .await
+                .unwrap()
                 .get("up-1")
                 .is_some_and(|runtime| runtime.in_flight == 0);
             if upstream_released {
@@ -4440,7 +4446,7 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
         .find(|upstream| upstream.id == "up-1")
         .expect("upstream should still exist");
     assert_eq!(upstream.failure_count, 0);
-    let runtime = state.upstream_runtime_snapshots().await;
+    let runtime = state.upstream_runtime_snapshots().await.unwrap();
     assert_eq!(
         runtime
             .get("up-1")
@@ -4612,10 +4618,14 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
     })
     .await
     .expect("upstream request should start");
-    state.mark_upstream_rate_limited("up-1", 60).await;
+    state
+        .mark_upstream_rate_limited("up-1", 60)
+        .await
+        .unwrap();
     let cooldown_before_headers = state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get("up-1")
         .expect("upstream runtime should exist")
         .cooldown_until;
@@ -4642,6 +4652,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
@@ -4679,6 +4690,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
@@ -4718,10 +4730,14 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
     })
     .await
     .expect("terminal upstream request should start");
-    state.mark_upstream_rate_limited("up-1", 60).await;
+    state
+        .mark_upstream_rate_limited("up-1", 60)
+        .await
+        .unwrap();
     let cooldown_before_terminal = state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get("up-1")
         .expect("upstream runtime should exist")
         .cooldown_until;
@@ -4744,6 +4760,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
@@ -4783,10 +4800,14 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
     })
     .await
     .expect("immediate JSON upstream request should start");
-    state.mark_upstream_rate_limited("up-1", 60).await;
+    state
+        .mark_upstream_rate_limited("up-1", 60)
+        .await
+        .unwrap();
     let cooldown_before_json = state
         .upstream_runtime_snapshots()
         .await
+        .unwrap()
         .get("up-1")
         .expect("upstream runtime should exist")
         .cooldown_until;
@@ -4809,6 +4830,7 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
         state
             .upstream_runtime_snapshots()
             .await
+            .unwrap()
             .get("up-1")
             .expect("upstream runtime should exist")
             .cooldown_until,
@@ -6564,7 +6586,7 @@ async fn stream_slow_model_first_byte_survives_through_keepalives() {
     // Use a generous timeout because the stream path is long.
     let _ = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let snapshots = state.upstream_runtime_snapshots().await;
+            let snapshots = state.upstream_runtime_snapshots().await.unwrap();
             let in_flight = snapshots
                 .get("up-1")
                 .map(|snapshot| snapshot.in_flight)
@@ -6858,7 +6880,7 @@ async fn synthesized_stream_response_releases_runtime_state() {
     assert_eq!(first.status(), StatusCode::OK);
     let _ = to_bytes(first.into_body(), usize::MAX).await.unwrap();
 
-    let snapshots = state.upstream_runtime_snapshots().await;
+    let snapshots = state.upstream_runtime_snapshots().await.unwrap();
     let up1_snapshot = snapshots.get("up-1").unwrap();
     assert_eq!(
         up1_snapshot.in_flight, 0,

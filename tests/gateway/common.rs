@@ -197,7 +197,7 @@ pub(crate) async fn wait_for_upstream_in_flight(
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let snapshots = state.upstream_runtime_snapshots().await;
+        let snapshots = state.upstream_runtime_snapshots().await.unwrap();
         let in_flight = snapshots
             .get(upstream_id)
             .map(|snapshot| snapshot.in_flight)

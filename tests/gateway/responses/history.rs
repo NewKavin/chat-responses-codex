@@ -975,7 +975,7 @@ async fn downstream_responses_unknown_previous_response_id_is_safe_and_categoriz
         "usage log leaked previous_response_id: {:?}",
         log.error_message
     );
-    let runtime = state.upstream_runtime_snapshots().await;
+    let runtime = state.upstream_runtime_snapshots().await.unwrap();
     assert_eq!(
         runtime
             .get("up-1")

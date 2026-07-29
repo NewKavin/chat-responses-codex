@@ -490,7 +490,7 @@ impl ClaudeResponsesThinkingFixture {
     }
 
     async fn upstream_runtime(&self) -> (f64, u32) {
-        let snapshots = self.state.upstream_runtime_snapshots().await;
+        let snapshots = self.state.upstream_runtime_snapshots().await.unwrap();
         let snapshot = snapshots.get("up-responses").copied().unwrap_or_default();
         (snapshot.minute_cost, snapshot.in_flight)
     }
@@ -942,7 +942,7 @@ impl ClaudeThinkingFixture {
     }
 
     async fn upstream_minute_costs(&self) -> BTreeMap<String, f64> {
-        let snapshots = self.state.upstream_runtime_snapshots().await;
+        let snapshots = self.state.upstream_runtime_snapshots().await.unwrap();
         self.state
             .upstreams()
             .await
@@ -958,7 +958,7 @@ impl ClaudeThinkingFixture {
     }
 
     async fn upstream_runtime(&self) -> BTreeMap<String, (f64, u32)> {
-        let snapshots = self.state.upstream_runtime_snapshots().await;
+        let snapshots = self.state.upstream_runtime_snapshots().await.unwrap();
         self.state
             .upstreams()
             .await
