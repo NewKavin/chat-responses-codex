@@ -817,14 +817,8 @@ async fn test_portal_usage_history_returns_recent_logs() {
 
     let recent_logs = result["recent_logs"].as_array().unwrap();
     assert!(!recent_logs.is_empty());
-    let with_latency = recent_logs
-        .iter()
-        .find(|log| log["id"] == "log-1")
-        .unwrap();
-    let without_latency = recent_logs
-        .iter()
-        .find(|log| log["id"] == "log-2")
-        .unwrap();
+    let with_latency = recent_logs.iter().find(|log| log["id"] == "log-1").unwrap();
+    let without_latency = recent_logs.iter().find(|log| log["id"] == "log-2").unwrap();
     assert_eq!(with_latency["first_token_latency_ms"], 10_650);
     assert!(without_latency["first_token_latency_ms"].is_null());
 }

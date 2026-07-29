@@ -2187,9 +2187,7 @@ pub(super) async fn send_to_upstream(
                 error_message: None,
                 error_category: None,
                 started,
-                first_token_latency: body_read_diagnostic_context
-                    .first_token_latency
-                    .clone(),
+                first_token_latency: body_read_diagnostic_context.first_token_latency.clone(),
                 hedge_control: hedge_control.clone(),
             };
             if upstream_protocol == endpoint.native_protocol() {

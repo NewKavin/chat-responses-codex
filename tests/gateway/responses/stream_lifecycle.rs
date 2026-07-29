@@ -796,9 +796,7 @@ async fn translated_truncated_chunked_body_after_usable_output_is_not_retried() 
     );
 }
 
-async fn translated_drop_after_event(
-    event_type: &str,
-) -> (Vec<String>, u16, String, Option<u64>) {
+async fn translated_drop_after_event(event_type: &str) -> (Vec<String>, u16, String, Option<u64>) {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1138,10 +1136,11 @@ async fn native_responses_response_for_chunks(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("text/event-stream"),
                 );
-                let output = stream::iter(chunks.as_ref().clone()).then(|(delay, chunk)| async move {
-                    tokio::time::sleep(delay).await;
-                    Ok::<Bytes, std::io::Error>(chunk)
-                });
+                let output =
+                    stream::iter(chunks.as_ref().clone()).then(|(delay, chunk)| async move {
+                        tokio::time::sleep(delay).await;
+                        Ok::<Bytes, std::io::Error>(chunk)
+                    });
                 let body = if stall_after_chunks {
                     Body::from_stream(
                         output.chain(stream::pending::<Result<Bytes, std::io::Error>>()),
@@ -1269,23 +1268,23 @@ async fn native_responses_response_for_chunks(
 async fn native_responses_clean_eof_without_terminal_is_typed_502() {
     let (response, state, _tempdir, first_hits, second_hits) =
         native_responses_response_for_chunks(
-        vec![(
-            Duration::ZERO,
-            Bytes::from_static(
-                concat!(
-                    "event: response.created\n",
-                    "data: {\"type\":\"response.created\",\"response\":{",
-                    "\"id\":\"resp-eof\",\"object\":\"response\",\"created_at\":1,",
-                    "\"status\":\"in_progress\",\"model\":\"gpt-4\",\"output\":[]}}\n\n",
-                    "event: response.output_text.delta\n",
-                    "data: {\"type\":\"response.output_text.delta\",",
-                    "\"response_id\":\"resp-eof\",\"item_id\":\"msg-1\",",
-                    "\"output_index\":0,\"content_index\":0,",
-                    "\"delta\":\"partial-before-eof\"}\n\n"
-                )
-                .as_bytes(),
-            ),
-        )],
+            vec![(
+                Duration::ZERO,
+                Bytes::from_static(
+                    concat!(
+                        "event: response.created\n",
+                        "data: {\"type\":\"response.created\",\"response\":{",
+                        "\"id\":\"resp-eof\",\"object\":\"response\",\"created_at\":1,",
+                        "\"status\":\"in_progress\",\"model\":\"gpt-4\",\"output\":[]}}\n\n",
+                        "event: response.output_text.delta\n",
+                        "data: {\"type\":\"response.output_text.delta\",",
+                        "\"response_id\":\"resp-eof\",\"item_id\":\"msg-1\",",
+                        "\"output_index\":0,\"content_index\":0,",
+                        "\"delta\":\"partial-before-eof\"}\n\n"
+                    )
+                    .as_bytes(),
+                ),
+            )],
             false,
         )
         .await;
@@ -1478,7 +1477,10 @@ async fn native_responses_records_first_token_latency_on_first_usable_output() {
     let first = log
         .first_token_latency_ms
         .expect("stream should record first usable output latency");
-    assert!(first >= 40, "first usable output was recorded too early: {first}");
+    assert!(
+        first >= 40,
+        "first usable output was recorded too early: {first}"
+    );
     assert!(first <= log.latency_ms);
 }
 

@@ -1492,7 +1492,10 @@ fn drop_message_without_observed_output_means_cancelled_before_output() {
     );
     assert_eq!(
         interruption.status_and_category(),
-        (StatusCode::from_u16(499).unwrap(), "stream_client_cancelled")
+        (
+            StatusCode::from_u16(499).unwrap(),
+            "stream_client_cancelled"
+        )
     );
 }
 
@@ -1507,7 +1510,10 @@ fn drop_message_with_observed_output_means_partial_output() {
     );
     assert_eq!(
         interruption.status_and_category(),
-        (StatusCode::from_u16(499).unwrap(), "stream_incomplete_close")
+        (
+            StatusCode::from_u16(499).unwrap(),
+            "stream_incomplete_close"
+        )
     );
 }
 

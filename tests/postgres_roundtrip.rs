@@ -353,7 +353,11 @@ async fn postgres_roundtrip_preserves_compatibility_metadata_and_first_token_lat
         .expect("PostgreSQL store-backed query should return compatibility usage logs");
 
     assert_eq!(page.total, 2);
-    let persisted_with_latency = page.logs.iter().find(|entry| entry.log.id == log.id).unwrap();
+    let persisted_with_latency = page
+        .logs
+        .iter()
+        .find(|entry| entry.log.id == log.id)
+        .unwrap();
     let persisted_without_latency = page
         .logs
         .iter()
