@@ -58,7 +58,7 @@ Codex catalog 必须从已配置的网关读取。下面的流程不会把下游
   trap 'rm -f "$catalog_tmp"; unset CHAT2RESPONSES_DOWNSTREAM_KEY' EXIT
   read -rsp 'Gateway downstream key: ' CHAT2RESPONSES_DOWNSTREAM_KEY
   printf '\n'
-  curl -fsS '<gateway_origin>/v1/models?client_version=0.144.6' \
+  curl -fsS '<gateway_origin>/v1/models?format=codex' \
     -H "Authorization: Bearer ${CHAT2RESPONSES_DOWNSTREAM_KEY}" \
     > "$catalog_tmp"
   jq -e '(.models | type == "array") and (.models | length > 0)' \
@@ -68,6 +68,9 @@ Codex catalog 必须从已配置的网关读取。下面的流程不会把下游
 ```
 
 这个响应已经覆盖当前下游白名单中的全部模型。能力字段由网关依据内部持久证据生成，响应不会下发 upstream、profile 或指纹身份。不要按模型名复制条目，也不要手写或补全工具、图像、推理等级等能力。
+
+门户和手工目录获取使用语义明确的 `format=codex`。真实 Codex 客户端请求中携带的
+`client_version` 仍由网关兼容，不需要在浏览器或脚本里固定某个 Codex 版本。
 
 ## 一把点亮版
 
@@ -99,8 +102,8 @@ tool_suggest = true
 multi_agent = true
 
 [agents]
-max_threads = 8
-max_depth = 3
+max_threads = 4
+max_depth = 2
 # max_threads controls concurrent agent threads; max_depth controls nested delegation depth.
 # These local limits do not override gateway quota.
 
@@ -113,6 +116,15 @@ stream_max_retries = 8
 ```
 
 完成配置后可运行 `codex --strict-config doctor --summary` 检查配置是否符合当前 Codex 版本。
+
+用下面的命令录入下游 key。它不会把明文 key 写进 shell 历史：
+
+```bash
+read -rsp 'Gateway downstream key: ' CHAT2RESPONSES_DOWNSTREAM_KEY
+printf '\n'
+printf '%s' "$CHAT2RESPONSES_DOWNSTREAM_KEY" | codex login --with-api-key
+unset CHAT2RESPONSES_DOWNSTREAM_KEY
+```
 
 把 `<gateway_origin>` 换成你的网关根地址，本机就填你本机监听的网关地址，远程就填你反向代理或公网域名对应的根地址。
 
@@ -356,8 +368,8 @@ web_search = "disabled"
 multi_agent = true
 
 [agents]
-max_threads = 8
-max_depth = 3
+max_threads = 4
+max_depth = 2
 
 [model_providers.gateway]
 name = "Chat Responses Gateway"
@@ -419,6 +431,11 @@ upstream、Key、runtime model、协议和 capability 配置自动计算、校�
 `reasoning = none`、无图片、无并行工具等保守元数据。不要手动声明搜索、工具、图像或
 推理能力；手写的乐观能力可能让 Codex 发出当前路由无法执行的请求。
 
+每个目录条目使用模型自己的绝对 `context_window`，并设置
+`effective_context_window_percent = 80`。Codex 会在累计 token 接近该模型窗口的 80% 时压缩
+历史；不要在 `config.toml` 再设置一个全局绝对压缩上限，否则切换不同窗口的模型时会失去
+按模型计算的压缩点。
+
 ### 5.2 为什么必须和网关一致
 
 Codex 会根据这个目录决定模型是否存在。
@@ -449,7 +466,7 @@ jq -r '.models[].slug' ~/.codex/model-catalog.json
 3. 配好上游模型
 4. 配好下游 key
 5. 把 `templates/codex/config.toml.example` 复制到 `~/.codex/config.toml`
-6. 使用下游 key 从 live `/v1/models?client_version=0.144.6` 获取目录，验证 `.models` 非空后写入 `~/.codex/model-catalog.json`
+6. 使用下游 key 从 live `/v1/models?format=codex` 获取目录，验证 `.models` 非空后写入 `~/.codex/model-catalog.json`
 7. 确认 `base_url` 是网关地址
 8. 确认 `model` 和 `review_model` 都是目录里真实存在的 slug
 

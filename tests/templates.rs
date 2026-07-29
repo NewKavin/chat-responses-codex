@@ -308,12 +308,14 @@ fn codex_integration_examples_document_multi_agent_validation() {
     let guide = fs::read_to_string("docs/codex-integration-guide.md").unwrap();
 
     for marker in [
-        "client_version=0.144.6",
+        "format=codex",
         "cli_auth_credentials_store = \"file\"",
         "multi_agent = true",
         "[agents]",
-        "max_threads = 8",
-        "max_depth = 3",
+        "max_threads = 4",
+        "max_depth = 2",
+        "stream_max_retries = 8",
+        "effective_context_window_percent = 80",
     ] {
         assert!(
             codex.contains(marker),
@@ -324,6 +326,11 @@ fn codex_integration_examples_document_multi_agent_validation() {
             "Codex guide should contain {marker}"
         );
     }
+
+    assert!(!codex.contains("client_version=0.144.6"));
+    assert!(!guide.contains("client_version=0.144.6"));
+    assert!(guide.contains("read -rsp 'Gateway downstream key: '"));
+    assert!(guide.contains("client_version"));
 
     for documentation in [readme, deployment, guide] {
         assert!(documentation.contains("codex --strict-config doctor --summary"));

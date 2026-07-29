@@ -1,7 +1,8 @@
 # Point Codex at the gateway, not at the upstream vendors directly.
 # `model` and `review_model` must match the selected exposed slug exactly.
 # Keep model-catalog.json next to this file; Codex resolves the path relative to ~/.codex/config.toml.
-# Render the complete downstream allowlist from `/v1/models?client_version=0.144.6` before use.
+# Render the complete downstream allowlist from `/v1/models?format=codex` before use.
+# Catalog entries use `effective_context_window_percent = 80`; do not override it with a global limit.
 # Do not add upstream IDs, route fingerprints, or cloned model entries to this client config.
 model_provider = "gateway"
 model = "<model_slug>"
@@ -17,8 +18,8 @@ tool_suggest = true
 multi_agent = true
 
 [agents]
-max_threads = 8
-max_depth = 3
+max_threads = 4
+max_depth = 2
 
 [model_providers.gateway]
 name = "Chat Responses Gateway"

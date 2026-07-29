@@ -460,7 +460,11 @@ describe('integration config generators', () => {
 
     expect(codexGuide).not.toContain('client_version=0.144.0')
     expect(codexGuide).not.toContain('client_version=0.144.4')
-    expect(codexGuide).toContain('client_version=0.144.6')
+    expect(codexGuide).not.toContain('client_version=0.144.6')
+    expect(codexGuide).toContain('format=codex')
+    expect(codexGuide).toContain('effective_context_window_percent = 80')
+    expect(codexTemplate).toContain('effective_context_window_percent = 80')
+    expect(codexGuide).toContain("read -rsp 'Gateway downstream key: '")
 
     const guideConfigExamples = [...codexGuide.matchAll(/```toml\n([\s\S]*?)```/g)]
       .map(match => match[1])
@@ -471,8 +475,8 @@ describe('integration config generators', () => {
       expect(example).toContain('cli_auth_credentials_store = "file"')
       expect(example).toContain('multi_agent = true')
       expect(example).toContain('[agents]')
-      expect(example).toContain('max_threads = 8')
-      expect(example).toContain('max_depth = 3')
+      expect(example).toContain('max_threads = 4')
+      expect(example).toContain('max_depth = 2')
       expect(example).toContain('web_search = "disabled"')
       expect(example).toContain('stream_max_retries = 8')
       expect(example.indexOf('web_search = "disabled"')).toBeLessThan(
