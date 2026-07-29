@@ -17,9 +17,9 @@ use crate::protocol::{
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     join_upstream_url, portal_model_is_allowed, unix_seconds, ActiveGatewayRequestStart, AppConfig,
-    AppState, CompatibilityUsageMetadata, GlobalContextProfile, KeyHealthKey, RouteAvailability,
-    RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery, RouteSetAggregateKey,
-    UpstreamConfig, UsageLog,
+    AppState, CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile,
+    KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
+    RouteSetAggregateKey, UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -2153,22 +2153,37 @@ async fn claude_count_tokens(
 
 struct DownstreamConcurrencyGuardInner {
     state: AppState,
-    downstream_id: String,
+    lease: DownstreamConcurrencyLease,
     released: AtomicBool,
 }
 
 impl DownstreamConcurrencyGuardInner {
-    fn release(&self) {
-        if !self.released.swap(true, Ordering::AcqRel) {
-            self.state
-                .release_downstream_concurrency(&self.downstream_id);
+    fn spawn_release(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::error!(
+                    downstream_id = %self.lease.downstream_id(),
+                    error = %error,
+                    "downstream concurrency guard dropped outside Tokio runtime"
+                );
+                return None;
+            }
+        };
+        if self.released.swap(true, Ordering::AcqRel) {
+            return None;
         }
+        let state = self.state.clone();
+        let lease = self.lease.clone();
+        Some(runtime.spawn(async move {
+            let _ = state.release_downstream_concurrency(lease).await;
+        }))
     }
 }
 
 impl Drop for DownstreamConcurrencyGuardInner {
     fn drop(&mut self) {
-        self.release();
+        drop(self.spawn_release());
     }
 }
 
@@ -2178,24 +2193,32 @@ struct DownstreamConcurrencyGuard {
 }
 
 impl DownstreamConcurrencyGuard {
-    fn new(state: AppState, downstream_id: String) -> Self {
+    fn new(state: AppState, lease: DownstreamConcurrencyLease) -> Self {
         Self {
             inner: Arc::new(DownstreamConcurrencyGuardInner {
                 state,
-                downstream_id,
+                lease,
                 released: AtomicBool::new(false),
             }),
         }
     }
 
-    fn release(&self) {
-        self.inner.release();
+    async fn release(&self) {
+        if let Some(task) = self.inner.spawn_release() {
+            if let Err(error) = task.await {
+                tracing::error!(
+                    downstream_id = %self.inner.lease.downstream_id(),
+                    error = %error,
+                    "downstream concurrency release task failed"
+                );
+            }
+        }
     }
 }
 
 struct UpstreamRequestGuardInner {
     state: AppState,
-    upstream_id: String,
+    lease: UpstreamRequestLease,
     released: AtomicBool,
 }
 
@@ -2205,7 +2228,7 @@ impl UpstreamRequestGuardInner {
             Ok(runtime) => runtime,
             Err(error) => {
                 tracing::error!(
-                    upstream_id = %self.upstream_id,
+                    upstream_id = %self.lease.upstream_id(),
                     error = %error,
                     "upstream request guard dropped outside Tokio runtime"
                 );
@@ -2216,9 +2239,9 @@ impl UpstreamRequestGuardInner {
             return None;
         }
         let state = self.state.clone();
-        let upstream_id = self.upstream_id.clone();
+        let lease = self.lease.clone();
         Some(runtime.spawn(async move {
-            state.release_upstream_request(&upstream_id).await;
+            let _ = state.release_upstream_request(lease).await;
         }))
     }
 }
@@ -2235,11 +2258,11 @@ struct UpstreamRequestGuard {
 }
 
 impl UpstreamRequestGuard {
-    fn new(state: AppState, upstream_id: String) -> Self {
+    fn new(state: AppState, lease: UpstreamRequestLease) -> Self {
         Self {
             inner: Arc::new(UpstreamRequestGuardInner {
                 state,
-                upstream_id,
+                lease,
                 released: AtomicBool::new(false),
             }),
         }
@@ -2249,7 +2272,7 @@ impl UpstreamRequestGuard {
         if let Some(task) = self.inner.spawn_release() {
             if let Err(error) = task.await {
                 tracing::error!(
-                    upstream_id = %self.inner.upstream_id,
+                    upstream_id = %self.inner.lease.upstream_id(),
                     error = %error,
                     "upstream request release task failed"
                 );
@@ -2284,7 +2307,7 @@ impl UpstreamRequestReservation {
         model: &str,
     ) -> Result<(), GatewayError> {
         self.release().await;
-        state
+        let lease = state
             .try_reserve_upstream_request(upstream, model)
             .await
             .map_err(|_| {
@@ -2292,10 +2315,7 @@ impl UpstreamRequestReservation {
                     "failed to reserve capacity for an internal upstream retry".into(),
                 )
             })?;
-        *self.guard.lock().await = Some(UpstreamRequestGuard::new(
-            state.clone(),
-            upstream.id.clone(),
-        ));
+        *self.guard.lock().await = Some(UpstreamRequestGuard::new(state.clone(), lease));
         Ok(())
     }
 }
@@ -2314,7 +2334,7 @@ struct StreamCompletionContext {
 impl StreamCompletionContext {
     async fn release_all(&self) {
         if !self.is_hedge_loser() {
-            self.downstream_concurrency_guard.release();
+            self.downstream_concurrency_guard.release().await;
         }
         self.upstream_request_guard.release().await;
     }
@@ -3629,97 +3649,108 @@ async fn process_gateway_request_inner(
         return Err(error);
     }
 
-    if let Err(rejection) = state.reserve_downstream_request(&downstream).await {
-        let retry_after_seconds = rejection.retry_after_seconds();
-        tracing::warn!(
-            request_id = %request_id,
-            downstream_key_id = %downstream.id,
-            path = %request_path,
-            original_model = %model,
-            normalized_model = %normalized_model,
-            retry_after_seconds,
-            "downstream request admission rejected"
-        );
-        let error = GatewayError::downstream_admission_rejection(rejection);
-        append_gateway_usage_log(
-            &state,
-            &request_id,
-            &downstream.id,
-            &downstream.name,
-            "",
-            None,
-            request_path,
-            model,
-            inference_strength.as_deref(),
-            user_agent.as_deref(),
-            None,
-            error.status_code(),
-            Some(error.to_string()),
-            Some(error.error_category().to_string()),
-            0,
-            0,
-            0,
-            started,
-        )
-        .await;
-        active_request_guard.fail_and_finish(error.error_category());
-        return Err(error);
-    }
+    let downstream_request_reservation =
+        match state.reserve_downstream_request(&downstream).await {
+            Ok(reservation) => reservation,
+            Err(rejection) => {
+                let retry_after_seconds = rejection.retry_after_seconds();
+                tracing::warn!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream.id,
+                    path = %request_path,
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    retry_after_seconds,
+                    "downstream request admission rejected"
+                );
+                let error = GatewayError::downstream_admission_rejection(rejection);
+                append_gateway_usage_log(
+                    &state,
+                    &request_id,
+                    &downstream.id,
+                    &downstream.name,
+                    "",
+                    None,
+                    request_path,
+                    model,
+                    inference_strength.as_deref(),
+                    user_agent.as_deref(),
+                    None,
+                    error.status_code(),
+                    Some(error.to_string()),
+                    Some(error.error_category().to_string()),
+                    0,
+                    0,
+                    0,
+                    started,
+                )
+                .await;
+                active_request_guard.fail_and_finish(error.error_category());
+                return Err(error);
+            }
+        };
 
-    if let Err(retry_after_seconds) = state.try_reserve_downstream_concurrency(&downstream) {
-        state
-            .rollback_downstream_request_reservation(&downstream.id)
-            .await;
-        tracing::warn!(
-            request_id = %request_id,
-            downstream_key_id = %downstream.id,
-            path = %request_path,
-            original_model = %model,
-            normalized_model = %normalized_model,
-            retry_after_seconds,
-            max_concurrency = downstream.max_concurrency,
-            "downstream concurrency limit exceeded"
-        );
-        let error = GatewayError::classified(
-            StatusCode::TOO_MANY_REQUESTS,
-            "downstream concurrency limit exceeded",
-            "gateway_quota_exceeded",
-            "gateway_concurrency_full",
-            "gateway_concurrency_full",
-            Some(retry_after_seconds),
-            Some(json!({
-                "scope": "gateway",
-                "quota": "concurrent_requests",
-                "limit": downstream.max_concurrency.max(1),
-                "retry_after_seconds": retry_after_seconds,
-            })),
-        );
-        append_gateway_usage_log(
-            &state,
-            &request_id,
-            &downstream.id,
-            &downstream.name,
-            "",
-            None,
-            request_path,
-            model,
-            inference_strength.as_deref(),
-            user_agent.as_deref(),
-            None,
-            error.status_code(),
-            Some(error.to_string()),
-            Some(error.error_category().to_string()),
-            0,
-            0,
-            0,
-            started,
-        )
-        .await;
-        active_request_guard.fail_and_finish(error.error_category());
-        return Err(error);
-    }
+    let downstream_concurrency_lease =
+        match state.try_reserve_downstream_concurrency(&downstream).await {
+            Ok(lease) => lease,
+            Err(retry_after_seconds) => {
+                state
+                    .rollback_downstream_request_reservation(
+                        downstream_request_reservation.clone(),
+                    )
+                    .await
+                    .expect("local downstream request rollback cannot fail");
+                tracing::warn!(
+                    request_id = %request_id,
+                    downstream_key_id = %downstream.id,
+                    path = %request_path,
+                    original_model = %model,
+                    normalized_model = %normalized_model,
+                    retry_after_seconds,
+                    max_concurrency = downstream.max_concurrency,
+                    "downstream concurrency limit exceeded"
+                );
+                let error = GatewayError::classified(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "downstream concurrency limit exceeded",
+                    "gateway_quota_exceeded",
+                    "gateway_concurrency_full",
+                    "gateway_concurrency_full",
+                    Some(retry_after_seconds),
+                    Some(json!({
+                        "scope": "gateway",
+                        "quota": "concurrent_requests",
+                        "limit": downstream.max_concurrency.max(1),
+                        "retry_after_seconds": retry_after_seconds,
+                    })),
+                );
+                append_gateway_usage_log(
+                    &state,
+                    &request_id,
+                    &downstream.id,
+                    &downstream.name,
+                    "",
+                    None,
+                    request_path,
+                    model,
+                    inference_strength.as_deref(),
+                    user_agent.as_deref(),
+                    None,
+                    error.status_code(),
+                    Some(error.to_string()),
+                    Some(error.error_category().to_string()),
+                    0,
+                    0,
+                    0,
+                    started,
+                )
+                .await;
+                active_request_guard.fail_and_finish(error.error_category());
+                return Err(error);
+            }
+        };
     let downstream_concurrency_guard =
-        DownstreamConcurrencyGuard::new(state.clone(), downstream.id.clone());
+        DownstreamConcurrencyGuard::new(state.clone(), downstream_concurrency_lease);
 
     let original_responses_body = (endpoint == EndpointKind::Responses).then(|| body.clone());
     let mut response_history_context = if endpoint == EndpointKind::Responses {
@@ -3963,10 +3994,11 @@ async fn process_gateway_request_inner(
         .await;
         if should_rollback_downstream_reservation(&error) {
             state
-                .rollback_downstream_request_reservation(&downstream.id)
-                .await;
+                .rollback_downstream_request_reservation(downstream_request_reservation.clone())
+                .await
+                .expect("local downstream request rollback cannot fail");
         }
-        downstream_concurrency_guard.release();
+        downstream_concurrency_guard.release().await;
         active_request_guard.fail_and_finish(error.error_category());
         return Err(error);
     }
@@ -4650,23 +4682,25 @@ async fn process_gateway_request_inner(
                         select_upstream_attempt_mode(request_stream, resolved_route.as_ref())
                     };
                     loop {
-                        if state
+                        let upstream_request_lease = match state
                             .try_reserve_upstream_request(&upstream, model)
                             .await
-                            .is_err()
                         {
-                            finish_route_health_permit(
-                                &route_health_permit,
-                                RouteOutcome::Cancelled,
-                            )
-                            .await;
-                            last_error = Some(GatewayError::Upstream(
-                                "failed to reserve upstream request capacity".into(),
-                            ));
-                            break;
-                        }
+                            Ok(lease) => lease,
+                            Err(_) => {
+                                finish_route_health_permit(
+                                    &route_health_permit,
+                                    RouteOutcome::Cancelled,
+                                )
+                                .await;
+                                last_error = Some(GatewayError::Upstream(
+                                    "failed to reserve upstream request capacity".into(),
+                                ));
+                                break;
+                            }
+                        };
                         let upstream_request_guard = UpstreamRequestReservation::new(
-                            UpstreamRequestGuard::new(state.clone(), upstream.id.clone()),
+                            UpstreamRequestGuard::new(state.clone(), upstream_request_lease),
                         );
                         tracing::info!(
                             request_id = %request_id,
@@ -5057,7 +5091,7 @@ async fn process_gateway_request_inner(
                                     && matches!(result.usage_log_timing, UsageLogTiming::Immediate)
                                 {
                                     upstream_request_guard.release().await;
-                                    downstream_concurrency_guard.release();
+                                    downstream_concurrency_guard.release().await;
                                 }
 
                                 result.request_id = request_id.clone();
@@ -5650,10 +5684,11 @@ async fn process_gateway_request_inner(
         .await;
         if should_rollback_downstream_reservation(&error) {
             state
-                .rollback_downstream_request_reservation(&downstream.id)
-                .await;
+                .rollback_downstream_request_reservation(downstream_request_reservation)
+                .await
+                .expect("local downstream request rollback cannot fail");
         }
-        downstream_concurrency_guard.release();
+        downstream_concurrency_guard.release().await;
         active_request_guard.fail_and_finish(error.error_category());
         let terminal_observation = (!attempt_ledger.is_empty())
             .then(|| attempt_ledger.terminal_observation_for(attempt_ledger.terminal_failure()))
@@ -5736,7 +5771,7 @@ async fn process_gateway_request_inner(
         endpoint = %request_path,
         "no routable upstream found for request"
     );
-    downstream_concurrency_guard.release();
+    downstream_concurrency_guard.release().await;
     active_request_guard.fail_and_finish(error.error_category());
     // Keep the downstream reservation so the portal reflects that the gateway
     // actually received and processed one request attempt, even if no upstream

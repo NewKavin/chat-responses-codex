@@ -661,20 +661,24 @@ fn send_route_hedge_attempt(
                 ));
             }
         };
-        if let Err(error) = context
+        let upstream_request_lease = match context
             .state
             .try_reserve_upstream_hedge(&candidate.upstream, &context.model)
             .await
         {
-            super::finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled).await;
-            return Err(GatewayError::upstream_temporary_unavailable(
-                error.message,
-                "upstream_hedge_capacity_unavailable",
-            ));
-        }
+            Ok(lease) => lease,
+            Err(error) => {
+                super::finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled)
+                    .await;
+                return Err(GatewayError::upstream_temporary_unavailable(
+                    error.message,
+                    "upstream_hedge_capacity_unavailable",
+                ));
+            }
+        };
         let upstream_request_guard = UpstreamRequestReservation::new(UpstreamRequestGuard::new(
             context.state.clone(),
-            candidate.upstream.id.clone(),
+            upstream_request_lease,
         ));
         let completion = StreamCompletionContext {
             state: context.state.clone(),
@@ -798,7 +802,7 @@ async fn send_hedge_stream_attempt(
         route_attempts,
         body_read_diagnostic_context,
     } = attempt;
-    state
+    let upstream_request_lease = state
         .try_reserve_upstream_hedge(&upstream, &request_model)
         .await
         .map_err(|error| {
@@ -807,7 +811,7 @@ async fn send_hedge_stream_attempt(
                 "upstream_hedge_capacity_unavailable",
             )
         })?;
-    let reservation = UpstreamRequestGuard::new(state.clone(), upstream.id.clone());
+    let reservation = UpstreamRequestGuard::new(state.clone(), upstream_request_lease);
     route_attempts.record_physical_send();
     let response = tokio::time::timeout(
         response_header_timeout,

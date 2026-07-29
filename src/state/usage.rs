@@ -61,18 +61,27 @@ pub(super) struct DownstreamTokenEvent {
     pub tokens: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct DownstreamRequestEvent {
+    pub event_id: String,
+    pub created_at: u64,
+}
+
 pub(super) const DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS: u64 = 24 * 60 * 60;
 pub(super) const DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 pub(super) fn build_downstream_request_windows(
     logs: &[UsageLog],
-) -> HashMap<String, VecDeque<u64>> {
+) -> HashMap<String, VecDeque<DownstreamRequestEvent>> {
     let mut windows = HashMap::new();
     for log in normalized_usage_logs(logs) {
         windows
             .entry(log.downstream_key_id.clone())
             .or_insert_with(VecDeque::new)
-            .push_back(log.created_at);
+            .push_back(DownstreamRequestEvent {
+                event_id: format!("history:{}", log.id),
+                created_at: log.created_at,
+            });
     }
     windows
 }
@@ -283,7 +292,7 @@ impl AppState {
                 .map(|window| {
                     window
                         .iter()
-                        .filter(|&&timestamp| timestamp >= window_start)
+                        .filter(|event| event.created_at >= window_start)
                         .count() as u32
                 })
                 .unwrap_or(0)

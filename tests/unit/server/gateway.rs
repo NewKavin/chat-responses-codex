@@ -485,12 +485,42 @@ fn terminal_observation_matches_the_public_terminal_failure_class() {
     assert_eq!(selected.upstream_status, Some(503));
 }
 
-fn stream_completion_fixture(
+async fn stream_completion_fixture(
     route: RouteHealthKey,
     route_attempts: RequestRouteAttempts,
     permit: RouteHealthPermit,
     state: AppState,
 ) -> StreamCompletionContext {
+    let upstream = crate::state::UpstreamConfig {
+        id: "up-1".into(),
+        ..Default::default()
+    };
+    let upstream_lease = state
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    let downstream = crate::state::DownstreamConfig {
+        id: "down-1".into(),
+        name: "fixture".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: false,
+        per_minute_limit: 1,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    };
+    let downstream_lease = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
     StreamCompletionContext {
         state: state.clone(),
         route_health_key: route,
@@ -498,9 +528,9 @@ fn stream_completion_fixture(
         route_health_permit: Arc::new(TokioMutex::new(Some(permit))),
         upstream_request_guard: UpstreamRequestReservation::new(UpstreamRequestGuard::new(
             state.clone(),
-            "up-1".into(),
+            upstream_lease,
         )),
-        downstream_concurrency_guard: DownstreamConcurrencyGuard::new(state, "down-1".into()),
+        downstream_concurrency_guard: DownstreamConcurrencyGuard::new(state, downstream_lease),
         hedge_control: None,
     }
 }
@@ -526,7 +556,7 @@ async fn stream_transport_failure_updates_only_its_exact_route_and_shared_aggreg
     attempts.register_eligible(tracked_aggregate(), route.clone());
     attempts.record_physical_attempt(route.clone());
     let completion =
-        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone());
+        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone()).await;
 
     completion.mark_failure().await;
 
@@ -570,7 +600,7 @@ async fn stream_cancellation_releases_exact_route_without_recording_failure() {
     attempts.register_eligible(tracked_aggregate(), route.clone());
     attempts.record_physical_attempt(route.clone());
     let completion =
-        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone());
+        stream_completion_fixture(route.clone(), attempts.clone(), permit, state.clone()).await;
 
     completion.mark_cancelled().await;
 
@@ -1584,13 +1614,14 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 .await
                 .get("up-1")
                 .is_some_and(|runtime| runtime.in_flight == 0);
-            if upstream_released
-                && state
-                    .try_reserve_downstream_concurrency(&downstream)
-                    .is_ok()
-            {
-                state.release_downstream_concurrency(&downstream.id);
-                break;
+            if upstream_released {
+                if let Ok(lease) = state.try_reserve_downstream_concurrency(&downstream).await {
+                    state
+                        .release_downstream_concurrency(lease)
+                        .await
+                        .unwrap();
+                    break;
+                }
             }
             tokio::task::yield_now().await;
         }

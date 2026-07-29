@@ -23,7 +23,9 @@ use crate::protocol::{
     ProtocolError, StreamAggregateResult, StreamResponseAggregator, UpstreamStreamErrorKind,
 };
 use crate::routing::UpstreamProtocol;
-use crate::state::{join_upstream_url, unix_seconds, AppState, UpstreamConfig};
+use crate::state::{
+    join_upstream_url, unix_seconds, AppState, UpstreamConfig, UpstreamRequestLease,
+};
 
 #[derive(Clone, Debug)]
 pub enum CoreProbeCase {
@@ -1779,13 +1781,13 @@ impl ProbeExecutor {
         let (Some(state), Some(upstream)) = (&self.probe_state, &self.upstream) else {
             return Ok(None);
         };
-        state
+        let lease = state
             .try_reserve_upstream_request(upstream, &self.runtime_model_slug)
             .await
             .map_err(|error| io::Error::other(error.message))?;
         Ok(Some(ProbeUpstreamRequestGuard {
             state: state.clone(),
-            upstream_id: upstream.id.clone(),
+            lease,
         }))
     }
 }
@@ -1872,16 +1874,16 @@ fn response_predicate_matches(body: &Value, predicate: &ResponsePredicate) -> bo
 
 struct ProbeUpstreamRequestGuard {
     state: AppState,
-    upstream_id: String,
+    lease: UpstreamRequestLease,
 }
 
 impl Drop for ProbeUpstreamRequestGuard {
     fn drop(&mut self) {
         if let Ok(handle) = Handle::try_current() {
             let state = self.state.clone();
-            let upstream_id = self.upstream_id.clone();
+            let lease = self.lease.clone();
             handle.spawn(async move {
-                state.release_upstream_request(&upstream_id).await;
+                let _ = state.release_upstream_request(lease).await;
             });
         }
     }

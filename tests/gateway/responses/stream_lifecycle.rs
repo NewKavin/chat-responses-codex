@@ -625,10 +625,14 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
     let mut downstream = state.snapshot().await.downstreams[0].clone();
     downstream.max_concurrency = 1;
-    assert!(state
+    let lease = state
         .try_reserve_downstream_concurrency(&downstream)
-        .is_ok());
-    state.release_downstream_concurrency(&downstream.id);
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(lease)
+        .await
+        .unwrap();
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));

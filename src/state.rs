@@ -66,7 +66,7 @@ use uuid::Uuid;
 use file_store::FileStateStore;
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
-pub use redis_runtime::RuntimeCoordinationBackend;
+pub use redis_runtime::{RuntimeCoordinationBackend, RuntimeCoordinationError};
 pub use store::{StateStore, StoreFuture};
 
 pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
@@ -153,8 +153,9 @@ use context_profile::{
 };
 use usage::{
     build_downstream_request_windows, build_downstream_token_windows,
-    downstream_token_retention_seconds, downstream_token_retry_after_seconds, DownstreamTokenEvent,
-    DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS, DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
+    downstream_token_retention_seconds, downstream_token_retry_after_seconds,
+    DownstreamRequestEvent, DownstreamTokenEvent, DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
+    DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
 };
 
 pub use crate::util::{
@@ -257,6 +258,57 @@ impl ResponseHistoryStore {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct DownstreamRequestReservation {
+    downstream_id: String,
+    event_id: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct DownstreamConcurrencyLease {
+    downstream_id: String,
+    lease_id: Option<String>,
+    released: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for DownstreamConcurrencyLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DownstreamConcurrencyLease")
+            .field("downstream_id", &self.downstream_id)
+            .field("active", &self.lease_id.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DownstreamConcurrencyLease {
+    pub fn downstream_id(&self) -> &str {
+        &self.downstream_id
+    }
+}
+
+#[derive(Clone)]
+pub struct UpstreamRequestLease {
+    upstream_id: String,
+    lease_id: String,
+    released: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for UpstreamRequestLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpstreamRequestLease")
+            .field("upstream_id", &self.upstream_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl UpstreamRequestLease {
+    pub fn upstream_id(&self) -> &str {
+        &self.upstream_id
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
@@ -270,7 +322,7 @@ pub struct AppState {
     route_health: Arc<Mutex<RouteHealthRegistry>>,
     runtime_coordination: RuntimeCoordinationBackend,
     runtime_capability_hints: Arc<StdMutex<RuntimeCapabilityHints>>,
-    downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
+    downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamRequestEvent>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
     downstream_in_flight: Arc<StdMutex<HashMap<String, u32>>>,
     active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
@@ -1910,7 +1962,7 @@ impl AppState {
         &self,
         upstream: &UpstreamConfig,
         model: &str,
-    ) -> Result<(), UpstreamAdmissionError> {
+    ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
         let request_cost = upstream.request_cost_for_model(model);
         if request_cost <= 0.0 {
             return Err(UpstreamAdmissionError::new(
@@ -1941,14 +1993,18 @@ impl AppState {
             created_at: now,
             cost: request_cost,
         });
-        Ok(())
+        Ok(UpstreamRequestLease {
+            upstream_id: upstream.id.clone(),
+            lease_id: Uuid::new_v4().to_string(),
+            released: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub async fn try_reserve_upstream_hedge(
         &self,
         upstream: &UpstreamConfig,
         model: &str,
-    ) -> Result<(), UpstreamAdmissionError> {
+    ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
         let request_cost = upstream.request_cost_for_model(model);
         if request_cost <= 0.0 {
             return Err(UpstreamAdmissionError::new(
@@ -2003,7 +2059,11 @@ impl AppState {
             created_at: now,
             cost: request_cost,
         });
-        Ok(())
+        Ok(UpstreamRequestLease {
+            upstream_id: upstream.id.clone(),
+            lease_id: Uuid::new_v4().to_string(),
+            released: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub async fn upstream_runtime_snapshots(&self) -> HashMap<String, UpstreamRuntimeSnapshot> {
@@ -2044,11 +2104,19 @@ impl AppState {
             .collect()
     }
 
-    pub async fn release_upstream_request(&self, upstream_id: &str) {
+    pub async fn release_upstream_request(
+        &self,
+        lease: UpstreamRequestLease,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if lease.released.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let _lease_id = lease.lease_id;
         let mut runtime_state = self.upstream_runtime_state.lock().await;
-        if let Some(state) = runtime_state.get_mut(upstream_id) {
+        if let Some(state) = runtime_state.get_mut(&lease.upstream_id) {
             state.in_flight = state.in_flight.saturating_sub(1);
         }
+        Ok(())
     }
 
     pub async fn mark_upstream_failure(&self, upstream_id: &str) -> io::Result<()> {
@@ -2339,9 +2407,12 @@ impl AppState {
     pub async fn reserve_downstream_request(
         &self,
         downstream: &DownstreamConfig,
-    ) -> Result<(), DownstreamAdmissionRejection> {
+    ) -> Result<DownstreamRequestReservation, DownstreamAdmissionRejection> {
         if !downstream.rate_limit_enabled {
-            return Ok(());
+            return Ok(DownstreamRequestReservation {
+                downstream_id: downstream.id.clone(),
+                event_id: None,
+            });
         }
 
         let mut windows = self.downstream_request_windows.lock().await;
@@ -2356,8 +2427,8 @@ impl AppState {
         let retention_seconds = request_quota_window_seconds.unwrap_or(60).max(60);
         let window_start = now.saturating_sub(retention_seconds.saturating_sub(1));
 
-        while let Some(&timestamp) = window.front() {
-            if timestamp < window_start {
+        while let Some(event) = window.front() {
+            if event.created_at < window_start {
                 window.pop_front();
             } else {
                 break;
@@ -2367,13 +2438,13 @@ impl AppState {
         let minute_start = now.saturating_sub(59);
         let minute_count = window
             .iter()
-            .filter(|&&timestamp| timestamp >= minute_start)
+            .filter(|event| event.created_at >= minute_start)
             .count();
         if minute_count >= downstream.per_minute_limit as usize {
             let oldest = window
                 .iter()
-                .copied()
-                .find(|timestamp| *timestamp >= minute_start)
+                .find(|event| event.created_at >= minute_start)
+                .map(|event| event.created_at)
                 .unwrap_or(now);
             let retry_after = oldest.saturating_add(60).saturating_sub(now).max(1);
             return Err(DownstreamAdmissionRejection::PerMinuteLimitExceeded {
@@ -2388,13 +2459,13 @@ impl AppState {
             let quota_start = now.saturating_sub(request_quota_window_seconds.saturating_sub(1));
             let quota_count = window
                 .iter()
-                .filter(|&&timestamp| timestamp >= quota_start)
+                .filter(|event| event.created_at >= quota_start)
                 .count();
             if quota_count >= request_quota_requests as usize {
                 let oldest = window
                     .iter()
-                    .copied()
-                    .find(|timestamp| *timestamp >= quota_start)
+                    .find(|event| event.created_at >= quota_start)
+                    .map(|event| event.created_at)
                     .unwrap_or(now);
                 let retry_after = oldest
                     .saturating_add(request_quota_window_seconds)
@@ -2484,16 +2555,27 @@ impl AppState {
             }
         }
 
-        window.push_back(now);
-        Ok(())
+        let event_id = Uuid::new_v4().to_string();
+        window.push_back(DownstreamRequestEvent {
+            event_id: event_id.clone(),
+            created_at: now,
+        });
+        Ok(DownstreamRequestReservation {
+            downstream_id: downstream.id.clone(),
+            event_id: Some(event_id),
+        })
     }
 
-    pub fn try_reserve_downstream_concurrency(
+    pub async fn try_reserve_downstream_concurrency(
         &self,
         downstream: &DownstreamConfig,
-    ) -> Result<(), u64> {
+    ) -> Result<DownstreamConcurrencyLease, u64> {
         if !downstream.rate_limit_enabled {
-            return Ok(());
+            return Ok(DownstreamConcurrencyLease {
+                downstream_id: downstream.id.clone(),
+                lease_id: None,
+                released: Arc::new(AtomicBool::new(false)),
+            });
         }
 
         let mut in_flight = self
@@ -2506,30 +2588,67 @@ impl AppState {
         }
 
         *current = current.saturating_add(1);
-        Ok(())
+        Ok(DownstreamConcurrencyLease {
+            downstream_id: downstream.id.clone(),
+            lease_id: Some(Uuid::new_v4().to_string()),
+            released: Arc::new(AtomicBool::new(false)),
+        })
     }
 
-    pub fn release_downstream_concurrency(&self, downstream_id: &str) {
+    pub async fn release_downstream_concurrency(
+        &self,
+        lease: DownstreamConcurrencyLease,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if lease.released.swap(true, Ordering::AcqRel) || lease.lease_id.is_none() {
+            return Ok(());
+        }
         let mut in_flight = self
             .downstream_in_flight
             .lock()
             .expect("downstream in_flight lock poisoned");
-        if let Some(count) = in_flight.get_mut(downstream_id) {
+        if let Some(count) = in_flight.get_mut(&lease.downstream_id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                in_flight.remove(downstream_id);
+                in_flight.remove(&lease.downstream_id);
             }
         }
+        Ok(())
     }
 
-    pub async fn rollback_downstream_request_reservation(&self, downstream_id: &str) {
+    pub async fn clear_downstream_runtime(
+        &self,
+        downstream_id: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        self.downstream_request_windows
+            .lock()
+            .await
+            .remove(downstream_id);
+        self.downstream_token_windows
+            .lock()
+            .await
+            .remove(downstream_id);
+        self.downstream_in_flight
+            .lock()
+            .expect("downstream in_flight lock poisoned")
+            .remove(downstream_id);
+        Ok(())
+    }
+
+    pub async fn rollback_downstream_request_reservation(
+        &self,
+        reservation: DownstreamRequestReservation,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let Some(event_id) = reservation.event_id else {
+            return Ok(());
+        };
         let mut windows = self.downstream_request_windows.lock().await;
-        if let Some(window) = windows.get_mut(downstream_id) {
-            window.pop_back();
+        if let Some(window) = windows.get_mut(&reservation.downstream_id) {
+            window.retain(|event| event.event_id != event_id);
             if window.is_empty() {
-                windows.remove(downstream_id);
+                windows.remove(&reservation.downstream_id);
             }
         }
+        Ok(())
     }
 
     fn routing_affinity_key(downstream_id: &str, normalized_model: &str) -> String {
@@ -2755,7 +2874,9 @@ impl AppState {
             })
             .await?;
         if removed {
-            self.release_downstream_concurrency(downstream_id);
+            self.clear_downstream_runtime(downstream_id)
+                .await
+                .map_err(io::Error::other)?;
         }
         Ok(removed)
     }

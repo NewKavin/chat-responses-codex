@@ -81,6 +81,123 @@ async fn downstream_token_quota_blocks_when_daily_budget_is_exhausted() {
 }
 
 #[tokio::test]
+async fn downstream_request_rollback_is_exact_and_idempotent() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let downstream = DownstreamConfig {
+        id: "down-exact-rollback".into(),
+        name: "Exact rollback".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 2,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    };
+
+    let first = state.reserve_downstream_request(&downstream).await.unwrap();
+    let second = state.reserve_downstream_request(&downstream).await.unwrap();
+
+    state
+        .rollback_downstream_request_reservation(first.clone())
+        .await
+        .unwrap();
+    state
+        .rollback_downstream_request_reservation(first)
+        .await
+        .unwrap();
+
+    state.reserve_downstream_request(&downstream).await.unwrap();
+    let rejection = state
+        .reserve_downstream_request(&downstream)
+        .await
+        .expect_err("the second and third reservations must still consume the limit");
+    assert!(matches!(
+        rejection,
+        DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+            limit: 2,
+            used: 2,
+            ..
+        }
+    ));
+
+    state
+        .rollback_downstream_request_reservation(second)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn downstream_concurrency_release_is_idempotent_across_clones() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let downstream = DownstreamConfig {
+        id: "down-idempotent-release".into(),
+        name: "Idempotent release".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 60,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    };
+
+    let lease = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    assert!(
+        state
+            .try_reserve_downstream_concurrency(&downstream)
+            .await
+            .is_err(),
+        "the first lease must consume all concurrency"
+    );
+
+    state
+        .release_downstream_concurrency(lease.clone())
+        .await
+        .unwrap();
+    state.release_downstream_concurrency(lease).await.unwrap();
+
+    state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    assert!(
+        state
+            .try_reserve_downstream_concurrency(&downstream)
+            .await
+            .is_err(),
+        "releasing a clone twice must not free the replacement lease"
+    );
+}
+
+#[tokio::test]
 async fn request_quota_usage_remaining_calculation() {
     let tempdir = tempdir().unwrap();
     let downstream_key = generate_downstream_key("gw");

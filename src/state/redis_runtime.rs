@@ -8,6 +8,10 @@ use std::time::Duration;
 const REDIS_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const REDIS_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("runtime coordination unavailable")]
+pub struct RuntimeCoordinationError;
+
 #[derive(Clone)]
 pub enum RuntimeCoordinationBackend {
     Local,

@@ -1103,7 +1103,7 @@ async fn hedge_admission_rejects_a_full_extra_candidate() {
         AppConfig::default(),
     );
 
-    state
+    let lease = state
         .try_reserve_upstream_request(&upstream, "gpt-4.1-mini")
         .await
         .unwrap();
@@ -1118,8 +1118,16 @@ async fn hedge_admission_rejects_a_full_extra_candidate() {
     assert_eq!(runtime.minute_cost, 1.0);
     assert_eq!(runtime.five_hour_cost, 1.0);
 
-    state.release_upstream_request(&upstream.id).await;
+    state
+        .release_upstream_request(lease.clone())
+        .await
+        .unwrap();
+    state.release_upstream_request(lease).await.unwrap();
     wait_for_upstream_in_flight(&state, &upstream.id, 0).await;
+    let runtime = state.upstream_runtime_snapshots().await;
+    let runtime = runtime.get(&upstream.id).unwrap();
+    assert_eq!(runtime.minute_cost, 1.0);
+    assert_eq!(runtime.five_hour_cost, 1.0);
 }
 
 #[tokio::test]
@@ -1243,7 +1251,7 @@ async fn full_cross_upstream_hedge_falls_through_to_the_next_key() {
             ..AppConfig::default()
         },
     );
-    state
+    let full_candidate_lease = state
         .try_reserve_upstream_request(&full_candidate, "gpt-4.1-mini")
         .await
         .unwrap();
@@ -1288,7 +1296,10 @@ async fn full_cross_upstream_hedge_falls_through_to_the_next_key() {
     assert_eq!(full_candidate_hits.load(Ordering::SeqCst), 0);
     wait_for_upstream_in_flight(&state, "primary-with-fallback-key", 0).await;
     wait_for_upstream_in_flight(&state, "full-cross-upstream", 1).await;
-    state.release_upstream_request("full-cross-upstream").await;
+    state
+        .release_upstream_request(full_candidate_lease)
+        .await
+        .unwrap();
     wait_for_upstream_in_flight(&state, "full-cross-upstream", 0).await;
 }
 
@@ -1750,10 +1761,14 @@ async fn downstream_drop_during_first_event_prefetch_cancels_without_retry() {
         .upstreams
         .iter()
         .all(|upstream| upstream.failure_count == 0));
-    assert!(state
+    let lease = state
         .try_reserve_downstream_concurrency(&downstream)
-        .is_ok());
-    state.release_downstream_concurrency(&downstream.id);
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(lease)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -4385,13 +4400,14 @@ async fn early_keepalive_receiver_drop_cancels_pending_request_and_releases_slot
                 .await
                 .get("up-1")
                 .is_some_and(|runtime| runtime.in_flight == 0);
-            if upstream_released
-                && state
-                    .try_reserve_downstream_concurrency(&downstream)
-                    .is_ok()
-            {
-                state.release_downstream_concurrency(&downstream.id);
-                break;
+            if upstream_released {
+                if let Ok(lease) = state.try_reserve_downstream_concurrency(&downstream).await {
+                    state
+                        .release_downstream_concurrency(lease)
+                        .await
+                        .unwrap();
+                    break;
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -4634,10 +4650,14 @@ async fn stream_success_and_client_cancel_do_not_mutate_legacy_upstream_health()
 
     drop(body);
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
-    assert!(state
+    let lease = state
         .try_reserve_downstream_concurrency(&downstream)
-        .is_ok());
-    state.release_downstream_concurrency(&downstream.id);
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(lease)
+        .await
+        .unwrap();
 
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
@@ -5428,10 +5448,14 @@ async fn malformed_proxied_sse_returns_structured_decode_error_not_499() {
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
     let mut downstream = state.snapshot().await.downstreams[0].clone();
     downstream.max_concurrency = 1;
-    assert!(state
+    let lease = state
         .try_reserve_downstream_concurrency(&downstream)
-        .is_ok());
-    state.release_downstream_concurrency(&downstream.id);
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(lease)
+        .await
+        .unwrap();
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));
@@ -5546,10 +5570,14 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
     wait_for_upstream_in_flight(&state, "up-1", 0).await;
     let mut downstream = state.snapshot().await.downstreams[0].clone();
     downstream.max_concurrency = 1;
-    assert!(state
+    let lease = state
         .try_reserve_downstream_concurrency(&downstream)
-        .is_ok());
-    state.release_downstream_concurrency(&downstream.id);
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(lease)
+        .await
+        .unwrap();
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
     assert!(snapshot.usage_logs.iter().all(|log| log.status_code != 499));

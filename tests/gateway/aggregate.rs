@@ -412,17 +412,22 @@ impl AggregateHarness {
             0
         );
         assert!(self.state.active_gateway_requests(None).is_empty());
-        self.state
+        let lease = self
+            .state
             .try_reserve_downstream_concurrency(&self.downstream)
+            .await
             .expect("downstream concurrency should return to zero");
         assert!(
             self.state
                 .try_reserve_downstream_concurrency(&self.downstream)
+                .await
                 .is_err(),
             "max_concurrency=1 must make the zero-state probe exact"
         );
         self.state
-            .release_downstream_concurrency(&self.downstream.id);
+            .release_downstream_concurrency(lease)
+            .await
+            .unwrap();
         assert!(
             self.state
                 .response_history(PARTIAL_RESPONSE_ID)
@@ -534,19 +539,27 @@ async fn assert_cancelled_request_cleanup(
         0
     );
     assert!(state.active_gateway_requests(None).is_empty());
+    let mut leases = Vec::new();
     for _ in 0..expected_downstream_capacity {
-        state
-            .try_reserve_downstream_concurrency(downstream)
-            .expect("downstream concurrency should return to zero");
+        leases.push(
+            state
+                .try_reserve_downstream_concurrency(downstream)
+                .await
+                .expect("downstream concurrency should return to zero"),
+        );
     }
     assert!(
         state
             .try_reserve_downstream_concurrency(downstream)
+            .await
             .is_err(),
         "downstream capacity probe must reach the configured limit"
     );
-    for _ in 0..expected_downstream_capacity {
-        state.release_downstream_concurrency(&downstream.id);
+    for lease in leases {
+        state
+            .release_downstream_concurrency(lease)
+            .await
+            .unwrap();
     }
     assert!(state.response_history(PARTIAL_RESPONSE_ID).await.is_none());
 }
