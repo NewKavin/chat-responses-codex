@@ -113,6 +113,12 @@ describe('admin ui structure', () => {
     expect(page).toContain('logs-table-region')
     expect(page).toContain('load-error-alert')
     expect(page).toContain('resetFilters')
+    expect(page).toContain('label="延迟"')
+    expect(page).toContain('首字')
+    expect(page).toContain('总耗时')
+    expect(page).toContain('formatLatencySeconds(row.first_token_latency_ms)')
+    expect(page).toContain('formatLatencySeconds(row.latency_ms)')
+    expect(page).not.toContain('{{ row.latency_ms }}ms')
   })
 
   it('uses unframed troubleshooting sections and one matrix tool surface', () => {

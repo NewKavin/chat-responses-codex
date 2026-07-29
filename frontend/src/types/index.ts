@@ -183,6 +183,7 @@ export interface UsageLog {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  first_token_latency_ms?: number | null
   latency_ms: number
   created_at: number
 }

@@ -3,7 +3,8 @@ import {
   buildVisibleLogSummary,
   errorCategoryGroups,
   formatErrorCategory,
-  formatInferenceStrength
+  formatInferenceStrength,
+  formatLatencySeconds
 } from '../../src/utils/logDisplay'
 
 describe('formatInferenceStrength', () => {
@@ -16,6 +17,19 @@ describe('formatInferenceStrength', () => {
     expect(formatInferenceStrength('')).toBe('-')
     expect(formatInferenceStrength('   ')).toBe('-')
     expect(formatInferenceStrength(undefined)).toBe('-')
+  })
+})
+
+describe('formatLatencySeconds', () => {
+  it('formats milliseconds as seconds with two decimals', () => {
+    expect(formatLatencySeconds(10_650)).toBe('10.65s')
+    expect(formatLatencySeconds(15_120)).toBe('15.12s')
+    expect(formatLatencySeconds(0)).toBe('0.00s')
+  })
+
+  it('falls back to a dash when latency is unavailable', () => {
+    expect(formatLatencySeconds(null)).toBe('-')
+    expect(formatLatencySeconds(undefined)).toBe('-')
   })
 })
 

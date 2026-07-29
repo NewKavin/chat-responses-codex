@@ -221,9 +221,12 @@
             {{ row.requestCount }}
           </template>
         </el-table-column>
-        <el-table-column label="耗时" width="90">
+        <el-table-column label="延迟" width="132">
           <template #default="{ row }">
-            {{ row.latency_ms }}ms
+            <div class="latency-cell">
+              <span><small>首字</small>{{ formatLatencySeconds(row.first_token_latency_ms) }}</span>
+              <span><small>总耗时</small>{{ formatLatencySeconds(row.latency_ms) }}</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="User-Agent" min-width="220" show-overflow-tooltip>
@@ -295,7 +298,8 @@ import {
   buildVisibleLogSummary,
   errorCategoryGroups,
   formatErrorCategory,
-  formatInferenceStrength
+  formatInferenceStrength,
+  formatLatencySeconds
 } from '@/utils/logDisplay'
 import { summarizeErrorText } from '@/utils/errorDisplay'
 
@@ -601,6 +605,24 @@ onMounted(() => {
 .token-line--total,
 .token-line--total strong {
   color: var(--crc-text-strong);
+}
+
+.latency-cell {
+  display: grid;
+  gap: 2px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.latency-cell span {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: baseline;
+}
+
+.latency-cell small {
+  color: var(--crc-text-muted);
+  font-size: 11px;
 }
 
 .pagination {

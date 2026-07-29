@@ -3,6 +3,11 @@ export const formatInferenceStrength = (value?: string | null) => {
   return trimmed && trimmed.length > 0 ? trimmed : '-'
 }
 
+export const formatLatencySeconds = (milliseconds?: number | null) => {
+  if (milliseconds == null || !Number.isFinite(milliseconds)) return '-'
+  return `${(Math.max(0, milliseconds) / 1000).toFixed(2)}s`
+}
+
 export interface ErrorCategoryOption {
   value: string
   label: string

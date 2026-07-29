@@ -34,6 +34,12 @@ describe('portal ui structure', () => {
     expect(history).toContain('watch(resolvedTheme')
     expect(history).toContain("const timeRange = ref<ChartRange>('7d')")
     expect(history).not.toContain('history-card')
+    expect(history).toContain('label="延迟"')
+    expect(history).toContain('首字')
+    expect(history).toContain('总耗时')
+    expect(history).toContain('formatLatencySeconds(row.first_token_latency_ms)')
+    expect(history).toContain('formatLatencySeconds(row.latency_ms)')
+    expect(history).not.toContain('{{ row.latency_ms }}ms')
   })
 
   it('uses flat integration sections and bounded code examples', () => {

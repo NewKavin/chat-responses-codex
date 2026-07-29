@@ -98,9 +98,12 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="耗时" width="96" align="right">
+            <el-table-column label="延迟" width="132">
               <template #default="{ row }">
-                {{ row.latency_ms }}ms
+                <div class="latency-cell">
+                  <span><small>首字</small>{{ formatLatencySeconds(row.first_token_latency_ms) }}</span>
+                  <span><small>总耗时</small>{{ formatLatencySeconds(row.latency_ms) }}</span>
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="错误信息" min-width="220" show-overflow-tooltip>
@@ -137,7 +140,7 @@ import { buildUsageHistoryBuckets } from '@/utils/usageHistoryChart'
 import { loadEcharts } from '@/utils/echartsLoader'
 import type { EChartsType } from 'echarts/core'
 import { formatCompactNumber } from '@/utils/numberFormat'
-import { formatInferenceStrength } from '@/utils/logDisplay'
+import { formatInferenceStrength, formatLatencySeconds } from '@/utils/logDisplay'
 import { useTheme } from '@/composables/useTheme'
 import { buildChartTheme, chartEnterAnimation } from '@/utils/chartTheme'
 
@@ -521,6 +524,24 @@ onUnmounted(() => {
 .token-line--total,
 .token-line--total strong {
   color: var(--crc-text-strong);
+}
+
+.latency-cell {
+  display: grid;
+  gap: 2px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.latency-cell span {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: baseline;
+}
+
+.latency-cell small {
+  color: var(--crc-text-muted);
+  font-size: 11px;
 }
 
 .pagination-wrap {
