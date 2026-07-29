@@ -7,10 +7,10 @@ use super::{unix_seconds, ApiKeyModelConfig, AppState, RouteHealthKey, UpstreamC
 use crate::capabilities::WireProtocol;
 use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
-use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -57,6 +57,7 @@ pub struct ModelKeySyncService;
 struct TargetedPendingGuard {
     state: AppState,
     key: TargetedDiscoveryKey,
+    remove_on_drop: bool,
 }
 
 struct ModelKeySyncServiceGuard {
@@ -65,12 +66,21 @@ struct ModelKeySyncServiceGuard {
 
 impl Drop for TargetedPendingGuard {
     fn drop(&mut self) {
+        if !self.remove_on_drop {
+            return;
+        }
         self.state
             .model_key_sync_runtime
             .lock()
             .expect("model key sync runtime lock poisoned")
             .targeted_pending
             .remove(&self.key);
+    }
+}
+
+impl TargetedPendingGuard {
+    fn retain_for_coordination_retry(&mut self) {
+        self.remove_on_drop = false;
     }
 }
 
@@ -359,10 +369,95 @@ impl AppState {
             .periodic_cycles_started
     }
 
+    fn targeted_coordination_retry_is_active(&self, key: &TargetedDiscoveryKey) -> bool {
+        let runtime = self
+            .model_key_sync_runtime
+            .lock()
+            .expect("model key sync runtime lock poisoned");
+        runtime.targeted_sender.is_some() && runtime.targeted_pending.contains(key)
+    }
+
+    fn complete_targeted_coordination_retry(
+        &self,
+        key: &TargetedDiscoveryKey,
+        observation_key: &MissingObservationKey,
+    ) {
+        let mut runtime = self
+            .model_key_sync_runtime
+            .lock()
+            .expect("model key sync runtime lock poisoned");
+        runtime.missing_observations.remove(observation_key);
+        runtime.targeted_pending.remove(key);
+    }
+
+    fn retry_targeted_route_health_clear(
+        &self,
+        key: TargetedDiscoveryKey,
+        observation_key: MissingObservationKey,
+        routes: Vec<RouteHealthKey>,
+    ) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut attempt = 0_u32;
+            loop {
+                tokio::time::sleep(targeted_coordination_retry_delay(attempt)).await;
+                if !state.targeted_coordination_retry_is_active(&key) {
+                    return;
+                }
+                let mut failed = false;
+                for route in &routes {
+                    if state.clear_route_health(route).await.is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
+                if !failed {
+                    state.complete_targeted_coordination_retry(&key, &observation_key);
+                    return;
+                }
+                attempt = attempt.saturating_add(1);
+                tracing::warn!(
+                    upstream_id = %key.upstream_id,
+                    attempt,
+                    "retrying route health clear after runtime coordination failure"
+                );
+            }
+        });
+    }
+
+    fn retry_targeted_route_health_reconcile(
+        &self,
+        key: TargetedDiscoveryKey,
+        observation_key: MissingObservationKey,
+    ) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut attempt = 0_u32;
+            loop {
+                tokio::time::sleep(targeted_coordination_retry_delay(attempt)).await;
+                if !state.targeted_coordination_retry_is_active(&key) {
+                    return;
+                }
+                let upstreams = state.routing_snapshot().await.upstreams;
+                if state.reconcile_route_health(&upstreams).await.is_ok() {
+                    state.complete_targeted_coordination_retry(&key, &observation_key);
+                    return;
+                }
+                attempt = attempt.saturating_add(1);
+                tracing::warn!(
+                    upstream_id = %key.upstream_id,
+                    attempt,
+                    "retrying route health reconcile after runtime coordination failure"
+                );
+            }
+        });
+    }
+
     async fn process_targeted_model_discovery(&self, job: TargetedModelDiscoveryJob) {
-        let _pending = TargetedPendingGuard {
+        let mut pending = TargetedPendingGuard {
             state: self.clone(),
             key: job.key.clone(),
+            remove_on_drop: true,
         };
         let _sync_guard = self.model_key_sync_lock.lock().await;
         let routing = self.routing_snapshot().await;
@@ -410,20 +505,37 @@ impl AppState {
             model: job.target_model.clone(),
         };
         if models.iter().any(|model| model == &job.target_model) {
-            self.model_key_sync_runtime
-                .lock()
-                .expect("model key sync runtime lock poisoned")
-                .missing_observations
-                .remove(&observation_key);
-            for protocol in current_upstream.supported_protocols() {
-                self.clear_route_health(&RouteHealthKey {
+            let routes = current_upstream
+                .supported_protocols()
+                .into_iter()
+                .map(|protocol| RouteHealthKey {
                     upstream_id: job.key.upstream_id.clone(),
                     key_fingerprint: job.key.key_fingerprint.clone(),
                     runtime_model_slug: job.target_model.clone(),
                     protocol: WireProtocol::from(protocol),
                 })
-                .await;
+                .collect::<Vec<_>>();
+            for route in &routes {
+                if let Err(error) = self.clear_route_health(route).await {
+                    tracing::error!(
+                        upstream_id = %job.key.upstream_id,
+                        error = %error,
+                        "failed to clear route health after model key sync"
+                    );
+                    self.retry_targeted_route_health_clear(
+                        job.key.clone(),
+                        observation_key,
+                        routes,
+                    );
+                    pending.retain_for_coordination_retry();
+                    return;
+                }
             }
+            self.model_key_sync_runtime
+                .lock()
+                .expect("model key sync runtime lock poisoned")
+                .missing_observations
+                .remove(&observation_key);
             return;
         }
 
@@ -495,13 +607,22 @@ impl AppState {
             .await
             .unwrap_or(false);
         if removed {
+            let current_upstreams = self.routing_snapshot().await.upstreams;
+            if let Err(error) = self.reconcile_route_health(&current_upstreams).await {
+                tracing::error!(
+                    error = %error,
+                    upstream_id = %job.key.upstream_id,
+                    "failed to reconcile route health after targeted model key sync"
+                );
+                self.retry_targeted_route_health_reconcile(job.key.clone(), observation_key);
+                pending.retain_for_coordination_retry();
+                return;
+            }
             self.model_key_sync_runtime
                 .lock()
                 .expect("model key sync runtime lock poisoned")
                 .missing_observations
                 .remove(&observation_key);
-            let current_upstreams = self.routing_snapshot().await.upstreams;
-            self.reconcile_route_health(&current_upstreams).await;
         }
     }
 
@@ -609,9 +730,15 @@ impl AppState {
             }
         }
         let current_upstreams = self.routing_snapshot().await.upstreams;
-        self.reconcile_route_health(&current_upstreams).await;
+        self.reconcile_route_health(&current_upstreams)
+            .await
+            .map_err(io::Error::other)?;
         Ok(summary)
     }
+}
+
+fn targeted_coordination_retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt.min(7)).min(30_000))
 }
 
 impl ModelKeySyncService {

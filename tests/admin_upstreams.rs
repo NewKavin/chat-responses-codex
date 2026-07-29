@@ -820,7 +820,8 @@ async fn test_upstreams_list_route_health_is_aggregate_and_secret_free() {
             RouteFailureClass::CapacityUnavailable,
             Some(Duration::from_secs(90)),
         )
-        .await;
+        .await
+        .expect("route health observation");
 
     let app = build_router(state);
     let token = get_admin_token(&app, "admin", "admin").await;

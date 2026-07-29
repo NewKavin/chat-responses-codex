@@ -1,6 +1,6 @@
 use super::normalize::{parse_u64_flexible, parse_upstream_protocol, parse_upstream_protocols};
 use super::types::*;
-use crate::state::AppState;
+use crate::state::{AppState, RuntimeCoordinationError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -21,6 +21,14 @@ pub struct FreekeySyncItem {
     pub api_key: String,
     pub model: String,
     pub valid: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FreekeySyncError {
+    #[error("{0}")]
+    Persist(String),
+    #[error(transparent)]
+    RuntimeCoordination(#[from] RuntimeCoordinationError),
 }
 
 pub(super) fn merge_api_keys(existing: &[String], incoming: &[String]) -> Vec<String> {
@@ -98,7 +106,7 @@ impl AppState {
         source: String,
         imports: Vec<FreekeySyncItem>,
         synced_at: u64,
-    ) -> Result<FreekeySyncSummary, String> {
+    ) -> Result<FreekeySyncSummary, FreekeySyncError> {
         let source = source.trim().to_string();
         let imports = imports
             .into_iter()
@@ -344,12 +352,14 @@ impl AppState {
 
                     Ok((result, touched_upstream_ids))
                 },
-                |error| format!("Failed to persist state: {}", error),
+                |error| FreekeySyncError::Persist(format!("Failed to persist state: {error}")),
             )
             .await?;
 
         let routing = self.routing_snapshot().await;
-        self.reconcile_route_health(&routing.upstreams).await;
+        self.reconcile_route_health(&routing.upstreams)
+            .await
+            .map_err(FreekeySyncError::RuntimeCoordination)?;
         let jobs = self.stale_capability_probe_jobs_for_upstreams(
             routing
                 .upstreams
@@ -362,7 +372,7 @@ impl AppState {
             crate::capabilities::ProbeReason::ConfigurationChanged,
         )
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| FreekeySyncError::Persist(error.to_string()))?;
 
         Ok(result)
     }
@@ -685,7 +695,9 @@ impl AppState {
             )
             .await?;
         let current_upstreams = self.routing_snapshot().await.upstreams;
-        self.reconcile_route_health(&current_upstreams).await;
+        self.reconcile_route_health(&current_upstreams)
+            .await
+            .map_err(UpstreamMutationError::RuntimeCoordination)?;
         Ok(updated_upstream)
     }
 }

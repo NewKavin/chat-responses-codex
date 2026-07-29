@@ -631,10 +631,11 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
     let route = route("fingerprint-a", "glm-5.2");
     state
         .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
-        .await;
+        .await
+        .unwrap();
     tokio::time::advance(Duration::from_secs(12)).await;
 
-    let permit = match state.reserve_route_health(&route, &key).await {
+    let permit = match state.reserve_route_health(&route, &key).await.unwrap() {
         RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
         other => panic!("expected half-open permit, got {other:?}"),
     };
@@ -643,7 +644,7 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
     tokio::task::yield_now().await;
 
     assert!(matches!(
-        state.reserve_route_health(&route, &key).await,
+        state.reserve_route_health(&route, &key).await.unwrap(),
         RouteAvailability::Ready(_)
     ));
 }

@@ -1,10 +1,16 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use chat_responses_codex::keys::generate_downstream_key;
+use axum::routing::get;
+use axum::{Json, Router};
+use chat_responses_codex::capabilities::WireProtocol;
+use chat_responses_codex::keys::{generate_downstream_key, upstream_key_fingerprint};
+use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamAdmissionRejection, DownstreamConfig, ModelRequestCostConfig,
-    PersistedState, RuntimeCoordinationBackend, UpstreamConfig, UsageLog,
+    ApiKeyModelConfig, AppConfig, AppState, DownstreamAdmissionRejection, DownstreamConfig,
+    KeyHealthKey, ModelKeySyncService, ModelRequestCostConfig, PersistedState, RouteAvailability,
+    RouteFailureClass, RouteHealthKey, RouteOutcome, RouteSetAggregateKey,
+    RuntimeCoordinationBackend, UpstreamConfig, UsageLog,
 };
 use sha2::{Digest, Sha256};
 use std::io;
@@ -156,6 +162,65 @@ fn redis_test_upstream(id: &str) -> UpstreamConfig {
         }],
         ..UpstreamConfig::default()
     }
+}
+
+fn redis_test_health_key(upstream_id: &str, fingerprint: &str) -> KeyHealthKey {
+    KeyHealthKey {
+        upstream_id: upstream_id.into(),
+        key_fingerprint: fingerprint.into(),
+    }
+}
+
+fn redis_test_health_route(upstream_id: &str, fingerprint: &str, model: &str) -> RouteHealthKey {
+    RouteHealthKey {
+        upstream_id: upstream_id.into(),
+        key_fingerprint: fingerprint.into(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::Responses,
+    }
+}
+
+fn redis_bulk_u64(response: &str) -> u64 {
+    response
+        .split("\r\n")
+        .nth(1)
+        .expect("bulk Redis response must include a value")
+        .parse()
+        .expect("bulk Redis value must be an integer")
+}
+
+fn redis_integer(response: &str) -> i64 {
+    response
+        .strip_prefix(':')
+        .and_then(|value| value.strip_suffix("\r\n"))
+        .expect("Redis response must be an integer")
+        .parse()
+        .expect("Redis integer response must contain a number")
+}
+
+async fn redis_route_health_state_key(config: &AppConfig) -> String {
+    let response = redis_test_command(
+        config,
+        &[
+            "KEYS".into(),
+            format!("{}:v1:route-health:*:route:*", config.redis_key_prefix),
+        ],
+    )
+    .await;
+    let mut lines = response.split("\r\n");
+    assert_eq!(lines.next(), Some("*1"));
+    assert!(lines.next().is_some_and(|line| line.starts_with('$')));
+    lines
+        .next()
+        .expect("route-health key response must contain one key")
+        .to_string()
+}
+
+fn redis_route_health_key(config: &AppConfig, suffix: &str) -> String {
+    format!(
+        "{}:v1:route-health:{{route-health}}:{suffix}",
+        config.redis_key_prefix
+    )
 }
 
 async fn redis_test_states(config: &AppConfig) -> (AppState, AppState, tempfile::TempDir) {
@@ -738,7 +803,10 @@ async fn redis_upstream_snapshot_failure_returns_stable_gateway_503() {
             Request::builder()
                 .method("POST")
                 .uri("/v1/chat/completions")
-                .header("authorization", format!("Bearer {}", downstream_key.plaintext))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -760,4 +828,753 @@ async fn redis_upstream_snapshot_failure_returns_stable_gateway_503() {
     )
     .unwrap();
     assert!(body.contains("\"code\":\"runtime_coordination_unavailable\""));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_cooldown_and_half_open_owner_are_shared() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("health-upstream", "fingerprint-a");
+    let route = redis_test_health_route("health-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Cooling {
+            class: RouteFailureClass::ConcurrencySaturated,
+            ..
+        }
+    ));
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    permit.finish(RouteOutcome::Success).await.unwrap();
+    assert!(matches!(
+        second.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(permit) if !permit.is_half_open()
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_earliest_route_recovery_uses_shared_health() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let route = redis_test_health_route("shared-recovery-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::TransientServer,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+
+    let recovery = second
+        .earliest_temporary_route_recovery(std::slice::from_ref(&route))
+        .await
+        .unwrap()
+        .expect("the second coordinator must see the shared recovery");
+    assert_eq!(recovery.class, RouteFailureClass::TransientServer);
+    assert!(recovery.retry_after > Duration::ZERO);
+    assert!(recovery.retry_after <= Duration::from_secs(10));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_admin_route_health_snapshots_use_shared_health() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let upstream = UpstreamConfig {
+        id: "shared-admin-health-upstream".into(),
+        name: "Shared admin health upstream".into(),
+        api_key: "snapshot-secret".into(),
+        api_key_models: vec![ApiKeyModelConfig {
+            api_key: "snapshot-secret".into(),
+            supported_models: vec!["model-a".into()],
+        }],
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec!["model-a".into()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let route = redis_test_health_route(
+        &upstream.id,
+        &upstream_key_fingerprint(&upstream.id, "snapshot-secret"),
+        "model-a",
+    );
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+
+    let snapshots = second
+        .route_health_snapshots(std::slice::from_ref(&upstream))
+        .await
+        .unwrap();
+    let snapshot = &snapshots[&upstream.id];
+    assert_eq!(snapshot.healthy_routes, 0);
+    assert_eq!(snapshot.cooldown_routes, 1);
+    assert_eq!(snapshot.half_open_routes, 0);
+    assert_eq!(snapshot.failure_classes["transient_server"], 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_reconcile_removes_unconfigured_state() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let route = redis_test_health_route("removed-health-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    assert!(second
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .is_some());
+
+    second.reconcile_route_health(&[]).await.unwrap();
+
+    assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_reconcile_defers_active_lease_then_removes_on_finish() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("removed-active-upstream", "fingerprint-a");
+    let route = redis_test_health_route("removed-active-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+
+    second.reconcile_route_health(&[]).await.unwrap();
+    assert!(second
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .is_some_and(|snapshot| snapshot.half_open));
+
+    permit
+        .finish(RouteOutcome::RouteFailure(
+            RouteFailureClass::TransientServer,
+        ))
+        .await
+        .unwrap();
+    assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_reconcile_removes_expired_half_open_lease() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("removed-expired-upstream", "fingerprint-a");
+    let route = redis_test_health_route("removed-expired-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let abandoned = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    std::mem::forget(abandoned);
+    let state_key = redis_route_health_state_key(&config).await;
+    assert!(redis_test_command(
+        &config,
+        &[
+            "HSET".into(),
+            state_key,
+            "half_open_expires_at_ms".into(),
+            "1".into(),
+        ],
+    )
+    .await
+    .starts_with(':'));
+
+    second.reconcile_route_health(&[]).await.unwrap();
+    assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_global_eviction_removes_the_owners_upstream_index() {
+    let config = redis_test_config();
+    let old_state = redis_route_health_key(&config, "route:old");
+    let new_state = redis_route_health_key(&config, "route:new");
+    let old_upstream_index = redis_route_health_key(&config, "upstream:old:index:routes");
+    let new_upstream_index = redis_route_health_key(&config, "upstream:new:index:routes");
+    let global_index = redis_route_health_key(&config, "index:routes");
+    let generation = redis_route_health_key(&config, "generation");
+
+    assert!(redis_test_command(
+        &config,
+        &[
+            "HSET".into(),
+            old_state.clone(),
+            "failure_class".into(),
+            "transient_server".into(),
+            "upstream_index_key".into(),
+            old_upstream_index.clone(),
+        ],
+    )
+    .await
+    .starts_with(':'));
+    for index in [&old_upstream_index, &global_index] {
+        assert_eq!(
+            redis_integer(
+                &redis_test_command(
+                    &config,
+                    &[
+                        "ZADD".into(),
+                        index.to_string(),
+                        "1".into(),
+                        old_state.clone()
+                    ],
+                )
+                .await,
+            ),
+            1
+        );
+    }
+
+    let response = redis_test_command(
+        &config,
+        &[
+            "EVAL".into(),
+            include_str!("../src/state/redis_runtime/route_health_observe.lua").into(),
+            "4".into(),
+            new_state,
+            new_upstream_index,
+            global_index,
+            generation,
+            "observe".into(),
+            "route".into(),
+            "transient_server".into(),
+            "-1".into(),
+            "600000".into(),
+            "7200".into(),
+            "1".into(),
+            "1".into(),
+            "new-upstream".into(),
+            "fingerprint".into(),
+            "model-a".into(),
+            "responses".into(),
+            "0".into(),
+            "1".into(),
+            "1000".into(),
+        ],
+    )
+    .await;
+    assert_eq!(redis_integer(&response), 1);
+    assert_eq!(
+        redis_integer(&redis_test_command(&config, &["ZCARD".into(), old_upstream_index]).await,),
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_finish_rejects_capacity_exhaustion_and_corrupt_markers() {
+    let config = redis_test_config();
+    let key_state = redis_route_health_key(&config, "key:new");
+    let route_state = redis_route_health_key(&config, "route:new");
+    let key_upstream_index = redis_route_health_key(&config, "upstream:new:index:keys");
+    let route_upstream_index = redis_route_health_key(&config, "upstream:new:index:routes");
+    let key_global_index = redis_route_health_key(&config, "index:keys");
+    let route_global_index = redis_route_health_key(&config, "index:routes");
+    let generation = redis_route_health_key(&config, "generation");
+    let marker = redis_route_health_key(&config, "finish:lease");
+    let active_state = redis_route_health_key(&config, "route:active");
+    let active_upstream_index = redis_route_health_key(&config, "upstream:active:index:routes");
+    assert!(redis_test_command(
+        &config,
+        &[
+            "HSET".into(),
+            active_state.clone(),
+            "failure_class".into(),
+            "transient_server".into(),
+            "half_open_lease".into(),
+            "active-owner".into(),
+            "upstream_index_key".into(),
+            active_upstream_index,
+        ],
+    )
+    .await
+    .starts_with(':'));
+    assert_eq!(
+        redis_integer(
+            &redis_test_command(
+                &config,
+                &[
+                    "ZADD".into(),
+                    route_global_index.clone(),
+                    "1".into(),
+                    active_state,
+                ],
+            )
+            .await,
+        ),
+        1
+    );
+
+    let finish_arguments = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/route_health_finish.lua").into(),
+        "8".into(),
+        key_state,
+        route_state,
+        key_upstream_index,
+        route_upstream_index,
+        key_global_index,
+        route_global_index,
+        generation,
+        marker.clone(),
+        "lease".into(),
+        "".into(),
+        "".into(),
+        "".into(),
+        "route_failure".into(),
+        "transient_server".into(),
+        "-1".into(),
+        "600000".into(),
+        "7200".into(),
+        "1".into(),
+        "1".into(),
+        "new-upstream".into(),
+        "fingerprint".into(),
+        "model-a".into(),
+        "responses".into(),
+        "1".into(),
+        "1000".into(),
+        "0".into(),
+        "0".into(),
+    ];
+    assert_eq!(
+        redis_integer(&redis_test_command(&config, &finish_arguments).await),
+        -1
+    );
+
+    assert_eq!(
+        redis_test_command(&config, &["SET".into(), marker, "2".into()]).await,
+        "+OK\r\n"
+    );
+    let response = redis_test_command(&config, &finish_arguments).await;
+    assert!(response.starts_with('-'), "unexpected response: {response}");
+    assert!(response.contains("invalid route health finish marker"));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_half_open_reserve_refreshes_route_index_ttls() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let upstream_id = "route-index-ttl-upstream";
+    let route = redis_test_health_route(upstream_id, "fingerprint-a", "model-a");
+    let key = redis_test_health_key(upstream_id, "fingerprint-a");
+    let upstream_identity = format!("{:x}", Sha256::digest(upstream_id.as_bytes()));
+    let upstream_index = format!(
+        "{}:v1:route-health:{{route-health}}:upstream:{upstream_identity}:index:routes",
+        config.redis_key_prefix
+    );
+    let global_index = format!(
+        "{}:v1:route-health:{{route-health}}:index:routes",
+        config.redis_key_prefix
+    );
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    for index in [&upstream_index, &global_index] {
+        assert_eq!(
+            redis_integer(
+                &redis_test_command(&config, &["EXPIRE".into(), index.to_string(), "1".into()],)
+                    .await,
+            ),
+            1
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let permit = match second.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+
+    for index in [&upstream_index, &global_index] {
+        let ttl =
+            redis_integer(&redis_test_command(&config, &["TTL".into(), index.to_string()]).await);
+        assert!(ttl > 60, "route index TTL was not refreshed: {ttl}");
+    }
+    permit.finish(RouteOutcome::Cancelled).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_stale_finish_cannot_clear_a_newer_failure() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("stale-health-upstream", "fingerprint-a");
+    let route = redis_test_health_route("stale-health-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let stale = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+
+    second
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::RateLimited,
+            Some(Duration::from_secs(30)),
+        )
+        .await
+        .unwrap();
+    stale.finish(RouteOutcome::Success).await.unwrap();
+
+    assert!(matches!(
+        first.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Cooling {
+            class: RouteFailureClass::RateLimited,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_key_and_aggregate_health_are_shared_without_overblocking_routes() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let blocked_key = redis_test_health_key("scoped-health-upstream", "fingerprint-a");
+    let blocked_route =
+        redis_test_health_route("scoped-health-upstream", "fingerprint-a", "model-a");
+    let blocked_other_model =
+        redis_test_health_route("scoped-health-upstream", "fingerprint-a", "model-b");
+    let healthy_key = redis_test_health_key("scoped-health-upstream", "fingerprint-b");
+    let healthy_route =
+        redis_test_health_route("scoped-health-upstream", "fingerprint-b", "model-a");
+    let aggregate = RouteSetAggregateKey {
+        upstream_id: "scoped-health-upstream".into(),
+        runtime_model_slug: "model-a".into(),
+        protocol: WireProtocol::Responses,
+    };
+
+    first
+        .observe_key_failure(
+            &blocked_key,
+            RouteFailureClass::Credentials,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        second
+            .reserve_route_health(&blocked_route, &blocked_key)
+            .await
+            .unwrap(),
+        RouteAvailability::Cooling {
+            class: RouteFailureClass::Credentials,
+            ..
+        }
+    ));
+    assert!(matches!(
+        second
+            .reserve_route_health(&blocked_other_model, &blocked_key)
+            .await
+            .unwrap(),
+        RouteAvailability::Cooling { .. }
+    ));
+
+    first
+        .observe_route_set_failure(
+            &aggregate,
+            RouteFailureClass::RateLimited,
+            Some(Duration::from_secs(7)),
+        )
+        .await
+        .unwrap();
+    let aggregate_snapshot = second
+        .route_set_health_snapshot(&aggregate)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(aggregate_snapshot.consecutive_failures, 1);
+    assert_eq!(
+        aggregate_snapshot.last_failure_class,
+        Some(RouteFailureClass::RateLimited)
+    );
+    assert!(matches!(
+        second
+            .reserve_route_health(&healthy_route, &healthy_key)
+            .await
+            .unwrap(),
+        RouteAvailability::Ready(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_cancelled_half_open_reapplies_concurrency_probe_delay() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("cancelled-health-upstream", "fingerprint-a");
+    let route = redis_test_health_route("cancelled-health-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::ConcurrencySaturated, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(110)).await;
+    let permit = match second.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    permit.finish(RouteOutcome::Cancelled).await.unwrap();
+
+    let snapshot = first.route_health_snapshot(&route).await.unwrap().unwrap();
+    assert_eq!(
+        snapshot.last_failure_class,
+        Some(RouteFailureClass::ConcurrencySaturated)
+    );
+    assert!(snapshot.cooldown_remaining > Duration::ZERO);
+    assert!(snapshot.cooldown_remaining <= Duration::from_millis(100));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_expired_half_open_owner_can_be_reclaimed() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("expired-owner-upstream", "fingerprint-a");
+    let route = redis_test_health_route("expired-owner-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(
+            &route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let abandoned = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    std::mem::forget(abandoned);
+
+    let response = redis_test_command(
+        &config,
+        &[
+            "HSET".into(),
+            redis_route_health_state_key(&config).await,
+            "half_open_expires_at_ms".into(),
+            "1".into(),
+        ],
+    )
+    .await;
+    assert!(response.starts_with(':'));
+
+    let replacement = match second.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected expired owner to be reclaimed, got {other:?}"),
+    };
+    replacement.finish(RouteOutcome::Success).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_generation_does_not_reset_after_clear() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let route = redis_test_health_route("generation-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    let state_key = redis_route_health_state_key(&config).await;
+    let first_generation = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &["HGET".into(), state_key.clone(), "state_generation".into()],
+        )
+        .await,
+    );
+
+    first.clear_route_health(&route).await.unwrap();
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    let second_generation = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &["HGET".into(), state_key, "state_generation".into()],
+        )
+        .await,
+    );
+
+    assert!(second_generation > first_generation);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_finish_retry_is_idempotent() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("finish-retry-upstream", "fingerprint-a");
+    let route = redis_test_health_route("finish-retry-upstream", "fingerprint-a", "model-a");
+    let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) => permit,
+        other => panic!("expected healthy permit, got {other:?}"),
+    };
+
+    pause_test_redis(&config, 2_100).await;
+    permit
+        .finish(RouteOutcome::RouteFailure(
+            RouteFailureClass::TransientServer,
+        ))
+        .await
+        .unwrap();
+
+    let snapshot = first.route_health_snapshot(&route).await.unwrap().unwrap();
+    assert_eq!(snapshot.consecutive_failures, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_targeted_model_sync_retains_pending_cleanup_until_coordination_recovers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let discovery_server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/v1/models",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{"id": "model-a", "object": "model"}]
+                    }))
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let mut config = redis_test_config();
+    config.upstream_model_auto_discovery_enabled = true;
+    config.upstream_model_key_sync_interval_seconds = 900;
+    let directory = tempdir().unwrap();
+    let state = AppState::load_from_path(directory.path().join("targeted.json"), config.clone())
+        .await
+        .unwrap();
+    let api_key = "targeted-secret";
+    let upstream_id = "targeted-redis-upstream";
+    state
+        .insert_upstream(UpstreamConfig {
+            id: upstream_id.into(),
+            name: "Targeted Redis upstream".into(),
+            base_url: format!("http://{address}"),
+            api_key: api_key.into(),
+            api_key_models: vec![ApiKeyModelConfig {
+                api_key: api_key.into(),
+                supported_models: vec!["model-a".into()],
+            }],
+            supported_models: vec!["model-a".into()],
+            protocol: UpstreamProtocol::Responses,
+            protocols: vec![UpstreamProtocol::Responses],
+            active: true,
+            ..UpstreamConfig::default()
+        })
+        .await
+        .unwrap();
+    let fingerprint = upstream_key_fingerprint(upstream_id, api_key);
+    let route = redis_test_health_route(upstream_id, &fingerprint, "model-a");
+    state
+        .observe_route_failure(&route, RouteFailureClass::ModelUnsupported, None)
+        .await
+        .unwrap();
+    let worker = ModelKeySyncService::spawn(state.clone()).expect("model sync enabled");
+
+    pause_test_redis(&config, 5_500).await;
+    assert!(state.submit_targeted_model_discovery(upstream_id, &fingerprint, "model-a"));
+    tokio::time::sleep(Duration::from_millis(4_500)).await;
+    assert_eq!(state.targeted_model_discovery_pending_count(), 1);
+
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if state.targeted_model_discovery_pending_count() == 0
+                && state
+                    .route_health_snapshot(&route)
+                    .await
+                    .is_ok_and(|snapshot| snapshot.is_none())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("pending route-health cleanup should finish after Redis recovers");
+
+    worker.abort();
+    discovery_server.abort();
 }

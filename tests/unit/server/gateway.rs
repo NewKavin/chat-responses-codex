@@ -597,7 +597,11 @@ async fn stream_transport_failure_updates_only_its_exact_route_and_shared_aggreg
         upstream_id: route.upstream_id.clone(),
         key_fingerprint: route.key_fingerprint.clone(),
     };
-    let permit = match state.reserve_route_health(&route, &key).await {
+    let permit = match state
+        .reserve_route_health(&route, &key)
+        .await
+        .expect("route health reservation")
+    {
         RouteAvailability::Ready(permit) => permit,
         availability => panic!("unexpected route availability: {availability:?}"),
     };
@@ -609,7 +613,11 @@ async fn stream_transport_failure_updates_only_its_exact_route_and_shared_aggreg
 
     completion.mark_failure().await;
 
-    let route_health = state.route_health_snapshot(&route).await.unwrap();
+    let route_health = state
+        .route_health_snapshot(&route)
+        .await
+        .expect("route health snapshot")
+        .unwrap();
     assert_eq!(route_health.consecutive_failures, 1);
     assert_eq!(
         route_health.last_failure_class,
@@ -618,6 +626,7 @@ async fn stream_transport_failure_updates_only_its_exact_route_and_shared_aggreg
     let aggregate_health = state
         .route_set_health_snapshot(&tracked_aggregate())
         .await
+        .expect("route set health snapshot")
         .unwrap();
     assert_eq!(aggregate_health.consecutive_failures, 1);
     assert_eq!(
@@ -641,7 +650,11 @@ async fn stream_cancellation_releases_exact_route_without_recording_failure() {
         upstream_id: route.upstream_id.clone(),
         key_fingerprint: route.key_fingerprint.clone(),
     };
-    let permit = match state.reserve_route_health(&route, &key).await {
+    let permit = match state
+        .reserve_route_health(&route, &key)
+        .await
+        .expect("route health reservation")
+    {
         RouteAvailability::Ready(permit) => permit,
         availability => panic!("unexpected route availability: {availability:?}"),
     };
@@ -653,7 +666,11 @@ async fn stream_cancellation_releases_exact_route_without_recording_failure() {
 
     completion.mark_cancelled().await;
 
-    if let Some(route_health) = state.route_health_snapshot(&route).await {
+    if let Some(route_health) = state
+        .route_health_snapshot(&route)
+        .await
+        .expect("route health snapshot")
+    {
         assert_eq!(route_health.consecutive_failures, 0);
         assert_eq!(route_health.last_failure_class, None);
     }
@@ -661,6 +678,7 @@ async fn stream_cancellation_releases_exact_route_without_recording_failure() {
     assert!(state
         .route_set_health_snapshot(&tracked_aggregate())
         .await
+        .expect("route set health snapshot")
         .is_none());
 }
 
@@ -1648,10 +1666,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
     );
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
 
-    state
-        .mark_upstream_rate_limited("up-1", 60)
-        .await
-        .unwrap();
+    state.mark_upstream_rate_limited("up-1", 60).await.unwrap();
     let cooldown_before_cancel = state
         .upstream_runtime_snapshots()
         .await

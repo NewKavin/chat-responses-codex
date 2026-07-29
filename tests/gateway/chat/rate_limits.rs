@@ -758,7 +758,8 @@ async fn concurrent_waiters_share_one_concurrency_probe() {
             chat_responses_codex::state::RouteFailureClass::ConcurrencySaturated,
             None,
         )
-        .await;
+        .await
+        .expect("route health observation");
     let upstream = state.snapshot().await.upstreams[0].clone();
     install_non_stream_profile(&state, &upstream).await;
     tokio::time::sleep(Duration::from_millis(120)).await;

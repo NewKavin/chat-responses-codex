@@ -319,7 +319,8 @@ async fn targeted_queue_deduplicates_and_clears_confirmed_model_quarantine() {
     };
     state
         .observe_route_failure(&route, RouteFailureClass::ModelUnsupported, None)
-        .await;
+        .await
+        .expect("route health observation");
     let worker = ModelKeySyncService::spawn(state.clone()).expect("sync service enabled");
 
     assert!(state.submit_targeted_model_discovery("sync-upstream", &key_fingerprint, "old-a"));
@@ -349,7 +350,10 @@ async fn targeted_queue_deduplicates_and_clears_confirmed_model_quarantine() {
     .await
     .expect("targeted discovery should always release its pending identity");
 
-    let health = state.route_health_snapshot(&route).await;
+    let health = state
+        .route_health_snapshot(&route)
+        .await
+        .expect("route health snapshot");
     assert!(health.is_none_or(|health| health.last_failure_class.is_none()));
     worker.abort();
     server.abort();

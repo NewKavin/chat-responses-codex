@@ -1,4 +1,5 @@
 use crate::routing::UpstreamProtocol;
+use crate::state::redis_runtime::RuntimeCoordinationError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -365,6 +366,7 @@ pub enum UpstreamMutationError {
     NotFound(String),
     InvalidInput(String),
     Persist(String),
+    RuntimeCoordination(RuntimeCoordinationError),
 }
 
 impl std::fmt::Display for UpstreamMutationError {
@@ -373,6 +375,7 @@ impl std::fmt::Display for UpstreamMutationError {
             UpstreamMutationError::NotFound(message)
             | UpstreamMutationError::InvalidInput(message)
             | UpstreamMutationError::Persist(message) => f.write_str(message),
+            UpstreamMutationError::RuntimeCoordination(error) => error.fmt(f),
         }
     }
 }

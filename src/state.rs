@@ -69,7 +69,7 @@ use postgres::PostgresStateStore;
 pub use redis_runtime::{RuntimeCoordinationBackend, RuntimeCoordinationError};
 pub use store::{StateStore, StoreFuture};
 
-pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
+pub use freekey_sync::{FreekeySyncError, FreekeySyncItem, FreekeySyncSummary};
 #[allow(unused_imports)]
 pub use model_discovery::{
     fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently,
@@ -826,19 +826,35 @@ impl AppState {
         &self,
         route: &RouteHealthKey,
         key: &KeyHealthKey,
-    ) -> RouteAvailability<RouteHealthPermit> {
+    ) -> Result<RouteAvailability<RouteHealthPermit>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let availability = coordinator
+                .reserve_route_health(route, key, &Uuid::new_v4().to_string())
+                .await?;
+            return Ok(match availability {
+                RouteAvailability::Ready(lease) => RouteAvailability::Ready(
+                    RouteHealthPermit::new_redis(coordinator.clone(), lease),
+                ),
+                RouteAvailability::Cooling { class, retry_after } => {
+                    RouteAvailability::Cooling { class, retry_after }
+                }
+                RouteAvailability::HalfOpenBusy { class, retry_after } => {
+                    RouteAvailability::HalfOpenBusy { class, retry_after }
+                }
+            });
+        }
         let availability = self.route_health.lock().await.reserve(route, key);
-        match availability {
-            RouteAvailability::Ready(lease) => {
-                RouteAvailability::Ready(RouteHealthPermit::new(self.route_health.clone(), lease))
-            }
+        Ok(match availability {
+            RouteAvailability::Ready(lease) => RouteAvailability::Ready(
+                RouteHealthPermit::new_local(self.route_health.clone(), lease),
+            ),
             RouteAvailability::Cooling { class, retry_after } => {
                 RouteAvailability::Cooling { class, retry_after }
             }
             RouteAvailability::HalfOpenBusy { class, retry_after } => {
                 RouteAvailability::HalfOpenBusy { class, retry_after }
             }
-        }
+        })
     }
 
     pub async fn observe_route_failure(
@@ -846,15 +862,28 @@ impl AppState {
         route: &RouteHealthKey,
         class: RouteFailureClass,
         retry_after: Option<Duration>,
-    ) {
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .observe_route_failure(route, class, retry_after)
+                .await;
+        }
         self.route_health
             .lock()
             .await
             .observe_route_failure(route, class, retry_after);
+        Ok(())
     }
 
-    pub async fn clear_route_health(&self, route: &RouteHealthKey) {
+    pub async fn clear_route_health(
+        &self,
+        route: &RouteHealthKey,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.clear_route_health(route).await;
+        }
         self.route_health.lock().await.clear_route_health(route);
+        Ok(())
     }
 
     pub async fn observe_key_failure(
@@ -862,11 +891,17 @@ impl AppState {
         key: &KeyHealthKey,
         class: RouteFailureClass,
         retry_after: Option<Duration>,
-    ) {
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .observe_key_failure(key, class, retry_after)
+                .await;
+        }
         self.route_health
             .lock()
             .await
             .observe_key_failure(key, class, retry_after);
+        Ok(())
     }
 
     pub async fn observe_route_set_failure(
@@ -874,49 +909,75 @@ impl AppState {
         aggregate: &RouteSetAggregateKey,
         class: RouteFailureClass,
         retry_after: Option<Duration>,
-    ) {
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .observe_route_set_failure(aggregate, class, retry_after)
+                .await;
+        }
         self.route_health
             .lock()
             .await
             .observe_route_set_failure(aggregate, class, retry_after);
+        Ok(())
     }
 
     pub async fn earliest_temporary_route_recovery(
         &self,
         routes: &[RouteHealthKey],
-    ) -> Option<RouteRecovery> {
-        self.route_health
+    ) -> Result<Option<RouteRecovery>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.earliest_temporary_route_recovery(routes).await;
+        }
+        Ok(self
+            .route_health
             .lock()
             .await
-            .earliest_temporary_recovery(routes)
+            .earliest_temporary_recovery(routes))
     }
 
     pub async fn route_health_snapshot(
         &self,
         route: &RouteHealthKey,
-    ) -> Option<HealthStateSnapshot> {
-        self.route_health.lock().await.route_health_snapshot(route)
+    ) -> Result<Option<HealthStateSnapshot>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.route_health_snapshot(route).await;
+        }
+        Ok(self.route_health.lock().await.route_health_snapshot(route))
     }
 
-    pub async fn key_health_snapshot(&self, key: &KeyHealthKey) -> Option<HealthStateSnapshot> {
-        self.route_health.lock().await.key_health_snapshot(key)
+    pub async fn key_health_snapshot(
+        &self,
+        key: &KeyHealthKey,
+    ) -> Result<Option<HealthStateSnapshot>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.key_health_snapshot(key).await;
+        }
+        Ok(self.route_health.lock().await.key_health_snapshot(key))
     }
 
     pub async fn route_set_health_snapshot(
         &self,
         aggregate: &RouteSetAggregateKey,
-    ) -> Option<HealthStateSnapshot> {
-        self.route_health
+    ) -> Result<Option<HealthStateSnapshot>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.route_set_health_snapshot(aggregate).await;
+        }
+        Ok(self
+            .route_health
             .lock()
             .await
-            .route_set_health_snapshot(aggregate)
+            .route_set_health_snapshot(aggregate))
     }
 
     pub async fn route_health_snapshots(
         &self,
         upstreams: &[UpstreamConfig],
-    ) -> HashMap<String, RouteHealthSnapshotDto> {
-        self.route_health.lock().await.upstream_snapshots(upstreams)
+    ) -> Result<HashMap<String, RouteHealthSnapshotDto>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.route_health_snapshots(upstreams).await;
+        }
+        Ok(self.route_health.lock().await.upstream_snapshots(upstreams))
     }
 
     pub fn runtime_capability_hints_snapshot(&self) -> RuntimeCapabilityHintSnapshot {
@@ -1022,75 +1083,25 @@ impl AppState {
             });
     }
 
-    /// Reconcile process-local health identities after a configuration change.  This never
-    /// persists anything and keeps an active half-open lease alive long enough for its owner to
-    /// finish cleanly.
-    pub async fn reconcile_route_health(&self, upstreams: &[UpstreamConfig]) {
+    /// Reconcile health identities after a configuration change while preserving active
+    /// half-open ownership long enough for its owner to finish cleanly.
+    pub async fn reconcile_route_health(
+        &self,
+        upstreams: &[UpstreamConfig],
+    ) -> Result<(), RuntimeCoordinationError> {
         let upstreams = upstreams.to_vec();
-        let mut registry = self.route_health.lock().await;
-        registry.retain_routes(
-            |route| {
-                let Some(upstream) = upstreams
-                    .iter()
-                    .find(|candidate| candidate.id == route.upstream_id && candidate.active)
-                else {
-                    return false;
-                };
-                if !upstream.supports_protocol(match route.protocol {
-                    crate::capabilities::WireProtocol::ChatCompletions => {
-                        UpstreamProtocol::ChatCompletions
-                    }
-                    crate::capabilities::WireProtocol::Responses => UpstreamProtocol::Responses,
-                    crate::capabilities::WireProtocol::Messages => return false,
-                }) {
-                    return false;
-                }
-                if !upstream.available_keys().iter().any(|api_key| {
-                    upstream_key_fingerprint(&upstream.id, api_key) == route.key_fingerprint
-                }) {
-                    return false;
-                }
-                upstream.route_models().is_empty()
-                    || upstream
-                        .keys_for_model(&route.runtime_model_slug)
-                        .iter()
-                        .any(|api_key| {
-                            upstream_key_fingerprint(&upstream.id, api_key) == route.key_fingerprint
-                        })
-            },
-            |key| {
-                upstreams.iter().any(|upstream| {
-                    upstream.id == key.upstream_id
-                        && upstream.active
-                        && upstream.available_keys().iter().any(|api_key| {
-                            upstream_key_fingerprint(&upstream.id, api_key) == key.key_fingerprint
-                        })
-                })
-            },
-            |aggregate| {
-                upstreams.iter().any(|upstream| {
-                    upstream.id == aggregate.upstream_id
-                        && upstream.active
-                        && upstream.supports_protocol(match aggregate.protocol {
-                            crate::capabilities::WireProtocol::ChatCompletions => {
-                                UpstreamProtocol::ChatCompletions
-                            }
-                            crate::capabilities::WireProtocol::Responses => {
-                                UpstreamProtocol::Responses
-                            }
-                            crate::capabilities::WireProtocol::Messages => return false,
-                        })
-                        && (upstream.route_models().is_empty()
-                            || upstream
-                                .route_models()
-                                .iter()
-                                .any(|model| model == &aggregate.runtime_model_slug))
-                })
-            },
-        );
-        drop(registry);
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            coordinator.reconcile_route_health(&upstreams).await?;
+        } else {
+            self.route_health.lock().await.retain_routes(
+                |route| route_health::route_health_route_is_current(&upstreams, route),
+                |key| route_health::route_health_key_is_current(&upstreams, key),
+                |aggregate| route_health::route_health_aggregate_is_current(&upstreams, aggregate),
+            );
+        }
         self.reconcile_runtime_capability_hints(&upstreams);
         self.reconcile_model_key_sync_runtime(&upstreams);
+        Ok(())
     }
 
     pub fn create_admin_session(&self) -> String {
@@ -2267,7 +2278,8 @@ impl AppState {
 
     pub async fn upstream_runtime_snapshots_with_feedback(
         &self,
-    ) -> Result<HashMap<String, UpstreamRuntimeSnapshotWithFeedback>, RuntimeCoordinationError> {
+    ) -> Result<HashMap<String, UpstreamRuntimeSnapshotWithFeedback>, RuntimeCoordinationError>
+    {
         let upstreams = {
             let state = self.inner.lock().await;
             state
@@ -2948,7 +2960,9 @@ impl AppState {
         })
         .await?;
         let current_upstreams = self.routing_snapshot().await.upstreams;
-        self.reconcile_route_health(&current_upstreams).await;
+        self.reconcile_route_health(&current_upstreams)
+            .await
+            .map_err(io::Error::other)?;
         let jobs = self.capability_probe_jobs_for_upstream(&queue_candidate);
         self.submit_capability_probe_jobs(jobs, ProbeReason::ConfigurationChanged)
             .await
@@ -2977,7 +2991,9 @@ impl AppState {
             .await?;
         if updated {
             let current_upstreams = self.routing_snapshot().await.upstreams;
-            self.reconcile_route_health(&current_upstreams).await;
+            self.reconcile_route_health(&current_upstreams)
+                .await
+                .map_err(io::Error::other)?;
             if let Some(upstream) = self
                 .routing_snapshot()
                 .await
@@ -2998,8 +3014,7 @@ impl AppState {
         let removed = self
             .mutate_persisted_state_io(|state| {
                 let original_len = state.upstreams.len();
-                Arc::make_mut(&mut state.upstreams)
-                    .retain(|upstream| upstream.id != upstream_id);
+                Arc::make_mut(&mut state.upstreams).retain(|upstream| upstream.id != upstream_id);
                 Ok(state.upstreams.len() != original_len)
             })
             .await?;
@@ -3008,7 +3023,9 @@ impl AppState {
             self.delete_dialect_profiles_for_upstream(upstream_id)
                 .await?;
             let current_upstreams = self.routing_snapshot().await.upstreams;
-            self.reconcile_route_health(&current_upstreams).await;
+            self.reconcile_route_health(&current_upstreams)
+                .await
+                .map_err(io::Error::other)?;
         }
 
         Ok(removed)
@@ -3112,7 +3129,9 @@ impl AppState {
             .await?;
         if updated {
             let current_upstreams = self.routing_snapshot().await.upstreams;
-            self.reconcile_route_health(&current_upstreams).await;
+            self.reconcile_route_health(&current_upstreams)
+                .await
+                .map_err(io::Error::other)?;
         }
         Ok(updated)
     }
@@ -4110,7 +4129,9 @@ impl AppState {
             })
             .await?;
         let current_upstreams = self.routing_snapshot().await.upstreams;
-        self.reconcile_route_health(&current_upstreams).await;
+        self.reconcile_route_health(&current_upstreams)
+            .await
+            .map_err(io::Error::other)?;
         Ok(result)
     }
 
@@ -4458,7 +4479,9 @@ impl AppState {
             Arc::make_mut(&mut inner.upstreams).push(upstream);
         }
         let current_upstreams = self.routing_snapshot().await.upstreams;
-        self.reconcile_route_health(&current_upstreams).await;
+        self.reconcile_route_health(&current_upstreams)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -4473,7 +4496,9 @@ impl AppState {
             }
         }
         let current_upstreams = self.routing_snapshot().await.upstreams;
-        self.reconcile_route_health(&current_upstreams).await;
+        self.reconcile_route_health(&current_upstreams)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -4489,7 +4514,9 @@ impl AppState {
             upstream.active
         };
         let current_upstreams = self.routing_snapshot().await.upstreams;
-        self.reconcile_route_health(&current_upstreams).await;
+        self.reconcile_route_health(&current_upstreams)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(active)
     }
 

@@ -3,13 +3,13 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     fetch_models_from_upstream_keys_concurrently, portal_model_is_allowed, unix_seconds,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState, DefaultModelContextConfig,
-    DownstreamConfig, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
-    ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
-    RouteHealthSnapshotDto, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision,
-    UsageLog, UsageLogQuery,
+    DownstreamConfig, FreekeySyncError, FreekeySyncItem, GlobalContextProfile,
+    KeyModelDiscoveryResult, ModelQualificationApplySummary, ModelQualificationEvidence,
+    ModelQualificationLevel, RouteHealthSnapshotDto, RuntimeCoordinationError, UpstreamConfig,
+    UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -69,6 +69,82 @@ pub(super) struct DashboardQuery {
 
 fn default_dashboard_range() -> String {
     "7d".to_string()
+}
+
+fn runtime_coordination_unavailable_admin_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({
+            "error": {
+                "message": "runtime coordination unavailable",
+                "code": "runtime_coordination_unavailable"
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn is_runtime_coordination_io_error(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.downcast_ref::<RuntimeCoordinationError>().is_some())
+}
+
+fn admin_io_error_response(error: std::io::Error, context: &str) -> Response {
+    if is_runtime_coordination_io_error(&error) {
+        return runtime_coordination_unavailable_admin_response();
+    }
+    let status = match error.kind() {
+        std::io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
+        std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(json!({"error": {"message": format!("{context}: {error}")}})),
+    )
+        .into_response()
+}
+
+fn admin_upstream_mutation_error_response(error: UpstreamMutationError) -> Response {
+    match error {
+        UpstreamMutationError::NotFound(message) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": message}})),
+        )
+            .into_response(),
+        UpstreamMutationError::InvalidInput(message) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": message}})),
+        )
+            .into_response(),
+        UpstreamMutationError::Persist(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": message}})),
+        )
+            .into_response(),
+        UpstreamMutationError::RuntimeCoordination(_) => {
+            runtime_coordination_unavailable_admin_response()
+        }
+    }
+}
+
+fn admin_freekey_sync_error_response(error: FreekeySyncError) -> Response {
+    match error {
+        FreekeySyncError::Persist(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": format!("Failed to sync freekey upstreams: {message}")
+                }
+            })),
+        )
+            .into_response(),
+        FreekeySyncError::RuntimeCoordination(_) => {
+            runtime_coordination_unavailable_admin_response()
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -446,20 +522,12 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
     let snapshot = state.snapshot().await;
     let runtime_snapshots = match state.upstream_runtime_snapshots().await {
         Ok(snapshots) => snapshots,
-        Err(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "error": {
-                        "message": "runtime coordination unavailable",
-                        "code": "runtime_coordination_unavailable"
-                    }
-                })),
-            )
-                .into_response();
-        }
+        Err(_) => return runtime_coordination_unavailable_admin_response(),
     };
-    let route_health_snapshots = state.route_health_snapshots(&snapshot.upstreams).await;
+    let route_health_snapshots = match state.route_health_snapshots(&snapshot.upstreams).await {
+        Ok(snapshots) => snapshots,
+        Err(_) => return runtime_coordination_unavailable_admin_response(),
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -824,15 +892,7 @@ pub(super) async fn admin_sync_freekey_upstreams(
             });
             (StatusCode::OK, Json(response)).into_response()
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": {
-                    "message": format!("Failed to sync freekey upstreams: {}", error)
-                }
-            })),
-        )
-            .into_response(),
+        Err(error) => admin_freekey_sync_error_response(error),
     }
 }
 
@@ -1327,14 +1387,7 @@ pub(super) async fn admin_create_upstreams_batch(
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": {"message": format!("保存失败: {}", e)},
-                "results": key_results,
-            })),
-        )
-            .into_response(),
+        Err(error) => admin_io_error_response(error, "保存失败"),
     }
 }
 
@@ -1450,6 +1503,9 @@ pub(super) async fn admin_qualify_upstream_models(
         {
             Ok(summary) => Some(summary),
             Err(error) => {
+                if is_runtime_coordination_io_error(&error) {
+                    return runtime_coordination_unavailable_admin_response();
+                }
                 let status = match error.kind() {
                     std::io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
                     std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
@@ -1599,27 +1655,8 @@ pub(super) async fn admin_create_upstream(
     }
 
     // Add the upstream
-    if let Err(e) = state.insert_upstream(upstream.clone()).await {
-        if e.kind() == std::io::ErrorKind::InvalidInput {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": e.to_string()
-                    }
-                })),
-            )
-                .into_response();
-        }
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": {
-                    "message": format!("Failed to create upstream: {}", e)
-                }
-            })),
-        )
-            .into_response();
+    if let Err(error) = state.insert_upstream(upstream.clone()).await {
+        return admin_io_error_response(error, "Failed to create upstream");
     }
 
     (StatusCode::CREATED, Json(upstream)).into_response()
@@ -1659,33 +1696,7 @@ pub(super) async fn admin_update_upstream(
 ) -> impl IntoResponse {
     match state.update_upstream_by_id(&id, updates).await {
         Ok(updated_upstream) => Json(json!(updated_upstream)).into_response(),
-        Err(UpstreamMutationError::NotFound(message)) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": {
-                    "message": message
-                }
-            })),
-        )
-            .into_response(),
-        Err(UpstreamMutationError::InvalidInput(message)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": {
-                    "message": message
-                }
-            })),
-        )
-            .into_response(),
-        Err(UpstreamMutationError::Persist(message)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": {
-                    "message": message
-                }
-            })),
-        )
-            .into_response(),
+        Err(error) => admin_upstream_mutation_error_response(error),
     }
 }
 pub(super) async fn admin_delete_upstream(
@@ -1703,15 +1714,7 @@ pub(super) async fn admin_delete_upstream(
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": {
-                    "message": format!("Failed to delete upstream: {}", e)
-                }
-            })),
-        )
-            .into_response(),
+        Err(error) => admin_io_error_response(error, "Failed to delete upstream"),
     }
 }
 
@@ -1737,15 +1740,7 @@ pub(super) async fn admin_toggle_upstream(
                 })),
             )
                 .into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": format!("Failed to update upstream: {}", e)
-                    }
-                })),
-            )
-                .into_response(),
+            Err(error) => admin_io_error_response(error, "Failed to update upstream"),
         }
     } else {
         (
@@ -2329,4 +2324,33 @@ pub(super) async fn admin_list_logs(
         "total_pages": page.total_pages,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        admin_freekey_sync_error_response, admin_io_error_response,
+        admin_upstream_mutation_error_response,
+    };
+    use crate::state::{FreekeySyncError, RuntimeCoordinationError, UpstreamMutationError};
+    use axum::http::{header, StatusCode};
+
+    fn assert_retryable_coordination_response(response: axum::response::Response) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+    }
+
+    #[test]
+    fn admin_mutation_errors_preserve_runtime_coordination_semantics() {
+        assert_retryable_coordination_response(admin_io_error_response(
+            std::io::Error::other(RuntimeCoordinationError),
+            "Failed to update upstream",
+        ));
+        assert_retryable_coordination_response(admin_upstream_mutation_error_response(
+            UpstreamMutationError::RuntimeCoordination(RuntimeCoordinationError),
+        ));
+        assert_retryable_coordination_response(admin_freekey_sync_error_response(
+            FreekeySyncError::RuntimeCoordination(RuntimeCoordinationError),
+        ));
+    }
 }

@@ -395,7 +395,10 @@ struct RouteAttemptContext<'a> {
     requested_value: Option<&'a str>,
 }
 
-async fn record_route_attempt(input: RouteAttemptContext<'_>, error: &GatewayError) {
+async fn record_route_attempt(
+    input: RouteAttemptContext<'_>,
+    error: &GatewayError,
+) -> Result<(), GatewayError> {
     let RouteAttemptContext {
         state,
         route_attempts,
@@ -413,10 +416,10 @@ async fn record_route_attempt(input: RouteAttemptContext<'_>, error: &GatewayErr
         protocol,
     } = route;
     let Some(class) = error.route_failure_class() else {
-        return;
+        return Ok(());
     };
     if class == FailureClass::RequestRejected {
-        return;
+        return Ok(());
     }
     if class == FailureClass::ModelUnsupported {
         state.submit_targeted_model_discovery(&upstream.id, key_fingerprint, runtime_model_slug);
@@ -444,8 +447,10 @@ async fn record_route_attempt(input: RouteAttemptContext<'_>, error: &GatewayErr
     for observation in route_attempts.take_newly_exhausted() {
         state
             .observe_route_set_failure(&observation.key, observation.class, observation.retry_after)
-            .await;
+            .await
+            .map_err(|_| runtime_coordination_unavailable_gateway_error())?;
     }
+    Ok(())
 }
 
 fn route_set_aggregate_key(
@@ -523,11 +528,15 @@ fn should_retry_same_route_once(error: &GatewayError) -> bool {
 async fn finish_route_health_permit(
     permit: &Arc<TokioMutex<Option<RouteHealthPermit>>>,
     outcome: RouteOutcome,
-) {
+) -> Result<(), GatewayError> {
     let permit = permit.lock().await.take();
     if let Some(permit) = permit {
-        permit.finish(outcome).await;
+        permit
+            .finish(outcome)
+            .await
+            .map_err(|_| runtime_coordination_unavailable_gateway_error())?;
     }
+    Ok(())
 }
 
 fn record_cooled_route_attempt(
@@ -2430,30 +2439,57 @@ impl StreamCompletionContext {
     }
 
     async fn mark_success(&self) {
-        finish_route_health_permit(&self.route_health_permit, RouteOutcome::Success).await;
+        if let Err(error) =
+            finish_route_health_permit(&self.route_health_permit, RouteOutcome::Success).await
+        {
+            tracing::error!(
+                error = %error,
+                "failed to finish route health after stream success"
+            );
+        }
     }
 
     async fn mark_failure(&self) {
-        finish_route_health_permit(
+        if let Err(error) = finish_route_health_permit(
             &self.route_health_permit,
             RouteOutcome::UncertainRouteFailure(FailureClass::Transport),
         )
-        .await;
+        .await
+        {
+            tracing::error!(
+                error = %error,
+                "failed to finish route health after stream failure"
+            );
+        }
         self.route_attempts
             .record_failure(&self.route_health_key, FailureClass::Transport, None);
         for observation in self.route_attempts.take_newly_exhausted() {
-            self.state
+            if let Err(error) = self
+                .state
                 .observe_route_set_failure(
                     &observation.key,
                     observation.class,
                     observation.retry_after,
                 )
-                .await;
+                .await
+            {
+                tracing::error!(
+                    error = %error,
+                    "failed to record route-set health after stream failure"
+                );
+            }
         }
     }
 
     async fn mark_cancelled(&self) {
-        finish_route_health_permit(&self.route_health_permit, RouteOutcome::Cancelled).await;
+        if let Err(error) =
+            finish_route_health_permit(&self.route_health_permit, RouteOutcome::Cancelled).await
+        {
+            tracing::error!(
+                error = %error,
+                "failed to cancel route health after stream completion"
+            );
+        }
     }
 }
 
@@ -3733,55 +3769,52 @@ async fn process_gateway_request_inner(
         return Err(error);
     }
 
-    let downstream_request_reservation =
-        match state.reserve_downstream_request(&downstream).await {
-            Ok(reservation) => reservation,
-            Err(rejection) => {
-                let retry_after_seconds = rejection.retry_after_seconds();
-                tracing::warn!(
-                    request_id = %request_id,
-                    downstream_key_id = %downstream.id,
-                    path = %request_path,
-                    original_model = %model,
-                    normalized_model = %normalized_model,
-                    retry_after_seconds,
-                    "downstream request admission rejected"
-                );
-                let error = GatewayError::downstream_admission_rejection(rejection);
-                let _ = append_gateway_usage_log(
-                    &state,
-                    &request_id,
-                    &downstream.id,
-                    &downstream.name,
-                    "",
-                    None,
-                    request_path,
-                    model,
-                    inference_strength.as_deref(),
-                    user_agent.as_deref(),
-                    None,
-                    error.status_code(),
-                    Some(error.to_string()),
-                    Some(error.error_category().to_string()),
-                    0,
-                    0,
-                    0,
-                    started,
-                )
-                .await;
-                active_request_guard.fail_and_finish(error.error_category());
-                return Err(error);
-            }
-        };
+    let downstream_request_reservation = match state.reserve_downstream_request(&downstream).await {
+        Ok(reservation) => reservation,
+        Err(rejection) => {
+            let retry_after_seconds = rejection.retry_after_seconds();
+            tracing::warn!(
+                request_id = %request_id,
+                downstream_key_id = %downstream.id,
+                path = %request_path,
+                original_model = %model,
+                normalized_model = %normalized_model,
+                retry_after_seconds,
+                "downstream request admission rejected"
+            );
+            let error = GatewayError::downstream_admission_rejection(rejection);
+            let _ = append_gateway_usage_log(
+                &state,
+                &request_id,
+                &downstream.id,
+                &downstream.name,
+                "",
+                None,
+                request_path,
+                model,
+                inference_strength.as_deref(),
+                user_agent.as_deref(),
+                None,
+                error.status_code(),
+                Some(error.to_string()),
+                Some(error.error_category().to_string()),
+                0,
+                0,
+                0,
+                started,
+            )
+            .await;
+            active_request_guard.fail_and_finish(error.error_category());
+            return Err(error);
+        }
+    };
 
     let downstream_concurrency_lease =
         match state.try_reserve_downstream_concurrency(&downstream).await {
             Ok(lease) => lease,
             Err(rejection) => {
                 let rollback_failed = state
-                    .rollback_downstream_request_reservation(
-                        downstream_request_reservation.clone(),
-                    )
+                    .rollback_downstream_request_reservation(downstream_request_reservation.clone())
                     .await
                     .is_err();
                 let rejection = if rollback_failed {
@@ -4050,9 +4083,7 @@ async fn process_gateway_request_inner(
             GatewayError::BadRequest("invalid or unavailable Claude thinking replay route".into());
         if should_rollback_downstream_reservation(&error) {
             let rollback = state
-                .rollback_downstream_request_reservation(
-                    downstream_request_reservation.clone(),
-                )
+                .rollback_downstream_request_reservation(downstream_request_reservation.clone())
                 .await;
             error = replace_error_on_runtime_rollback_failure(error, rollback);
         }
@@ -4733,6 +4764,7 @@ async fn process_gateway_request_inner(
                     let route_health_permit = match state
                         .reserve_route_health(&route_health_key, &key_health_key)
                         .await
+                        .map_err(|_| runtime_coordination_unavailable_gateway_error())?
                     {
                         RouteAvailability::Ready(permit) => Arc::new(TokioMutex::new(Some(permit))),
                         RouteAvailability::Cooling { class, retry_after }
@@ -4774,7 +4806,7 @@ async fn process_gateway_request_inner(
                                     &route_health_permit,
                                     RouteOutcome::Cancelled,
                                 )
-                                .await;
+                                .await?;
                                 if error.is_runtime_coordination_unavailable() {
                                     return Err(runtime_coordination_unavailable_gateway_error());
                                 }
@@ -5111,7 +5143,7 @@ async fn process_gateway_request_inner(
                                         &route_health_permit,
                                         RouteOutcome::Cancelled,
                                     )
-                                    .await;
+                                    .await?;
                                 }
                                 if selected_upstream_id != upstream.id
                                     && upstream_request_guard.release().await.is_err()
@@ -5235,7 +5267,7 @@ async fn process_gateway_request_inner(
                                             &route_health_permit,
                                             RouteOutcome::Success,
                                         )
-                                        .await;
+                                        .await?;
                                     }
                                 }
                                 if use_routing_affinity {
@@ -5277,12 +5309,7 @@ async fn process_gateway_request_inner(
                                     if defer_success_usage_log {
                                         result.usage_log_context = Some(context);
                                     } else if let Err(error) = context
-                                        .emit_fail_closed(
-                                            result.status,
-                                            None,
-                                            None,
-                                            result.usage,
-                                        )
+                                        .emit_fail_closed(result.status, None, None, result.usage)
                                         .await
                                     {
                                         downstream_concurrency_guard.release().await;
@@ -5340,8 +5367,8 @@ async fn process_gateway_request_inner(
                                     &route_health_permit,
                                     route_health_outcome(&error),
                                 )
-                                .await;
-                                record_route_attempt(route_attempt_context, &error).await;
+                                .await?;
+                                record_route_attempt(route_attempt_context, &error).await?;
                                 tracing::warn!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
@@ -5400,7 +5427,7 @@ async fn process_gateway_request_inner(
                                             &route_health_permit,
                                             RouteOutcome::Cancelled,
                                         )
-                                        .await;
+                                        .await?;
                                         return Err(
                                             runtime_coordination_unavailable_gateway_error(),
                                         );
@@ -5420,7 +5447,7 @@ async fn process_gateway_request_inner(
                                         retry_after,
                                     },
                                 )
-                                .await;
+                                .await?;
                                 finish_route_health_permit(
                                     &route_health_permit,
                                     if stream_only_recovery.consumed {
@@ -5442,7 +5469,7 @@ async fn process_gateway_request_inner(
                                             ))
                                     },
                                 )
-                                .await;
+                                .await?;
 
                                 break;
                             }
@@ -5484,7 +5511,7 @@ async fn process_gateway_request_inner(
                                         &route_health_permit,
                                         RouteOutcome::Cancelled,
                                     )
-                                    .await;
+                                    .await?;
                                     return Err(runtime_coordination_unavailable_gateway_error());
                                 }
                                 last_error = Some(GatewayError::TooManyRequests {
@@ -5501,7 +5528,7 @@ async fn process_gateway_request_inner(
                                         retry_after: Some(retry_after),
                                     },
                                 )
-                                .await;
+                                .await?;
                                 finish_route_health_permit(
                                     &route_health_permit,
                                     if stream_only_recovery.consumed {
@@ -5513,7 +5540,7 @@ async fn process_gateway_request_inner(
                                         }
                                     },
                                 )
-                                .await;
+                                .await?;
 
                                 break;
                             }
@@ -5522,7 +5549,7 @@ async fn process_gateway_request_inner(
                                     &route_health_permit,
                                     RouteOutcome::Success,
                                 )
-                                .await;
+                                .await?;
                                 maybe_record_chat_fallback_stage_failure(
                                     &state,
                                     &downstream.id,
@@ -5560,7 +5587,7 @@ async fn process_gateway_request_inner(
                                         &route_health_permit,
                                         RouteOutcome::Success,
                                     )
-                                    .await;
+                                    .await?;
                                     maybe_record_chat_fallback_stage_failure(
                                         &state,
                                         &downstream.id,
@@ -5592,8 +5619,8 @@ async fn process_gateway_request_inner(
                                         &route_health_permit,
                                         route_health_outcome(&error),
                                     )
-                                    .await;
-                                    record_route_attempt(route_attempt_context, &error).await;
+                                    .await?;
+                                    record_route_attempt(route_attempt_context, &error).await?;
                                 }
                                 maybe_record_chat_fallback_stage_failure(
                                     &state,
@@ -5629,7 +5656,7 @@ async fn process_gateway_request_inner(
                                     &route_health_permit,
                                     route_health_outcome(&error),
                                 )
-                                .await;
+                                .await?;
                                 tracing::debug!(
                                     request_id = %request_id,
                                     downstream_key_id = %downstream.id,
@@ -5669,12 +5696,12 @@ async fn process_gateway_request_inner(
                                         RouteOutcome::RouteFailure(FailureClass::TransientServer)
                                     },
                                 )
-                                .await;
+                                .await?;
                                 record_route_attempt(
                                     route_attempt_context,
                                     &GatewayError::TemporaryUpstreamUnavailable(message.clone()),
                                 )
-                                .await;
+                                .await?;
                                 last_error =
                                     Some(GatewayError::TemporaryUpstreamUnavailable(message));
                                 last_failure_upstream =
@@ -5698,8 +5725,8 @@ async fn process_gateway_request_inner(
                                     &route_health_permit,
                                     route_health_outcome(&error),
                                 )
-                                .await;
-                                record_route_attempt(route_attempt_context, &error).await;
+                                .await?;
+                                record_route_attempt(route_attempt_context, &error).await?;
                                 last_error = Some(error);
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -5727,11 +5754,10 @@ async fn process_gateway_request_inner(
             (!payload_rejected && !stream_only_final_attempt && !round_ledger.is_empty())
                 .then(|| round_ledger.terminal_failure());
         let round_recovery = match round_terminal {
-            Some(TerminalFailure::Temporary { .. }) => {
-                state
-                    .earliest_temporary_route_recovery(&request_route_attempts.eligible_routes())
-                    .await
-            }
+            Some(TerminalFailure::Temporary { .. }) => state
+                .earliest_temporary_route_recovery(&request_route_attempts.eligible_routes())
+                .await
+                .map_err(|_| runtime_coordination_unavailable_gateway_error())?,
             _ => None,
         };
 
@@ -5775,7 +5801,8 @@ async fn process_gateway_request_inner(
         let mut error = if should_aggregate {
             let live_recovery = state
                 .earliest_temporary_route_recovery(&request_route_attempts.eligible_routes())
-                .await;
+                .await
+                .map_err(|_| runtime_coordination_unavailable_gateway_error())?;
             terminal_route_failure_error(
                 &attempt_ledger,
                 request_route_attempts.routing_round(),

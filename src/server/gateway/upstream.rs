@@ -653,6 +653,7 @@ fn send_route_hedge_attempt(
             .state
             .reserve_route_health(&route_health_key, &key_health_key)
             .await
+            .map_err(|_| super::runtime_coordination_unavailable_gateway_error())?
         {
             crate::state::RouteAvailability::Ready(permit) => {
                 std::sync::Arc::new(tokio::sync::Mutex::new(Some(permit)))
@@ -673,7 +674,7 @@ fn send_route_hedge_attempt(
             Ok(lease) => lease,
             Err(error) => {
                 super::finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled)
-                    .await;
+                    .await?;
                 return Err(if error.is_runtime_coordination_unavailable() {
                     super::runtime_coordination_unavailable_gateway_error()
                 } else {
@@ -755,7 +756,7 @@ fn send_route_hedge_attempt(
                     &completion.route_health_permit,
                     super::route_health_outcome(&error),
                 )
-                .await;
+                .await?;
                 if !context.route_attempts.should_attempt(&route_health_key) {
                     super::record_route_attempt(
                         super::RouteAttemptContext {
@@ -775,7 +776,7 @@ fn send_route_hedge_attempt(
                         },
                         &error,
                     )
-                    .await;
+                    .await?;
                 }
                 return Err(error);
             }

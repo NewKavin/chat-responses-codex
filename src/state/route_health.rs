@@ -4,6 +4,7 @@
 //! kept separate from the upstream admission state because a credential or capacity failure on
 //! one virtual route must not make the other routes of the same account unavailable.
 
+use super::redis_runtime::{RedisRuntimeCoordinator, RuntimeCoordinationError};
 use super::types::{
     RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig,
     DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
@@ -96,8 +97,29 @@ impl HealthLease {
 }
 
 pub struct RouteHealthPermit {
-    registry: Arc<Mutex<RouteHealthRegistry>>,
-    lease: Option<HealthLease>,
+    backend: Option<RouteHealthPermitBackend>,
+}
+
+enum RouteHealthPermitBackend {
+    Local {
+        registry: Arc<Mutex<RouteHealthRegistry>>,
+        lease: HealthLease,
+    },
+    Redis {
+        coordinator: Arc<RedisRuntimeCoordinator>,
+        lease: RedisHealthLease,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RedisHealthLease {
+    pub(super) route: RouteHealthKey,
+    pub(super) key: KeyHealthKey,
+    pub(super) lease_id: String,
+    pub(super) key_generation: Option<u64>,
+    pub(super) route_generation: Option<u64>,
+    pub(super) route_state_generation: Option<u64>,
+    pub(super) half_open: bool,
 }
 
 impl std::fmt::Debug for RouteHealthPermit {
@@ -105,49 +127,91 @@ impl std::fmt::Debug for RouteHealthPermit {
         formatter
             .debug_struct("RouteHealthPermit")
             .field(
-                "half_open",
-                &self.lease.as_ref().is_some_and(HealthLease::is_half_open),
+                "backend",
+                &self.backend.as_ref().map(|backend| match backend {
+                    RouteHealthPermitBackend::Local { .. } => "local",
+                    RouteHealthPermitBackend::Redis { .. } => "redis",
+                }),
             )
+            .field("half_open", &self.is_half_open())
             .finish()
     }
 }
 
 impl RouteHealthPermit {
-    pub(crate) fn new(registry: Arc<Mutex<RouteHealthRegistry>>, lease: HealthLease) -> Self {
+    pub(crate) fn new_local(registry: Arc<Mutex<RouteHealthRegistry>>, lease: HealthLease) -> Self {
         Self {
-            registry,
-            lease: Some(lease),
+            backend: Some(RouteHealthPermitBackend::Local { registry, lease }),
+        }
+    }
+
+    pub(crate) fn new_redis(
+        coordinator: Arc<RedisRuntimeCoordinator>,
+        lease: RedisHealthLease,
+    ) -> Self {
+        Self {
+            backend: Some(RouteHealthPermitBackend::Redis { coordinator, lease }),
         }
     }
 
     pub fn is_half_open(&self) -> bool {
-        self.lease.as_ref().is_some_and(HealthLease::is_half_open)
+        self.backend.as_ref().is_some_and(|backend| match backend {
+            RouteHealthPermitBackend::Local { lease, .. } => lease.is_half_open(),
+            RouteHealthPermitBackend::Redis { lease, .. } => lease.half_open,
+        })
     }
 
     pub fn route(&self) -> Option<&RouteHealthKey> {
-        self.lease.as_ref().map(HealthLease::route)
+        self.backend.as_ref().map(|backend| match backend {
+            RouteHealthPermitBackend::Local { lease, .. } => lease.route(),
+            RouteHealthPermitBackend::Redis { lease, .. } => &lease.route,
+        })
     }
 
-    pub async fn finish(mut self, outcome: RouteOutcome) {
-        let Some(lease) = self.lease.take() else {
-            return;
+    pub async fn finish(mut self, outcome: RouteOutcome) -> Result<(), RuntimeCoordinationError> {
+        let Some(backend) = self.backend.take() else {
+            return Ok(());
         };
-        self.registry.lock().await.finish(lease, outcome);
+        match backend {
+            RouteHealthPermitBackend::Local { registry, lease } => {
+                registry.lock().await.finish(lease, outcome);
+                Ok(())
+            }
+            RouteHealthPermitBackend::Redis { coordinator, lease } => {
+                coordinator.finish_route_health(lease, outcome).await
+            }
+        }
     }
 }
 
 impl Drop for RouteHealthPermit {
     fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
+        let Some(backend) = self.backend.take() else {
             return;
         };
-        let registry = self.registry.clone();
         let Ok(handle) = Handle::try_current() else {
             return;
         };
-        handle.spawn(async move {
-            registry.lock().await.finish(lease, RouteOutcome::Cancelled);
-        });
+        match backend {
+            RouteHealthPermitBackend::Local { registry, lease } => {
+                handle.spawn(async move {
+                    registry.lock().await.finish(lease, RouteOutcome::Cancelled);
+                });
+            }
+            RouteHealthPermitBackend::Redis { coordinator, lease } => {
+                handle.spawn(async move {
+                    if let Err(error) = coordinator
+                        .finish_route_health(lease, RouteOutcome::Cancelled)
+                        .await
+                    {
+                        tracing::error!(
+                            error = %error,
+                            "failed to cancel Redis route health permit"
+                        );
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -367,100 +431,20 @@ impl RouteHealthRegistry {
 
     fn upstream_snapshot(&self, upstream: &UpstreamConfig, now: Instant) -> RouteHealthSnapshotDto {
         let routes = self.enumerable_routes(upstream);
-        let mut snapshot = RouteHealthSnapshotDto {
-            failure_classes: RouteFailureClass::ALL
-                .into_iter()
-                .map(|class| (class.as_str().to_string(), 0))
-                .collect::<BTreeMap<_, _>>(),
-            ..RouteHealthSnapshotDto::default()
-        };
-
-        for route in routes {
-            let key = KeyHealthKey {
-                upstream_id: route.upstream_id.clone(),
-                key_fingerprint: route.key_fingerprint.clone(),
-            };
-            let key_state = self.keys.get(&key);
-            let route_state = self.routes.get(&route);
-            let active_state = key_state
-                .filter(|state| state.is_active())
-                .or_else(|| route_state.filter(|state| state.is_active()));
-            if let Some(state) = active_state {
-                snapshot.half_open_routes += 1;
-                increment_failure_class(&mut snapshot, state.last_failure_class);
-                continue;
-            }
-
-            let cooling_state = key_state
-                .filter(|state| state.is_cooling(now))
-                .or_else(|| route_state.filter(|state| state.is_cooling(now)));
-            if let Some(state) = cooling_state {
-                snapshot.cooldown_routes += 1;
-                increment_failure_class(&mut snapshot, state.last_failure_class);
-                let retry_after = duration_seconds_ceil(state.retry_after(now));
-                snapshot.earliest_retry_after_seconds = Some(
-                    snapshot
-                        .earliest_retry_after_seconds
-                        .map_or(retry_after, |current| current.min(retry_after)),
-                );
-            } else {
-                snapshot.healthy_routes += 1;
-            }
-        }
-
-        snapshot
+        summarize_route_health_routes(
+            routes,
+            |route| {
+                self.routes
+                    .get(route)
+                    .map(|state| health_snapshot(state, now))
+            },
+            |key| self.keys.get(key).map(|state| health_snapshot(state, now)),
+        )
     }
 
     fn enumerable_routes(&self, upstream: &UpstreamConfig) -> HashSet<RouteHealthKey> {
-        if !upstream.active {
-            return HashSet::new();
-        }
-        let protocols = upstream
-            .supported_protocols()
-            .into_iter()
-            .map(WireProtocol::from)
-            .collect::<HashSet<_>>();
-        let current_fingerprints = upstream
-            .available_keys()
-            .into_iter()
-            .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
-            .collect::<HashSet<_>>();
-
-        if upstream.api_key_models.is_empty() {
-            return self
-                .routes
-                .keys()
-                .filter(|route| {
-                    route.upstream_id == upstream.id
-                        && current_fingerprints.contains(&route.key_fingerprint)
-                        && protocols.contains(&route.protocol)
-                })
-                .cloned()
-                .collect();
-        }
-
-        let mut routes = HashSet::new();
-        for mapping in &upstream.api_key_models {
-            let key_fingerprint = upstream_key_fingerprint(&upstream.id, &mapping.api_key);
-            if !current_fingerprints.contains(&key_fingerprint) {
-                continue;
-            }
-            for model in &mapping.supported_models {
-                let model = model.trim();
-                if model.is_empty() {
-                    continue;
-                }
-                for protocol in &protocols {
-                    routes.insert(RouteHealthKey {
-                        upstream_id: upstream.id.clone(),
-                        key_fingerprint: key_fingerprint.clone(),
-                        runtime_model_slug: model.to_string(),
-                        protocol: *protocol,
-                    });
-                }
-            }
-        }
-        routes
+        let existing_routes = self.routes.keys().cloned().collect();
+        enumerable_route_health_routes(upstream, &existing_routes)
     }
 
     pub fn route_count(&self) -> usize {
@@ -933,6 +917,184 @@ impl RouteHealthRegistry {
     }
 }
 
+pub(super) fn enumerable_route_health_routes(
+    upstream: &UpstreamConfig,
+    existing_routes: &HashSet<RouteHealthKey>,
+) -> HashSet<RouteHealthKey> {
+    if !upstream.active {
+        return HashSet::new();
+    }
+    let protocols = upstream
+        .supported_protocols()
+        .into_iter()
+        .map(WireProtocol::from)
+        .collect::<HashSet<_>>();
+    let current_fingerprints = upstream
+        .available_keys()
+        .into_iter()
+        .map(|api_key| upstream_key_fingerprint(&upstream.id, &api_key))
+        .collect::<HashSet<_>>();
+
+    if upstream.api_key_models.is_empty() {
+        return existing_routes
+            .iter()
+            .filter(|route| {
+                route.upstream_id == upstream.id
+                    && current_fingerprints.contains(&route.key_fingerprint)
+                    && protocols.contains(&route.protocol)
+            })
+            .cloned()
+            .collect();
+    }
+
+    let mut routes = HashSet::new();
+    for mapping in &upstream.api_key_models {
+        let key_fingerprint = upstream_key_fingerprint(&upstream.id, &mapping.api_key);
+        if !current_fingerprints.contains(&key_fingerprint) {
+            continue;
+        }
+        for model in &mapping.supported_models {
+            let model = model.trim();
+            if model.is_empty() {
+                continue;
+            }
+            for protocol in &protocols {
+                routes.insert(RouteHealthKey {
+                    upstream_id: upstream.id.clone(),
+                    key_fingerprint: key_fingerprint.clone(),
+                    runtime_model_slug: model.to_string(),
+                    protocol: *protocol,
+                });
+            }
+        }
+    }
+    routes
+}
+
+pub(super) fn route_health_route_is_current(
+    upstreams: &[UpstreamConfig],
+    route: &RouteHealthKey,
+) -> bool {
+    let Some(upstream) = upstreams
+        .iter()
+        .find(|candidate| candidate.id == route.upstream_id && candidate.active)
+    else {
+        return false;
+    };
+    if !upstream
+        .supported_protocols()
+        .into_iter()
+        .map(WireProtocol::from)
+        .any(|protocol| protocol == route.protocol)
+    {
+        return false;
+    }
+    if !upstream
+        .available_keys()
+        .iter()
+        .any(|api_key| upstream_key_fingerprint(&upstream.id, api_key) == route.key_fingerprint)
+    {
+        return false;
+    }
+    upstream.route_models().is_empty()
+        || upstream
+            .keys_for_model(&route.runtime_model_slug)
+            .iter()
+            .any(|api_key| upstream_key_fingerprint(&upstream.id, api_key) == route.key_fingerprint)
+}
+
+pub(super) fn route_health_key_is_current(
+    upstreams: &[UpstreamConfig],
+    key: &KeyHealthKey,
+) -> bool {
+    upstreams.iter().any(|upstream| {
+        upstream.id == key.upstream_id
+            && upstream.active
+            && upstream.available_keys().iter().any(|api_key| {
+                upstream_key_fingerprint(&upstream.id, api_key) == key.key_fingerprint
+            })
+    })
+}
+
+pub(super) fn route_health_aggregate_is_current(
+    upstreams: &[UpstreamConfig],
+    aggregate: &RouteSetAggregateKey,
+) -> bool {
+    upstreams.iter().any(|upstream| {
+        upstream.id == aggregate.upstream_id
+            && upstream.active
+            && upstream
+                .supported_protocols()
+                .into_iter()
+                .map(WireProtocol::from)
+                .any(|protocol| protocol == aggregate.protocol)
+            && (upstream.route_models().is_empty()
+                || upstream
+                    .route_models()
+                    .iter()
+                    .any(|model| model == &aggregate.runtime_model_slug))
+    })
+}
+
+pub(super) fn summarize_route_health_routes<R, K>(
+    routes: HashSet<RouteHealthKey>,
+    mut route_snapshot: R,
+    mut key_snapshot: K,
+) -> RouteHealthSnapshotDto
+where
+    R: FnMut(&RouteHealthKey) -> Option<HealthStateSnapshot>,
+    K: FnMut(&KeyHealthKey) -> Option<HealthStateSnapshot>,
+{
+    let mut snapshot = RouteHealthSnapshotDto {
+        failure_classes: RouteFailureClass::ALL
+            .into_iter()
+            .map(|class| (class.as_str().to_string(), 0))
+            .collect::<BTreeMap<_, _>>(),
+        ..RouteHealthSnapshotDto::default()
+    };
+
+    for route in routes {
+        let key = KeyHealthKey {
+            upstream_id: route.upstream_id.clone(),
+            key_fingerprint: route.key_fingerprint.clone(),
+        };
+        let key_state = key_snapshot(&key);
+        let route_state = route_snapshot(&route);
+        let active_state = key_state
+            .as_ref()
+            .filter(|state| state.half_open)
+            .or_else(|| route_state.as_ref().filter(|state| state.half_open));
+        if let Some(state) = active_state {
+            snapshot.half_open_routes += 1;
+            increment_failure_class(&mut snapshot, state.last_failure_class);
+            continue;
+        }
+
+        let cooling_state = key_state
+            .as_ref()
+            .filter(|state| state.cooldown_remaining > Duration::ZERO)
+            .or_else(|| {
+                route_state
+                    .as_ref()
+                    .filter(|state| state.cooldown_remaining > Duration::ZERO)
+            });
+        if let Some(state) = cooling_state {
+            snapshot.cooldown_routes += 1;
+            increment_failure_class(&mut snapshot, state.last_failure_class);
+            let retry_after = duration_seconds_ceil(state.cooldown_remaining);
+            snapshot.earliest_retry_after_seconds = Some(
+                snapshot
+                    .earliest_retry_after_seconds
+                    .map_or(retry_after, |current| current.min(retry_after)),
+            );
+        } else {
+            snapshot.healthy_routes += 1;
+        }
+    }
+
+    snapshot
+}
+
 fn increment_failure_class(
     snapshot: &mut RouteHealthSnapshotDto,
     class: Option<RouteFailureClass>,
@@ -980,7 +1142,7 @@ fn health_state_recovery(state: &HealthState, now: Instant) -> Option<RouteRecov
     Some(RouteRecovery { class, retry_after })
 }
 
-fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {
+pub(super) fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {
     matches!(
         class,
         RouteFailureClass::CapacityUnavailable
@@ -993,7 +1155,7 @@ fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {
     )
 }
 
-fn key_failure_has_cooldown(class: RouteFailureClass) -> bool {
+pub(super) fn key_failure_has_cooldown(class: RouteFailureClass) -> bool {
     matches!(
         class,
         RouteFailureClass::Credentials | RouteFailureClass::KeyQuota
@@ -1040,7 +1202,7 @@ fn route_cooldown_with_concurrency_delays(
     route_cooldown(class, step, route, max)
 }
 
-fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
+pub(super) fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
     const MAX_PROBE_DELAY_MS: u64 = 60_000;
     let values = if values.is_empty()
         || values
@@ -1053,6 +1215,50 @@ fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
         values
     };
     values.into_iter().map(Duration::from_millis).collect()
+}
+
+pub(super) fn route_cooldown_schedule_ms(
+    route: &RouteHealthKey,
+    class: RouteFailureClass,
+    concurrency_probe_delays: &[Duration],
+) -> Vec<u64> {
+    let max = if class == RouteFailureClass::ModelUnsupported {
+        MODEL_QUARANTINE_MAX
+    } else {
+        ROUTE_COOLDOWN_MAX
+    };
+    (1..=17)
+        .map(|step| {
+            duration_millis_saturating(route_cooldown_with_concurrency_delays(
+                class,
+                step,
+                route,
+                max,
+                concurrency_probe_delays,
+            ))
+        })
+        .collect()
+}
+
+pub(super) fn key_cooldown_schedule_ms(key: &KeyHealthKey, class: RouteFailureClass) -> Vec<u64> {
+    let max = if class == RouteFailureClass::Credentials {
+        KEY_COOLDOWN_MAX
+    } else {
+        ROUTE_COOLDOWN_MAX
+    };
+    (1..=17)
+        .map(|step| duration_millis_saturating(key_cooldown(class, step, key, max)))
+        .collect()
+}
+
+pub(super) fn concurrency_probe_schedule_ms(delays: &[Duration]) -> Vec<u64> {
+    (1..=17)
+        .map(|step| duration_millis_saturating(sequence_delay(delays, step)))
+        .collect()
+}
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn sequence_delay(delays: &[Duration], step: u32) -> Duration {

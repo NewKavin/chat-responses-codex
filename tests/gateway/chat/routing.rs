@@ -945,6 +945,7 @@ async fn all_physically_attempted_key_routes_create_one_route_set_observation() 
         let health = state
             .route_set_health_snapshot(&aggregate)
             .await
+            .expect("route set health snapshot")
             .expect("exhausting all physically attempted routes should update the route set");
         assert_eq!(health.consecutive_failures, 1);
         assert_eq!(
@@ -1136,6 +1137,7 @@ async fn feature_mismatch_hints_only_block_the_matching_effort_on_that_key() {
                 protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
             })
             .await
+            .expect("route health snapshot")
             .is_none());
     })
     .await;
@@ -1271,6 +1273,7 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
         let health = state
             .route_health_snapshot(&route)
             .await
+            .expect("route health snapshot")
             .expect("429 should create exact route health state");
         assert_eq!(
             health.last_failure_class,
