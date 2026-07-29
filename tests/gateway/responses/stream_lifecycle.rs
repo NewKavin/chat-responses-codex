@@ -453,11 +453,12 @@ async fn stream_interruption_marks_interrupted_not_success() {
         log.error_category.as_deref(),
         Some("stream_incomplete_close")
     );
-    assert!(
-        log.error_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("client disconnected"),
+    assert_eq!(
+        log.error_message.as_deref(),
+        Some(
+            "downstream response body dropped before semantic completion \
+             (partial output delivered)"
+        ),
         "unexpected interruption message: {:?}",
         log.error_message
     );
@@ -947,6 +948,154 @@ async fn translated_drop_after_text_delta_is_incomplete_close() {
     assert!(delivered.len() > 1);
     assert_eq!(status, 499);
     assert_eq!(category, "stream_incomplete_close");
+}
+
+#[tokio::test]
+async fn native_drop_after_response_incomplete_is_not_499() {
+    let tempdir = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(|| async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            let output = stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    concat!(
+                        "event: response.created\n",
+                        "data: {\"type\":\"response.created\",\"response\":{",
+                        "\"id\":\"resp-incomplete\",\"object\":\"response\",",
+                        "\"created_at\":1,\"status\":\"in_progress\",",
+                        "\"model\":\"gpt-4\",\"output\":[]}}\n\n",
+                        "event: response.output_text.delta\n",
+                        "data: {\"type\":\"response.output_text.delta\",",
+                        "\"response_id\":\"resp-incomplete\",\"item_id\":\"msg-1\",",
+                        "\"output_index\":0,\"content_index\":0,",
+                        "\"delta\":\"partial output\"}\n\n"
+                    )
+                    .as_bytes(),
+                )),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    concat!(
+                        "event: response.incomplete\n",
+                        "data: {\"type\":\"response.incomplete\",\"response\":{",
+                        "\"id\":\"resp-incomplete\",\"object\":\"response\",",
+                        "\"created_at\":1,\"status\":\"incomplete\",",
+                        "\"incomplete_details\":{\"reason\":\"max_output_tokens\"},",
+                        "\"model\":\"gpt-4\",\"output\":[]}}\n\n"
+                    )
+                    .as_bytes(),
+                )),
+            ])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+            (StatusCode::OK, headers, Body::from_stream(output))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-1".into(),
+                name: "primary".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["gpt-4".into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            ..Default::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            ..Default::default()
+        },
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-4", "input": "Hello", "stream": true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let mut saw_incomplete = false;
+    for _ in 0..8 {
+        let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("timed out waiting for response.incomplete")
+            .expect("expected an SSE frame")
+            .expect("expected a valid SSE frame")
+            .into_data()
+            .expect("expected SSE data");
+        if String::from_utf8_lossy(&frame).contains("response.incomplete") {
+            saw_incomplete = true;
+            break;
+        }
+    }
+    assert!(
+        saw_incomplete,
+        "upstream terminal must reach the downstream"
+    );
+    drop(body);
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while state.snapshot().await.usage_logs.len() != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal drop should emit one usage log");
+
+    let snapshot = state.snapshot().await;
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.status_code, StatusCode::OK.as_u16());
+    assert_eq!(log.error_category, None);
+    assert_eq!(log.error_message, None);
+    assert_eq!(snapshot.upstreams[0].failure_count, 0);
 }
 
 #[tokio::test]

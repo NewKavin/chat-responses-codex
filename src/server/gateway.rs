@@ -2536,7 +2536,9 @@ impl PreHeaderStreamCancellation {
             Some(context.completion),
             Some(context.usage_log),
             None,
-            stream_drop_interruption_message(false),
+            StreamInterruption::DownstreamBodyDropped {
+                usable_output_delivered: false,
+            },
         )
         .await;
     }
@@ -3189,16 +3191,38 @@ fn classify_stream_failure(error_message: &str) -> (StatusCode, &'static str) {
     }
 }
 
-/// Build a discriminative interruption message for the Drop path based on
-/// how far the stream progressed before the downstream client closed.
-/// Splits the catch-all `stream_interrupted` bucket into
-/// `stream_client_cancelled` (no output yet) and `stream_incomplete_close`
-/// (some output received but not completed) for actionable 499 triage.
-fn stream_drop_interruption_message(usable_output_seen: bool) -> String {
-    if usable_output_seen {
-        "client disconnected during stream (partial output received)".to_string()
-    } else {
-        "client disconnected before any upstream output".to_string()
+/// Describe the observed downstream body lifecycle without inferring human
+/// intent from an Axum body drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamInterruption {
+    DownstreamBodyDropped { usable_output_delivered: bool },
+}
+
+impl StreamInterruption {
+    fn status_and_category(self) -> (StatusCode, &'static str) {
+        let status = StatusCode::from_u16(499).expect("499 is a valid HTTP status code");
+        match self {
+            Self::DownstreamBodyDropped {
+                usable_output_delivered: true,
+            } => (status, "stream_incomplete_close"),
+            Self::DownstreamBodyDropped {
+                usable_output_delivered: false,
+            } => (status, "stream_client_cancelled"),
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::DownstreamBodyDropped {
+                usable_output_delivered: true,
+            } => {
+                "downstream response body dropped before semantic completion \
+                 (partial output delivered)"
+            }
+            Self::DownstreamBodyDropped {
+                usable_output_delivered: false,
+            } => "downstream response body dropped before semantic completion",
+        }
     }
 }
 
@@ -3262,6 +3286,25 @@ async fn finalize_stream_interruption(
     completion_context: Option<StreamCompletionContext>,
     log_context: Option<StreamUsageLogContext>,
     usage: Option<(u64, u64, u64)>,
+    interruption: StreamInterruption,
+) {
+    let (status, error_category) = interruption.status_and_category();
+    finalize_stream_error(
+        completion_context,
+        log_context,
+        usage,
+        status,
+        error_category,
+        interruption.message().to_string(),
+        false,
+    )
+    .await;
+}
+
+async fn finalize_stream_interruption_message(
+    completion_context: Option<StreamCompletionContext>,
+    log_context: Option<StreamUsageLogContext>,
+    usage: Option<(u64, u64, u64)>,
     error_message: String,
 ) {
     let (status, error_category) = classify_stream_failure(&error_message);
@@ -3282,7 +3325,7 @@ fn spawn_stream_interruption_cleanup(
     completion_context: Option<StreamCompletionContext>,
     log_context: Option<StreamUsageLogContext>,
     usage: Option<(u64, u64, u64)>,
-    error_message: String,
+    interruption: StreamInterruption,
 ) {
     if completion_context.is_none() && log_context.is_none() {
         return;
@@ -3290,7 +3333,7 @@ fn spawn_stream_interruption_cleanup(
 
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
-            finalize_stream_interruption(completion_context, log_context, usage, error_message)
+            finalize_stream_interruption(completion_context, log_context, usage, interruption)
                 .await;
         });
     } else {
@@ -3301,7 +3344,7 @@ fn spawn_stream_interruption_cleanup(
 /// When a stream finished normally (received [DONE]) but the downstream client
 /// disconnected before all pending frames were delivered, finalize as success
 /// rather than recording a spurious "stream disconnected" error.
-fn spawn_stream_normal_completion_cleanup(
+fn spawn_stream_terminal_cleanup(
     completion_context: Option<StreamCompletionContext>,
     log_context: Option<StreamUsageLogContext>,
     usage: Option<(u64, u64, u64)>,

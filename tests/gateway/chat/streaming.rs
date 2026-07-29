@@ -4975,13 +4975,14 @@ async fn stream_interruption_marks_interrupted_not_success() {
         log.error_category.as_deref(),
         Some("stream_incomplete_close")
     );
-    assert!(
-        log.error_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("client disconnected"),
-        "unexpected interruption message: {:?}",
-        log.error_message
+    assert_eq!(
+        log.error_message.as_deref(),
+        Some(
+            "downstream response body dropped before semantic completion \
+             (partial output delivered)"
+        ),
+        "the usage log must describe the observed body lifecycle without \
+         claiming a person cancelled the request"
     );
     let upstream = snapshot
         .upstreams

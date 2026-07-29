@@ -622,7 +622,7 @@ pub(super) fn proxied_stream_body(
         response_history_context,
         response_history_stored: false,
         finished: false,
-        semantic_completion_emitted: false,
+        semantic_terminal_emitted: false,
         usable_output_seen: false,
         usage_log_flushed: false,
     };
@@ -707,7 +707,7 @@ pub(super) fn proxied_stream_body(
                         "proxied",
                         error_category,
                         state.usable_output_seen,
-                        state.semantic_completion_emitted,
+                        state.semantic_terminal_emitted,
                     );
                     state
                         .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
@@ -778,7 +778,7 @@ struct ProxiedStreamState {
     response_history_context: Option<ResponseHistoryContext>,
     response_history_stored: bool,
     finished: bool,
-    semantic_completion_emitted: bool,
+    semantic_terminal_emitted: bool,
     usable_output_seen: bool,
     usage_log_flushed: bool,
 }
@@ -881,7 +881,7 @@ impl ProxiedStreamState {
                 self.usage = Some(usage);
             }
             if self.canonicalizer.is_some() && chat_stream_event_is_semantically_complete(&event) {
-                self.semantic_completion_emitted = true;
+                self.semantic_terminal_emitted = true;
             }
             let log_context = self.log_context.as_ref();
             let events = if let Some(canonicalizer) = self.canonicalizer.as_mut() {
@@ -910,8 +910,8 @@ impl ProxiedStreamState {
                 if stream_event_has_usable_output(&event) {
                     self.usable_output_seen = true;
                 }
-                if event.get("type").and_then(Value::as_str) == Some("response.completed") {
-                    self.semantic_completion_emitted = true;
+                if responses_event_is_terminal(&event) {
+                    self.semantic_terminal_emitted = true;
                 }
                 if !self.response_history_stored {
                     if let Some(context) = self.response_history_context.as_ref() {
@@ -958,7 +958,7 @@ impl ProxiedStreamState {
 
     fn should_emit_empty_response_error(&self) -> bool {
         !self.usage_log_flushed
-            && (self.finished || self.semantic_completion_emitted)
+            && (self.finished || self.semantic_terminal_emitted)
             && !self.usable_output_seen
             && stream_output_tokens_are_zero_or_unknown(self.usage)
     }
@@ -1080,7 +1080,8 @@ impl ProxiedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        finalize_stream_interruption(completion_context, log_context, usage, error_message).await;
+        finalize_stream_interruption_message(completion_context, log_context, usage, error_message)
+            .await;
     }
 
     async fn mark_upstream_stream_error(
@@ -1117,16 +1118,19 @@ impl Drop for ProxiedStreamState {
         let log_context = self.log_context.take();
         let usage = self.usage;
 
-        if self.finished || self.semantic_completion_emitted {
-            // Responses completes at `response.completed`; Chat completes when
-            // all choices in a terminal chunk carry a finish reason.
-            spawn_stream_normal_completion_cleanup(completion_context, log_context, usage);
+        if self.finished || self.semantic_terminal_emitted {
+            // Responses reaches a terminal lifecycle at `response.completed`
+            // or `response.incomplete`; Chat does so when every choice carries
+            // a finish reason.
+            spawn_stream_terminal_cleanup(completion_context, log_context, usage);
         } else {
             spawn_stream_interruption_cleanup(
                 completion_context,
                 log_context,
                 usage,
-                stream_drop_interruption_message(self.usable_output_seen),
+                StreamInterruption::DownstreamBodyDropped {
+                    usable_output_delivered: self.usable_output_seen,
+                },
             );
         }
     }
@@ -1151,6 +1155,13 @@ fn normalize_responses_event_usage(event: &mut Value) -> bool {
         return *usage != original;
     }
     false
+}
+
+fn responses_event_is_terminal(event: &Value) -> bool {
+    matches!(
+        event.get("type").and_then(Value::as_str),
+        Some("response.completed" | "response.incomplete")
+    )
 }
 
 fn chat_stream_event_is_semantically_complete(event: &Value) -> bool {
@@ -1213,7 +1224,7 @@ pub(super) fn translated_stream_body(
         endpoint,
         next_responses_sequence_number: 1,
         finished: false,
-        semantic_completion_emitted: false,
+        semantic_terminal_emitted: false,
         usable_output_observed: false,
         usable_output_delivered: false,
         usage_log_flushed: false,
@@ -1301,7 +1312,7 @@ pub(super) fn translated_stream_body(
                         "translated",
                         error_category,
                         state.usable_output_delivered,
-                        state.semantic_completion_emitted,
+                        state.semantic_terminal_emitted,
                     );
                     state
                         .mark_upstream_stream_error(error_message.clone(), is_timeout, is_decode)
@@ -1378,7 +1389,7 @@ struct TranslatedStreamState {
     endpoint: EndpointKind,
     next_responses_sequence_number: u64,
     finished: bool,
-    semantic_completion_emitted: bool,
+    semantic_terminal_emitted: bool,
     usable_output_observed: bool,
     usable_output_delivered: bool,
     usage_log_flushed: bool,
@@ -1518,10 +1529,8 @@ impl TranslatedStreamState {
                         return Err(error);
                     }
                 };
-                if translated.iter().any(|item| {
-                    item.get("type").and_then(Value::as_str) == Some("response.completed")
-                }) {
-                    self.semantic_completion_emitted = true;
+                if translated.iter().any(responses_event_is_terminal) {
+                    self.semantic_terminal_emitted = true;
                 }
                 if !self.response_history_stored {
                     if let Some(context) = self.response_history_context.as_ref() {
@@ -1589,11 +1598,8 @@ impl TranslatedStreamState {
             .translator
             .finish()
             .map_err(|_| upstream_stream_translation_error())?;
-        if translated
-            .iter()
-            .any(|item| item.get("type").and_then(Value::as_str) == Some("response.completed"))
-        {
-            self.semantic_completion_emitted = true;
+        if translated.iter().any(responses_event_is_terminal) {
+            self.semantic_terminal_emitted = true;
         }
         if !self.response_history_stored {
             if let Some(context) = self.response_history_context.as_ref() {
@@ -1619,7 +1625,7 @@ impl TranslatedStreamState {
 
     fn should_emit_empty_response_error(&self) -> bool {
         !self.usage_log_flushed
-            && (self.finished || self.semantic_completion_emitted)
+            && (self.finished || self.semantic_terminal_emitted)
             && !self.usable_output_observed
             && stream_output_tokens_are_zero_or_unknown(self.usage)
     }
@@ -1702,7 +1708,8 @@ impl TranslatedStreamState {
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
-        finalize_stream_interruption(completion_context, log_context, usage, error_message).await;
+        finalize_stream_interruption_message(completion_context, log_context, usage, error_message)
+            .await;
     }
 
     async fn mark_upstream_stream_error(
@@ -1739,18 +1746,20 @@ impl Drop for TranslatedStreamState {
         let log_context = self.log_context.take();
         let usage = self.usage;
 
-        if self.finished || self.semantic_completion_emitted {
-            // A translated Responses stream can be semantically complete once
-            // `response.completed` has been emitted, even if the upstream chat
-            // provider trails with usage/[DONE]. Treat a downstream drop after
-            // that point as success, not a spurious interruption.
-            spawn_stream_normal_completion_cleanup(completion_context, log_context, usage);
+        if self.finished || self.semantic_terminal_emitted {
+            // A translated Responses stream reaches a terminal lifecycle once
+            // `response.completed` or `response.incomplete` has been emitted,
+            // even if the upstream trails with usage/[DONE]. A later drop is
+            // not a downstream interruption.
+            spawn_stream_terminal_cleanup(completion_context, log_context, usage);
         } else {
             spawn_stream_interruption_cleanup(
                 completion_context,
                 log_context,
                 usage,
-                stream_drop_interruption_message(self.usable_output_delivered),
+                StreamInterruption::DownstreamBodyDropped {
+                    usable_output_delivered: self.usable_output_delivered,
+                },
             );
         }
     }
