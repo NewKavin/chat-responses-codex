@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         message_text = json.dumps(request.get("messages", []))
         if "hold" in message_text:
             increment_counter("hold.hits")
-            (WORKDIR / "hold.started").touch()
+            (WORKDIR / "hold.started").write_text("started")
             time.sleep(HOLD_SECONDS)
             self.send_json(
                 200,
@@ -324,7 +324,7 @@ DOWNSTREAM_PAYLOAD='{
   "id": "smoke-downstream",
   "name": "Redis smoke downstream",
   "model_allowlist": ["smoke-model"],
-  "rate_limit_enabled": false,
+  "rate_limit_enabled": true,
   "per_minute_limit": 1000,
   "max_concurrency": 1,
   "active": true

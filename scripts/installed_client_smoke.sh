@@ -176,6 +176,53 @@ record_case() {
     "$client" "$task" "$duration" "$events"
 }
 
+verify_codex_namespace_case() {
+  local output_file="$1"
+  local proof_file="$2"
+  local expected_marker="$3"
+  local call_count tool_name server_proof_status jsonl_status
+
+  call_count="$(wc -l <"$proof_file" | tr -d '[:space:]')"
+  tool_name="$(head -n 1 "$proof_file" 2>/dev/null || true)"
+  server_proof_status="invalid"
+  if [[ "$call_count" == "1" && "$tool_name" == "lookup" ]]; then
+    server_proof_status="verified"
+  fi
+
+  jsonl_status="invalid"
+  if jq -Rne --arg marker "$expected_marker" '
+    [inputs | fromjson?] as $events
+    | ([$events[]
+        | select(
+            .type == "item.completed"
+            and .item.type == "mcp_tool_call"
+            and .item.server == "smoke_namespace"
+            and .item.tool == "lookup"
+            and .item.status == "completed"
+            and any(.item.result.content[]?; .type == "text" and .text == $marker)
+          )
+      ] | length) == 1
+      and ([$events[]
+        | select(
+            .type == "item.completed"
+            and .item.type == "agent_message"
+            and .item.text == $marker
+          )
+      ] | length) >= 1
+      and any($events[]; .type == "turn.completed")
+  ' "$output_file" >/dev/null 2>&1; then
+    jsonl_status="verified"
+  fi
+
+  if [[ "$server_proof_status" != "verified" || "$jsonl_status" != "verified" ]]; then
+    printf 'client=codex task=namespace_proof calls=%s tool=%s jsonl=%s status=failed\n' \
+      "$call_count" "$([[ "$tool_name" == "lookup" ]] && printf 'lookup' || printf 'unexpected')" \
+      "$jsonl_status" >&2
+    return 1
+  fi
+  printf 'client=codex task=namespace_proof calls=1 tool=lookup jsonl=verified status=verified\n'
+}
+
 if client_enabled codex; then
   verify_version codex "$CODEX_VERSION" "$CODEX_BIN" --version
 fi
@@ -430,7 +477,10 @@ if client_enabled codex && [[ "${CODEX_NAMESPACE_TEST:-0}" == "1" ]]; then
     exit 1
   fi
   NAMESPACE_MARKER="namespace-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+  NAMESPACE_MCP_PROOF_FILE="$WORKDIR/codex-namespace-proof.log"
+  : >"$NAMESPACE_MCP_PROOF_FILE"
   cat >"$WORKDIR/namespace-server.mjs" <<'EOF'
+import fs from 'node:fs'
 import readline from 'node:readline'
 
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
@@ -458,11 +508,21 @@ for await (const line of lines) {
         tools: [{
           name: 'lookup',
           description: 'Return the namespace smoke value.',
-          inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+          annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            openWorldHint: false
+          }
         }]
       }
     })
   } else if (request.method === 'tools/call') {
+    fs.appendFileSync(
+      process.env.NAMESPACE_MCP_PROOF_FILE,
+      `${String(request.params?.name ?? '')}\n`,
+      { encoding: 'utf8', mode: 0o600 }
+    )
     send({
       jsonrpc: '2.0',
       id: request.id,
@@ -476,18 +536,21 @@ EOF
   NAMESPACE_COMMAND_TOML="$(jq -Rn --arg value "$(command -v node)" '$value')"
   NAMESPACE_SERVER_TOML="$(jq -Rn --arg value "$WORKDIR/namespace-server.mjs" '$value')"
   NAMESPACE_MARKER_TOML="$(jq -Rn --arg value "$NAMESPACE_MARKER" '$value')"
+  NAMESPACE_MCP_PROOF_TOML="$(jq -Rn --arg value "$NAMESPACE_MCP_PROOF_FILE" '$value')"
   cat >>"$CODEX_HOME_DIR/config.toml" <<EOF
 
 [mcp_servers.smoke_namespace]
 command = $NAMESPACE_COMMAND_TOML
 args = [$NAMESPACE_SERVER_TOML]
-env = { NAMESPACE_MARKER = $NAMESPACE_MARKER_TOML }
+env = { NAMESPACE_MARKER = $NAMESPACE_MARKER_TOML, NAMESPACE_MCP_PROOF_FILE = $NAMESPACE_MCP_PROOF_TOML }
 EOF
   record_case codex namespace_lookup "$NAMESPACE_MARKER" "$WORKDIR/codex-namespace.jsonl" \
     env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
     "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
     --cd "$TASKDIR" --model "$MODEL_SLUG" \
-    'Use the mcp__smoke_namespace__lookup tool exactly once. Reply with exactly the tool result.'
+    'Call the lookup member in the mcp__smoke_namespace namespace exactly once. Do not answer from memory. Reply with exactly the returned text.'
+  verify_codex_namespace_case \
+    "$WORKDIR/codex-namespace.jsonl" "$NAMESPACE_MCP_PROOF_FILE" "$NAMESPACE_MARKER"
 fi
 
 if [[ -n "${ATTACHMENT_FILE:-}" ]]; then

@@ -353,7 +353,10 @@ fn redis_runtime_smoke_is_isolated_and_secret_safe() {
         "runtime_state.cooldown_remaining",
         "upstream_routes_exhausted",
     ] {
-        assert!(script.contains(marker), "smoke script should contain `{marker}`");
+        assert!(
+            script.contains(marker),
+            "smoke script should contain `{marker}`"
+        );
     }
 
     assert!(!script.contains("set -x"));
@@ -365,6 +368,10 @@ fn redis_runtime_smoke_is_isolated_and_secret_safe() {
     assert!(!script.contains("docker volume prune"));
     assert!(!script.contains("echo \"$ADMIN_PASSWORD\""));
     assert!(!script.contains("echo \"$DOWNSTREAM_KEY\""));
+    assert!(script.contains(r#"(WORKDIR / "hold.started").write_text("started")"#));
+    assert!(!script.contains(r#"(WORKDIR / "hold.started").touch()"#));
+    assert!(script.contains(r#""rate_limit_enabled": true"#));
+    assert!(!script.contains(r#""rate_limit_enabled": false"#));
 
     let redis_run = script
         .find("--name \"$REDIS_CONTAINER\"")
@@ -1064,7 +1071,112 @@ fn installed_client_smoke_only_requests_tools_that_each_client_has() {
     assert!(script.contains("\"$CLAUDE_CODE_BIN\" -p \"$READ_FILE_PROMPT\""));
     assert!(script.contains("record_case hermes read_only_tool_task"));
     assert!(script.contains("--query \"$HERMES_READ_PROMPT\""));
-    assert!(script.contains("mcp__smoke_namespace__lookup"));
+    assert!(script.contains("the lookup member in the mcp__smoke_namespace namespace"));
+    assert!(!script.contains("mcp__smoke_namespace__lookup tool"));
+}
+
+#[test]
+fn installed_client_smoke_requires_structured_codex_namespace_proof() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    fs::create_dir(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli 0.144.6\n'
+  exit 0
+fi
+args=" $* "
+if [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+  printf 'CLIENT_TEXT_SMOKE_OK\n'
+elif grep -q '^\[mcp_servers\.smoke_namespace\]$' "$CODEX_HOME/config.toml"; then
+  config="$(<"$CODEX_HOME/config.toml")"
+  [[ "$config" =~ NAMESPACE_MARKER\ =\ \"([^\"]+)\" ]] || exit 91
+  marker="${BASH_REMATCH[1]}"
+  proof_file=""
+  if [[ "$config" =~ NAMESPACE_MCP_PROOF_FILE\ =\ \"([^\"]+)\" ]]; then
+    proof_file="${BASH_REMATCH[1]}"
+  fi
+  case "$FAKE_NAMESPACE_MODE" in
+    marker_only)
+      printf '%s\n' "$marker"
+      ;;
+    valid)
+      printf 'lookup\n' >>"$proof_file"
+      jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"mcp_tool_call",server:"smoke_namespace",tool:"lookup",status:"completed",result:{content:[{type:"text",text:$marker}]}}}'
+      jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+      jq -nc '{type:"turn.completed"}'
+      ;;
+    duplicate)
+      printf 'lookup\nlookup\n' >>"$proof_file"
+      jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"mcp_tool_call",server:"smoke_namespace",tool:"lookup",status:"completed",result:{content:[{type:"text",text:$marker}]}}}'
+      jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+      jq -nc '{type:"turn.completed"}'
+      ;;
+    wrong_tool)
+      printf 'other\n' >>"$proof_file"
+      jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"mcp_tool_call",server:"smoke_namespace",tool:"other",status:"completed",result:{content:[{type:"text",text:$marker}]}}}'
+      jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+      jq -nc '{type:"turn.completed"}'
+      ;;
+  esac
+else
+  cat probe.txt
+fi
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let run = |mode: &str| {
+        Command::new("bash")
+            .arg("scripts/installed_client_smoke.sh")
+            .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+            .env("BASE_URL", "https://gateway.invalid")
+            .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+            .env("MODEL_SLUG", "opaque/exposed-slug")
+            .env("CLIENTS_JSON", r#"["codex"]"#)
+            .env("CODEX_NAMESPACE_TEST", "1")
+            .env("FAKE_NAMESPACE_MODE", mode)
+            .env("CLIENT_TIMEOUT_SECONDS", "5")
+            .output()
+            .unwrap()
+    };
+
+    let marker_only = run("marker_only");
+    assert!(
+        !marker_only.status.success(),
+        "a marker without a structured MCP event or server proof must fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&marker_only.stdout),
+        String::from_utf8_lossy(&marker_only.stderr)
+    );
+
+    let valid = run("valid");
+    assert!(
+        valid.status.success(),
+        "one matching MCP event and server call must pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&valid.stdout),
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&valid.stdout);
+    assert!(stdout.contains(
+        "client=codex task=namespace_proof calls=1 tool=lookup jsonl=verified status=verified"
+    ));
+
+    for mode in ["duplicate", "wrong_tool"] {
+        let output = run(mode);
+        assert!(
+            !output.status.success(),
+            "namespace proof mode {mode} must fail\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
