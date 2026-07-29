@@ -514,7 +514,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
 }
 
 #[test]
-fn deployment_surfaces_document_model_key_sync_and_process_local_health() {
+fn deployment_surfaces_document_model_key_sync_and_optional_redis_coordination() {
     let dotenv = fs::read_to_string(".env.example").expect(".env.example should be readable");
     let compose =
         fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
@@ -545,9 +545,34 @@ fn deployment_surfaces_document_model_key_sync_and_process_local_health() {
             "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.",
             "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.",
             "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.",
-            "Exact route health is process-local; run one active gateway instance per database.",
         ] {
             assert!(surface.contains(marker), "{name} should state `{marker}`");
         }
     }
+
+    for marker in [
+        "redis:7-alpine",
+        "profiles: [\"redis\"]",
+        "REDIS_ENABLED: ${REDIS_ENABLED:-false}",
+        "REDIS_URL: ${REDIS_URL:-redis://redis:6379}",
+        "REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-chat2responses}",
+    ] {
+        assert!(compose.contains(marker), "docker-compose.yml should contain `{marker}`");
+    }
+    assert!(dotenv.contains("REDIS_ENABLED=false"));
+    assert!(dotenv.contains("REDIS_URL=redis://redis:6379"));
+    assert!(dotenv.contains("REDIS_KEY_PREFIX=chat2responses"));
+    assert!(deployment.contains("docker compose --profile redis up -d"));
+    assert!(deployment.contains("Redis does not replace PostgreSQL"));
+    assert!(!compose.contains("depends_on:\n      redis:"));
+    assert!(!compose.contains("16379"));
+
+    let redis_start = compose.find("\n  redis:\n").expect("Redis service should exist");
+    let redis_tail = &compose[redis_start + 1..];
+    let redis_end = redis_tail[1..]
+        .find("\n  ")
+        .map(|offset| offset + 1)
+        .unwrap_or(redis_tail.len());
+    let redis_service = &redis_tail[..redis_end];
+    assert!(!redis_service.contains("ports:"), "Redis must not expose a host port");
 }

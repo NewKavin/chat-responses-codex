@@ -19,6 +19,21 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    profiles: ["redis"]
+    restart: unless-stopped
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - redis-data:/data
+
   gateway:
     image: chat-responses-codex:latest
     build:
@@ -30,7 +45,7 @@ services:
         condition: service_healthy
     ports:
       - "3001:3001"
-    # Exact route health is process-local; run one active gateway instance per database.
+    # Local coordination supports one authoritative gateway; enable Redis before adding replicas.
     environment:
       BIND_ADDR: ${BIND_ADDR:-0.0.0.0:3001}
       STATE_PATH: ${STATE_PATH:-/data/state.json}
@@ -42,6 +57,9 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in your shell or .env file}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in your shell or .env file}
       APP_NAME: ${APP_NAME:-chat-responses-codex}
+      REDIS_ENABLED: ${REDIS_ENABLED:-false}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-chat2responses}
       USAGE_LOG_ROTATION_MAX_BYTES: ${USAGE_LOG_ROTATION_MAX_BYTES:-1048576}
       USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}
       USAGE_LOG_RETENTION_DAYS: ${USAGE_LOG_RETENTION_DAYS:-14}
@@ -92,3 +110,4 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:

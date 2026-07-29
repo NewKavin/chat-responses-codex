@@ -512,8 +512,8 @@ Explain fail-fast startup, fail-closed runtime behavior, prefix isolation, secre
 
 Create `scripts/redis_runtime_smoke.sh`. It builds an isolated file-backed state
 through gateway A's admin API, starts gateway B with the same read-only state
-and Redis prefix, sends a request through A to an intentionally unreachable
-upstream so A holds the only downstream concurrency lease, and asserts B
+and Redis prefix, sends a request through A to a deterministically delayed mock upstream
+so A holds the only downstream concurrency lease, and asserts B
 returns `429 gateway_concurrency_full`. After A records the route failure, the
 script asserts B immediately honors the shared route cooldown. It uses ports
 `3301`/`3302` by default, accepts overrides, creates all credentials with

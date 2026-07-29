@@ -188,6 +188,34 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
 }
 
 #[test]
+fn deployment_templates_expose_optional_redis_runtime_coordination() {
+    let env_example = fs::read_to_string(".env.example").unwrap();
+    let compose = fs::read_to_string("docker-compose.yml").unwrap();
+    let readme = fs::read_to_string("README.md").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+
+    for marker in ["REDIS_ENABLED", "REDIS_URL", "REDIS_KEY_PREFIX"] {
+        for (path, contents) in [
+            (".env.example", env_example.as_str()),
+            ("docker-compose.yml", compose.as_str()),
+            ("README.md", readme.as_str()),
+            ("DEPLOYMENT.md", deployment.as_str()),
+        ] {
+            assert!(contents.contains(marker), "{path} should expose {marker}");
+        }
+    }
+
+    for contents in [readme.as_str(), deployment.as_str()] {
+        assert!(contents.contains("docker compose up -d"));
+        assert!(contents.contains("docker compose --profile redis up -d"));
+        assert!(contents.contains("starts Redis and one gateway"));
+        assert!(contents.contains("fail fast"));
+        assert!(contents.contains("fail closed"));
+        assert!(contents.contains("Redis does not replace PostgreSQL"));
+    }
+}
+
+#[test]
 fn route_exhaustion_retry_is_exposed_on_every_operator_surface() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();

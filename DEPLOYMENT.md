@@ -1,15 +1,18 @@
 # Deployment Runbook
 
-`chat-responses-codex` is designed for a single active gateway instance backed by PostgreSQL 15.
+`chat-responses-codex` supports a local coordination mode with one authoritative
+gateway instance and an optional Redis coordination mode for replicas. Both
+modes use PostgreSQL 15 as the durable source of truth.
 
 ## Operating Model
 
-- Run one active gateway instance per PostgreSQL database.
-- Exact route health is process-local; run one active gateway instance per database.
+- With `REDIS_ENABLED=false`, run one authoritative gateway instance per PostgreSQL database.
+- With `REDIS_ENABLED=true`, replicas share admission windows, exact leases, route cooldowns, and half-open ownership through Redis.
 - Keep PostgreSQL on a private network or managed service. Do not publish it directly to the public internet.
 - Mount or provision durable storage for PostgreSQL so keys, upstreams, downstreams, and usage logs survive restarts.
 - Place a reverse proxy or load balancer in front if the service is exposed outside a trusted network.
-- Do not run multiple active gateway replicas against the same database yet. The app still uses in-memory request windows for rate limiting.
+- Redis does not replace PostgreSQL. Every coordinated replica still connects to the same durable database.
+- Give each deployment sharing Redis a unique `REDIS_KEY_PREFIX`; never reuse a prefix across environments.
 - `STATE_PATH` remains only for the file-backed compatibility mode when `DATABASE_URL` is unset.
 
 ## Required Environment
@@ -24,6 +27,9 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `ADMIN_PASSWORD=<strong-secret>`
 - `JWT_SECRET=<strong-secret-at-least-32-characters>`
 - `APP_NAME=chat-responses-codex`
+- `REDIS_ENABLED=false`
+- `REDIS_URL=redis://redis:6379`
+- `REDIS_KEY_PREFIX=chat2responses`
 - `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
 - `USAGE_LOG_ARCHIVE_MAX_FILES=10`
 - `USAGE_LOG_RETENTION_DAYS=14`
@@ -165,10 +171,17 @@ Automatic replay before usable output reuses the same idempotency identifier,
 but remains at-least-once when the provider does not honor an idempotency header,
 so retries can duplicate inference or provider-side storage.
 
-The runtime route health resets on restart and fails open for the next request.
-It does not change the persisted model catalog and is never consulted by
-`/v1/models`. Because cooldown and half-open state are not shared, multiple
-active gateway replicas against one database are unsupported.
+In local mode, runtime route health resets on restart and the next request
+re-evaluates the route. In Redis mode, cooldown and half-open ownership are
+shared across replicas and survive individual gateway restarts for their
+bounded Redis lifetime. Runtime coordination does not change the persisted model catalog
+and is never consulted for `/v1/models`.
+
+When Redis coordination is enabled, startup is fail fast: an invalid prefix,
+missing URL, or unavailable Redis prevents the gateway from starting. Runtime
+operations fail closed: health checks and requests that depend on coordination
+return 503 instead of silently using local counters. Error and structured logs
+do not include Redis URLs, key names, admin credentials, or downstream keys.
 
 Stable client outcomes:
 
@@ -236,6 +249,28 @@ For PostgreSQL-backed deployments, use Compose or another orchestrator and provi
 
 Use this if you want a repeatable local or VM deployment. The checked-in `docker-compose.yml` is the source of truth for the full environment wiring and defaults.
 
+The default, single-instance mode does not start Redis:
+
+```bash
+docker compose up -d
+```
+
+For coordinated replicas, set `REDIS_ENABLED=true` and a unique
+`REDIS_KEY_PREFIX` in `.env`, then start the optional Redis profile:
+
+```bash
+docker compose --profile redis up -d
+```
+
+This command starts Redis and one gateway. Provision additional gateway
+replicas through a Compose override or another orchestrator, with unique
+container names and non-conflicting host ports. Every replica must use the same
+Redis URL and deployment prefix.
+
+The Redis service has no host port. The gateway has no unconditional Redis
+dependency because Redis is optional; enabled gateways instead fail fast during
+startup until Redis is reachable. Redis does not replace PostgreSQL.
+
 ```yaml
 services:
   postgres:
@@ -257,6 +292,17 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    profiles: ["redis"]
+    restart: unless-stopped
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+    volumes:
+      - redis-data:/data
+
   gateway:
     image: chat-responses-codex:latest
     build:
@@ -276,6 +322,9 @@ services:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in your shell or .env file}
       APP_NAME: chat-responses-codex
+      REDIS_ENABLED: ${REDIS_ENABLED:-false}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-chat2responses}
       USAGE_LOG_ROTATION_MAX_BYTES: "1048576"
       USAGE_LOG_ARCHIVE_MAX_FILES: "10"
       USAGE_LOG_RETENTION_DAYS: "14"
@@ -290,6 +339,7 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:
 ```
 
 If you use a `.env` file, copy [`.env.example`](.env.example) to `.env`, keep the recommended defaults, and rotate the secrets before first launch.
@@ -391,4 +441,4 @@ The matrix fails on semantic check failures and unpermitted downgrades. The inst
 - Per-minute request limiting is enforced at the gateway entry point.
 - `daily_token_limit` and `monthly_token_limit` are persisted and shown in the admin UI, but they are not yet enforced by the request path.
 - Back up the PostgreSQL data volume or managed database regularly. In PostgreSQL mode, the normalized tables are the source of truth for keys and upstream configuration.
-- If you need shared rate limiting across replicas, this codebase does not yet provide it.
+- Keep `REDIS_ENABLED=false` for a single authoritative gateway. Enable Redis before running replicas that must share rate limiting and route health.

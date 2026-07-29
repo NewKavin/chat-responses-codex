@@ -121,6 +121,16 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+默认命令保持 `REDIS_ENABLED=false`，适合单个权威网关实例。需要多个网关副本时，先在 `.env` 中设置 `REDIS_ENABLED=true` 和部署专用的 `REDIS_KEY_PREFIX`，再启动可选 profile：
+
+```bash
+docker compose --profile redis up -d --build
+```
+
+该命令启动 Redis 和一个 gateway；额外副本需要通过 Compose override 或其他编排器另行配置，并为每个副本使用不冲突的容器名和 host port。
+
+Redis 只协调运行时准入、租约和精确路由健康；PostgreSQL 仍是上游、下游、能力配置和 usage log 的持久化权威。Redis does not replace PostgreSQL。启用 Redis 时，启动阶段连接失败会 fail fast；运行中 Redis 不可用会 fail closed，以 503 拒绝依赖协调状态的请求，不会静默退回各实例的本地计数。日志不会输出 `REDIS_URL` 或凭据，同一 Redis 上的每个部署必须使用不同的 `REDIS_KEY_PREFIX`。
+
 启动后：
 
 - 网关默认监听 `0.0.0.0:3001`
@@ -143,9 +153,9 @@ docker compose up -d --build
 
 当前运维约束：
 
-- 单个 PostgreSQL 数据库只跑一个活跃网关实例。
-- 目前不建议把多个网关副本同时挂到同一个数据库上。
-- 精确路由健康状态保存在进程内，多副本不会共享冷却和半开状态。
+- `REDIS_ENABLED=false` 时，单个 PostgreSQL 数据库只跑一个权威网关实例。
+- `REDIS_ENABLED=true` 时，多个副本通过 Redis 共享准入限制、租约、冷却和半开状态。
+- Redis 模式仍要求所有副本连接同一个 PostgreSQL 数据库，并使用相同且部署隔离的 `REDIS_KEY_PREFIX`。
 - `STATE_PATH` 仅用于不设置 `DATABASE_URL` 的文件兼容模式。
 
 ### 协议转换思路
@@ -400,6 +410,27 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+The default command keeps `REDIS_ENABLED=false` and supports one authoritative
+gateway instance. To coordinate multiple gateway replicas, set
+`REDIS_ENABLED=true` and a deployment-specific `REDIS_KEY_PREFIX` in `.env`,
+then start the optional profile:
+
+```bash
+docker compose --profile redis up -d --build
+```
+
+This command starts Redis and one gateway. Provision additional gateway
+replicas through a Compose override or another orchestrator, with unique
+container names and non-conflicting host ports.
+
+Redis coordinates runtime admission, leases, and exact-route health only.
+Redis does not replace PostgreSQL, which remains authoritative for durable
+configuration and usage logs. Enabled deployments fail fast when Redis cannot
+be initialized and fail closed with 503 responses if Redis becomes unavailable
+at runtime; they never fall back silently to per-process counters. Redis URLs
+and credentials are not logged. Use a distinct `REDIS_KEY_PREFIX` for every
+deployment sharing a Redis service.
+
 Deployment notes:
 
 - The gateway listens on `0.0.0.0:3001` by default.
@@ -422,9 +453,9 @@ Reverse proxy guidance:
 
 Operational constraint:
 
-- Run only one active gateway instance per PostgreSQL database.
-- Do not run multiple active replicas against the same database yet.
-- Exact route health is held in process, so replicas do not share cooldown or half-open state.
+- With `REDIS_ENABLED=false`, run one authoritative gateway instance per PostgreSQL database.
+- With `REDIS_ENABLED=true`, replicas share admission windows, leases, cooldowns, and half-open ownership through Redis.
+- Redis-coordinated replicas still use the same PostgreSQL database and a shared, deployment-isolated `REDIS_KEY_PREFIX`.
 - Use `STATE_PATH` only when `DATABASE_URL` is unset and you want file-backed compatibility mode.
 
 ### How Protocol Conversion Works

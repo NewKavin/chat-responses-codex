@@ -331,6 +331,64 @@ fn deployment_scripts_disable_xtrace_before_reading_secrets() {
 }
 
 #[test]
+fn redis_runtime_smoke_is_isolated_and_secret_safe() {
+    let script = fs::read_to_string("scripts/redis_runtime_smoke.sh")
+        .expect("Redis runtime smoke script should exist");
+
+    for marker in [
+        "set -euo pipefail",
+        "set +x",
+        "openssl rand",
+        "SMOKE_PREFIX",
+        "STATE_DIR",
+        "chmod 0777 \"$STATE_DIR\"",
+        "-v \"$STATE_DIR:/data\"",
+        "docker network create",
+        "gateway-a",
+        "gateway-b",
+        "trap cleanup EXIT",
+        "3301",
+        "3302",
+        "route_health.cooldown_routes",
+        "runtime_state.cooldown_remaining",
+        "upstream_routes_exhausted",
+    ] {
+        assert!(script.contains(marker), "smoke script should contain `{marker}`");
+    }
+
+    assert!(!script.contains("set -x"));
+    assert!(!script.contains("16379"));
+    assert!(!script.contains("docker volume create"));
+    assert!(!script.contains("docker ps"));
+    assert!(!script.contains("docker container prune"));
+    assert!(!script.contains("docker network prune"));
+    assert!(!script.contains("docker volume prune"));
+    assert!(!script.contains("echo \"$ADMIN_PASSWORD\""));
+    assert!(!script.contains("echo \"$DOWNSTREAM_KEY\""));
+
+    let redis_run = script
+        .find("--name \"$REDIS_CONTAINER\"")
+        .expect("smoke should start its exact Redis container");
+    let redis_tail = &script[redis_run..];
+    let redis_run_end = redis_tail
+        .find("\ndocker run -d")
+        .unwrap_or(redis_tail.len());
+    let redis_block = &redis_tail[..redis_run_end];
+    assert!(!redis_block.contains("\n  -p "));
+    assert!(!redis_block.contains("--publish"));
+
+    let disable_xtrace = script.find("set +x").unwrap();
+    let first_secret = script.find("ADMIN_PASSWORD=").unwrap();
+    assert!(disable_xtrace < first_secret);
+
+    let plan = fs::read_to_string(
+        "docs/superpowers/plans/2026-07-29-optional-redis-runtime-coordination.md",
+    )
+    .unwrap();
+    assert!(plan.contains("deterministically delayed mock upstream"));
+}
+
+#[test]
 fn deploy_builds_local_artifacts_before_packaging_runtime_image() {
     let temp = tempfile::tempdir().unwrap();
     let repo_root = temp.path().join("repo");
