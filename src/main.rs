@@ -101,6 +101,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             0,
         ),
         postgres_pool_max_size: env_u32("POSTGRES_POOL_MAX_SIZE", 16).max(4),
+        redis_enabled: env_bool("REDIS_ENABLED", false),
+        redis_url: env::var("REDIS_URL").unwrap_or_default(),
+        redis_key_prefix: env_or("REDIS_KEY_PREFIX", "chat2responses"),
         capability_probe_queue_capacity: env_usize("CAPABILITY_PROBE_QUEUE_CAPACITY", 256).max(1),
         capability_probe_request_timeout_seconds: env_u64(
             "CAPABILITY_PROBE_REQUEST_TIMEOUT_SECONDS",

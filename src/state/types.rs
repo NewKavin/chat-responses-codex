@@ -1,6 +1,7 @@
 use crate::routing::UpstreamProtocol;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -84,7 +85,7 @@ pub const DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: u32 = 32;
 pub const DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS: [u64; 6] =
     [100, 200, 400, 800, 1_000, 2_000];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub admin_username: String,
     pub admin_password: String,
@@ -109,6 +110,9 @@ pub struct AppConfig {
     pub upstream_model_auto_discovery_enabled: bool,
     pub upstream_model_key_sync_interval_seconds: u64,
     pub postgres_pool_max_size: u32,
+    pub redis_enabled: bool,
+    pub redis_url: String,
+    pub redis_key_prefix: String,
     /// Maximum pending atomic probe submission batches. Route jobs inside an
     /// accepted batch are expanded and deduplicated by `ProbeQueueState`.
     pub capability_probe_queue_capacity: usize,
@@ -134,6 +138,22 @@ pub struct AppConfig {
     pub upstream_concurrency_recovery_max_wait_ms: u64,
     pub upstream_concurrency_recovery_max_rounds: u32,
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
+}
+
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppConfig")
+            .field("admin_username", &self.admin_username)
+            .field("admin_password", &"[REDACTED]")
+            .field("jwt_secret", &"[REDACTED]")
+            .field("app_name", &self.app_name)
+            .field("postgres_pool_max_size", &self.postgres_pool_max_size)
+            .field("redis_enabled", &self.redis_enabled)
+            .field("redis_url", &"[REDACTED]")
+            .field("redis_key_prefix", &self.redis_key_prefix)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for AppConfig {
@@ -162,6 +182,9 @@ impl Default for AppConfig {
             upstream_model_auto_discovery_enabled: false,
             upstream_model_key_sync_interval_seconds: 0,
             postgres_pool_max_size: 16,
+            redis_enabled: false,
+            redis_url: String::new(),
+            redis_key_prefix: "chat2responses".into(),
             capability_probe_queue_capacity: 256,
             capability_probe_request_timeout_seconds: 20,
             automatic_capability_probes_enabled: false,

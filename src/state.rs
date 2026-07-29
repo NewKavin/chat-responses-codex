@@ -19,6 +19,8 @@ mod file_store;
 pub mod log_queries;
 #[path = "state/postgres.rs"]
 mod postgres;
+#[path = "state/redis_runtime.rs"]
+mod redis_runtime;
 #[path = "state/store.rs"]
 mod store;
 
@@ -64,6 +66,7 @@ use uuid::Uuid;
 use file_store::FileStateStore;
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
+pub use redis_runtime::RuntimeCoordinationBackend;
 pub use store::{StateStore, StoreFuture};
 
 pub use freekey_sync::{FreekeySyncItem, FreekeySyncSummary};
@@ -265,6 +268,7 @@ pub struct AppState {
     usage_log_flush_running: Arc<AtomicBool>,
     upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
     route_health: Arc<Mutex<RouteHealthRegistry>>,
+    runtime_coordination: RuntimeCoordinationBackend,
     runtime_capability_hints: Arc<StdMutex<RuntimeCapabilityHints>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
@@ -399,7 +403,13 @@ impl StateStore for PostgresStateStore {
 
 impl AppState {
     pub fn new(state: PersistedState, store_path: impl Into<PathBuf>, config: AppConfig) -> Self {
-        Self::new_with_archived(state, Vec::new(), store_path, config)
+        Self::new_with_archived(
+            state,
+            Vec::new(),
+            store_path,
+            config,
+            RuntimeCoordinationBackend::Local,
+        )
     }
 
     pub fn store_response_history(
@@ -557,6 +567,7 @@ impl AppState {
         archived_usage_logs: Vec<UsageLog>,
         store_path: impl Into<PathBuf>,
         config: AppConfig,
+        runtime_coordination: RuntimeCoordinationBackend,
     ) -> Self {
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
@@ -585,6 +596,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
+            runtime_coordination,
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
@@ -648,6 +660,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
+            runtime_coordination: RuntimeCoordinationBackend::Local,
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
@@ -682,6 +695,7 @@ impl AppState {
         mut state: PersistedState,
         config: AppConfig,
         postgres: PostgresStateStore,
+        runtime_coordination: RuntimeCoordinationBackend,
     ) -> Self {
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
@@ -705,6 +719,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
+            runtime_coordination,
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
                 &downstream_usage_logs,
@@ -741,6 +756,10 @@ impl AppState {
 
     pub fn client(&self) -> Client {
         self.client.clone()
+    }
+
+    pub async fn runtime_coordination_healthcheck(&self) -> io::Result<()> {
+        self.runtime_coordination.healthcheck().await
     }
 
     pub fn client_for_url(&self, url: &str) -> Client {
@@ -1441,10 +1460,16 @@ impl AppState {
     }
 
     pub async fn load_from_path(path: impl AsRef<Path>, config: AppConfig) -> io::Result<Self> {
+        let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
         if let Ok(database_url) = env::var("DATABASE_URL") {
             if !database_url.trim().is_empty() {
                 tracing::info!(backend = "postgres", "loading gateway state from postgres");
-                return Self::load_from_database_url(database_url, config).await;
+                return Self::load_from_database_url_with_runtime(
+                    database_url,
+                    config,
+                    runtime_coordination,
+                )
+                .await;
             }
         }
 
@@ -1466,7 +1491,13 @@ impl AppState {
         let downstream_count = state.downstreams.len();
         let usage_log_count = state.usage_logs.len();
         let archived_usage_log_count = archived_usage_logs.len();
-        let app = Self::new_with_archived(state, archived_usage_logs, store_path, config);
+        let app = Self::new_with_archived(
+            state,
+            archived_usage_logs,
+            store_path,
+            config,
+            runtime_coordination,
+        );
         let capability_state = app.config_store.load_capability_state().await?;
         app.initialize_capability_snapshot_from_store(capability_state)
             .await?;
@@ -1487,6 +1518,15 @@ impl AppState {
         database_url: impl AsRef<str>,
         config: AppConfig,
     ) -> io::Result<Self> {
+        let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
+        Self::load_from_database_url_with_runtime(database_url, config, runtime_coordination).await
+    }
+
+    async fn load_from_database_url_with_runtime(
+        database_url: impl AsRef<str>,
+        config: AppConfig,
+        runtime_coordination: RuntimeCoordinationBackend,
+    ) -> io::Result<Self> {
         let postgres =
             PostgresStateStore::connect(database_url.as_ref(), config.postgres_pool_max_size)
                 .await
@@ -1502,7 +1542,7 @@ impl AppState {
             usage_logs = state.usage_logs.len(),
             "loaded postgres-backed gateway state"
         );
-        let app = Self::new_with_postgres(state, config, postgres).await;
+        let app = Self::new_with_postgres(state, config, postgres, runtime_coordination).await;
         app.initialize_capability_snapshot_from_store(capability_state)
             .await?;
         Ok(app)

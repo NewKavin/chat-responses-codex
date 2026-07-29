@@ -494,6 +494,14 @@ fn app_config_exposes_postgres_pool_and_admin_query_limits() {
     assert!(config.upstream_http_pool_max_idle_per_host >= 8);
 }
 
+#[test]
+fn app_config_defaults_disable_redis_runtime_coordination() {
+    let config = AppConfig::default();
+    assert!(!config.redis_enabled);
+    assert!(config.redis_url.is_empty());
+    assert_eq!(config.redis_key_prefix, "chat2responses");
+}
+
 #[tokio::test]
 #[ignore]
 async fn load_gateway_chat_path_with_twenty_way_concurrency() {

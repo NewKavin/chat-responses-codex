@@ -1756,8 +1756,15 @@ async fn serve_frontend(uri: axum::http::Uri) -> Response {
     (StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
-async fn healthz() -> impl IntoResponse {
-    "ok"
+async fn healthz(State(state): State<AppState>) -> Response {
+    match state.runtime_coordination_healthcheck().await {
+        Ok(()) => (StatusCode::OK, "ok").into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime coordination unavailable",
+        )
+            .into_response(),
+    }
 }
 
 async fn list_models(
