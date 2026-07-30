@@ -26,6 +26,7 @@ use chat_responses_codex::state::{
     RouteFailureClass, RouteHealthKey, StateStore, StoreFuture, UpstreamConfig,
     UpstreamQualificationDecision,
 };
+use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io;
@@ -36,6 +37,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Barrier};
 use tower::ServiceExt;
 use uuid::Uuid;
+
+#[path = "common/tls.rs"]
+mod tls;
 
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
@@ -2730,6 +2734,48 @@ async fn test_admin_discover_upstream_models_handles_base_url_with_v1_suffix() {
     assert_eq!(result["failed"].as_u64().unwrap(), 0);
     assert_eq!(result["total"].as_u64().unwrap(), 1);
     assert_eq!(result["models"], json!(["gpt-4o", "gpt-4o-mini"]));
+}
+
+#[tokio::test]
+async fn test_admin_discover_upstream_models_uses_custom_ca_client() {
+    let server = tls::spawn_tls_model_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("internal-ca.crt"), &server.ca_pem).unwrap();
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        upstream_ca: UpstreamCaConfig::load(Some(directory.path())).unwrap(),
+        ..Default::default()
+    };
+    let state = create_test_state_with_upstreams_and_config(Vec::new(), config);
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "base_url": server.base_url,
+        "keys": ["key-a"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["failed"], 0);
+    assert_eq!(result["models"], json!(["internal-model"]));
 }
 
 #[tokio::test]

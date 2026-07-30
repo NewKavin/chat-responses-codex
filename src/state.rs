@@ -72,7 +72,7 @@ pub use store::{StateStore, StoreFuture};
 pub use freekey_sync::{FreekeySyncError, FreekeySyncItem, FreekeySyncSummary};
 #[allow(unused_imports)]
 pub use model_discovery::{
-    fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently,
+    fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently, model_discovery_url,
     KeyModelDiscoveryResult,
 };
 pub use model_key_sync::{

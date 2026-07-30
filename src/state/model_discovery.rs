@@ -5,6 +5,10 @@ use std::time::Duration;
 
 pub const MODEL_DISCOVERY_MAX_CONCURRENCY: usize = 8;
 
+pub fn model_discovery_url(base_url: &str) -> String {
+    crate::util::join_upstream_url(base_url, "/v1/models")
+}
+
 #[derive(Debug, Clone)]
 pub struct KeyModelDiscoveryResult {
     pub key_index: usize,
@@ -19,7 +23,7 @@ pub async fn fetch_models_from_upstream(
     api_key: &str,
     timeout_seconds: u64,
 ) -> Result<Vec<String>, String> {
-    let url = crate::util::join_upstream_url(base_url, "/v1/models");
+    let url = model_discovery_url(base_url);
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))

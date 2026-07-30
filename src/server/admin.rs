@@ -1,12 +1,13 @@
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    fetch_models_from_upstream_keys_concurrently, portal_model_is_allowed, unix_seconds,
-    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState, DefaultModelContextConfig,
-    DownstreamConfig, FreekeySyncError, FreekeySyncItem, GlobalContextProfile,
-    KeyModelDiscoveryResult, ModelQualificationApplySummary, ModelQualificationEvidence,
-    ModelQualificationLevel, RouteHealthSnapshotDto, RuntimeCoordinationError, UpstreamConfig,
-    UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    fetch_models_from_upstream_keys_concurrently, model_discovery_url, portal_model_is_allowed,
+    unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState,
+    DefaultModelContextConfig, DownstreamConfig, FreekeySyncError, FreekeySyncItem,
+    GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
+    ModelQualificationEvidence, ModelQualificationLevel, RouteHealthSnapshotDto,
+    RuntimeCoordinationError, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision,
+    UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -1006,11 +1007,6 @@ pub(super) async fn build_model_probe_response(
 ) -> ModelProbeResponse {
     let snapshot = state.snapshot().await;
     let timeout_seconds = state.config.admin_upstream_timeout_seconds.max(1);
-    let client = reqwest::Client::builder()
-        .user_agent(&state.config.upstream_user_agent)
-        .timeout(Duration::from_secs(timeout_seconds))
-        .build()
-        .unwrap_or_default();
     let refreshed_at = unix_seconds();
 
     let mut channels = Vec::new();
@@ -1021,6 +1017,7 @@ pub(super) async fn build_model_probe_response(
 
     for upstream in snapshot.upstreams.iter().filter(|upstream| upstream.active) {
         let keys = upstream.available_keys();
+        let client = state.client_for_url(&model_discovery_url(&upstream.base_url));
         let discovery_results = fetch_models_from_upstream_keys_concurrently(
             &client,
             &upstream.base_url,
@@ -1174,16 +1171,12 @@ fn explicit_batch_model_configuration(
 }
 
 async fn discover_batch_model_configuration(
+    state: &AppState,
     payload: &BatchCreateUpstreamPayload,
     current_keys: &[String],
     timeout_seconds: u64,
-    user_agent: &str,
 ) -> BatchModelConfiguration {
-    let client = reqwest::Client::builder()
-        .user_agent(user_agent)
-        .timeout(Duration::from_secs(timeout_seconds))
-        .build()
-        .unwrap_or_default();
+    let client = state.client_for_url(&model_discovery_url(&payload.base_url));
     let discovery_results = fetch_models_from_upstream_keys_concurrently(
         &client,
         &payload.base_url,
@@ -1306,13 +1299,7 @@ pub(super) async fn admin_create_upstreams_batch(
     }
     let automatic_discovery = state.config.upstream_model_auto_discovery_enabled;
     let model_configuration = if automatic_discovery {
-        discover_batch_model_configuration(
-            &payload,
-            &current_keys,
-            admin_timeout,
-            &state.config.upstream_user_agent,
-        )
-        .await
+        discover_batch_model_configuration(&state, &payload, &current_keys, admin_timeout).await
     } else {
         explicit_batch_model_configuration(
             &current_keys,
@@ -1404,11 +1391,7 @@ pub(super) async fn admin_discover_upstream_models(
             .into_response();
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent(&state.config.upstream_user_agent)
-        .timeout(std::time::Duration::from_secs(admin_timeout))
-        .build()
-        .unwrap_or_default();
+    let client = state.client_for_url(&model_discovery_url(&payload.base_url));
 
     let discovery_results = fetch_models_from_upstream_keys_concurrently(
         &client,
