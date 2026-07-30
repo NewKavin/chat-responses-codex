@@ -326,10 +326,14 @@ Run:
 
 ```bash
 rtk docker compose config --quiet
-rtk docker compose build chat-responses-codex
+rtk scripts/build-package-image.sh --skip-npm-install --skip-frontend-build --skip-export
 ```
 
-Start an isolated test container with a generated CA directory, verify an invalid configured path prevents startup, and verify the default blank configuration remains healthy. Do not modify the existing production container or its Redis settings during this isolated check.
+The packaging script builds the release binary and the `chat-responses-codex:latest`
+runtime image from local artifacts. Start an isolated test container with a
+generated CA directory, verify an invalid configured path prevents startup, and
+verify the default blank configuration remains healthy. Do not modify the
+existing production container or its Redis settings during this isolated check.
 
 - [ ] **Step 4: Review the final diff**
 

@@ -112,8 +112,10 @@ async fn custom_ca_trusts_a_private_ca_tls_upstream() {
 
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("internal-ca.crt"), &server.ca_pem).unwrap();
-    let mut config = AppConfig::default();
-    config.upstream_ca = UpstreamCaConfig::load(Some(directory.path())).unwrap();
+    let config = AppConfig {
+        upstream_ca: UpstreamCaConfig::load(Some(directory.path())).unwrap(),
+        ..Default::default()
+    };
     let trusted_client = build_upstream_http_client(&config, false);
 
     let response = trusted_client.get(&models_url).send().await.unwrap();
