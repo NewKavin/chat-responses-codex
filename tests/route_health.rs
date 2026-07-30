@@ -116,6 +116,74 @@ async fn route_cooldown_has_one_half_open_lease_and_resets_after_success() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn transient_route_cooldown_uses_configured_base_and_cap() {
+    for class in [
+        RouteFailureClass::TransientServer,
+        RouteFailureClass::Transport,
+    ] {
+        let mut registry =
+            RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4);
+        let route = route(class.as_str(), "glm-5.2");
+
+        registry.observe_route_failure(&route, class, None);
+        let first = registry.route_health_snapshot(&route).unwrap();
+        assert_eq!(first.consecutive_failures, 1);
+        assert!(first.cooldown_remaining >= Duration::from_millis(2_400));
+        assert!(first.cooldown_remaining <= Duration::from_millis(3_600));
+
+        registry.observe_route_failure(&route, class, None);
+        let second = registry.route_health_snapshot(&route).unwrap();
+        assert_eq!(second.consecutive_failures, 2);
+        assert_eq!(second.cooldown_remaining, Duration::from_secs(4));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn transient_route_cooldown_config_does_not_change_other_classes() {
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4);
+    let concurrency_route = route("concurrency-config-isolation", "glm-5.2");
+
+    registry.observe_route_failure(
+        &concurrency_route,
+        RouteFailureClass::ConcurrencySaturated,
+        None,
+    );
+    assert_eq!(
+        registry
+            .route_health_snapshot(&concurrency_route)
+            .unwrap()
+            .cooldown_remaining,
+        Duration::from_millis(100)
+    );
+    registry.observe_route_failure(
+        &concurrency_route,
+        RouteFailureClass::ConcurrencySaturated,
+        None,
+    );
+    assert_eq!(
+        registry
+            .route_health_snapshot(&concurrency_route)
+            .unwrap()
+            .cooldown_remaining,
+        Duration::from_millis(200)
+    );
+
+    let capacity_route = route("capacity-config-isolation", "glm-5.2");
+    registry.observe_route_failure(
+        &capacity_route,
+        RouteFailureClass::CapacityUnavailable,
+        None,
+    );
+    assert!(
+        registry
+            .route_health_snapshot(&capacity_route)
+            .unwrap()
+            .cooldown_remaining
+            > Duration::from_secs(4)
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn successful_route_state_does_not_create_a_new_half_open_lease() {
     let mut registry = RouteHealthRegistry::new(16, 16);
     let route = route("fingerprint-a", "glm-5.2");

@@ -388,13 +388,13 @@ pub struct AppState {
 }
 
 fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealthRegistry>> {
-    Arc::new(Mutex::new(
-        RouteHealthRegistry::new_with_concurrency_probe_delays(
-            ROUTE_HEALTH_GLOBAL_CAPACITY,
-            ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
-            config.upstream_concurrency_probe_delays_ms.clone(),
-        ),
-    ))
+    Arc::new(Mutex::new(RouteHealthRegistry::new_with_runtime_tuning(
+        ROUTE_HEALTH_GLOBAL_CAPACITY,
+        ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+        config.upstream_concurrency_probe_delays_ms.clone(),
+        config.upstream_transient_route_cooldown_base_seconds,
+        config.upstream_transient_route_cooldown_max_seconds,
+    )))
 }
 
 fn new_internal_route_capture_token() -> Arc<str> {

@@ -8,6 +8,8 @@ use super::redis_runtime::{RedisRuntimeCoordinator, RuntimeCoordinationError};
 use super::types::{
     RouteFailureClass, RouteHealthSnapshotDto, UpstreamConfig,
     DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
 };
 use crate::capabilities::WireProtocol;
 use crate::keys::upstream_key_fingerprint;
@@ -21,7 +23,6 @@ use tokio::time::Instant;
 
 pub const ROUTE_HEALTH_GLOBAL_CAPACITY: usize = 16_384;
 pub const ROUTE_HEALTH_PER_UPSTREAM_CAPACITY: usize = 4_096;
-const TRANSIENT_ROUTE_BASE: Duration = Duration::from_secs(10);
 const CAPACITY_ROUTE_BASE: Duration = Duration::from_secs(15);
 const DEFAULT_RATE_LIMIT_BASE: Duration = Duration::from_secs(30);
 const ROUTE_COOLDOWN_MAX: Duration = Duration::from_secs(5 * 60);
@@ -295,6 +296,8 @@ pub struct RouteHealthRegistry {
     per_upstream_capacity: usize,
     next_generation: u64,
     concurrency_probe_delays: Vec<Duration>,
+    transient_route_cooldown_base: Duration,
+    transient_route_cooldown_max: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -323,6 +326,14 @@ impl std::fmt::Debug for RouteHealthRegistry {
             .field("aggregate_count", &self.aggregates.len())
             .field("route_capacity", &self.route_capacity)
             .field("per_upstream_capacity", &self.per_upstream_capacity)
+            .field(
+                "transient_route_cooldown_base",
+                &self.transient_route_cooldown_base,
+            )
+            .field(
+                "transient_route_cooldown_max",
+                &self.transient_route_cooldown_max,
+            )
             .finish()
     }
 }
@@ -341,6 +352,25 @@ impl RouteHealthRegistry {
         per_upstream_capacity: usize,
         concurrency_probe_delays_ms: Vec<u64>,
     ) -> Self {
+        Self::new_with_runtime_tuning(
+            route_capacity,
+            per_upstream_capacity,
+            concurrency_probe_delays_ms,
+            DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
+            DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+        )
+    }
+
+    pub fn new_with_runtime_tuning(
+        route_capacity: usize,
+        per_upstream_capacity: usize,
+        concurrency_probe_delays_ms: Vec<u64>,
+        transient_route_cooldown_base_seconds: u64,
+        transient_route_cooldown_max_seconds: u64,
+    ) -> Self {
+        let transient_route_cooldown_base_seconds = transient_route_cooldown_base_seconds.max(1);
+        let transient_route_cooldown_max_seconds =
+            transient_route_cooldown_max_seconds.max(transient_route_cooldown_base_seconds);
         Self {
             routes: HashMap::new(),
             keys: HashMap::new(),
@@ -351,6 +381,10 @@ impl RouteHealthRegistry {
             concurrency_probe_delays: normalize_concurrency_probe_delays(
                 concurrency_probe_delays_ms,
             ),
+            transient_route_cooldown_base: Duration::from_secs(
+                transient_route_cooldown_base_seconds,
+            ),
+            transient_route_cooldown_max: Duration::from_secs(transient_route_cooldown_max_seconds),
         }
     }
 
@@ -701,6 +735,8 @@ impl RouteHealthRegistry {
             return;
         }
         let concurrency_probe_delays = self.concurrency_probe_delays.clone();
+        let transient_route_cooldown_base = self.transient_route_cooldown_base;
+        let transient_route_cooldown_max = self.transient_route_cooldown_max;
         let state = self
             .routes
             .entry(route.clone())
@@ -712,17 +748,13 @@ impl RouteHealthRegistry {
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
         state.last_access = now;
-        let max = if class == RouteFailureClass::ModelUnsupported {
-            MODEL_QUARANTINE_MAX
-        } else {
-            ROUTE_COOLDOWN_MAX
-        };
         let local = route_cooldown_with_concurrency_delays(
             class,
             step,
             route,
-            max,
             &concurrency_probe_delays,
+            transient_route_cooldown_base,
+            transient_route_cooldown_max,
         );
         let cooldown = match (class, retry_after) {
             (RouteFailureClass::ConcurrencySaturated, Some(explicit)) => explicit,
@@ -1178,13 +1210,16 @@ fn route_cooldown(
     class: RouteFailureClass,
     step: u32,
     route: &RouteHealthKey,
-    max: Duration,
+    transient_route_cooldown_base: Duration,
+    transient_route_cooldown_max: Duration,
 ) -> Duration {
-    let base = match class {
-        RouteFailureClass::CapacityUnavailable => CAPACITY_ROUTE_BASE,
-        RouteFailureClass::RateLimited | RouteFailureClass::KeyQuota => DEFAULT_RATE_LIMIT_BASE,
-        RouteFailureClass::ModelUnsupported => MODEL_QUARANTINE_BASE,
-        _ => TRANSIENT_ROUTE_BASE,
+    let (base, max) = match class {
+        RouteFailureClass::CapacityUnavailable => (CAPACITY_ROUTE_BASE, ROUTE_COOLDOWN_MAX),
+        RouteFailureClass::RateLimited | RouteFailureClass::KeyQuota => {
+            (DEFAULT_RATE_LIMIT_BASE, ROUTE_COOLDOWN_MAX)
+        }
+        RouteFailureClass::ModelUnsupported => (MODEL_QUARANTINE_BASE, MODEL_QUARANTINE_MAX),
+        _ => (transient_route_cooldown_base, transient_route_cooldown_max),
     };
     jittered_backoff(base, step, max, route_jitter_material(route, class, step))
 }
@@ -1193,13 +1228,20 @@ fn route_cooldown_with_concurrency_delays(
     class: RouteFailureClass,
     step: u32,
     route: &RouteHealthKey,
-    max: Duration,
     concurrency_probe_delays: &[Duration],
+    transient_route_cooldown_base: Duration,
+    transient_route_cooldown_max: Duration,
 ) -> Duration {
     if class == RouteFailureClass::ConcurrencySaturated {
-        return sequence_delay(concurrency_probe_delays, step).min(max);
+        return sequence_delay(concurrency_probe_delays, step).min(ROUTE_COOLDOWN_MAX);
     }
-    route_cooldown(class, step, route, max)
+    route_cooldown(
+        class,
+        step,
+        route,
+        transient_route_cooldown_base,
+        transient_route_cooldown_max,
+    )
 }
 
 pub(super) fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
@@ -1222,19 +1264,15 @@ pub(super) fn route_cooldown_schedule_ms(
     class: RouteFailureClass,
     concurrency_probe_delays: &[Duration],
 ) -> Vec<u64> {
-    let max = if class == RouteFailureClass::ModelUnsupported {
-        MODEL_QUARANTINE_MAX
-    } else {
-        ROUTE_COOLDOWN_MAX
-    };
     (1..=17)
         .map(|step| {
             duration_millis_saturating(route_cooldown_with_concurrency_delays(
                 class,
                 step,
                 route,
-                max,
                 concurrency_probe_delays,
+                Duration::from_secs(DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS),
+                Duration::from_secs(DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS),
             ))
         })
         .collect()
