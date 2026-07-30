@@ -6,7 +6,9 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
-    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
 };
 use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use chrono::{FixedOffset, Utc};
@@ -42,6 +44,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     let upstream_ca = UpstreamCaConfig::load(upstream_ca_path.as_deref())?;
+    let transient_route_cooldown_base_seconds = env_positive_u64(
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS",
+        DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
+    )?;
+    let transient_route_cooldown_max_seconds = env_positive_u64(
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS",
+        DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+    )?;
+    let (transient_route_cooldown_base_seconds, transient_route_cooldown_max_seconds) =
+        validate_transient_route_cooldown_seconds(
+            transient_route_cooldown_base_seconds,
+            transient_route_cooldown_max_seconds,
+        )?;
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -160,6 +175,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS",
             DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
         ),
+        upstream_same_route_retry_enabled: env_bool(
+            "UPSTREAM_SAME_ROUTE_RETRY_ENABLED",
+            DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+        ),
+        upstream_transient_route_cooldown_base_seconds: transient_route_cooldown_base_seconds,
+        upstream_transient_route_cooldown_max_seconds: transient_route_cooldown_max_seconds,
         upstream_route_exhaustion_retry_enabled: env_bool(
             "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED",
             DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
@@ -200,6 +221,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         hedge_delay_ms = config.upstream_hedge_delay_ms,
         hedge_interval_ms = config.upstream_hedge_interval_ms,
         hedge_max_extra_attempts = config.upstream_hedge_max_extra_attempts,
+        same_route_retry_enabled = config.upstream_same_route_retry_enabled,
+        transient_route_cooldown_base_seconds = config.upstream_transient_route_cooldown_base_seconds,
+        transient_route_cooldown_max_seconds = config.upstream_transient_route_cooldown_max_seconds,
         route_exhaustion_retry_enabled = config.upstream_route_exhaustion_retry_enabled,
         route_exhaustion_retry_max_wait_ms = config.upstream_route_exhaustion_retry_max_wait_ms,
         route_exhaustion_retry_max_rounds = config.upstream_route_exhaustion_retry_max_rounds,
@@ -306,6 +330,40 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn env_positive_u64(key: &str, default: u64) -> io::Result<u64> {
+    let value = match env::var(key) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(default),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{key} must be a positive integer"),
+            ));
+        }
+    };
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{key} must be a positive integer"),
+            )
+        })
+}
+
+fn validate_transient_route_cooldown_seconds(base: u64, max: u64) -> io::Result<(u64, u64)> {
+    if base == 0 || max == 0 || base > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS must be positive and no greater than UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS",
+        ));
+    }
+    Ok((base, max))
 }
 
 fn normalize_hedge_delay_ms(value: u64) -> u64 {
@@ -477,8 +535,8 @@ impl Write for TeeWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        env_u64, normalize_concurrency_probe_delays_ms, normalize_hedge_delay_ms,
-        normalize_route_retry_rounds,
+        env_positive_u64, env_u64, normalize_concurrency_probe_delays_ms, normalize_hedge_delay_ms,
+        normalize_route_retry_rounds, validate_transient_route_cooldown_seconds,
     };
     use std::env;
     use std::sync::{Mutex, OnceLock};
@@ -523,5 +581,37 @@ mod tests {
         env::set_var("TEST_MODEL_KEY_SYNC_INTERVAL", "0");
         assert_eq!(env_u64("TEST_MODEL_KEY_SYNC_INTERVAL", 900), 0);
         env::remove_var("TEST_MODEL_KEY_SYNC_INTERVAL");
+    }
+
+    #[test]
+    fn transient_route_cooldown_env_requires_positive_integer_seconds() {
+        let _guard = env_lock();
+        const NAME: &str = "TEST_TRANSIENT_ROUTE_COOLDOWN_SECONDS";
+
+        env::remove_var(NAME);
+        assert_eq!(env_positive_u64(NAME, 10).unwrap(), 10);
+        env::set_var(NAME, " 3 ");
+        assert_eq!(env_positive_u64(NAME, 10).unwrap(), 3);
+
+        for invalid in ["0", "not-a-number", "-1"] {
+            env::set_var(NAME, invalid);
+            let error = env_positive_u64(NAME, 10).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(NAME));
+        }
+        env::remove_var(NAME);
+    }
+
+    #[test]
+    fn transient_route_cooldown_base_must_not_exceed_max() {
+        assert_eq!(
+            validate_transient_route_cooldown_seconds(3, 60).unwrap(),
+            (3, 60)
+        );
+        let error = validate_transient_route_cooldown_seconds(61, 60).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS"));
     }
 }

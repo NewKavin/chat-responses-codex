@@ -3,7 +3,9 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS, DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
-    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
+    DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
 };
 use std::fs;
 
@@ -397,6 +399,27 @@ fn deployment_exposes_route_exhaustion_retry_configuration() {
             ".env.example should contain {expected}"
         );
     }
+}
+
+#[test]
+fn transient_route_retry_defaults_preserve_existing_behavior() {
+    let defaults = AppConfig::default();
+
+    assert_eq!(
+        defaults.upstream_same_route_retry_enabled,
+        DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED
+    );
+    assert_eq!(
+        defaults.upstream_transient_route_cooldown_base_seconds,
+        DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS
+    );
+    assert_eq!(
+        defaults.upstream_transient_route_cooldown_max_seconds,
+        DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS
+    );
+    assert!(defaults.upstream_same_route_retry_enabled);
+    assert_eq!(defaults.upstream_transient_route_cooldown_base_seconds, 10);
+    assert_eq!(defaults.upstream_transient_route_cooldown_max_seconds, 300);
 }
 
 #[test]
