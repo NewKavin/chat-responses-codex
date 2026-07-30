@@ -1285,8 +1285,7 @@ async fn rate_limit_retry_after_cools_the_route_without_waiting_in_request() {
     .await;
 }
 
-#[tokio::test]
-async fn generic_500_retries_the_same_key_route_once_before_fallback() {
+async fn generic_500_attempts(same_route_retry_enabled: bool) -> Vec<String> {
     with_proxy_env_cleared(|| async move {
         let attempts = Arc::new(Mutex::new(Vec::<String>::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1385,7 +1384,10 @@ async fn generic_500_retries_the_same_key_route_once_before_fallback() {
                 ..Default::default()
             },
             state_path.clone(),
-            AppConfig::default(),
+            AppConfig {
+                upstream_same_route_retry_enabled: same_route_retry_enabled,
+                ..AppConfig::default()
+            },
         );
         let response = build_router(state)
             .oneshot(
@@ -1411,16 +1413,30 @@ async fn generic_500_retries_the_same_key_route_once_before_fallback() {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            attempts.lock().unwrap().as_slice(),
-            &["Bearer key-a", "Bearer key-a"]
-        );
         assert!(
             !state_path.exists(),
             "request retries and success must not persist legacy upstream health"
         );
+        let attempts = attempts.lock().unwrap().clone();
+        attempts
     })
-    .await;
+    .await
+}
+
+#[tokio::test]
+async fn generic_500_retries_the_same_key_route_once_before_fallback() {
+    assert_eq!(
+        generic_500_attempts(true).await,
+        ["Bearer key-a", "Bearer key-a"]
+    );
+}
+
+#[tokio::test]
+async fn generic_500_skips_same_key_route_retry_when_disabled() {
+    assert_eq!(
+        generic_500_attempts(false).await,
+        ["Bearer key-a", "Bearer key-b"]
+    );
 }
 
 #[tokio::test]

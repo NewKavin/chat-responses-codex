@@ -5466,7 +5466,8 @@ async fn process_gateway_request_inner(
                                 return Ok(result);
                             }
                             Err(error)
-                                if !same_route_retry_attempted
+                                if state.config.upstream_same_route_retry_enabled
+                                    && !same_route_retry_attempted
                                     && !stream_only_recovery.final_attempt
                                     && should_retry_same_route_once(&error) =>
                             {
