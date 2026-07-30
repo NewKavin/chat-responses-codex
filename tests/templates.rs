@@ -239,6 +239,42 @@ fn route_exhaustion_retry_is_exposed_on_every_operator_surface() {
 }
 
 #[test]
+fn transient_route_retry_controls_are_exposed_on_every_operator_surface() {
+    let env_example = fs::read_to_string(".env.example").unwrap();
+    let compose = fs::read_to_string("docker-compose.yml").unwrap();
+    let readme = fs::read_to_string("README.md").unwrap();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+
+    for marker in [
+        "UPSTREAM_SAME_ROUTE_RETRY_ENABLED",
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS",
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS",
+    ] {
+        for (path, contents) in [
+            (".env.example", env_example.as_str()),
+            ("docker-compose.yml", compose.as_str()),
+            ("README.md", readme.as_str()),
+            ("DEPLOYMENT.md", deployment.as_str()),
+        ] {
+            assert!(contents.contains(marker), "{path} should expose {marker}");
+        }
+    }
+
+    for contract in [
+        "UPSTREAM_SAME_ROUTE_RETRY_ENABLED=false",
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS=3",
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS=60",
+        "Codex owns SSE interruption retries",
+        "Key and upstream fallback remains available",
+    ] {
+        assert!(
+            deployment.contains(contract),
+            "DEPLOYMENT.md should document `{contract}`"
+        );
+    }
+}
+
+#[test]
 fn route_exhaustion_docs_preserve_retry_and_replay_safety_contract() {
     let readme = fs::read_to_string("README.md").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();

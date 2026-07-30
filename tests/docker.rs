@@ -402,7 +402,9 @@ fn deployment_exposes_route_exhaustion_retry_configuration() {
 }
 
 #[test]
-fn transient_route_retry_defaults_preserve_existing_behavior() {
+fn deployment_exposes_transient_route_retry_configuration() {
+    let compose = fs::read_to_string("docker-compose.yml").expect("compose should be readable");
+    let env = fs::read_to_string(".env.example").expect("env example should be readable");
     let defaults = AppConfig::default();
 
     assert_eq!(
@@ -420,6 +422,45 @@ fn transient_route_retry_defaults_preserve_existing_behavior() {
     assert!(defaults.upstream_same_route_retry_enabled);
     assert_eq!(defaults.upstream_transient_route_cooldown_base_seconds, 10);
     assert_eq!(defaults.upstream_transient_route_cooldown_max_seconds, 300);
+
+    for expected in [
+        format!(
+            "UPSTREAM_SAME_ROUTE_RETRY_ENABLED: ${{UPSTREAM_SAME_ROUTE_RETRY_ENABLED:-{}}}",
+            defaults.upstream_same_route_retry_enabled
+        ),
+        format!(
+            "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS: ${{UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS:-{}}}",
+            defaults.upstream_transient_route_cooldown_base_seconds
+        ),
+        format!(
+            "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS: ${{UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS:-{}}}",
+            defaults.upstream_transient_route_cooldown_max_seconds
+        ),
+    ] {
+        assert!(
+            compose.contains(&expected),
+            "compose should contain {expected}"
+        );
+    }
+    for expected in [
+        format!(
+            "UPSTREAM_SAME_ROUTE_RETRY_ENABLED={}",
+            defaults.upstream_same_route_retry_enabled
+        ),
+        format!(
+            "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS={}",
+            defaults.upstream_transient_route_cooldown_base_seconds
+        ),
+        format!(
+            "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS={}",
+            defaults.upstream_transient_route_cooldown_max_seconds
+        ),
+    ] {
+        assert!(
+            env.contains(&expected),
+            ".env.example should contain {expected}"
+        );
+    }
 }
 
 #[test]

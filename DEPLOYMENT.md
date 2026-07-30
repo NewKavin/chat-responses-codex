@@ -45,6 +45,9 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_CA_CERT_PATH=`
 - `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
+- `UPSTREAM_SAME_ROUTE_RETRY_ENABLED=true`
+- `UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS=10`
+- `UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS=300`
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true`
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000`
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3`
@@ -91,6 +94,15 @@ UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility on
 UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.
 These rate-limit fields remain parsed for backward-compatible configuration only.
 
+Generic Transport/5xx failures retry the same exact route once only when
+`UPSTREAM_SAME_ROUTE_RETRY_ENABLED=true`. The setting does not disable the
+initial routing round: Key and upstream fallback remains available. Their
+exact-route cooldown starts at
+`UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS`, grows exponentially with
+deterministic jitter, and is capped by
+`UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS`. Both values must be positive
+integer seconds and base must not exceed max; invalid values fail startup.
+
 `UPSTREAM_HEDGE_DELAY_MS` controls when a slow-first-output request launches its
 first extra attempt. `UPSTREAM_HEDGE_INTERVAL_MS` spaces later extra attempts,
 and `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS` bounds their number. Set the maximum to
@@ -119,6 +131,21 @@ UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=2
 
 This permits at most three admitted attempts for one logical stream. Every
 extra attempt still requires normal upstream concurrency and quota admission.
+
+For deployments where repeated Transport/5xx failures and Codex retries are
+amplifying long streams, use this retry-ownership profile:
+
+```dotenv
+UPSTREAM_SAME_ROUTE_RETRY_ENABLED=false
+UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS=3
+UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS=60
+```
+
+Codex owns SSE interruption retries under this profile. The gateway still
+tries other eligible Keys and upstreams in the initial routing round; only the
+fixed same-route retry is disabled. Keep the concurrency probe sequence
+separate because `ConcurrencySaturated` does not use the Transport/5xx cooldown.
+
 Rollback uses:
 
 ```dotenv
