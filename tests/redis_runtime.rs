@@ -1439,6 +1439,28 @@ async fn redis_transient_route_cooldown_uses_configured_base_and_max() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_route_health_ttl_outlives_long_configured_cooldown() {
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 7_201;
+    config.upstream_transient_route_cooldown_max_seconds = 7_201;
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let route = redis_test_health_route("long-cooldown-upstream", "fingerprint-a", "model-a");
+
+    state
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+
+    let state_key = redis_route_health_state_key(&config).await;
+    let ttl_seconds = redis_integer(&redis_test_command(&config, &["TTL".into(), state_key]).await);
+    assert!(
+        ttl_seconds >= 7_260,
+        "Redis route-health TTL {ttl_seconds}s must outlive the 7201s cooldown"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_admin_route_health_snapshots_use_shared_health() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;

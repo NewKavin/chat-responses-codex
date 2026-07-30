@@ -23,7 +23,8 @@ use std::time::Duration;
 
 const REDIS_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const REDIS_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
-const ROUTE_HEALTH_TTL_SECONDS: u64 = 2 * 60 * 60;
+const ROUTE_HEALTH_MIN_TTL_SECONDS: u64 = 2 * 60 * 60;
+const ROUTE_HEALTH_TTL_GRACE_SECONDS: u64 = 60;
 const ROUTE_HEALTH_FAILURE_STREAK_RESET_MS: u64 = 10 * 60 * 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -77,6 +78,9 @@ impl RuntimeCoordinationBackend {
                     .upstream_stream_max_duration_seconds
                     .saturating_add(60)
                     .saturating_mul(1_000),
+                route_health_ttl_seconds: route_health_retention_ttl_seconds(Duration::from_secs(
+                    config.upstream_transient_route_cooldown_max_seconds,
+                )),
                 concurrency_probe_delays: normalize_concurrency_probe_delays(
                     config.upstream_concurrency_probe_delays_ms.clone(),
                 ),
@@ -114,6 +118,7 @@ pub struct RedisRuntimeCoordinator {
     manager: Arc<RwLock<ConnectionManager>>,
     key_prefix: Arc<str>,
     lease_duration_ms: u64,
+    route_health_ttl_seconds: u64,
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
@@ -508,7 +513,7 @@ impl RedisRuntimeCoordinator {
             .key(self.health_global_index_key("keys"))
             .key(self.health_global_index_key("routes"))
             .arg(lease_id)
-            .arg(ROUTE_HEALTH_TTL_SECONDS)
+            .arg(self.route_health_ttl_seconds)
             .arg(self.lease_duration_ms);
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
@@ -550,6 +555,10 @@ impl RedisRuntimeCoordinator {
             .map(|class| key_cooldown_schedule_ms(&lease.key, class))
             .unwrap_or_default();
         let probe_schedule = concurrency_probe_schedule_ms(&self.concurrency_probe_delays);
+        let ttl_seconds = self.retention_ttl_seconds_for(
+            retry_after,
+            &[&route_schedule, &key_schedule, &probe_schedule],
+        );
         let mut connection = self.connection();
         let script = redis::Script::new(include_str!("redis_runtime/route_health_finish.lua"));
         let mut invocation = script.prepare_invoke();
@@ -570,7 +579,7 @@ impl RedisRuntimeCoordinator {
             .arg(class.map(RouteFailureClass::as_str).unwrap_or(""))
             .arg(optional_duration_ms(retry_after))
             .arg(ROUTE_HEALTH_FAILURE_STREAK_RESET_MS)
-            .arg(ROUTE_HEALTH_TTL_SECONDS)
+            .arg(ttl_seconds)
             .arg(ROUTE_HEALTH_GLOBAL_CAPACITY as u64)
             .arg(ROUTE_HEALTH_PER_UPSTREAM_CAPACITY as u64)
             .arg(&lease.route.upstream_id)
@@ -714,6 +723,7 @@ impl RedisRuntimeCoordinator {
         protocol: &str,
         schedule: &[u64],
     ) -> Result<(), RuntimeCoordinationError> {
+        let ttl_seconds = self.retention_ttl_seconds_for(retry_after, &[schedule]);
         let mut connection = self.connection();
         let script = redis::Script::new(include_str!("redis_runtime/route_health_observe.lua"));
         let mut invocation = script.prepare_invoke();
@@ -727,7 +737,7 @@ impl RedisRuntimeCoordinator {
             .arg(class.as_str())
             .arg(optional_duration_ms(retry_after))
             .arg(ROUTE_HEALTH_FAILURE_STREAK_RESET_MS)
-            .arg(ROUTE_HEALTH_TTL_SECONDS)
+            .arg(ttl_seconds)
             .arg(ROUTE_HEALTH_GLOBAL_CAPACITY as u64)
             .arg(ROUTE_HEALTH_PER_UPSTREAM_CAPACITY as u64)
             .arg(upstream_id)
@@ -768,7 +778,7 @@ impl RedisRuntimeCoordinator {
             .arg("")
             .arg(-1_i64)
             .arg(ROUTE_HEALTH_FAILURE_STREAK_RESET_MS)
-            .arg(ROUTE_HEALTH_TTL_SECONDS)
+            .arg(self.route_health_ttl_seconds)
             .arg(ROUTE_HEALTH_GLOBAL_CAPACITY as u64)
             .arg(ROUTE_HEALTH_PER_UPSTREAM_CAPACITY as u64)
             .arg("")
@@ -1123,6 +1133,22 @@ impl RedisRuntimeCoordinator {
             .clone()
     }
 
+    fn retention_ttl_seconds_for(
+        &self,
+        retry_after: Option<Duration>,
+        schedules: &[&[u64]],
+    ) -> u64 {
+        let scheduled_cooldown = schedules
+            .iter()
+            .flat_map(|schedule| schedule.iter().copied())
+            .max()
+            .map(Duration::from_millis)
+            .unwrap_or_default();
+        let cooldown = retry_after.unwrap_or_default().max(scheduled_cooldown);
+        self.route_health_ttl_seconds
+            .max(route_health_retention_ttl_seconds(cooldown))
+    }
+
     async fn refresh_manager(&self) -> Result<(), RuntimeCoordinationError> {
         let manager = tokio::time::timeout(
             REDIS_OPERATION_TIMEOUT,
@@ -1408,11 +1434,20 @@ fn route_health_redis_key(key_prefix: &str, suffix: &str) -> String {
     format!("{key_prefix}:v1:route-health:{{route-health}}:{suffix}")
 }
 
+fn route_health_retention_ttl_seconds(cooldown: Duration) -> u64 {
+    let cooldown_seconds = cooldown
+        .as_secs()
+        .saturating_add(u64::from(cooldown.subsec_nanos() != 0));
+    ROUTE_HEALTH_MIN_TTL_SECONDS
+        .max(cooldown_seconds.saturating_add(ROUTE_HEALTH_TTL_GRACE_SECONDS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         parse_health_state_snapshot, parse_route_health_finish_result,
         parse_route_health_observe_result, parse_route_health_reservation, route_health_redis_key,
+        route_health_retention_ttl_seconds,
     };
     use crate::capabilities::WireProtocol;
     use crate::state::{KeyHealthKey, RouteHealthKey};
@@ -1428,6 +1463,18 @@ mod tests {
         ];
 
         assert!(keys.iter().all(|key| key.contains(":{route-health}:")));
+    }
+
+    #[test]
+    fn route_health_retention_outlives_configured_cooldowns() {
+        assert_eq!(
+            route_health_retention_ttl_seconds(std::time::Duration::from_secs(300)),
+            2 * 60 * 60
+        );
+        assert_eq!(
+            route_health_retention_ttl_seconds(std::time::Duration::from_millis(7_200_001)),
+            7_261
+        );
     }
 
     #[test]
