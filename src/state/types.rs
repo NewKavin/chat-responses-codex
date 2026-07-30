@@ -1,5 +1,6 @@
 use crate::routing::UpstreamProtocol;
 use crate::state::redis_runtime::RuntimeCoordinationError;
+use crate::upstream_tls::UpstreamCaConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -122,6 +123,8 @@ pub struct AppConfig {
     pub admin_logs_page_size_max: usize,
     pub upstream_http_pool_max_idle_per_host: usize,
     pub upstream_user_agent: String,
+    #[serde(skip)]
+    pub upstream_ca: UpstreamCaConfig,
     pub admin_upstream_timeout_seconds: u64,
     pub troubleshooting_check_timeout_seconds: u64,
     pub upstream_connect_timeout_seconds: u64,
@@ -192,6 +195,7 @@ impl Default for AppConfig {
             admin_logs_page_size_max: 200,
             upstream_http_pool_max_idle_per_host: 32,
             upstream_user_agent: "codex/0.144.6".into(),
+            upstream_ca: UpstreamCaConfig::default(),
             admin_upstream_timeout_seconds: 30,
             troubleshooting_check_timeout_seconds: 20,
             upstream_connect_timeout_seconds: 30,

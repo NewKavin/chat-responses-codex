@@ -8,6 +8,7 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS,
 };
+use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use chrono::{FixedOffset, Utc};
 use std::env;
 use std::error::Error;
@@ -35,6 +36,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 3).max(1);
     let context_retry_min_output_tokens_default =
         env_u64("CONTEXT_RETRY_MIN_OUTPUT_TOKENS", 128).max(1);
+    let upstream_ca_path = env::var("UPSTREAM_CA_CERT_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let upstream_ca = UpstreamCaConfig::load(upstream_ca_path.as_deref())?;
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -115,6 +122,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         upstream_http_pool_max_idle_per_host: env_usize("UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST", 32)
             .max(8),
         upstream_user_agent: env_or("UPSTREAM_USER_AGENT", "codex/0.144.6"),
+        upstream_ca,
         troubleshooting_check_timeout_seconds: env_u64("TROUBLESHOOTING_CHECK_TIMEOUT_SECONDS", 20)
             .max(1),
         upstream_connect_timeout_seconds: env_u64("UPSTREAM_CONNECT_TIMEOUT_SECONDS", 30).max(1),

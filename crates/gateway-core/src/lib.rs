@@ -9,5 +9,7 @@ pub mod protocol;
 pub mod routing;
 #[path = "../../../src/state.rs"]
 pub mod state;
+#[path = "../../../src/upstream_tls.rs"]
+pub mod upstream_tls;
 #[path = "../../../src/util.rs"]
 pub mod util;

@@ -73,10 +73,12 @@ pub fn build_upstream_http_client(config: &AppConfig, no_proxy: bool) -> reqwest
     if no_proxy {
         builder = builder.no_proxy();
     }
+    for certificate in config.upstream_ca.certificates() {
+        builder = builder.add_root_certificate(certificate.clone());
+    }
 
     builder.build().unwrap_or_else(|error| {
-        tracing::warn!(%error, no_proxy, "failed to build upstream HTTP client, falling back");
-        reqwest::Client::new()
+        panic!("failed to build upstream HTTP client (no_proxy={no_proxy}): {error}")
     })
 }
 
