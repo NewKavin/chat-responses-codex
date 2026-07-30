@@ -62,6 +62,15 @@ export interface DiscoverUpstreamModelsResult {
   message?: string
 }
 
+export function formatModelDiscoveryFailure(result: DiscoverUpstreamModelsResult): string {
+  const summary = result.message?.trim() || '所有 Key 获取模型均失败'
+  const details = result.results
+    .filter(item => item.error?.trim())
+    .map(item => `Key #${item.key_index + 1}: ${item.error!.trim()}`)
+    .join('；')
+  return details ? `${summary}：${details}` : summary
+}
+
 export function reconcileKeyModelMappings(
   keys: string[],
   previous: ApiKeyModelConfig[] = [],

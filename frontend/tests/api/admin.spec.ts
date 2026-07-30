@@ -4,6 +4,7 @@ import {
   adminHttp,
   buildSelectedKeyModelMappings,
   createAdminApiClient,
+  formatModelDiscoveryFailure,
   hasUsableAdminToken,
   mergeDiscoveredModelCandidates,
   reconcileKeyModelMappings,
@@ -124,6 +125,21 @@ describe('admin api auth behavior', () => {
       keys: ['first-local-key', 'second-local-key']
     })
     expect(discovery.results.map(result => result.key_index)).toEqual([0, 1])
+  })
+
+  it('keeps the discovery summary and appends indexed safe errors', () => {
+    expect(formatModelDiscoveryFailure({
+      models: [],
+      failed: 2,
+      total: 2,
+      message: '所有 key 都无法获取模型列表',
+      results: [
+        { key_index: 0, error: 'upstream model discovery connection failed' },
+        { key_index: 1, error: 'upstream model discovery returned status 403' }
+      ]
+    })).toBe(
+      '所有 key 都无法获取模型列表：Key #1: upstream model discovery connection failed；Key #2: upstream model discovery returned status 403'
+    )
   })
 
   it('reconciles indexed discovery without reviving removed or failed new keys', () => {

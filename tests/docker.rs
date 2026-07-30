@@ -82,6 +82,16 @@ fn dockerfile_runs_the_application_as_a_non_root_user_with_writable_runtime_dire
 }
 
 #[test]
+fn deployment_exposes_custom_upstream_ca_directory() {
+    let compose = fs::read_to_string("docker-compose.yml").expect("compose should be readable");
+    let dotenv = fs::read_to_string(".env.example").expect("env example should be readable");
+
+    assert!(compose.contains("UPSTREAM_CA_CERT_PATH: ${UPSTREAM_CA_CERT_PATH:-}"));
+    assert!(compose.contains("./certs:/certs:ro"));
+    assert!(dotenv.contains("UPSTREAM_CA_CERT_PATH="));
+}
+
+#[test]
 fn dockerignore_keeps_the_build_context_small_for_multistage_images() {
     let dockerignore =
         fs::read_to_string(".dockerignore").expect(".dockerignore should be readable");

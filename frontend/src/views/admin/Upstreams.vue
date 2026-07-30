@@ -287,6 +287,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
   buildSelectedKeyModelMappings,
+  formatModelDiscoveryFailure,
   mergeDiscoveredModelCandidates,
   type BatchCreateUpstreamPayload
 } from '@/api/admin'
@@ -766,11 +767,7 @@ const fetchModels = async () => {
     )
 
     if (!result.models || result.models.length === 0) {
-      const errorDetails = (result.results || [])
-        .filter(item => item.error)
-        .map(item => `Key #${item.key_index + 1}: ${item.error}`)
-        .join('；')
-      ElMessage.error(result.message || `所有 Key 获取模型均失败${errorDetails ? `：${errorDetails}` : ''}`)
+      ElMessage.error(formatModelDiscoveryFailure(result))
       return
     }
 

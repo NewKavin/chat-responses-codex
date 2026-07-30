@@ -42,6 +42,7 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `ADMIN_LOGS_PAGE_SIZE_MAX=200`
 - `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
 - `UPSTREAM_USER_AGENT=codex/0.144.6`
+- `UPSTREAM_CA_CERT_PATH=`
 - `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
 - `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
 - `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true`
@@ -54,6 +55,15 @@ The checked-in [.env.example](.env.example) now contains the full recommended ru
 - `UPSTREAM_HEDGE_DELAY_MS=12000`
 - `UPSTREAM_HEDGE_INTERVAL_MS=12000`
 - `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=1`
+
+For HTTPS upstreams signed by an internal CA, place the CA certificates in the
+repository-local `certs/` directory and set `UPSTREAM_CA_CERT_PATH=/certs`.
+The path may also point to one PEM bundle file. Directory mode loads regular
+`.crt` and `.pem` files in file-name order, and every file may contain multiple
+PEM certificates. Public WebPKI roots remain enabled; configured internal roots
+are additive. The Compose mount is read-only, environment certificate files are
+ignored by Git, and the gateway must be restarted after certificate changes.
+Do not place server private keys in `certs/` and do not disable TLS verification.
 
 `CAPABILITY_PROBE_QUEUE_CAPACITY` limits pending atomic probe submission batches,
 not the number of routes inside a batch. Accepted batches are expanded immediately
