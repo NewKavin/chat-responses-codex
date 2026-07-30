@@ -1263,6 +1263,8 @@ pub(super) fn route_cooldown_schedule_ms(
     route: &RouteHealthKey,
     class: RouteFailureClass,
     concurrency_probe_delays: &[Duration],
+    transient_route_cooldown_base: Duration,
+    transient_route_cooldown_max: Duration,
 ) -> Vec<u64> {
     (1..=17)
         .map(|step| {
@@ -1271,8 +1273,8 @@ pub(super) fn route_cooldown_schedule_ms(
                 step,
                 route,
                 concurrency_probe_delays,
-                Duration::from_secs(DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS),
-                Duration::from_secs(DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS),
+                transient_route_cooldown_base,
+                transient_route_cooldown_max,
             ))
         })
         .collect()

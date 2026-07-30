@@ -1397,6 +1397,48 @@ async fn redis_earliest_route_recovery_uses_shared_health() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_transient_route_cooldown_uses_configured_base_and_max() {
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 1;
+    config.upstream_transient_route_cooldown_max_seconds = 1;
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("configured-cooldown-upstream", "fingerprint-a");
+    let route = redis_test_health_route("configured-cooldown-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    let recovery = second
+        .earliest_temporary_route_recovery(std::slice::from_ref(&route))
+        .await
+        .unwrap()
+        .expect("the configured Redis cooldown must be shared");
+    assert!(recovery.retry_after > Duration::ZERO);
+    assert!(recovery.retry_after <= Duration::from_secs(1));
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit after configured cooldown, got {other:?}"),
+    };
+    permit
+        .finish(RouteOutcome::RouteFailure(
+            RouteFailureClass::TransientServer,
+        ))
+        .await
+        .unwrap();
+    let recovery = second
+        .earliest_temporary_route_recovery(std::slice::from_ref(&route))
+        .await
+        .unwrap()
+        .expect("permit completion must reuse the configured Redis cooldown");
+    assert!(recovery.retry_after > Duration::ZERO);
+    assert!(recovery.retry_after <= Duration::from_secs(1));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_admin_route_health_snapshots_use_shared_health() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;

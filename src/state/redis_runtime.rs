@@ -80,6 +80,12 @@ impl RuntimeCoordinationBackend {
                 concurrency_probe_delays: normalize_concurrency_probe_delays(
                     config.upstream_concurrency_probe_delays_ms.clone(),
                 ),
+                transient_route_cooldown_base: Duration::from_secs(
+                    config.upstream_transient_route_cooldown_base_seconds,
+                ),
+                transient_route_cooldown_max: Duration::from_secs(
+                    config.upstream_transient_route_cooldown_max_seconds,
+                ),
             });
             coordinator.ping().await?;
             Ok::<_, redis::RedisError>(coordinator)
@@ -109,6 +115,8 @@ pub struct RedisRuntimeCoordinator {
     key_prefix: Arc<str>,
     lease_duration_ms: u64,
     concurrency_probe_delays: Vec<Duration>,
+    transient_route_cooldown_base: Duration,
+    transient_route_cooldown_max: Duration,
 }
 
 impl RedisRuntimeCoordinator {
@@ -528,7 +536,13 @@ impl RedisRuntimeCoordinator {
         let route_schedule = class
             .filter(|class| route_failure_has_cooldown(*class))
             .map(|class| {
-                route_cooldown_schedule_ms(&lease.route, class, &self.concurrency_probe_delays)
+                route_cooldown_schedule_ms(
+                    &lease.route,
+                    class,
+                    &self.concurrency_probe_delays,
+                    self.transient_route_cooldown_base,
+                    self.transient_route_cooldown_max,
+                )
             })
             .unwrap_or_default();
         let key_schedule = class
@@ -588,7 +602,13 @@ impl RedisRuntimeCoordinator {
         if !route_failure_has_cooldown(class) {
             return self.clear_route_health(route).await;
         }
-        let schedule = route_cooldown_schedule_ms(route, class, &self.concurrency_probe_delays);
+        let schedule = route_cooldown_schedule_ms(
+            route,
+            class,
+            &self.concurrency_probe_delays,
+            self.transient_route_cooldown_base,
+            self.transient_route_cooldown_max,
+        );
         self.observe_health_state(
             &self.route_health_state_key(route),
             &self.health_index_key(&route.upstream_id, "routes"),
