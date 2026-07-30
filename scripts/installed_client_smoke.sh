@@ -289,7 +289,7 @@ name = "chat-responses-gateway"
 base_url = $API_BASE_TOML
 wire_api = "responses"
 env_key = "CHAT2RESPONSES_KEY"
-stream_max_retries = 8
+stream_max_retries = 2
 EOF
 
   record_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \

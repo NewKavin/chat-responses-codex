@@ -112,7 +112,7 @@ name = "Chat Responses Gateway"
 base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
-stream_max_retries = 8
+stream_max_retries = 2
 ```
 
 完成配置后可运行 `codex --strict-config doctor --summary` 检查配置是否符合当前 Codex 版本。
@@ -376,7 +376,7 @@ name = "Chat Responses Gateway"
 base_url = "<gateway_origin>/v1"
 wire_api = "responses"
 requires_openai_auth = true
-stream_max_retries = 8
+stream_max_retries = 2
 ```
 
 ### 4.3 每个字段是什么意思
@@ -384,7 +384,7 @@ stream_max_retries = 8
 - `model_provider`：使用哪个 provider
 - `model`：日常对话主模型
 - `review_model`：审查/评审模型
-- `stream_max_retries = 8`：网关在一次请求内完成 Key 和 upstream fallback；Codex 在收到终态 `response.failed` 后最多重试 8 次，给上游限流恢复时间
+- `stream_max_retries = 2`：Codex 对 SSE 流中断最多额外重试 2 次（当前官方默认值为 5）。它不替代网关首轮的 Key/upstream fallback；网关仍负责在请求交付可用输出前切换候选路由。
 - `model_reasoning_effort`：推理强度。门户会使用所选模型目录项的 `default_reasoning_level`；没有验证到可配置推理控制时使用 `none`
 - `model_catalog_json`：Codex 模型目录文件路径，按相对路径解析
 - `base_url`：网关根地址加 `/v1`

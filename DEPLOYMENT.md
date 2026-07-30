@@ -145,6 +145,10 @@ Codex owns SSE interruption retries under this profile. The gateway still
 tries other eligible Keys and upstreams in the initial routing round; only the
 fixed same-route retry is disabled. Keep the concurrency probe sequence
 separate because `ConcurrencySaturated` does not use the Transport/5xx cooldown.
+Use `stream_max_retries = 2` in the generated Codex configuration with this
+profile. Codex counts SSE interruption retries separately from the gateway's
+initial Key/upstream fallback, so a lower bounded value avoids multiplying
+long-lived interrupted streams while preserving route failover.
 
 Rollback uses:
 
