@@ -278,6 +278,19 @@ pub struct DownstreamRequestReservation {
     event_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DownstreamRuntimeCounts {
+    pub admitted: u32,
+    pub waiting_upstream: u32,
+    pub running: u32,
+}
+
+#[derive(Default)]
+struct DownstreamLeaseState {
+    admitted: HashSet<String>,
+    waiting: HashSet<String>,
+}
+
 #[derive(Clone)]
 pub struct DownstreamConcurrencyLease {
     downstream_id: String,
@@ -379,7 +392,7 @@ pub struct AppState {
     runtime_capability_hints: Arc<StdMutex<RuntimeCapabilityHints>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamRequestEvent>>>>,
     downstream_token_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamTokenEvent>>>>,
-    downstream_in_flight: Arc<StdMutex<HashMap<String, HashSet<String>>>>,
+    downstream_runtime: Arc<StdMutex<HashMap<String, DownstreamLeaseState>>>,
     active_requests: Arc<StdMutex<HashMap<String, ActiveGatewayRequest>>>,
     response_history: Arc<StdMutex<ResponseHistoryStore>>,
     fallback_stage_failures: Arc<StdMutex<HashMap<String, u8>>>,
@@ -728,7 +741,7 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
             ))),
-            downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
@@ -795,7 +808,7 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
             ))),
-            downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
@@ -857,7 +870,7 @@ impl AppState {
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
             ))),
-            downstream_in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
             response_history: Arc::new(StdMutex::new(ResponseHistoryStore::default())),
             fallback_stage_failures: Arc::new(StdMutex::new(HashMap::new())),
@@ -891,6 +904,164 @@ impl AppState {
 
     pub fn account_concurrency_registry(&self) -> Arc<AccountConcurrencyRegistry> {
         self.account_concurrency.clone()
+    }
+
+    pub async fn observe_account_concurrency(
+        &self,
+        account: &AccountConcurrencyKey,
+        retry_after: Option<Duration>,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .reject_account_concurrency(account, retry_after)
+                .await;
+        }
+        self.account_concurrency
+            .reject(account, retry_after, tokio::time::Instant::now());
+        Ok(())
+    }
+
+    pub async fn register_account_waiter(
+        &self,
+        account: &AccountConcurrencyKey,
+        request_id: &str,
+        downstream_id: &str,
+        downstream_lease_id: &str,
+    ) -> Result<AccountWaitTicket, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .register_account_waiter(
+                    account,
+                    request_id,
+                    downstream_id,
+                    downstream_lease_id,
+                )
+                .await;
+        }
+        Ok(self.account_concurrency.register_waiter(
+            account.clone(),
+            request_id,
+            downstream_id,
+            downstream_lease_id,
+            tokio::time::Instant::now(),
+        ))
+    }
+
+    pub async fn renew_account_waiter(
+        &self,
+        ticket: &AccountWaitTicket,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.renew_account_waiter(ticket).await;
+        }
+        self.account_concurrency
+            .renew_waiter(ticket, tokio::time::Instant::now())
+            .map_err(|_| RuntimeCoordinationError)
+    }
+
+    pub async fn cancel_account_waiter(
+        &self,
+        ticket: &AccountWaitTicket,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.cancel_account_waiter(ticket).await;
+        }
+        self.account_concurrency.cancel_waiter(ticket);
+        Ok(())
+    }
+
+    pub async fn try_acquire_account_probe(
+        &self,
+        ticket: &AccountWaitTicket,
+    ) -> Result<ProbeDecision, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.try_acquire_account_probe(ticket).await;
+        }
+        Ok(self
+            .account_concurrency
+            .try_probe(ticket, tokio::time::Instant::now()))
+    }
+
+    pub async fn renew_account_probe(
+        &self,
+        lease: &AccountProbeLease,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.renew_account_probe(lease).await;
+        }
+        self.account_concurrency
+            .renew_probe(lease, tokio::time::Instant::now())
+            .map_err(|_| RuntimeCoordinationError)
+    }
+
+    pub async fn finish_account_probe(
+        &self,
+        lease: &AccountProbeLease,
+        outcome: AccountProbeOutcome,
+    ) -> Result<(), RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.finish_account_probe(lease, outcome).await;
+        }
+        self.account_concurrency
+            .finish_probe(lease.clone(), outcome, tokio::time::Instant::now())
+            .map_err(|_| RuntimeCoordinationError)
+    }
+
+    pub async fn acquire_account_status_poller(
+        &self,
+        account: &AccountConcurrencyKey,
+        owner_token: &str,
+    ) -> Result<bool, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .acquire_account_status_poller(account, owner_token)
+                .await;
+        }
+        let ttl = Duration::from_secs(
+            self.config
+                .upstream_concurrency_status_refresh_seconds
+                .saturating_add(3),
+        );
+        Ok(self.account_concurrency.acquire_status_poller(
+            account,
+            owner_token,
+            ttl,
+            tokio::time::Instant::now(),
+        ))
+    }
+
+    pub async fn store_account_concurrency_observation(
+        &self,
+        account: &AccountConcurrencyKey,
+        current: u32,
+        limit: u32,
+    ) -> Result<ProviderConcurrencyObservation, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .store_account_observation(account, current, limit)
+                .await;
+        }
+        let now = tokio::time::Instant::now();
+        self.account_concurrency
+            .observe_provider_status(account, current, limit, now)
+            .map_err(|_| RuntimeCoordinationError)?;
+        self.account_concurrency
+            .snapshot(account, now)
+            .observation
+            .ok_or(RuntimeCoordinationError)
+    }
+
+    pub async fn account_concurrency_observation(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<Option<ProviderConcurrencyObservation>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.account_observation(account).await;
+        }
+        Ok(self
+            .account_concurrency
+            .snapshot(account, tokio::time::Instant::now())
+            .observation)
     }
 
     pub fn client(&self) -> Client {
@@ -2874,19 +3045,19 @@ impl AppState {
         }
 
         let lease_id = Uuid::new_v4().to_string();
-        let mut in_flight = self
-            .downstream_in_flight
+        let mut runtime = self
+            .downstream_runtime
             .lock()
-            .expect("downstream in_flight lock poisoned");
-        let current = in_flight.entry(downstream.id.clone()).or_default();
-        if current.len() >= downstream.max_concurrency.max(1) as usize {
+            .expect("downstream runtime lock poisoned");
+        let current = runtime.entry(downstream.id.clone()).or_default();
+        if current.admitted.len() >= downstream.max_concurrency.max(1) as usize {
             return Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
                 retry_after_seconds: 1,
                 limit: downstream.max_concurrency.max(1),
             });
         }
 
-        current.insert(lease_id.clone());
+        current.admitted.insert(lease_id.clone());
         Ok(DownstreamConcurrencyLease {
             downstream_id: downstream.id.clone(),
             lease_id: Some(lease_id),
@@ -2907,18 +3078,19 @@ impl AppState {
                     .release_downstream_lease(&lease.downstream_id, &lease_id)
                     .await
             } else {
-                let mut in_flight = self
-                    .downstream_in_flight
+                let mut runtime = self
+                    .downstream_runtime
                     .lock()
-                    .expect("downstream in_flight lock poisoned");
-                let remove_entry = in_flight
+                    .expect("downstream runtime lock poisoned");
+                let remove_entry = runtime
                     .get_mut(&lease.downstream_id)
-                    .is_some_and(|leases| {
-                        leases.remove(&lease_id);
-                        leases.is_empty()
+                    .is_some_and(|state| {
+                        state.admitted.remove(&lease_id);
+                        state.waiting.remove(&lease_id);
+                        state.admitted.is_empty() && state.waiting.is_empty()
                     });
                 if remove_entry {
-                    in_flight.remove(&lease.downstream_id);
+                    runtime.remove(&lease.downstream_id);
                 }
                 Ok(())
             }
@@ -2929,6 +3101,82 @@ impl AppState {
             release_guard.complete();
         }
         result
+    }
+
+    pub async fn mark_downstream_waiting(
+        &self,
+        lease: &DownstreamConcurrencyLease,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let Some(lease_id) = lease.lease_id.as_deref() else {
+            return Ok(());
+        };
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .mark_downstream_waiting(&lease.downstream_id, lease_id)
+                .await;
+        }
+        let mut runtime = self
+            .downstream_runtime
+            .lock()
+            .expect("downstream runtime lock poisoned");
+        let state = runtime
+            .get_mut(&lease.downstream_id)
+            .ok_or(RuntimeCoordinationError)?;
+        if !state.admitted.contains(lease_id) {
+            return Err(RuntimeCoordinationError);
+        }
+        state.waiting.insert(lease_id.to_string());
+        Ok(())
+    }
+
+    pub async fn unmark_downstream_waiting(
+        &self,
+        lease: &DownstreamConcurrencyLease,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let Some(lease_id) = lease.lease_id.as_deref() else {
+            return Ok(());
+        };
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .unmark_downstream_waiting(&lease.downstream_id, lease_id)
+                .await;
+        }
+        let mut runtime = self
+            .downstream_runtime
+            .lock()
+            .expect("downstream runtime lock poisoned");
+        if let Some(state) = runtime.get_mut(&lease.downstream_id) {
+            state.waiting.remove(lease_id);
+        }
+        Ok(())
+    }
+
+    pub async fn downstream_runtime_snapshot(
+        &self,
+        downstream: &DownstreamConfig,
+    ) -> Result<DownstreamRuntimeCounts, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .downstream_runtime_snapshot(&downstream.id)
+                .await;
+        }
+        let runtime = self
+            .downstream_runtime
+            .lock()
+            .expect("downstream runtime lock poisoned");
+        let Some(state) = runtime.get(&downstream.id) else {
+            return Ok(DownstreamRuntimeCounts::default());
+        };
+        let admitted = u32::try_from(state.admitted.len()).unwrap_or(u32::MAX);
+        let waiting_upstream = u32::try_from(state.waiting.len()).unwrap_or(u32::MAX);
+        let running = admitted
+            .checked_sub(waiting_upstream)
+            .ok_or(RuntimeCoordinationError)?;
+        Ok(DownstreamRuntimeCounts {
+            admitted,
+            waiting_upstream,
+            running,
+        })
     }
 
     pub async fn clear_downstream_runtime(
@@ -2946,9 +3194,9 @@ impl AppState {
             .lock()
             .await
             .remove(downstream_id);
-        self.downstream_in_flight
+        self.downstream_runtime
             .lock()
-            .expect("downstream in_flight lock poisoned")
+            .expect("downstream runtime lock poisoned")
             .remove(downstream_id);
         Ok(())
     }

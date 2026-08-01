@@ -164,6 +164,7 @@ pub struct AccountConcurrencyRegistry {
 #[derive(Default)]
 struct RegistryState {
     accounts: HashMap<AccountConcurrencyKey, AccountState>,
+    pollers: HashMap<AccountConcurrencyKey, PollerRecord>,
 }
 
 struct AccountState {
@@ -192,6 +193,11 @@ struct ProbeRecord {
 struct ObservationRecord {
     value: ProviderConcurrencyObservation,
     fresh_until: Instant,
+}
+
+struct PollerRecord {
+    owner_token: String,
+    expires_at: Instant,
 }
 
 impl AccountState {
@@ -488,8 +494,41 @@ impl AccountConcurrencyRegistry {
         }
     }
 
+    pub fn acquire_status_poller(
+        &self,
+        key: &AccountConcurrencyKey,
+        owner_token: &str,
+        ttl: Duration,
+        now: Instant,
+    ) -> bool {
+        let mut registry = self.inner.lock().expect("account registry lock poisoned");
+        registry
+            .pollers
+            .retain(|_, poller| poller.expires_at > now);
+        match registry.pollers.get_mut(key) {
+            Some(poller) if poller.owner_token == owner_token => {
+                poller.expires_at = now + ttl;
+                true
+            }
+            Some(_) => false,
+            None => {
+                registry.pollers.insert(
+                    key.clone(),
+                    PollerRecord {
+                        owner_token: owner_token.to_string(),
+                        expires_at: now + ttl,
+                    },
+                );
+                true
+            }
+        }
+    }
+
     pub fn prune_idle(&self, now: Instant) -> usize {
         let mut registry = self.inner.lock().expect("account registry lock poisoned");
+        registry
+            .pollers
+            .retain(|_, poller| poller.expires_at > now);
         for state in registry.accounts.values_mut() {
             self.prune_account(state, now);
         }
@@ -621,6 +660,7 @@ fn ticket_identity_matches(left: &AccountWaitTicket, right: &AccountWaitTicket) 
     left.request_id == right.request_id
         && left.downstream_id == right.downstream_id
         && left.downstream_lease_id == right.downstream_lease_id
+        && left.registered_at_ms == right.registered_at_ms
 }
 
 fn ticket_matches(left: &AccountWaitTicket, right: &AccountWaitTicket) -> bool {

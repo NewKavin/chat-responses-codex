@@ -20,8 +20,10 @@ fn test_tuning() -> AccountConcurrencyTuning {
 
 #[test]
 fn provider_observation_freshness_is_not_extended_by_the_poll_interval() {
-    let mut config = AppConfig::default();
-    config.upstream_concurrency_status_refresh_seconds = 30;
+    let config = AppConfig {
+        upstream_concurrency_status_refresh_seconds: 30,
+        ..AppConfig::default()
+    };
 
     assert_eq!(
         AccountConcurrencyTuning::from_config(&config).observation_freshness,
@@ -315,4 +317,46 @@ async fn probe_renewal_keeps_the_same_owner_valid_past_the_initial_ttl() {
     coordinator
         .finish_probe(probe, AccountProbeOutcome::Accepted, Instant::now())
         .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_status_poller_election_expires_and_fences_other_owners() {
+    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
+    let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");
+    let ttl = Duration::from_secs(8);
+
+    assert!(coordinator.acquire_status_poller(&account, "owner-one", ttl, Instant::now()));
+    assert!(!coordinator.acquire_status_poller(&account, "owner-two", ttl, Instant::now()));
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert!(coordinator.acquire_status_poller(&account, "owner-two", ttl, Instant::now()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_local_ticket_cannot_cancel_same_generation_re_registration() {
+    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
+    let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");
+    coordinator.reject(&account, None, Instant::now());
+    let stale = coordinator.register_waiter(
+        account.clone(),
+        "req-ticket",
+        "down-a",
+        "lease-ticket",
+        Instant::now(),
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let current = coordinator.register_waiter(
+        account.clone(),
+        "req-ticket",
+        "down-a",
+        "lease-ticket",
+        Instant::now(),
+    );
+
+    coordinator.cancel_waiter(&stale);
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert_eq!(coordinator.snapshot(&account, Instant::now()).waiters, 1);
+    assert!(matches!(
+        coordinator.try_probe(&current, Instant::now()),
+        ProbeDecision::Granted(_)
+    ));
 }

@@ -7,10 +7,11 @@ use chat_responses_codex::keys::{generate_downstream_key, upstream_key_fingerpri
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    ApiKeyModelConfig, AppConfig, AppState, DownstreamAdmissionRejection, DownstreamConfig,
-    KeyHealthKey, ModelKeySyncService, ModelRequestCostConfig, PersistedState, RouteAvailability,
-    RouteFailureClass, RouteHealthKey, RouteOutcome, RouteSetAggregateKey,
-    RuntimeCoordinationBackend, UpstreamConfig, UsageLog,
+    AccountConcurrencyKey, AccountProbeOutcome, ApiKeyModelConfig, AppConfig, AppState,
+    DownstreamAdmissionRejection, DownstreamConfig, KeyHealthKey, ModelKeySyncService,
+    ModelRequestCostConfig, PersistedState, ProbeDecision, RouteAvailability, RouteFailureClass,
+    RouteHealthKey, RouteOutcome, RouteSetAggregateKey, RuntimeCoordinationBackend, UpstreamConfig,
+    UsageLog,
 };
 use sha2::{Digest, Sha256};
 use std::io;
@@ -202,6 +203,14 @@ fn redis_integer(response: &str) -> i64 {
         .expect("Redis integer response must contain a number")
 }
 
+fn redis_integer_array(response: &str) -> Vec<i64> {
+    response
+        .split("\r\n")
+        .filter_map(|line| line.strip_prefix(':'))
+        .map(|value| value.parse().expect("Redis array integer must be valid"))
+        .collect()
+}
+
 fn redis_command_calls(response: &str, command: &str) -> u64 {
     let prefix = format!("cmdstat_{command}:");
     response
@@ -235,6 +244,17 @@ async fn redis_route_health_state_key(config: &AppConfig) -> String {
 fn redis_route_health_key(config: &AppConfig, suffix: &str) -> String {
     format!(
         "{}:v1:route-health:{{route-health}}:{suffix}",
+        config.redis_key_prefix
+    )
+}
+
+fn redis_account_key(config: &AppConfig, account: &AccountConcurrencyKey, suffix: &str) -> String {
+    let identity = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{}", account.upstream_id, account.key_fingerprint).as_bytes())
+    );
+    format!(
+        "{}:v1:account:{{{identity}}}:{suffix}",
         config.redis_key_prefix
     )
 }
@@ -612,6 +632,547 @@ async fn redis_downstream_concurrency_leases_are_shared_and_idempotent() {
         .release_downstream_concurrency(second_lease)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_queue_grants_one_fifo_probe_across_instances() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let older = first
+        .register_account_waiter(&account, "req-1", "down-a", "lease-1")
+        .await
+        .unwrap();
+    let newer = second
+        .register_account_waiter(&account, "req-2", "down-a", "lease-2")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let (older_result, newer_result) = tokio::join!(
+        first.try_acquire_account_probe(&older),
+        second.try_acquire_account_probe(&newer),
+    );
+    assert!(matches!(older_result.unwrap(), ProbeDecision::Granted(_)));
+    assert!(matches!(newer_result.unwrap(), ProbeDecision::Wait { .. }));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_snapshot_counts_admitted_and_waiting_without_false_zero() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let downstream = redis_test_downstream("down-runtime");
+    let lease = first
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    first.mark_downstream_waiting(&lease).await.unwrap();
+    let snapshot = second
+        .downstream_runtime_snapshot(&downstream)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            snapshot.admitted,
+            snapshot.waiting_upstream,
+            snapshot.running
+        ),
+        (1, 1, 0)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_waiter_cancellation_advances_fifo_head() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-cancel", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let cancelled = first
+        .register_account_waiter(&account, "req-cancel", "down-a", "lease-cancel")
+        .await
+        .unwrap();
+    let retained = second
+        .register_account_waiter(&account, "req-retain", "down-a", "lease-retain")
+        .await
+        .unwrap();
+    first.cancel_account_waiter(&cancelled).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    assert!(matches!(
+        second.try_acquire_account_probe(&retained).await.unwrap(),
+        ProbeDecision::Granted(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_stale_ticket_cannot_mutate_re_registration() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-ticket-fence", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let stale = first
+        .register_account_waiter(&account, "req-ticket", "down-a", "lease-ticket")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let current = second
+        .register_account_waiter(&account, "req-ticket", "down-a", "lease-ticket")
+        .await
+        .unwrap();
+
+    assert!(first.cancel_account_waiter(&stale).await.is_err());
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    assert!(matches!(
+        second.try_acquire_account_probe(&current).await.unwrap(),
+        ProbeDecision::Granted(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_probe_fences_stale_owner_completion() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-stale", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter(&account, "req-stale", "down-a", "lease-stale")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    let probe = match first.try_acquire_account_probe(&ticket).await.unwrap() {
+        ProbeDecision::Granted(probe) => probe,
+        other => panic!("expected a probe grant, got {other:?}"),
+    };
+    first.renew_account_probe(&probe).await.unwrap();
+    second
+        .finish_account_probe(&probe, AccountProbeOutcome::Accepted)
+        .await
+        .unwrap();
+
+    assert!(first
+        .finish_account_probe(&probe, AccountProbeOutcome::Accepted)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_probe_script_renewal_extends_ownership_past_initial_ttl() {
+    let config = redis_test_config();
+    let account = AccountConcurrencyKey::new("up-renew", "fingerprint-a");
+    let queue = redis_account_key(&config, &account, "waiters");
+    let tickets = redis_account_key(&config, &account, "tickets");
+    let sequence = redis_account_key(&config, &account, "sequence");
+    let state = redis_account_key(&config, &account, "state");
+    let probe = redis_account_key(&config, &account, "probe");
+    let account_identity = queue
+        .split('{')
+        .nth(1)
+        .and_then(|value| value.split('}').next())
+        .unwrap();
+
+    let reject = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/account_probe.lua").into(),
+        "4".into(),
+        queue.clone(),
+        tickets.clone(),
+        state.clone(),
+        probe.clone(),
+        "reject".into(),
+        account_identity.into(),
+        "-1".into(),
+        "0".into(),
+        "1".into(),
+        "reject-renew-token".into(),
+        "100".into(),
+    ];
+    assert!(redis_test_command(&config, &reject)
+        .await
+        .contains(":0\r\n"));
+
+    let register = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/account_waiter.lua").into(),
+        "4".into(),
+        queue.clone(),
+        tickets.clone(),
+        sequence,
+        state.clone(),
+        "register".into(),
+        "req-renew".into(),
+        "down-a".into(),
+        "lease-renew".into(),
+        "600000".into(),
+        "660000".into(),
+        "registration-renew".into(),
+    ];
+    let register_response = redis_test_command(&config, &register).await;
+    let register_values = redis_integer_array(&register_response);
+    assert_eq!(register_values.first(), Some(&0));
+    let registered_at_ms = register_values[2].to_string();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let grant = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/account_probe.lua").into(),
+        "4".into(),
+        queue.clone(),
+        tickets.clone(),
+        state.clone(),
+        probe.clone(),
+        "grant".into(),
+        "req-renew".into(),
+        "1".into(),
+        registered_at_ms,
+        "owner-renew".into(),
+        "2000".into(),
+    ];
+    assert!(redis_test_command(&config, &grant).await.contains(":0\r\n"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let renew = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/account_probe.lua").into(),
+        "4".into(),
+        queue.clone(),
+        tickets.clone(),
+        state.clone(),
+        probe.clone(),
+        "renew".into(),
+        "req-renew".into(),
+        "1".into(),
+        "owner-renew".into(),
+        "2000".into(),
+    ];
+    let renew_response = redis_test_command(&config, &renew).await;
+    assert!(
+        renew_response.contains(":0\r\n"),
+        "unexpected renew response: {renew_response:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(1_700)).await;
+
+    let finish = vec![
+        "EVAL".into(),
+        include_str!("../src/state/redis_runtime/account_probe.lua").into(),
+        "4".into(),
+        queue,
+        tickets,
+        state,
+        probe,
+        "finish".into(),
+        "req-renew".into(),
+        "1".into(),
+        "owner-renew".into(),
+        "accepted".into(),
+        "finish-renew-token".into(),
+    ];
+    assert_eq!(redis_test_command(&config, &finish).await, "*1\r\n:0\r\n");
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_keys_include_upstream_identity() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let first_account = AccountConcurrencyKey::new("up-one", "same-fingerprint");
+    let second_account = AccountConcurrencyKey::new("up-two", "same-fingerprint");
+    first
+        .observe_account_concurrency(&first_account, None)
+        .await
+        .unwrap();
+    second
+        .observe_account_concurrency(&second_account, None)
+        .await
+        .unwrap();
+    let first_ticket = first
+        .register_account_waiter(&first_account, "req-one", "down-a", "lease-one")
+        .await
+        .unwrap();
+    let second_ticket = second
+        .register_account_waiter(&second_account, "req-two", "down-a", "lease-two")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let (first_probe, second_probe) = tokio::join!(
+        first.try_acquire_account_probe(&first_ticket),
+        second.try_acquire_account_probe(&second_ticket),
+    );
+    assert!(matches!(first_probe.unwrap(), ProbeDecision::Granted(_)));
+    assert!(matches!(second_probe.unwrap(), ProbeDecision::Granted(_)));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_status_poller_and_observation_are_shared() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-status", "fingerprint-a");
+
+    assert!(first
+        .acquire_account_status_poller(&account, "owner-one")
+        .await
+        .unwrap());
+    assert!(!second
+        .acquire_account_status_poller(&account, "owner-two")
+        .await
+        .unwrap());
+    first
+        .store_account_concurrency_observation(&account, 3, 4)
+        .await
+        .unwrap();
+    let observation = second
+        .account_concurrency_observation(&account)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (observation.concurrency, observation.concurrency_limit),
+        (3, 4)
+    );
+    tokio::time::sleep(Duration::from_millis(5_100)).await;
+    assert!(second
+        .account_concurrency_observation(&account)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_release_removes_wait_state_atomically() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let downstream = redis_test_downstream("down-release-waiting");
+    let lease = first
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    first.mark_downstream_waiting(&lease).await.unwrap();
+    first.release_downstream_concurrency(lease).await.unwrap();
+
+    assert_eq!(
+        second
+            .downstream_runtime_snapshot(&downstream)
+            .await
+            .unwrap(),
+        Default::default()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_mutation_fails_closed_during_outage() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-outage", "fingerprint-a");
+    pause_test_redis(&config, 5_000).await;
+
+    let error = first
+        .register_account_waiter(&account, "req-outage", "down-a", "lease-outage")
+        .await
+        .expect_err("account mutation must not fall back to local state");
+    assert_eq!(error.to_string(), "runtime coordination unavailable");
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_waiter_registration_retry_is_idempotent() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-register-retry", "fingerprint-a");
+    pause_test_redis(&config, 2_100).await;
+    first
+        .register_account_waiter(&account, "req-retry", "down-a", "lease-retry")
+        .await
+        .unwrap();
+
+    let sequence_key = redis_account_key(&config, &account, "sequence");
+    let response = redis_test_command(&config, &["GET".into(), sequence_key]).await;
+    assert_eq!(redis_bulk_u64(&response), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_rejection_retry_advances_one_generation() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-reject-retry", "fingerprint-a");
+    pause_test_redis(&config, 2_100).await;
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter(&account, "req-reject", "down-a", "lease-reject")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(320)).await;
+    let probe = match first.try_acquire_account_probe(&ticket).await.unwrap() {
+        ProbeDecision::Granted(probe) => probe,
+        other => panic!("expected a probe grant, got {other:?}"),
+    };
+    assert_eq!(probe.generation, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_probe_grant_retry_returns_the_original_lease() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-grant-retry", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter(&account, "req-grant", "down-a", "lease-grant")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    pause_test_redis(&config, 2_100).await;
+
+    assert!(matches!(
+        first.try_acquire_account_probe(&ticket).await.unwrap(),
+        ProbeDecision::Granted(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_probe_finish_retry_is_idempotent() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-finish-retry", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter(&account, "req-finish", "down-a", "lease-finish")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    let probe = match first.try_acquire_account_probe(&ticket).await.unwrap() {
+        ProbeDecision::Granted(probe) => probe,
+        other => panic!("expected a probe grant, got {other:?}"),
+    };
+    pause_test_redis(&config, 2_100).await;
+
+    first
+        .finish_account_probe(&probe, AccountProbeOutcome::Accepted)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_concurrency_rejection_requeues_at_the_tail() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-requeue", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let oldest = first
+        .register_account_waiter(&account, "req-oldest", "down-a", "lease-oldest")
+        .await
+        .unwrap();
+    let next = second
+        .register_account_waiter(&account, "req-next", "down-a", "lease-next")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    let probe = match first.try_acquire_account_probe(&oldest).await.unwrap() {
+        ProbeDecision::Granted(probe) => probe,
+        other => panic!("expected a probe grant, got {other:?}"),
+    };
+    first
+        .finish_account_probe(
+            &probe,
+            AccountProbeOutcome::ConcurrencyRejected { retry_after: None },
+        )
+        .await
+        .unwrap();
+    let retried = first
+        .register_account_waiter(&account, "req-oldest", "down-a", "lease-oldest")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(320)).await;
+
+    assert!(matches!(
+        first.try_acquire_account_probe(&retried).await.unwrap(),
+        ProbeDecision::Wait { .. }
+    ));
+    assert!(matches!(
+        second.try_acquire_account_probe(&next).await.unwrap(),
+        ProbeDecision::Granted(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_observation_never_shortens_explicit_retry_after() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-explicit", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, Some(Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter(&account, "req-explicit", "down-a", "lease-explicit")
+        .await
+        .unwrap();
+    second
+        .store_account_concurrency_observation(&account, 0, 4)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    match second.try_acquire_account_probe(&ticket).await.unwrap() {
+        ProbeDecision::Wait { retry_after } => {
+            assert!(retry_after >= Duration::from_millis(1_500));
+        }
+        other => panic!("explicit retry-after was shortened: {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_state_ttl_covers_long_explicit_retry_after() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-long-retry", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, Some(Duration::from_secs(1_800)))
+        .await
+        .unwrap();
+
+    let state_key = redis_account_key(&config, &account, "state");
+    let response = redis_test_command(&config, &["TTL".into(), state_key]).await;
+    let ttl = redis_integer(&response);
+    assert!(ttl >= 2_399, "long retry-after was truncated to TTL {ttl}");
 }
 
 #[tokio::test]
