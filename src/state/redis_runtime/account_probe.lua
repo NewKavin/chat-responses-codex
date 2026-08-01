@@ -73,13 +73,13 @@ if operation == 'reject' then
   local retry_after_ms = tonumber(ARGV[3])
   local jitter_max = tonumber(ARGV[4])
   local delay_count = tonumber(ARGV[5])
-  local mutation_token = ARGV[6]
   if delay_count <= 0 then return {3} end
-  if redis.call('HGET', KEYS[3], 'last_reject_token') == mutation_token then
-    return {0, tonumber(redis.call('HGET', KEYS[3], 'generation') or '0')}
+  local replay_generation = redis.call('GET', KEYS[5])
+  if replay_generation then
+    return {0, tonumber(replay_generation)}
   end
   local generation = apply_rejection(identity, retry_after_ms, jitter_max, delay_count, 7)
-  redis.call('HSET', KEYS[3], 'last_reject_token', mutation_token)
+  redis.call('SET', KEYS[5], generation, 'PX', 60000)
   retain_state()
   return {0, generation}
 end
@@ -154,8 +154,7 @@ if operation == 'finish' then
   local generation = tonumber(ARGV[3])
   local owner_token = ARGV[4]
   local outcome = ARGV[5]
-  local mutation_token = ARGV[6]
-  if redis.call('HGET', KEYS[3], 'last_finish_token') == mutation_token then return {0} end
+  if redis.call('GET', KEYS[5]) then return {0} end
   if tonumber(redis.call('HGET', KEYS[3], 'generation') or '-1') ~= generation then return {2} end
   if redis.call('HGET', KEYS[4], 'request_id') ~= request_id then return {2} end
   if redis.call('HGET', KEYS[4], 'owner_token') ~= owner_token then return {2} end
@@ -167,7 +166,7 @@ if operation == 'finish' then
   if outcome == 'accepted' then
     redis.call('HDEL', KEYS[3], 'cooldown_until', 'explicit_until')
     redis.call('HSET', KEYS[3], 'rejection_count', 0, 'saturated', 0)
-    redis.call('HSET', KEYS[3], 'last_finish_token', mutation_token)
+    redis.call('SET', KEYS[5], 1, 'PX', 60000)
     retain_state()
     return {0}
   end
@@ -178,12 +177,12 @@ if operation == 'finish' then
     local delay_count = tonumber(ARGV[10])
     if delay_count <= 0 then return {3} end
     apply_rejection(identity, retry_after_ms, jitter_max, delay_count, 11)
-    redis.call('HSET', KEYS[3], 'last_finish_token', mutation_token)
+    redis.call('SET', KEYS[5], 1, 'PX', 60000)
     retain_state()
     return {0}
   end
   if outcome == 'attempt_failed' or outcome == 'cancelled' then
-    redis.call('HSET', KEYS[3], 'last_finish_token', mutation_token)
+    redis.call('SET', KEYS[5], 1, 'PX', 60000)
     retain_state()
     return {0}
   end

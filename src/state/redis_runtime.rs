@@ -453,6 +453,10 @@ impl RedisRuntimeCoordinator {
         let probe_key = self.account_key(&identity, "probe");
         let retry_after_ms = retry_after.map(duration_millis).unwrap_or(u64::MAX);
         let mutation_token = Uuid::new_v4().to_string();
+        let mutation_key = self.account_key(
+            &identity,
+            &format!("mutation:{}", stable_identity(&mutation_token)),
+        );
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -462,6 +466,7 @@ impl RedisRuntimeCoordinator {
                 let probe_key = probe_key.clone();
                 let identity = identity.clone();
                 let mutation_token = mutation_token.clone();
+                let mutation_key = mutation_key.clone();
                 async move {
                     let script =
                         redis::Script::new(include_str!("redis_runtime/account_probe.lua"));
@@ -471,6 +476,7 @@ impl RedisRuntimeCoordinator {
                         .key(tickets_key)
                         .key(state_key)
                         .key(probe_key)
+                        .key(mutation_key)
                         .arg("reject")
                         .arg(identity)
                         .arg(if retry_after_ms == u64::MAX {
@@ -689,6 +695,10 @@ impl RedisRuntimeCoordinator {
         let state_key = self.account_key(&identity, "state");
         let probe_key = self.account_key(&identity, "probe");
         let mutation_token = Uuid::new_v4().to_string();
+        let mutation_key = self.account_key(
+            &identity,
+            &format!("mutation:{}", stable_identity(&mutation_token)),
+        );
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -698,6 +708,7 @@ impl RedisRuntimeCoordinator {
                 let probe_key = probe_key.clone();
                 let identity = identity.clone();
                 let mutation_token = mutation_token.clone();
+                let mutation_key = mutation_key.clone();
                 async move {
                     let script =
                         redis::Script::new(include_str!("redis_runtime/account_probe.lua"));
@@ -707,6 +718,9 @@ impl RedisRuntimeCoordinator {
                         .key(tickets_key)
                         .key(state_key)
                         .key(probe_key);
+                    if outcome.is_some() {
+                        invocation.key(mutation_key);
+                    }
                     match outcome {
                         None => {
                             invocation

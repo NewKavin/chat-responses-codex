@@ -339,6 +339,19 @@ async fn pause_test_redis(config: &AppConfig, milliseconds: u64) {
     assert_eq!(response, "+OK\r\n");
 }
 
+async fn wait_for_test_redis_recovery(state: &AppState) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if state.runtime_coordination_healthcheck().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("test Redis must recover after CLIENT PAUSE");
+}
+
 #[tokio::test]
 async fn stale_upstream_lease_does_not_release_recreated_capacity() {
     let directory = tempdir().unwrap();
@@ -835,11 +848,12 @@ async fn redis_account_probe_script_renewal_extends_ownership_past_initial_ttl()
     let reject = vec![
         "EVAL".into(),
         include_str!("../src/state/redis_runtime/account_probe.lua").into(),
-        "4".into(),
+        "5".into(),
         queue.clone(),
         tickets.clone(),
         state.clone(),
         probe.clone(),
+        redis_account_key(&config, &account, "mutation-reject-renew"),
         "reject".into(),
         account_identity.into(),
         "-1".into(),
@@ -917,11 +931,12 @@ async fn redis_account_probe_script_renewal_extends_ownership_past_initial_ttl()
     let finish = vec![
         "EVAL".into(),
         include_str!("../src/state/redis_runtime/account_probe.lua").into(),
-        "4".into(),
+        "5".into(),
         queue,
         tickets,
         state,
         probe,
+        redis_account_key(&config, &account, "mutation-finish-renew"),
         "finish".into(),
         "req-renew".into(),
         "1".into(),
@@ -1076,6 +1091,54 @@ async fn redis_account_rejection_retry_advances_one_generation() {
         other => panic!("expected a probe grant, got {other:?}"),
     };
     assert_eq!(probe.generation, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_rejection_replay_survives_an_interleaved_mutation() {
+    let config = redis_test_config();
+    let account = AccountConcurrencyKey::new("up-reject-interleaved", "fingerprint-a");
+    let queue = redis_account_key(&config, &account, "waiters");
+    let tickets = redis_account_key(&config, &account, "tickets");
+    let state = redis_account_key(&config, &account, "state");
+    let probe = redis_account_key(&config, &account, "probe");
+    let identity = queue
+        .split('{')
+        .nth(1)
+        .and_then(|value| value.split('}').next())
+        .unwrap()
+        .to_string();
+
+    for (token, marker) in [
+        ("reject-token-a", "mutation-a"),
+        ("reject-token-b", "mutation-b"),
+        ("reject-token-a", "mutation-a"),
+    ] {
+        let reject = vec![
+            "EVAL".into(),
+            include_str!("../src/state/redis_runtime/account_probe.lua").into(),
+            "5".into(),
+            queue.clone(),
+            tickets.clone(),
+            state.clone(),
+            probe.clone(),
+            redis_account_key(&config, &account, marker),
+            "reject".into(),
+            identity.clone(),
+            "-1".into(),
+            "0".into(),
+            "1".into(),
+            token.into(),
+            "100".into(),
+        ];
+        assert!(redis_test_command(&config, &reject)
+            .await
+            .contains(":0\r\n"));
+    }
+
+    let generation =
+        redis_test_command(&config, &["HGET".into(), state, "generation".into()]).await;
+    assert_eq!(redis_bulk_u64(&generation), 2);
 }
 
 #[tokio::test]
@@ -1615,9 +1678,9 @@ async fn redis_token_recording_retries_commit_after_response_loss() {
 
     let command_stats = redis_test_command(&config, &["INFO".into(), "commandstats".into()]).await;
     assert_eq!(
-        redis_command_calls(&command_stats, "evalsha"),
+        redis_command_calls(&command_stats, "zadd"),
         2,
-        "token recording must execute exactly one initial attempt and one replay: {command_stats:?}"
+        "token recording must execute its ZADD exactly once initially and once on replay: {command_stats:?}"
     );
 
     assert_eq!(
@@ -1719,7 +1782,7 @@ async fn failed_redis_cleanup_leaves_downstream_available_for_retry() {
     first.insert_downstream(downstream.clone()).await.unwrap();
     first.reserve_downstream_request(&downstream).await.unwrap();
 
-    pause_test_redis(&config, 2_500).await;
+    pause_test_redis(&config, 5_000).await;
     first
         .remove_downstream(&downstream.id)
         .await
@@ -1734,7 +1797,7 @@ async fn failed_redis_cleanup_leaves_downstream_available_for_retry() {
         "failed cleanup must not persist the removal"
     );
 
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    wait_for_test_redis_recovery(&first).await;
     assert!(first.remove_downstream(&downstream.id).await.unwrap());
     second
         .reserve_downstream_request(&downstream)
@@ -1906,6 +1969,7 @@ async fn redis_upstream_admission_distinguishes_capacity_from_coordination_failu
         .await
         .expect_err("Redis timeout must fail closed");
     assert!(coordination.is_runtime_coordination_unavailable());
+    wait_for_test_redis_recovery(&second).await;
 }
 
 #[tokio::test]
