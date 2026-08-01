@@ -1244,7 +1244,7 @@ fn route_cooldown_with_concurrency_delays(
     )
 }
 
-pub(super) fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
+pub fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
     const MAX_PROBE_DELAY_MS: u64 = 60_000;
     let values = if values.is_empty()
         || values

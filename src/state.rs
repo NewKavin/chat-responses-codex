@@ -88,9 +88,10 @@ pub use model_qualification::{
     ModelQualificationLevel, QualificationObservation, UpstreamQualificationDecision,
 };
 pub use route_health::{
-    HealthLease, HealthStateSnapshot, KeyHealthKey, RouteAvailability, RouteHealthKey,
-    RouteHealthPermit, RouteHealthRegistry, RouteOutcome, RouteRecovery, RouteSetAggregateKey,
-    ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+    normalize_concurrency_probe_delays, HealthLease, HealthStateSnapshot, KeyHealthKey,
+    RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteHealthRegistry, RouteOutcome,
+    RouteRecovery, RouteSetAggregateKey, ROUTE_HEALTH_GLOBAL_CAPACITY,
+    ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
@@ -501,12 +502,15 @@ impl StateStore for PostgresStateStore {
 
 impl AppState {
     pub fn new(state: PersistedState, store_path: impl Into<PathBuf>, config: AppConfig) -> Self {
+        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
+            .expect("deployment timezone must be valid before state construction");
         Self::new_with_archived(
             state,
             Vec::new(),
             store_path,
             config,
             RuntimeCoordinationBackend::Local,
+            deployment_calendar,
         )
     }
 
@@ -650,6 +654,8 @@ impl AppState {
         config: AppConfig,
         config_store: Arc<dyn StateStore>,
     ) -> Self {
+        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
+            .expect("deployment timezone must be valid before state construction");
         Self::new_with_archived_and_store(
             state,
             Vec::new(),
@@ -657,6 +663,7 @@ impl AppState {
             config,
             config_store,
             None,
+            deployment_calendar,
         )
     }
 
@@ -666,6 +673,7 @@ impl AppState {
         store_path: impl Into<PathBuf>,
         config: AppConfig,
         runtime_coordination: RuntimeCoordinationBackend,
+        deployment_calendar: DeploymentCalendar,
     ) -> Self {
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
@@ -682,8 +690,6 @@ impl AppState {
             .collect::<Vec<_>>();
         let store_path = store_path.into();
         let config_store: Arc<dyn StateStore> = Arc::new(FileStateStore::new(store_path.clone()));
-        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
-            .expect("deployment timezone must be validated before state construction");
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -735,6 +741,7 @@ impl AppState {
         config: AppConfig,
         config_store: Arc<dyn StateStore>,
         postgres: Option<Arc<PostgresStateStore>>,
+        deployment_calendar: DeploymentCalendar,
     ) -> Self {
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
@@ -749,8 +756,6 @@ impl AppState {
             .cloned()
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
-        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
-            .expect("deployment timezone must be validated before state construction");
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -800,6 +805,7 @@ impl AppState {
         config: AppConfig,
         postgres: PostgresStateStore,
         runtime_coordination: RuntimeCoordinationBackend,
+        deployment_calendar: DeploymentCalendar,
     ) -> Self {
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
@@ -811,8 +817,6 @@ impl AppState {
         let downstream_usage_logs = state.usage_logs.clone();
         let postgres = Arc::new(postgres);
         let config_store: Arc<dyn StateStore> = postgres.clone();
-        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
-            .expect("deployment timezone must be validated before state construction");
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -1582,6 +1586,16 @@ impl AppState {
     }
 
     pub async fn load_from_path(path: impl AsRef<Path>, config: AppConfig) -> io::Result<Self> {
+        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        Self::load_from_path_with_calendar(path, config, deployment_calendar).await
+    }
+
+    pub async fn load_from_path_with_calendar(
+        path: impl AsRef<Path>,
+        config: AppConfig,
+        deployment_calendar: DeploymentCalendar,
+    ) -> io::Result<Self> {
         let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
         if let Ok(database_url) = env::var("DATABASE_URL") {
             if !database_url.trim().is_empty() {
@@ -1590,6 +1604,7 @@ impl AppState {
                     database_url,
                     config,
                     runtime_coordination,
+                    deployment_calendar,
                 )
                 .await;
             }
@@ -1619,6 +1634,7 @@ impl AppState {
             store_path,
             config,
             runtime_coordination,
+            deployment_calendar,
         );
         let capability_state = app.config_store.load_capability_state().await?;
         app.initialize_capability_snapshot_from_store(capability_state)
@@ -1640,14 +1656,23 @@ impl AppState {
         database_url: impl AsRef<str>,
         config: AppConfig,
     ) -> io::Result<Self> {
+        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
-        Self::load_from_database_url_with_runtime(database_url, config, runtime_coordination).await
+        Self::load_from_database_url_with_runtime(
+            database_url,
+            config,
+            runtime_coordination,
+            deployment_calendar,
+        )
+        .await
     }
 
     async fn load_from_database_url_with_runtime(
         database_url: impl AsRef<str>,
         config: AppConfig,
         runtime_coordination: RuntimeCoordinationBackend,
+        deployment_calendar: DeploymentCalendar,
     ) -> io::Result<Self> {
         let postgres =
             PostgresStateStore::connect(database_url.as_ref(), config.postgres_pool_max_size)
@@ -1664,7 +1689,14 @@ impl AppState {
             usage_logs = state.usage_logs.len(),
             "loaded postgres-backed gateway state"
         );
-        let app = Self::new_with_postgres(state, config, postgres, runtime_coordination).await;
+        let app = Self::new_with_postgres(
+            state,
+            config,
+            postgres,
+            runtime_coordination,
+            deployment_calendar,
+        )
+        .await;
         app.initialize_capability_snapshot_from_store(capability_state)
             .await?;
         Ok(app)

@@ -1,7 +1,8 @@
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DeploymentCalendar, ModelKeySyncService,
-    DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS, DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+    normalize_concurrency_probe_delays, AppConfig, AppState, DeploymentCalendar,
+    ModelKeySyncService, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
@@ -219,12 +220,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         codex_stream_idle_timeout_ms: env_u64("CODEX_STREAM_IDLE_TIMEOUT_MS", 3_600_000).max(1),
     };
 
-    DeploymentCalendar::parse(&config.deployment_timezone).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid TZ configuration: {error}"),
-        )
-    })?;
+    let deployment_calendar =
+        DeploymentCalendar::parse(&config.deployment_timezone).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid TZ configuration: {error}"),
+            )
+        })?;
     let long_stream_profile = LongStreamProfile::from_config(&config);
     validate_long_stream_profile(&long_stream_profile)?;
 
@@ -272,7 +274,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "starting gateway"
     );
 
-    let state = match AppState::load_from_path(&state_path, config).await {
+    let state = match AppState::load_from_path_with_calendar(
+        &state_path,
+        config,
+        deployment_calendar,
+    )
+    .await
+    {
         Ok(state) => state,
         Err(error) => {
             tracing::error!(
@@ -435,9 +443,9 @@ fn validate_long_stream_profile(profile: &LongStreamProfile) -> io::Result<()> {
     const CANCELLATION_MARGIN_SECONDS: u64 = 30;
     const CANCELLATION_MARGIN_MS: u64 = 30_000;
 
-    if profile.probe_delays_ms.is_empty() || profile.concurrency_rounds == 0 {
+    if profile.concurrency_rounds == 0 {
         return Err(invalid_long_stream_profile(
-            "concurrency probe schedule must not be empty",
+            "concurrency probe round cap must be positive",
         ));
     }
 
@@ -475,10 +483,11 @@ fn validate_long_stream_profile(profile: &LongStreamProfile) -> io::Result<()> {
         .response_header_seconds
         .checked_add(60)
         .ok_or_else(|| invalid_long_stream_profile("probe TTL overflows"))?;
-    let probe_cancellation_deadline = probe_ttl_seconds
+    let minimum_probe_ttl_seconds = profile
+        .response_header_seconds
         .checked_add(CANCELLATION_MARGIN_SECONDS)
         .ok_or_else(|| invalid_long_stream_profile("probe cancellation margin overflows"))?;
-    if probe_cancellation_deadline > profile.first_semantic_seconds {
+    if probe_ttl_seconds <= minimum_probe_ttl_seconds {
         return Err(invalid_long_stream_profile(
             "probe TTL leaves less than a 30-second cancellation margin",
         ));
@@ -488,22 +497,25 @@ fn validate_long_stream_profile(profile: &LongStreamProfile) -> io::Result<()> {
         .concurrency_wait_ms
         .checked_add(60_000)
         .ok_or_else(|| invalid_long_stream_profile("waiter TTL overflows"))?;
-    let waiter_cancellation_deadline = waiter_ttl_ms
+    let minimum_waiter_ttl_ms = profile
+        .concurrency_wait_ms
         .checked_add(CANCELLATION_MARGIN_MS)
         .ok_or_else(|| invalid_long_stream_profile("waiter cancellation margin overflows"))?;
-    if waiter_cancellation_deadline > first_semantic_ms {
+    if waiter_ttl_ms <= minimum_waiter_ttl_ms {
         return Err(invalid_long_stream_profile(
             "waiter TTL leaves less than a 30-second cancellation margin",
         ));
     }
 
+    let probe_delays = normalize_concurrency_probe_delays(profile.probe_delays_ms.clone());
     let mut covered_ms = 0_u64;
     for round in 1..profile.concurrency_rounds {
         let delay_index = usize::try_from(round - 1)
             .unwrap_or(usize::MAX)
-            .min(profile.probe_delays_ms.len() - 1);
+            .min(probe_delays.len() - 1);
+        let delay_ms = u64::try_from(probe_delays[delay_index].as_millis()).unwrap_or(u64::MAX);
         covered_ms = covered_ms
-            .checked_add(profile.probe_delays_ms[delay_index])
+            .checked_add(delay_ms)
             .ok_or_else(|| invalid_long_stream_profile("concurrency probe coverage overflows"))?;
     }
     if covered_ms < profile.concurrency_wait_ms {
@@ -794,5 +806,20 @@ mod tests {
         profile = LongStreamProfile::internal();
         profile.codex_stream_idle_ms = 3_599_999;
         assert!(validate_long_stream_profile(&profile).is_err());
+    }
+
+    #[test]
+    fn profile_accepts_tight_semantic_budget_and_normalizes_probe_delays() {
+        let profile = LongStreamProfile {
+            response_header_seconds: 100,
+            upstream_idle_seconds: 0,
+            concurrency_wait_ms: 0,
+            first_semantic_seconds: 100,
+            codex_stream_idle_ms: 400_000,
+            concurrency_rounds: 1,
+            probe_delays_ms: Vec::new(),
+        };
+
+        validate_long_stream_profile(&profile).unwrap();
     }
 }
