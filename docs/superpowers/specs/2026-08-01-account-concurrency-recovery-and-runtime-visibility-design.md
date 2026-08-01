@@ -4,9 +4,8 @@ Date: 2026-08-01
 
 ## Status
 
-The design choices were approved interactively before this document was
-written. This written specification is pending final user review. Implementation
-starts only after that review and a separate implementation plan.
+Approved by the user on 2026-08-01. Implementation starts only from the
+separately reviewed implementation plan.
 
 ## Problem
 
