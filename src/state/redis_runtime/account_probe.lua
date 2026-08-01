@@ -88,8 +88,9 @@ if operation == 'grant' then
   local request_id = ARGV[2]
   local ticket_generation = tonumber(ARGV[3])
   local registered_at_ms = tonumber(ARGV[4])
-  local owner_token = ARGV[5]
-  local probe_ttl_ms = tonumber(ARGV[6])
+  local registration_token = ARGV[5]
+  local owner_token = ARGV[6]
+  local probe_ttl_ms = tonumber(ARGV[7])
   local existing_request = redis.call('HGET', KEYS[4], 'request_id')
   local existing_owner = redis.call('HGET', KEYS[4], 'owner_token')
   local existing_expires = tonumber(redis.call('HGET', KEYS[4], 'expires_at') or '0')
@@ -101,7 +102,9 @@ if operation == 'grant' then
   end
   local ticket = decode_ticket(redis.call('HGET', KEYS[2], request_id))
   if not ticket then return {3} end
-  if tonumber(ticket.generation) ~= ticket_generation or tonumber(ticket.registered_at_ms) ~= registered_at_ms then
+  if tonumber(ticket.generation) ~= ticket_generation or
+      tonumber(ticket.registered_at_ms) ~= registered_at_ms or
+      ticket.registration_token ~= registration_token then
     return {2}
   end
   local head = redis.call('ZRANGE', KEYS[1], 0, 0)

@@ -68,13 +68,16 @@ if operation == 'renew' then
   local request_id = ARGV[2]
   local generation = tonumber(ARGV[3])
   local registered_at_ms = tonumber(ARGV[4])
-  local waiter_ttl_ms = tonumber(ARGV[5])
+  local registration_token = ARGV[5]
+  local waiter_ttl_ms = tonumber(ARGV[6])
   local raw = redis.call('HGET', KEYS[2], request_id)
   local ticket = decode_ticket(raw)
   if not ticket then
     return {3}
   end
-  if tonumber(ticket.generation) ~= generation or tonumber(ticket.registered_at_ms) ~= registered_at_ms then
+  if tonumber(ticket.generation) ~= generation or
+      tonumber(ticket.registered_at_ms) ~= registered_at_ms or
+      ticket.registration_token ~= registration_token then
     return {2}
   end
   if tonumber(ticket.logical_deadline) <= now_ms or tonumber(ticket.lease_deadline) <= now_ms then
@@ -91,11 +94,14 @@ if operation == 'cancel' then
   local request_id = ARGV[2]
   local generation = tonumber(ARGV[3])
   local registered_at_ms = tonumber(ARGV[4])
+  local registration_token = ARGV[5]
   local ticket = decode_ticket(redis.call('HGET', KEYS[2], request_id))
   if not ticket then
     return {0}
   end
-  if tonumber(ticket.generation) ~= generation or tonumber(ticket.registered_at_ms) ~= registered_at_ms then
+  if tonumber(ticket.generation) ~= generation or
+      tonumber(ticket.registered_at_ms) ~= registered_at_ms or
+      ticket.registration_token ~= registration_token then
     return {2}
   end
   redis.call('ZREM', KEYS[1], request_id)

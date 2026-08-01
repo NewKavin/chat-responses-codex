@@ -32,6 +32,7 @@ pub struct AccountWaitTicket {
     pub downstream_lease_id: String,
     pub generation: u64,
     pub registered_at_ms: u64,
+    pub registration_token: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,6 +281,7 @@ impl AccountConcurrencyRegistry {
             downstream_lease_id: downstream_lease_id.to_string(),
             generation: state.generation,
             registered_at_ms,
+            registration_token: Uuid::new_v4().to_string(),
         };
         state.tickets.push_back(TicketRecord {
             ticket: ticket.clone(),
@@ -467,7 +469,7 @@ impl AccountConcurrencyRegistry {
             },
             fresh_until,
         });
-        if current < limit && state.explicit_retry_after_until.is_none() {
+        if current < limit {
             state.cooldown_until = None;
         }
         state.last_access = now;
@@ -661,6 +663,7 @@ fn ticket_identity_matches(left: &AccountWaitTicket, right: &AccountWaitTicket) 
         && left.downstream_id == right.downstream_id
         && left.downstream_lease_id == right.downstream_lease_id
         && left.registered_at_ms == right.registered_at_ms
+        && left.registration_token == right.registration_token
 }
 
 fn ticket_matches(left: &AccountWaitTicket, right: &AccountWaitTicket) -> bool {

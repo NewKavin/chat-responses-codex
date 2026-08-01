@@ -360,3 +360,53 @@ async fn stale_local_ticket_cannot_cancel_same_generation_re_registration() {
         ProbeDecision::Granted(_)
     ));
 }
+
+#[tokio::test(start_paused = true)]
+async fn stale_local_ticket_is_fenced_when_re_registered_in_the_same_millisecond() {
+    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
+    let account = AccountConcurrencyKey::new("up-same-ms", "fingerprint-a");
+    coordinator.reject(&account, None, Instant::now());
+    let stale = coordinator.register_waiter(
+        account.clone(),
+        "req-ticket",
+        "down-a",
+        "lease-ticket",
+        Instant::now(),
+    );
+    let current = coordinator.register_waiter(
+        account.clone(),
+        "req-ticket",
+        "down-a",
+        "lease-ticket",
+        Instant::now(),
+    );
+
+    coordinator.cancel_waiter(&stale);
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert_eq!(coordinator.snapshot(&account, Instant::now()).waiters, 1);
+    assert!(matches!(
+        coordinator.try_probe(&current, Instant::now()),
+        ProbeDecision::Granted(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn provider_observation_shortens_only_local_cooldown() {
+    let mut tuning = test_tuning();
+    tuning.probe_delays = vec![Duration::from_secs(5)];
+    let coordinator = AccountConcurrencyRegistry::new(tuning);
+    let account = AccountConcurrencyKey::new("up-observation", "fingerprint-a");
+    coordinator.reject(&account, Some(Duration::from_secs(2)), Instant::now());
+
+    assert_eq!(
+        coordinator.snapshot(&account, Instant::now()).retry_after,
+        Duration::from_secs(5)
+    );
+    coordinator
+        .observe_provider_status(&account, 0, 4, Instant::now())
+        .unwrap();
+    assert_eq!(
+        coordinator.snapshot(&account, Instant::now()).retry_after,
+        Duration::from_secs(2)
+    );
+}

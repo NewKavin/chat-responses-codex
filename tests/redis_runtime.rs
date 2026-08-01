@@ -744,6 +744,49 @@ async fn redis_account_stale_ticket_cannot_mutate_re_registration() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_registration_token_fences_same_millisecond_replacement() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-ticket-token", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let stale = first
+        .register_account_waiter(&account, "req-ticket", "down-a", "lease-ticket")
+        .await
+        .unwrap();
+    let mut current = second
+        .register_account_waiter(&account, "req-ticket", "down-a", "lease-ticket")
+        .await
+        .unwrap();
+    assert_ne!(stale.registration_token, current.registration_token);
+
+    let tickets = redis_account_key(&config, &account, "tickets");
+    let force_timestamp_collision = vec![
+        "EVAL".into(),
+        "local ticket=cjson.decode(redis.call('HGET',KEYS[1],ARGV[1])); ticket.registered_at_ms=tonumber(ARGV[2]); redis.call('HSET',KEYS[1],ARGV[1],cjson.encode(ticket)); return 1".into(),
+        "1".into(),
+        tickets,
+        current.request_id.clone(),
+        stale.registered_at_ms.to_string(),
+    ];
+    assert_eq!(
+        redis_test_command(&config, &force_timestamp_collision).await,
+        ":1\r\n"
+    );
+    current.registered_at_ms = stale.registered_at_ms;
+
+    assert!(first.cancel_account_waiter(&stale).await.is_err());
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    assert!(matches!(
+        second.try_acquire_account_probe(&current).await.unwrap(),
+        ProbeDecision::Granted(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_account_probe_fences_stale_owner_completion() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
@@ -843,11 +886,12 @@ async fn redis_account_probe_script_renewal_extends_ownership_past_initial_ttl()
         "req-renew".into(),
         "1".into(),
         registered_at_ms,
+        "registration-renew".into(),
         "owner-renew".into(),
-        "2000".into(),
+        "31000".into(),
     ];
     assert!(redis_test_command(&config, &grant).await.contains(":0\r\n"));
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(30_100)).await;
 
     let renew = vec![
         "EVAL".into(),
@@ -861,14 +905,14 @@ async fn redis_account_probe_script_renewal_extends_ownership_past_initial_ttl()
         "req-renew".into(),
         "1".into(),
         "owner-renew".into(),
-        "2000".into(),
+        "31000".into(),
     ];
     let renew_response = redis_test_command(&config, &renew).await;
     assert!(
         renew_response.contains(":0\r\n"),
         "unexpected renew response: {renew_response:?}"
     );
-    tokio::time::sleep(Duration::from_millis(1_700)).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
 
     let finish = vec![
         "EVAL".into(),
@@ -1155,6 +1199,35 @@ async fn redis_account_observation_never_shortens_explicit_retry_after() {
             assert!(retry_after >= Duration::from_millis(1_500));
         }
         other => panic!("explicit retry-after was shortened: {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_observation_clears_local_cooldown_but_preserves_retry_after() {
+    let mut config = redis_test_config();
+    config.upstream_concurrency_probe_delays_ms = vec![5_000];
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-observation-shortens", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, Some(Duration::from_secs(2)))
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter(&account, "req-observation", "down-a", "lease-observation")
+        .await
+        .unwrap();
+    second
+        .store_account_concurrency_observation(&account, 0, 4)
+        .await
+        .unwrap();
+
+    match second.try_acquire_account_probe(&ticket).await.unwrap() {
+        ProbeDecision::Wait { retry_after } => {
+            assert!(retry_after <= Duration::from_secs(2));
+            assert!(retry_after >= Duration::from_millis(1_500));
+        }
+        other => panic!("explicit retry-after was not preserved: {other:?}"),
     }
 }
 

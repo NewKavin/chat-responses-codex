@@ -37,8 +37,7 @@ if operation == 'store' then
     'fresh_until', fresh_until)
   redis.call('PEXPIRE', KEYS[2], freshness_ms + 60000)
 
-  local explicit = tonumber(redis.call('HGET', KEYS[3], 'explicit_until') or '0')
-  if concurrency < concurrency_limit and explicit <= now_ms then
+  if concurrency < concurrency_limit then
     redis.call('HDEL', KEYS[3], 'cooldown_until')
   end
   return {0, concurrency, concurrency_limit, now_ms, fresh_until}

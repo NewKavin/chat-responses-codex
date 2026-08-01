@@ -547,6 +547,7 @@ impl RedisRuntimeCoordinator {
             downstream_lease_id: downstream_lease_id.to_string(),
             generation: parse_u64(result.get(1))?,
             registered_at_ms: parse_u64(result.get(2))?,
+            registration_token,
         })
     }
 
@@ -594,7 +595,8 @@ impl RedisRuntimeCoordinator {
                         .arg(operation)
                         .arg(request_id)
                         .arg(ticket.generation)
-                        .arg(ticket.registered_at_ms);
+                        .arg(ticket.registered_at_ms)
+                        .arg(&ticket.registration_token);
                     if operation == "renew" {
                         invocation.arg(self.account_waiter_ttl_ms);
                     }
@@ -638,6 +640,7 @@ impl RedisRuntimeCoordinator {
                         .arg(request_id)
                         .arg(ticket.generation)
                         .arg(ticket.registered_at_ms)
+                        .arg(&ticket.registration_token)
                         .arg(owner_token)
                         .arg(self.account_probe_ttl_ms);
                     timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
