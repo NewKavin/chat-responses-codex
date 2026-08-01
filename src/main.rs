@@ -405,6 +405,7 @@ struct LongStreamProfile {
 }
 
 impl LongStreamProfile {
+    #[cfg(test)]
     fn internal() -> Self {
         Self {
             response_header_seconds: 600,

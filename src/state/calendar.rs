@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use thiserror::Error;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct CalendarDay {
     pub day: String,
     pub timezone: String,

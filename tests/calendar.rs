@@ -7,8 +7,8 @@ fn shanghai_day_has_strict_half_open_bounds() {
 
     assert_eq!(day.day, "2026-08-01");
     assert_eq!(day.timezone, "Asia/Shanghai");
-    assert_eq!(day.start_time, 1_754_067_600);
-    assert_eq!(day.end_time, 1_754_154_000);
+    assert_eq!(day.start_time, 1_785_513_600);
+    assert_eq!(day.end_time, 1_785_600_000);
     assert_eq!(day.duration_seconds(), 86_400);
 }
 
