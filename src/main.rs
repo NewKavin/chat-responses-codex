@@ -509,8 +509,8 @@ fn validate_long_stream_profile(profile: &LongStreamProfile) -> io::Result<()> {
 
     let probe_delays = normalize_concurrency_probe_delays(profile.probe_delays_ms.clone());
     let mut covered_ms = 0_u64;
-    for round in 0..profile.concurrency_rounds {
-        let delay_index = usize::try_from(round)
+    for round in 1..profile.concurrency_rounds {
+        let delay_index = usize::try_from(round - 1)
             .unwrap_or(usize::MAX)
             .min(probe_delays.len() - 1);
         let delay_ms = u64::try_from(probe_delays[delay_index].as_millis()).unwrap_or(u64::MAX);
@@ -824,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn long_stream_profile_counts_every_permitted_concurrency_wait() {
+    fn long_stream_profile_rejects_round_cap_without_a_permitted_wait() {
         let profile = LongStreamProfile {
             response_header_seconds: 0,
             upstream_idle_seconds: 0,
@@ -835,6 +835,6 @@ mod tests {
             probe_delays_ms: vec![100],
         };
 
-        validate_long_stream_profile(&profile).unwrap();
+        assert!(validate_long_stream_profile(&profile).is_err());
     }
 }
