@@ -246,7 +246,8 @@ impl AccountConcurrencyRegistry {
             .entry(key.clone())
             .or_insert_with(|| AccountState::new(now));
         self.prune_account(state, now);
-        self.apply_rejection(state, key, retry_after, now);
+        let advance_generation = state.probe.is_none();
+        self.apply_rejection(state, key, retry_after, now, advance_generation);
     }
 
     pub fn register_waiter(
@@ -425,7 +426,7 @@ impl AccountConcurrencyRegistry {
 
         match outcome {
             AccountProbeOutcome::ConcurrencyRejected { retry_after } => {
-                self.apply_rejection(state, &lease.account, retry_after, now);
+                self.apply_rejection(state, &lease.account, retry_after, now, true);
             }
             AccountProbeOutcome::Accepted => {
                 state.cooldown_until = None;
@@ -560,8 +561,11 @@ impl AccountConcurrencyRegistry {
         key: &AccountConcurrencyKey,
         retry_after: Option<Duration>,
         now: Instant,
+        advance_generation: bool,
     ) {
-        state.generation = state.generation.saturating_add(1);
+        if advance_generation {
+            state.generation = state.generation.saturating_add(1);
+        }
         state.saturated = true;
         let schedule_index = state
             .rejection_count

@@ -129,6 +129,39 @@ async fn stale_owner_cannot_complete_replacement_generation() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn concurrent_rejection_does_not_invalidate_an_active_probe() {
+    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
+    let account = AccountConcurrencyKey::new("up-active", "fingerprint-a");
+    let probe = grant_one_probe(&coordinator, &account, "req-probe").await;
+
+    coordinator.reject(&account, None, Instant::now());
+
+    coordinator.renew_probe(&probe, Instant::now()).unwrap();
+    coordinator
+        .finish_probe(probe, AccountProbeOutcome::Accepted, Instant::now())
+        .unwrap();
+}
+
+#[test]
+fn rejection_jitter_is_deterministic_and_bounded() {
+    let mut tuning = test_tuning();
+    tuning.jitter_max = Duration::from_millis(100);
+    let first = AccountConcurrencyRegistry::new(tuning.clone());
+    let second = AccountConcurrencyRegistry::new(tuning);
+    let account = AccountConcurrencyKey::new("up-jitter", "fingerprint-a");
+
+    let now = Instant::now();
+    first.reject(&account, None, now);
+    second.reject(&account, None, now);
+
+    let first_delay = first.snapshot(&account, now).retry_after;
+    let second_delay = second.snapshot(&account, now).retry_after;
+    assert_eq!(first_delay, second_delay);
+    assert!(first_delay >= Duration::from_millis(100));
+    assert!(first_delay <= Duration::from_millis(200));
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancellation_removes_only_the_matching_ticket() {
     let coordinator = AccountConcurrencyRegistry::new(test_tuning());
     let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");

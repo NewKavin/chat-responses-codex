@@ -42,7 +42,12 @@ local function local_delay(identity, generation, jitter_max, delay_count, delays
 end
 
 local function apply_rejection(identity, retry_after_ms, jitter_max, delay_count, delays_start)
-  local generation = redis.call('HINCRBY', KEYS[3], 'generation', 1)
+  local generation
+  if redis.call('EXISTS', KEYS[4]) == 1 then
+    generation = tonumber(redis.call('HGET', KEYS[3], 'generation') or '0')
+  else
+    generation = redis.call('HINCRBY', KEYS[3], 'generation', 1)
+  end
   local delay = local_delay(identity, generation, jitter_max, delay_count, delays_start)
   redis.call('HINCRBY', KEYS[3], 'rejection_count', 1)
   local local_deadline = now_ms + delay

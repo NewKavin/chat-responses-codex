@@ -1095,6 +1095,38 @@ async fn redis_account_rejection_retry_advances_one_generation() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_concurrent_rejection_does_not_invalidate_an_active_probe() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-active-reject", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter(&account, "req-probe", "down-a", "lease-probe")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    let probe = match first.try_acquire_account_probe(&ticket).await.unwrap() {
+        ProbeDecision::Granted(probe) => probe,
+        other => panic!("expected a probe grant, got {other:?}"),
+    };
+
+    second
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+
+    first.renew_account_probe(&probe).await.unwrap();
+    first
+        .finish_account_probe(&probe, AccountProbeOutcome::Accepted)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_account_rejection_replay_survives_an_interleaved_mutation() {
     let config = redis_test_config();
     let account = AccountConcurrencyKey::new("up-reject-interleaved", "fingerprint-a");
