@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_rejects_short_semantic_deadline_and_round_cap() {
+    fn long_stream_profile_rejects_short_semantic_deadline_and_round_cap() {
         let mut profile = LongStreamProfile::internal();
         profile.first_semantic_seconds = 2_999;
         assert!(validate_long_stream_profile(&profile).is_err());
@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_accepts_tight_semantic_budget_and_normalizes_probe_delays() {
+    fn long_stream_profile_accepts_tight_semantic_budget_and_normalizes_probe_delays() {
         let profile = LongStreamProfile {
             response_header_seconds: 100,
             upstream_idle_seconds: 0,
