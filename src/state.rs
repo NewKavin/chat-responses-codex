@@ -15,6 +15,8 @@ use crate::routing::{
 
 #[path = "state/file_store.rs"]
 mod file_store;
+#[path = "state/calendar.rs"]
+mod calendar;
 #[path = "state/log_queries.rs"]
 pub mod log_queries;
 #[path = "state/postgres.rs"]
@@ -64,6 +66,7 @@ use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use file_store::FileStateStore;
+pub use calendar::{CalendarDay, CalendarError, CalendarRange, DeploymentCalendar};
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
 pub use redis_runtime::{RuntimeCoordinationBackend, RuntimeCoordinationError};
@@ -381,6 +384,7 @@ pub struct AppState {
     troubleshooting_route_capture_token: Arc<str>,
     pub store_path: PathBuf,
     pub config: AppConfig,
+    deployment_calendar: DeploymentCalendar,
     client: Client,
     direct_client: Client,
     config_store: Arc<dyn StateStore>,
@@ -678,6 +682,8 @@ impl AppState {
             .collect::<Vec<_>>();
         let store_path = store_path.into();
         let config_store: Arc<dyn StateStore> = Arc::new(FileStateStore::new(store_path.clone()));
+        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
+            .expect("deployment timezone must be validated before state construction");
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -716,6 +722,7 @@ impl AppState {
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
             config,
+            deployment_calendar,
             config_store,
             postgres: None,
         }
@@ -742,6 +749,8 @@ impl AppState {
             .cloned()
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
+        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
+            .expect("deployment timezone must be validated before state construction");
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -780,6 +789,7 @@ impl AppState {
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
             config,
+            deployment_calendar,
             config_store,
             postgres,
         }
@@ -801,6 +811,8 @@ impl AppState {
         let downstream_usage_logs = state.usage_logs.clone();
         let postgres = Arc::new(postgres);
         let config_store: Arc<dyn StateStore> = postgres.clone();
+        let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
+            .expect("deployment timezone must be validated before state construction");
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -839,6 +851,7 @@ impl AppState {
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
             config,
+            deployment_calendar,
             config_store,
             postgres: Some(postgres),
         }
@@ -846,6 +859,10 @@ impl AppState {
 
     pub fn troubleshooting_route_capture_token(&self) -> &str {
         &self.troubleshooting_route_capture_token
+    }
+
+    pub fn deployment_calendar(&self) -> &DeploymentCalendar {
+        &self.deployment_calendar
     }
 
     pub fn client(&self) -> Client {

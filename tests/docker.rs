@@ -94,6 +94,32 @@ fn deployment_exposes_custom_upstream_ca_directory() {
 }
 
 #[test]
+fn deployment_exposes_calendar_and_long_stream_configuration() {
+    let compose = fs::read_to_string("docker-compose.yml").expect("compose should be readable");
+    let dotenv = fs::read_to_string(".env.example").expect("env example should be readable");
+
+    for expected in [
+        "TZ: ${TZ:-Asia/Shanghai}",
+        "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS: ${UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS:-5}",
+        "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS: ${UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS:-3300}",
+        "CODEX_STREAM_IDLE_TIMEOUT_MS: ${CODEX_STREAM_IDLE_TIMEOUT_MS:-3600000}",
+    ] {
+        assert!(compose.contains(expected), "compose should contain {expected}");
+    }
+    for expected in [
+        "TZ=Asia/Shanghai",
+        "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS=5",
+        "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS=3300",
+        "CODEX_STREAM_IDLE_TIMEOUT_MS=3600000",
+    ] {
+        assert!(
+            dotenv.contains(expected),
+            ".env.example should contain {expected}"
+        );
+    }
+}
+
+#[test]
 fn dockerignore_keeps_the_build_context_small_for_multistage_images() {
     let dockerignore =
         fs::read_to_string(".dockerignore").expect(".dockerignore should be readable");

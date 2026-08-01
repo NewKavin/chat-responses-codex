@@ -6,6 +6,7 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 chrono = "0.4"
+chrono-tz = { version = "0.10", features = ["serde"] }
 gateway-core = { path = "crates/gateway-core" }
 axum = "=0.8.9"
 base64 = "=0.22.1"

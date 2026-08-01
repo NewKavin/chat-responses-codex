@@ -96,6 +96,7 @@ pub struct AppConfig {
     pub admin_password: String,
     pub jwt_secret: String,
     pub app_name: String,
+    pub deployment_timezone: String,
     pub usage_log_rotation_max_bytes: usize,
     pub usage_log_archive_max_files: usize,
     pub usage_log_retention_days: u64,
@@ -148,6 +149,9 @@ pub struct AppConfig {
     pub upstream_concurrency_recovery_max_wait_ms: u64,
     pub upstream_concurrency_recovery_max_rounds: u32,
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
+    pub upstream_concurrency_status_refresh_seconds: u64,
+    pub upstream_first_semantic_output_timeout_seconds: u64,
+    pub codex_stream_idle_timeout_ms: u64,
 }
 
 impl fmt::Debug for AppConfig {
@@ -173,6 +177,7 @@ impl Default for AppConfig {
             admin_password: "admin".into(),
             jwt_secret: "change_me_in_production".into(),
             app_name: "chat-responses-codex".into(),
+            deployment_timezone: "Asia/Shanghai".into(),
             usage_log_rotation_max_bytes: 1_048_576,
             usage_log_archive_max_files: 10,
             usage_log_retention_days: 14,
@@ -230,6 +235,9 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
             upstream_concurrency_probe_delays_ms: DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS
                 .to_vec(),
+            upstream_concurrency_status_refresh_seconds: 5,
+            upstream_first_semantic_output_timeout_seconds: 3_300,
+            codex_stream_idle_timeout_ms: 3_600_000,
         }
     }
 }

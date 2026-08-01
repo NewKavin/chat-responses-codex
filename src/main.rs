@@ -1,7 +1,7 @@
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
-    AppConfig, AppState, ModelKeySyncService, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
-    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+    AppConfig, AppState, DeploymentCalendar, ModelKeySyncService,
+    DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS, DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
         jwt_secret: env_or("JWT_SECRET", "change_me_in_production"),
         app_name: env_or("APP_NAME", "chat-responses-codex"),
+        deployment_timezone: env_or("TZ", "Asia/Shanghai"),
         usage_log_rotation_max_bytes: env_usize("USAGE_LOG_ROTATION_MAX_BYTES", 1_048_576).max(1),
         usage_log_archive_max_files: env_usize("USAGE_LOG_ARCHIVE_MAX_FILES", 10).max(1),
         usage_log_retention_days: env_u64("USAGE_LOG_RETENTION_DAYS", 14),
@@ -205,7 +206,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .ok()
             .map(|value| normalize_concurrency_probe_delays_ms(&value))
             .unwrap_or_else(|| DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec()),
+        upstream_concurrency_status_refresh_seconds: env_u64(
+            "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS",
+            5,
+        )
+        .max(1),
+        upstream_first_semantic_output_timeout_seconds: env_u64(
+            "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS",
+            3_300,
+        )
+        .max(1),
+        codex_stream_idle_timeout_ms: env_u64("CODEX_STREAM_IDLE_TIMEOUT_MS", 3_600_000).max(1),
     };
+
+    DeploymentCalendar::parse(&config.deployment_timezone).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid TZ configuration: {error}"),
+        )
+    })?;
+    let long_stream_profile = LongStreamProfile::from_config(&config);
+    validate_long_stream_profile(&long_stream_profile)?;
 
     if config.jwt_secret == "change_me_in_production" {
         tracing::warn!(
@@ -217,6 +238,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state_path = %state_path.display(),
         log_path = %log_path,
         app_name = %config.app_name,
+        deployment_timezone = %config.deployment_timezone,
+        upstream_response_header_timeout_seconds = config.upstream_response_header_timeout_seconds,
+        upstream_stream_idle_timeout_seconds = config.upstream_stream_idle_timeout_seconds,
+        upstream_concurrency_recovery_max_wait_ms = config.upstream_concurrency_recovery_max_wait_ms,
+        upstream_first_semantic_output_timeout_seconds = config.upstream_first_semantic_output_timeout_seconds,
+        codex_stream_idle_timeout_ms = config.codex_stream_idle_timeout_ms,
         hedge_enabled = config.upstream_hedge_enabled,
         hedge_delay_ms = config.upstream_hedge_delay_ms,
         hedge_interval_ms = config.upstream_hedge_interval_ms,
@@ -364,6 +391,131 @@ fn validate_transient_route_cooldown_seconds(base: u64, max: u64) -> io::Result<
         ));
     }
     Ok((base, max))
+}
+
+#[derive(Clone, Debug)]
+struct LongStreamProfile {
+    response_header_seconds: u64,
+    upstream_idle_seconds: u64,
+    concurrency_wait_ms: u64,
+    first_semantic_seconds: u64,
+    codex_stream_idle_ms: u64,
+    concurrency_rounds: u32,
+    probe_delays_ms: Vec<u64>,
+}
+
+impl LongStreamProfile {
+    fn internal() -> Self {
+        Self {
+            response_header_seconds: 600,
+            upstream_idle_seconds: 1_800,
+            concurrency_wait_ms: 600_000,
+            first_semantic_seconds: 3_300,
+            codex_stream_idle_ms: 3_600_000,
+            concurrency_rounds: 320,
+            probe_delays_ms: DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec(),
+        }
+    }
+
+    fn from_config(config: &AppConfig) -> Self {
+        Self {
+            response_header_seconds: config.upstream_response_header_timeout_seconds,
+            upstream_idle_seconds: config.upstream_stream_idle_timeout_seconds,
+            concurrency_wait_ms: config.upstream_concurrency_recovery_max_wait_ms,
+            first_semantic_seconds: config.upstream_first_semantic_output_timeout_seconds,
+            codex_stream_idle_ms: config.codex_stream_idle_timeout_ms,
+            concurrency_rounds: config.upstream_concurrency_recovery_max_rounds,
+            probe_delays_ms: config.upstream_concurrency_probe_delays_ms.clone(),
+        }
+    }
+}
+
+fn validate_long_stream_profile(profile: &LongStreamProfile) -> io::Result<()> {
+    const CANCELLATION_MARGIN_SECONDS: u64 = 30;
+    const CANCELLATION_MARGIN_MS: u64 = 30_000;
+
+    if profile.probe_delays_ms.is_empty() || profile.concurrency_rounds == 0 {
+        return Err(invalid_long_stream_profile(
+            "concurrency probe schedule must not be empty",
+        ));
+    }
+
+    let wait_seconds = profile
+        .concurrency_wait_ms
+        .checked_add(999)
+        .ok_or_else(|| invalid_long_stream_profile("concurrency wait overflows seconds"))?
+        / 1_000;
+    let gateway_budget = wait_seconds
+        .checked_add(profile.response_header_seconds)
+        .and_then(|value| value.checked_add(profile.upstream_idle_seconds))
+        .ok_or_else(|| invalid_long_stream_profile("gateway stream budget overflows"))?;
+    if gateway_budget > profile.first_semantic_seconds {
+        return Err(invalid_long_stream_profile(
+            "gateway wait, response-header, and idle budgets exceed first semantic output deadline",
+        ));
+    }
+
+    let first_semantic_ms = profile
+        .first_semantic_seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| {
+            invalid_long_stream_profile("first semantic deadline overflows milliseconds")
+        })?;
+    let minimum_codex_idle_ms = first_semantic_ms
+        .checked_add(300_000)
+        .ok_or_else(|| invalid_long_stream_profile("Codex idle deadline overflows"))?;
+    if profile.codex_stream_idle_ms < minimum_codex_idle_ms {
+        return Err(invalid_long_stream_profile(
+            "Codex stream idle timeout must exceed first semantic output deadline by 300 seconds",
+        ));
+    }
+
+    let probe_ttl_seconds = profile
+        .response_header_seconds
+        .checked_add(60)
+        .ok_or_else(|| invalid_long_stream_profile("probe TTL overflows"))?;
+    let probe_cancellation_deadline = probe_ttl_seconds
+        .checked_add(CANCELLATION_MARGIN_SECONDS)
+        .ok_or_else(|| invalid_long_stream_profile("probe cancellation margin overflows"))?;
+    if probe_cancellation_deadline > profile.first_semantic_seconds {
+        return Err(invalid_long_stream_profile(
+            "probe TTL leaves less than a 30-second cancellation margin",
+        ));
+    }
+
+    let waiter_ttl_ms = profile
+        .concurrency_wait_ms
+        .checked_add(60_000)
+        .ok_or_else(|| invalid_long_stream_profile("waiter TTL overflows"))?;
+    let waiter_cancellation_deadline = waiter_ttl_ms
+        .checked_add(CANCELLATION_MARGIN_MS)
+        .ok_or_else(|| invalid_long_stream_profile("waiter cancellation margin overflows"))?;
+    if waiter_cancellation_deadline > first_semantic_ms {
+        return Err(invalid_long_stream_profile(
+            "waiter TTL leaves less than a 30-second cancellation margin",
+        ));
+    }
+
+    let mut covered_ms = 0_u64;
+    for round in 1..profile.concurrency_rounds {
+        let delay_index = usize::try_from(round - 1)
+            .unwrap_or(usize::MAX)
+            .min(profile.probe_delays_ms.len() - 1);
+        covered_ms = covered_ms
+            .checked_add(profile.probe_delays_ms[delay_index])
+            .ok_or_else(|| invalid_long_stream_profile("concurrency probe coverage overflows"))?;
+    }
+    if covered_ms < profile.concurrency_wait_ms {
+        return Err(invalid_long_stream_profile(
+            "concurrency round cap does not cover the configured wait budget",
+        ));
+    }
+
+    Ok(())
+}
+
+fn invalid_long_stream_profile(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
 fn normalize_hedge_delay_ms(value: u64) -> u64 {
@@ -536,7 +688,8 @@ impl Write for TeeWriter {
 mod tests {
     use super::{
         env_positive_u64, env_u64, normalize_concurrency_probe_delays_ms, normalize_hedge_delay_ms,
-        normalize_route_retry_rounds, validate_transient_route_cooldown_seconds,
+        normalize_route_retry_rounds, validate_long_stream_profile,
+        validate_transient_route_cooldown_seconds, LongStreamProfile,
     };
     use std::env;
     use std::sync::{Mutex, OnceLock};
@@ -613,5 +766,32 @@ mod tests {
         assert!(error
             .to_string()
             .contains("UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS"));
+    }
+
+    #[test]
+    fn internal_long_stream_profile_is_valid() {
+        let profile = LongStreamProfile {
+            response_header_seconds: 600,
+            upstream_idle_seconds: 1_800,
+            concurrency_wait_ms: 600_000,
+            first_semantic_seconds: 3_300,
+            codex_stream_idle_ms: 3_600_000,
+            concurrency_rounds: 320,
+            probe_delays_ms: vec![100, 200, 400, 800, 1_000, 2_000],
+        };
+        validate_long_stream_profile(&profile).unwrap();
+    }
+
+    #[test]
+    fn profile_rejects_short_semantic_deadline_and_round_cap() {
+        let mut profile = LongStreamProfile::internal();
+        profile.first_semantic_seconds = 2_999;
+        assert!(validate_long_stream_profile(&profile).is_err());
+        profile = LongStreamProfile::internal();
+        profile.concurrency_rounds = 32;
+        assert!(validate_long_stream_profile(&profile).is_err());
+        profile = LongStreamProfile::internal();
+        profile.codex_stream_idle_ms = 3_599_999;
+        assert!(validate_long_stream_profile(&profile).is_err());
     }
 }
