@@ -15,6 +15,8 @@ use crate::routing::{
 
 #[path = "state/file_store.rs"]
 mod file_store;
+#[path = "state/account_concurrency.rs"]
+mod account_concurrency;
 #[path = "state/calendar.rs"]
 mod calendar;
 #[path = "state/log_queries.rs"]
@@ -66,6 +68,12 @@ use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use file_store::FileStateStore;
+pub use account_concurrency::{
+    AccountConcurrencyKey, AccountConcurrencyRegistry, AccountConcurrencySnapshot,
+    AccountConcurrencyTuning, AccountLeaseError, AccountProbeLease, AccountProbeOutcome,
+    AccountWaitTicket, ObservationError, ProbeDecision, ProviderConcurrencyObservation,
+    ProviderConcurrencyObservationSource,
+};
 pub use calendar::{CalendarDay, CalendarError, CalendarRange, DeploymentCalendar};
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
@@ -366,6 +374,7 @@ pub struct AppState {
     usage_log_flush_running: Arc<AtomicBool>,
     upstream_runtime_state: Arc<Mutex<HashMap<String, UpstreamRuntimeState>>>,
     route_health: Arc<Mutex<RouteHealthRegistry>>,
+    account_concurrency: Arc<AccountConcurrencyRegistry>,
     runtime_coordination: RuntimeCoordinationBackend,
     runtime_capability_hints: Arc<StdMutex<RuntimeCapabilityHints>>,
     downstream_request_windows: Arc<Mutex<HashMap<String, VecDeque<DownstreamRequestEvent>>>>,
@@ -400,6 +409,14 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
         config.upstream_transient_route_cooldown_base_seconds,
         config.upstream_transient_route_cooldown_max_seconds,
     )))
+}
+
+fn account_concurrency_registry_from_config(
+    config: &AppConfig,
+) -> Arc<AccountConcurrencyRegistry> {
+    Arc::new(AccountConcurrencyRegistry::new(
+        AccountConcurrencyTuning::from_config(config),
+    ))
 }
 
 fn new_internal_route_capture_token() -> Arc<str> {
@@ -702,6 +719,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
+            account_concurrency: account_concurrency_registry_from_config(&config),
             runtime_coordination,
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
@@ -768,6 +786,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
+            account_concurrency: account_concurrency_registry_from_config(&config),
             runtime_coordination: RuntimeCoordinationBackend::Local,
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
@@ -829,6 +848,7 @@ impl AppState {
             usage_log_flush_running: Arc::new(AtomicBool::new(false)),
             upstream_runtime_state: Arc::new(Mutex::new(HashMap::new())),
             route_health: route_health_registry_from_config(&config),
+            account_concurrency: account_concurrency_registry_from_config(&config),
             runtime_coordination,
             runtime_capability_hints: Arc::new(StdMutex::new(RuntimeCapabilityHints::default())),
             downstream_request_windows: Arc::new(Mutex::new(build_downstream_request_windows(
@@ -867,6 +887,10 @@ impl AppState {
 
     pub fn deployment_calendar(&self) -> &DeploymentCalendar {
         &self.deployment_calendar
+    }
+
+    pub fn account_concurrency_registry(&self) -> Arc<AccountConcurrencyRegistry> {
+        self.account_concurrency.clone()
     }
 
     pub fn client(&self) -> Client {
