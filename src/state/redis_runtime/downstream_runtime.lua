@@ -24,7 +24,11 @@ if operation == 'mark_waiting' then
   end
   local deadline = math.min(tonumber(admitted_until), expires_at_ms)
   redis.call('ZADD', KEYS[2], deadline, lease_id)
-  redis.call('PEXPIREAT', KEYS[2], deadline + 60000)
+  local retention_ms = math.max(0, deadline - now_ms) + 60000
+  local current_ttl = redis.call('PTTL', KEYS[2])
+  if current_ttl < retention_ms then
+    redis.call('PEXPIRE', KEYS[2], retention_ms)
+  end
   return 1
 end
 

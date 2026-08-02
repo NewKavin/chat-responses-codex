@@ -15,7 +15,7 @@ use chat_responses_codex::state::{
 };
 use sha2::{Digest, Sha256};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
@@ -255,6 +255,14 @@ fn redis_account_key(config: &AppConfig, account: &AccountConcurrencyKey, suffix
     );
     format!(
         "{}:v1:account:{{{identity}}}:{suffix}",
+        config.redis_key_prefix
+    )
+}
+
+fn redis_downstream_key(config: &AppConfig, downstream_id: &str, suffix: &str) -> String {
+    let identity = format!("{:x}", Sha256::digest(downstream_id.as_bytes()));
+    format!(
+        "{}:v1:downstream:{{{identity}}}:{suffix}",
         config.redis_key_prefix
     )
 }
@@ -702,6 +710,61 @@ async fn redis_downstream_snapshot_counts_admitted_and_waiting_without_false_zer
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_short_waiting_lease_does_not_shorten_shared_waiting_ttl() {
+    let mut long_config = redis_test_config();
+    long_config.upstream_stream_max_duration_seconds = 300;
+    long_config.upstream_concurrency_recovery_max_wait_ms = 300_000;
+    let mut short_config = long_config.clone();
+    short_config.upstream_stream_max_duration_seconds = 0;
+    short_config.upstream_concurrency_recovery_max_wait_ms = 0;
+
+    let directory = tempdir().unwrap();
+    let long_state =
+        AppState::load_from_path(directory.path().join("long.json"), long_config.clone())
+            .await
+            .unwrap();
+    let short_state = AppState::load_from_path(directory.path().join("short.json"), short_config)
+        .await
+        .unwrap();
+    let mut downstream = redis_test_downstream("down-runtime-shared-ttl");
+    downstream.max_concurrency = 2;
+
+    let long_lease = long_state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    long_state
+        .mark_downstream_waiting(&long_lease)
+        .await
+        .unwrap();
+    let waiting_key = redis_downstream_key(&long_config, &downstream.id, "waiting");
+    let before = redis_integer(
+        &redis_test_command(&long_config, &["PTTL".into(), waiting_key.clone()]).await,
+    );
+
+    let observed_at = Instant::now();
+    let short_lease = short_state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    short_state
+        .mark_downstream_waiting(&short_lease)
+        .await
+        .unwrap();
+    let elapsed_ms = i64::try_from(observed_at.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let after =
+        redis_integer(&redis_test_command(&long_config, &["PTTL".into(), waiting_key]).await);
+
+    assert!(before > 0, "long waiting key must have a positive TTL");
+    assert!(after > 0, "shared waiting key must retain a positive TTL");
+    assert!(
+        after.saturating_add(elapsed_ms).saturating_add(2_000) >= before,
+        "short lease reduced shared waiting TTL from {before} ms to {after} ms"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_account_waiter_cancellation_advances_fifo_head() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
@@ -902,7 +965,7 @@ async fn redis_account_probe_script_renewal_extends_ownership_past_initial_ttl()
         registered_at_ms,
         "registration-renew".into(),
         "owner-renew".into(),
-        "31000".into(),
+        "36000".into(),
     ];
     assert!(redis_test_command(&config, &grant).await.contains(":0\r\n"));
     tokio::time::sleep(Duration::from_millis(30_100)).await;
@@ -919,14 +982,14 @@ async fn redis_account_probe_script_renewal_extends_ownership_past_initial_ttl()
         "req-renew".into(),
         "1".into(),
         "owner-renew".into(),
-        "31000".into(),
+        "36000".into(),
     ];
     let renew_response = redis_test_command(&config, &renew).await;
     assert!(
         renew_response.contains(":0\r\n"),
         "unexpected renew response: {renew_response:?}"
     );
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    tokio::time::sleep(Duration::from_millis(6_100)).await;
 
     let finish = vec![
         "EVAL".into(),
@@ -1598,6 +1661,8 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
     assert!(downstream_result.is_err());
     assert!(upstream_result.is_err());
 
+    wait_for_test_redis_recovery(&first).await;
+    pause_test_redis(&config, 5_000).await;
     let (downstream_result, upstream_result) = tokio::join!(
         first.release_downstream_concurrency(downstream_retry_during_outage),
         first.release_upstream_request(upstream_retry_during_outage),
@@ -1611,7 +1676,7 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
         "a retained upstream clone must retry Redis instead of returning false success"
     );
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_test_redis_recovery(&first).await;
     let (downstream_result, upstream_result) = tokio::join!(
         first.release_downstream_concurrency(downstream_retry_after_recovery),
         first.release_upstream_request(upstream_retry_after_recovery),
