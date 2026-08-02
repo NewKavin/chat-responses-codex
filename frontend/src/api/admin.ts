@@ -36,6 +36,7 @@ export interface BatchCreateUpstreamPayload {
   protocols?: string[]
   active?: boolean
   strip_nonstandard_chat_fields?: boolean
+  concurrency_status_enabled?: boolean
 }
 
 export interface BatchCreateUpstreamResult {

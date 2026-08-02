@@ -99,6 +99,7 @@ export interface UpstreamConfig {
   managed_source?: string | null
   last_synced_at?: number
   strip_nonstandard_chat_fields: boolean
+  concurrency_status_enabled: boolean
   runtime_state?: UpstreamRuntimeState
   _replace_api_keys?: boolean
 }

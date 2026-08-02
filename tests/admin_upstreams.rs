@@ -121,6 +121,34 @@ fn create_test_state_with_upstreams_and_config(
     attach_capability_probe_sink(AppState::new(state, unique_state_path(), config))
 }
 
+#[test]
+fn account_api_keys_are_trimmed_deduplicated_and_non_empty() {
+    let upstream = UpstreamConfig {
+        api_key: " primary-key ".to_string(),
+        api_keys: vec![
+            "primary-key".to_string(),
+            "".to_string(),
+            " second-key ".to_string(),
+        ],
+        api_key_models: vec![
+            ApiKeyModelConfig {
+                api_key: "second-key".to_string(),
+                supported_models: vec![],
+            },
+            ApiKeyModelConfig {
+                api_key: " third-key ".to_string(),
+                supported_models: vec![],
+            },
+        ],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        upstream.account_api_keys(),
+        vec!["primary-key", "second-key", "third-key"]
+    );
+}
+
 fn qualification_mock_response(model: &str, protocol: UpstreamProtocol) -> Response {
     match model {
         "chat-ok" | "old" => Json(json!({
@@ -933,6 +961,76 @@ async fn test_upstreams_create_adds_new_upstream() {
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams.len(), 3);
     assert!(snapshot.upstreams.iter().any(|u| u.id == "upstream-3"));
+}
+
+#[tokio::test]
+async fn concurrency_status_switch_round_trips_through_admin_create_and_update() {
+    let state = create_test_state();
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "id": "private-status",
+                        "name": "Private Status",
+                        "base_url": "https://api.example.invalid",
+                        "api_key": "private-secret",
+                        "protocol": "Responses",
+                        "supported_models": ["glm-5.2"],
+                        "active": true,
+                        "concurrency_status_enabled": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["concurrency_status_enabled"], true);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/private-status")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"concurrency_status_enabled": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let updated: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated["concurrency_status_enabled"], false);
+    assert!(
+        !state
+            .routing_snapshot()
+            .await
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == "private-status")
+            .unwrap()
+            .concurrency_status_enabled
+    );
 }
 
 #[tokio::test]

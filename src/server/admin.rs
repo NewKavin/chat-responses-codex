@@ -939,6 +939,8 @@ pub(super) struct BatchCreateUpstreamPayload {
     active: bool,
     #[serde(default)]
     strip_nonstandard_chat_fields: bool,
+    #[serde(default)]
+    concurrency_status_enabled: bool,
 }
 
 fn default_batch_requests_per_minute() -> u32 {
@@ -1362,6 +1364,7 @@ pub(super) async fn admin_create_upstreams_batch(
         managed_source: automatic_discovery.then(|| "batch".to_string()),
         last_synced_at: if automatic_discovery { now } else { 0 },
         strip_nonstandard_chat_fields: payload.strip_nonstandard_chat_fields,
+        concurrency_status_enabled: payload.concurrency_status_enabled,
         default_model_context: Some(DefaultModelContextConfig {
             context_limit: 200_000,
             output_reserve: 4096,

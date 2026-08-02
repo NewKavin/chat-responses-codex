@@ -2,7 +2,7 @@ use crate::routing::UpstreamProtocol;
 use crate::state::redis_runtime::RuntimeCoordinationError;
 use crate::upstream_tls::UpstreamCaConfig;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -299,6 +299,22 @@ pub struct UpstreamConfig {
     /// when they encounter unrecognized fields.
     #[serde(default)]
     pub strip_nonstandard_chat_fields: bool,
+    #[serde(default)]
+    pub concurrency_status_enabled: bool,
+}
+
+impl UpstreamConfig {
+    pub fn account_api_keys(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        std::iter::once(&self.api_key)
+            .chain(self.api_keys.iter())
+            .chain(self.api_key_models.iter().map(|mapping| &mapping.api_key))
+            .filter_map(|key| {
+                let key = key.trim();
+                (!key.is_empty() && seen.insert(key.to_string())).then(|| key.to_string())
+            })
+            .collect()
+    }
 }
 
 impl Default for UpstreamConfig {
@@ -330,6 +346,7 @@ impl Default for UpstreamConfig {
             managed_source: None,
             last_synced_at: 0,
             strip_nonstandard_chat_fields: false,
+            concurrency_status_enabled: false,
         }
     }
 }

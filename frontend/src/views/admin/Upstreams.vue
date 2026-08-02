@@ -265,6 +265,11 @@
           </el-alert>
         </el-form-item>
 
+        <el-form-item label="私有并发状态接口">
+          <el-switch v-model="form.concurrency_status_enabled" />
+          <span class="form-hint">非 OpenAI 标准接口，默认关闭；仅为支持该固定路径的内部上游开启。</span>
+        </el-form-item>
+
         <el-form-item label="启用">
           <el-switch v-model="form.active" />
         </el-form-item>
@@ -327,6 +332,7 @@ const form = ref<Partial<UpstreamConfig>>({
   premium_models: [],
   protect_premium_quota: false,
   strip_nonstandard_chat_fields: false,
+  concurrency_status_enabled: false,
   failure_count: 0
 })
 
@@ -481,6 +487,7 @@ const handleCreate = () => {
     premium_models: [],
     protect_premium_quota: false,
     strip_nonstandard_chat_fields: false,
+    concurrency_status_enabled: false,
     failure_count: 0
   }
   dialogVisible.value = true
@@ -511,6 +518,7 @@ const handleCopy = (row: UpstreamConfig) => {
     premium_models: [...(row.premium_models || [])],
     protect_premium_quota: row.protect_premium_quota,
     strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
+    concurrency_status_enabled: false,
     failure_count: 0
   }
   dialogVisible.value = true
@@ -539,6 +547,7 @@ const handleEdit = (row: UpstreamConfig) => {
     protocol: protocols[0] as UpstreamConfig['protocol'],
     protocols,
     strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
+    concurrency_status_enabled: Boolean(row.concurrency_status_enabled),
     default_model_context: row.default_model_context
       ? {
           ...row.default_model_context
@@ -605,6 +614,7 @@ const handleSubmit = async () => {
     submitData.protocols = protocols
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
     submitData.strip_nonstandard_chat_fields = Boolean(submitData.strip_nonstandard_chat_fields)
+    submitData.concurrency_status_enabled = Boolean(submitData.concurrency_status_enabled)
 
     const submittedKeys = (form.value.api_key || '')
       .split('\n')
@@ -651,7 +661,8 @@ const handleSubmit = async () => {
           protocol: protocols[0] ? String(protocols[0]) : 'ChatCompletions',
           protocols: protocols.map(p => String(p)),
           active: submitData.active,
-          strip_nonstandard_chat_fields: Boolean(submitData.strip_nonstandard_chat_fields)
+          strip_nonstandard_chat_fields: Boolean(submitData.strip_nonstandard_chat_fields),
+          concurrency_status_enabled: Boolean(submitData.concurrency_status_enabled)
         }
 
         const response = await adminApi.createUpstreamsBatch(batchPayload)

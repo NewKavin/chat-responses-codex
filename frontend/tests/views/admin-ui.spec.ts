@@ -70,6 +70,15 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('onUnmounted')
   })
 
+  it('labels the private concurrency adapter as opt-in and non-standard', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('v-model="form.concurrency_status_enabled"')
+    expect(page).toContain('私有并发状态接口')
+    expect(page).toContain('非 OpenAI 标准接口，默认关闭')
+    expect(page).toContain('concurrency_status_enabled: Boolean(submitData.concurrency_status_enabled)')
+  })
+
   it('labels indexed model discovery results without key prefixes', () => {
     const page = source('views/admin/Upstreams.vue')
 
