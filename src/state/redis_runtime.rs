@@ -94,6 +94,10 @@ impl RuntimeCoordinationBackend {
                     .upstream_concurrency_status_refresh_seconds
                     .saturating_mul(1_000)
                     .saturating_add(3_000),
+                account_observation_freshness_ms: config
+                    .upstream_concurrency_status_refresh_seconds
+                    .saturating_mul(1_000)
+                    .max(1_000),
                 route_health_ttl_seconds: route_health_retention_ttl_seconds(Duration::from_secs(
                     config.upstream_transient_route_cooldown_max_seconds,
                 )),
@@ -138,6 +142,7 @@ pub struct RedisRuntimeCoordinator {
     account_waiter_ttl_ms: u64,
     account_probe_ttl_ms: u64,
     account_poller_ttl_ms: u64,
+    account_observation_freshness_ms: u64,
     route_health_ttl_seconds: u64,
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
@@ -948,7 +953,10 @@ impl RedisRuntimeCoordinator {
         let current = current.to_string();
         let limit = limit.to_string();
         let result = self
-            .run_account_status(account, &["store", &current, &limit, "5000"])
+            .run_account_status(
+                account,
+                &["store", &current, &limit, &self.account_observation_freshness_ms.to_string()],
+            )
             .await?;
         parse_provider_observation(&result)
     }

@@ -406,6 +406,7 @@ pub struct AppState {
     model_key_sync_runtime: Arc<StdMutex<model_key_sync::ModelKeySyncRuntime>>,
     model_key_sync_lock: Arc<Mutex<()>>,
     troubleshooting_route_capture_token: Arc<str>,
+    replica_owner_token: Arc<str>,
     pub store_path: PathBuf,
     pub config: AppConfig,
     deployment_calendar: DeploymentCalendar,
@@ -756,6 +757,7 @@ impl AppState {
             )),
             model_key_sync_lock: Arc::new(Mutex::new(())),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
+            replica_owner_token: new_internal_route_capture_token(),
             store_path,
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -823,6 +825,7 @@ impl AppState {
             )),
             model_key_sync_lock: Arc::new(Mutex::new(())),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
+            replica_owner_token: new_internal_route_capture_token(),
             store_path,
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -885,6 +888,7 @@ impl AppState {
             )),
             model_key_sync_lock: Arc::new(Mutex::new(())),
             troubleshooting_route_capture_token: new_internal_route_capture_token(),
+            replica_owner_token: new_internal_route_capture_token(),
             store_path: PathBuf::new(),
             client: build_upstream_http_client(&config, false),
             direct_client: build_upstream_http_client(&config, true),
@@ -897,6 +901,11 @@ impl AppState {
 
     pub fn troubleshooting_route_capture_token(&self) -> &str {
         &self.troubleshooting_route_capture_token
+    }
+
+    /// Stable owner token for this replica, used to acquire poller leases.
+    pub fn replica_owner_token(&self) -> &str {
+        &self.replica_owner_token
     }
 
     pub fn deployment_calendar(&self) -> &DeploymentCalendar {
@@ -1173,6 +1182,26 @@ impl AppState {
             .account_concurrency
             .snapshot(account, tokio::time::Instant::now())
             .observation)
+    }
+
+    /// Compatibility wrapper for storing a provider concurrency observation.
+    pub async fn store_provider_concurrency_observation(
+        &self,
+        account: &AccountConcurrencyKey,
+        current: u32,
+        limit: u32,
+    ) -> Result<(), RuntimeCoordinationError> {
+        self.store_account_concurrency_observation(account, current, limit)
+            .await
+            .map(|_| ())
+    }
+
+    /// Compatibility wrapper for reading a provider concurrency observation.
+    pub async fn provider_concurrency_observation(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<Option<ProviderConcurrencyObservation>, RuntimeCoordinationError> {
+        self.account_concurrency_observation(account).await
     }
 
     pub fn client(&self) -> Client {

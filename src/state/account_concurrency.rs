@@ -108,7 +108,9 @@ impl AccountConcurrencyTuning {
                     .saturating_add(60),
             ),
             renewal_interval: Duration::from_secs(30),
-            observation_freshness: Duration::from_secs(5),
+            observation_freshness: Duration::from_secs(
+                config.upstream_concurrency_status_refresh_seconds.max(1),
+            ),
             idle_retention: Duration::from_secs(600),
         }
     }

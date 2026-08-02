@@ -295,6 +295,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     chat_responses_codex::server::CapabilityProbeService::spawn(state.clone());
     ModelKeySyncService::spawn(state.clone());
     spawn_usage_log_retention_task(state.clone());
+    chat_responses_codex::server::spawn_concurrency_status_poller(state.clone());
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,

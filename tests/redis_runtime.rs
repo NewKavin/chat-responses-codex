@@ -1,11 +1,12 @@
 use axum::body::{to_bytes, Body};
+use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
 use chat_responses_codex::capabilities::WireProtocol;
 use chat_responses_codex::keys::{generate_downstream_key, upstream_key_fingerprint};
 use chat_responses_codex::routing::UpstreamProtocol;
-use chat_responses_codex::server::build_router;
+use chat_responses_codex::server::{build_router, poll_concurrency_status_once};
 use chat_responses_codex::state::{
     AccountConcurrencyKey, AccountProbeOutcome, ApiKeyModelConfig, AppConfig, AppState,
     DownstreamAdmissionRejection, DownstreamConfig, KeyHealthKey, ModelKeySyncService,
@@ -13,8 +14,11 @@ use chat_responses_codex::state::{
     RouteHealthKey, RouteOutcome, RouteSetAggregateKey, RuntimeCoordinationBackend, UpstreamConfig,
     UsageLog,
 };
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1235,6 +1239,60 @@ async fn redis_account_status_poller_and_observation_are_shared() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_status_poller_deduplicates_provider_hits_across_replicas() {
+    async fn provider_status(State(hits): State<Arc<AtomicUsize>>) -> Json<Value> {
+        hits.fetch_add(1, Ordering::SeqCst);
+        Json(json!({"concurrency": 3, "concurrency_limit": 4}))
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/dashboard/api/user/request-status", get(provider_status))
+        .with_state(hits.clone());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut config = redis_test_config();
+    config.upstream_concurrency_status_refresh_seconds = 30;
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let upstream = UpstreamConfig {
+        id: "redis-status-upstream".into(),
+        name: "Redis status upstream".into(),
+        base_url: format!("http://{address}/v1"),
+        api_key: "redis-status-secret".into(),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec!["glm-5.2".into()],
+        active: true,
+        concurrency_status_enabled: true,
+        ..Default::default()
+    };
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream).await.unwrap();
+
+    tokio::join!(
+        poll_concurrency_status_once(&first),
+        poll_concurrency_status_once(&second)
+    );
+
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let account = AccountConcurrencyKey::new(
+        "redis-status-upstream",
+        upstream_key_fingerprint("redis-status-upstream", "redis-status-secret"),
+    );
+    assert!(first
+        .account_concurrency_observation(&account)
+        .await
+        .unwrap()
+        .is_some());
+    task.abort();
 }
 
 #[tokio::test]

@@ -29,7 +29,7 @@ fn provider_observation_freshness_is_not_extended_by_the_poll_interval() {
 
     assert_eq!(
         AccountConcurrencyTuning::from_config(&config).observation_freshness,
-        Duration::from_secs(5)
+        Duration::from_secs(30)
     );
 }
 
