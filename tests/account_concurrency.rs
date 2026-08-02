@@ -72,20 +72,43 @@ async fn one_account_orders_waiters_across_models_and_protocols() {
         "lease-1",
         Instant::now(),
     );
+    let last = coordinator.register_waiter(
+        account.clone(),
+        "req-3",
+        "down-a",
+        "lease-3",
+        Instant::now(),
+    );
     tokio::time::advance(Duration::from_millis(100)).await;
 
-    assert!(matches!(
+    assert_eq!(
         coordinator.try_probe(&first, Instant::now()),
-        ProbeDecision::Wait { .. }
-    ));
+        ProbeDecision::Wait {
+            retry_after: Duration::from_millis(100),
+        }
+    );
+    assert_eq!(
+        coordinator.try_probe(&last, Instant::now()),
+        ProbeDecision::Wait {
+            retry_after: Duration::from_millis(100),
+        }
+    );
     let permit = match coordinator.try_probe(&second, Instant::now()) {
         ProbeDecision::Granted(permit) => permit,
         other => panic!("oldest waiter must win: {other:?}"),
     };
-    assert!(matches!(
+    assert_eq!(
         coordinator.try_probe(&first, Instant::now()),
-        ProbeDecision::Wait { .. }
-    ));
+        ProbeDecision::Wait {
+            retry_after: Duration::from_secs(660),
+        }
+    );
+    assert_eq!(
+        coordinator.try_probe(&last, Instant::now()),
+        ProbeDecision::Wait {
+            retry_after: Duration::from_millis(100),
+        }
+    );
     coordinator
         .finish_probe(permit, AccountProbeOutcome::Accepted, Instant::now())
         .unwrap();

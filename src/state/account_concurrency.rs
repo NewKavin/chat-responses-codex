@@ -9,6 +9,8 @@ use thiserror::Error;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+const FIFO_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountConcurrencyKey {
     pub upstream_id: String,
@@ -356,7 +358,7 @@ impl AccountConcurrencyRegistry {
         }
         if position != 0 {
             return ProbeDecision::Wait {
-                retry_after: self.retry_after(state, now),
+                retry_after: FIFO_POLL_INTERVAL,
             };
         }
         if let Some(probe) = &state.probe {
