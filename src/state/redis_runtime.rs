@@ -426,19 +426,7 @@ impl RedisRuntimeCoordinator {
                 }
             })
             .await?;
-        if result.len() != 2 {
-            return Err(RuntimeCoordinationError);
-        }
-        let admitted = u32::try_from(result[0]).map_err(|_| RuntimeCoordinationError)?;
-        let waiting_upstream = u32::try_from(result[1]).map_err(|_| RuntimeCoordinationError)?;
-        let running = admitted
-            .checked_sub(waiting_upstream)
-            .ok_or(RuntimeCoordinationError)?;
-        Ok(DownstreamRuntimeCounts {
-            admitted,
-            waiting_upstream,
-            running,
-        })
+        parse_downstream_runtime_counts(result)
     }
 
     pub(super) async fn reject_account_concurrency(
@@ -2184,9 +2172,9 @@ fn route_health_retention_ttl_seconds(cooldown: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_health_state_snapshot, parse_route_health_finish_result,
-        parse_route_health_observe_result, parse_route_health_reservation, route_health_redis_key,
-        route_health_retention_ttl_seconds,
+        parse_downstream_runtime_counts, parse_health_state_snapshot,
+        parse_route_health_finish_result, parse_route_health_observe_result,
+        parse_route_health_reservation, route_health_redis_key, route_health_retention_ttl_seconds,
     };
     use crate::capabilities::WireProtocol;
     use crate::state::{KeyHealthKey, RouteHealthKey};
@@ -2202,6 +2190,11 @@ mod tests {
         ];
 
         assert!(keys.iter().all(|key| key.contains(":{route-health}:")));
+    }
+
+    #[test]
+    fn downstream_snapshot_rejects_inconsistent_redis_counts() {
+        assert!(parse_downstream_runtime_counts(vec![1, 2]).is_err());
     }
 
     #[test]
@@ -2319,6 +2312,25 @@ fn parse_upstream_reservation(result: Vec<String>) -> Result<(), UpstreamAdmissi
         )),
         _ => Err(UpstreamAdmissionError::runtime_coordination_unavailable()),
     }
+}
+
+fn parse_downstream_runtime_counts(
+    result: Vec<u64>,
+) -> Result<DownstreamRuntimeCounts, RuntimeCoordinationError> {
+    let [admitted, waiting_upstream] = result.as_slice() else {
+        return Err(RuntimeCoordinationError);
+    };
+    let admitted = u32::try_from(*admitted).map_err(|_| RuntimeCoordinationError)?;
+    let waiting_upstream =
+        u32::try_from(*waiting_upstream).map_err(|_| RuntimeCoordinationError)?;
+    let running = admitted
+        .checked_sub(waiting_upstream)
+        .ok_or(RuntimeCoordinationError)?;
+    Ok(DownstreamRuntimeCounts {
+        admitted,
+        waiting_upstream,
+        running,
+    })
 }
 
 fn parse_upstream_snapshot(

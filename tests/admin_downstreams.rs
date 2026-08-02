@@ -11,7 +11,9 @@
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use chat_responses_codex::state::{AppConfig, AppState, DownstreamConfig, PersistedState};
+use chat_responses_codex::state::{
+    AppConfig, AppState, DownstreamConcurrencySnapshot, DownstreamConfig, PersistedState,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tower::ServiceExt;
@@ -116,6 +118,84 @@ async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> 
 // ============================================================================
 // Downstream List Tests
 // ============================================================================
+
+#[test]
+fn downstream_concurrency_snapshot_omits_invalid_counts() {
+    let snapshot = DownstreamConcurrencySnapshot::from_counts(1, 2, 7, 123);
+    let payload = serde_json::to_value(snapshot).unwrap();
+
+    assert_eq!(payload["available"], false);
+    assert_eq!(payload["limit"], 7);
+    assert_eq!(payload["updated_at"], 123);
+    assert!(payload.get("running").is_none());
+    assert!(payload.get("waiting_upstream").is_none());
+    assert!(payload.get("admitted").is_none());
+}
+
+#[tokio::test]
+async fn downstream_runtime_endpoint_is_lightweight_and_includes_disabled_rows() {
+    let state = create_test_state();
+    let snapshot = state.routing_snapshot().await;
+    let active_config = snapshot
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == "downstream-1")
+        .unwrap()
+        .clone();
+    let lease = state
+        .try_reserve_downstream_concurrency(&active_config)
+        .await
+        .unwrap();
+    state.mark_downstream_waiting(&lease).await.unwrap();
+
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/downstreams/runtime")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let items = payload["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(payload["updated_at"].is_number());
+
+    let active = items
+        .iter()
+        .find(|item| item["downstream_id"] == "downstream-1")
+        .unwrap();
+    assert_eq!(active["concurrency"]["available"], true);
+    assert_eq!(active["concurrency"]["running"], 0);
+    assert_eq!(active["concurrency"]["waiting_upstream"], 1);
+    assert_eq!(active["concurrency"]["admitted"], 1);
+    assert_eq!(active["concurrency"]["limit"], 10);
+
+    let disabled = items
+        .iter()
+        .find(|item| item["downstream_id"] == "downstream-2")
+        .unwrap();
+    assert_eq!(disabled["concurrency"]["available"], true);
+    assert_eq!(disabled["concurrency"]["running"], 0);
+    assert_eq!(disabled["concurrency"]["waiting_upstream"], 0);
+    assert_eq!(disabled["concurrency"]["admitted"], 0);
+    assert_eq!(disabled["concurrency"]["limit"], 10);
+
+    let serialized = serde_json::to_string(&payload).unwrap();
+    assert!(!serialized.contains("plaintext_key"));
+    assert!(!serialized.contains("hash1"));
+    assert!(!serialized.contains("hash2"));
+}
 
 #[tokio::test]
 async fn test_downstreams_list_returns_all_downstreams() {

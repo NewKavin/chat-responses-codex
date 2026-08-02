@@ -1705,6 +1705,13 @@ pub fn build_router(state: AppState) -> Router {
                 )),
         )
         .route(
+            "/api/admin/downstreams/runtime",
+            get(admin_downstream_runtime).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
             "/api/admin/downstreams/{id}",
             get(admin_get_downstream)
                 .put(admin_update_downstream)

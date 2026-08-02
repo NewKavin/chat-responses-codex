@@ -1,5 +1,5 @@
 use crate::keys::generate_downstream_key;
-use crate::state::{unix_seconds, AppState};
+use crate::state::{unix_seconds, AppState, DownstreamConcurrencySnapshot};
 use axum::extract::{Json, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -142,10 +142,26 @@ pub(super) async fn portal_overview(
         "active_models": summary.active_models,
     });
 
+    let concurrency = state
+        .downstream_runtime_snapshot(downstream)
+        .await
+        .map(|counts| {
+            DownstreamConcurrencySnapshot::from_counts(
+                counts.admitted,
+                counts.waiting_upstream,
+                downstream.max_concurrency,
+                unix_seconds(),
+            )
+        })
+        .unwrap_or_else(|_| {
+            DownstreamConcurrencySnapshot::unavailable(downstream.max_concurrency, unix_seconds())
+        });
+
     Json(json!({
         "quota_summary": quota_summary,
         "token_summary": token_summary,
         "model_summary": model_summary,
+        "concurrency": concurrency,
     }))
     .into_response()
 }

@@ -3,8 +3,8 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     fetch_models_from_upstream_keys_concurrently, model_discovery_url, portal_model_is_allowed,
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState,
-    DefaultModelContextConfig, DownstreamConfig, FreekeySyncError, FreekeySyncItem,
-    GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
+    DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig, FreekeySyncError,
+    FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
     ModelQualificationEvidence, ModelQualificationLevel, RouteHealthSnapshotDto,
     RuntimeCoordinationError, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision,
     UsageLog, UsageLogQuery,
@@ -79,6 +79,20 @@ fn runtime_coordination_unavailable_admin_response() -> Response {
             "error": {
                 "message": "runtime coordination unavailable",
                 "code": "runtime_coordination_unavailable"
+            }
+        })),
+    )
+        .into_response()
+}
+
+fn runtime_state_unavailable_admin_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({
+            "error": {
+                "message": "runtime state unavailable",
+                "code": "runtime_state_unavailable"
             }
         })),
     )
@@ -1780,6 +1794,38 @@ pub(super) async fn admin_list_downstreams(
     }
 
     Json(downstreams).into_response()
+}
+
+#[derive(Serialize)]
+struct DownstreamRuntimeListResponse {
+    items: Vec<DownstreamRuntimeItem>,
+    updated_at: u64,
+}
+
+#[derive(Serialize)]
+struct DownstreamRuntimeItem {
+    downstream_id: String,
+    concurrency: DownstreamConcurrencySnapshot,
+}
+
+pub(super) async fn admin_downstream_runtime(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshots = match state.all_downstream_runtime_snapshots().await {
+        Ok(snapshots) => snapshots,
+        Err(_) => return runtime_state_unavailable_admin_response(),
+    };
+    let updated_at = snapshots
+        .first()
+        .map(|(_, snapshot)| snapshot.updated_at)
+        .unwrap_or_else(unix_seconds);
+    let items = snapshots
+        .into_iter()
+        .map(|(downstream_id, concurrency)| DownstreamRuntimeItem {
+            downstream_id,
+            concurrency,
+        })
+        .collect();
+
+    Json(DownstreamRuntimeListResponse { items, updated_at }).into_response()
 }
 
 /// Create a new downstream

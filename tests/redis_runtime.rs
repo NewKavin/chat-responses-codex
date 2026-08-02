@@ -1,5 +1,5 @@
 use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
 use chat_responses_codex::capabilities::WireProtocol;
@@ -786,6 +786,84 @@ async fn redis_downstream_snapshot_counts_admitted_and_waiting_without_false_zer
         ),
         (1, 1, 0)
     );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_admin_downstream_snapshot_failure_returns_typed_503() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    state
+        .add_downstream(redis_test_downstream("down-runtime-admin-outage"))
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+    let token = chat_responses_codex::auth::generate_admin_token(
+        &config.admin_username,
+        &config.jwt_secret,
+    )
+    .unwrap();
+    pause_test_redis(&config, 5_000).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/downstreams/runtime")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "runtime_state_unavailable");
+    wait_for_test_redis_recovery(&state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_portal_downstream_snapshot_failure_preserves_quota() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let generated = generate_downstream_key("sk");
+    let mut downstream = redis_test_downstream("down-runtime-portal-outage");
+    downstream.hash = generated.hash;
+    downstream.plaintext_key = Some(generated.plaintext.clone());
+    downstream.request_quota_window_hours = Some(24);
+    downstream.request_quota_requests = Some(1_000);
+    state.add_downstream(downstream).await.unwrap();
+    let app = build_router(state.clone());
+    pause_test_redis(&config, 5_000).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", generated.plaintext),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["quota_summary"]["request_quota"]["limit"], 1_000);
+    assert_eq!(payload["concurrency"]["available"], false);
+    assert_eq!(payload["concurrency"]["limit"], 1);
+    assert!(payload["concurrency"].get("running").is_none());
+    assert!(payload["concurrency"].get("waiting_upstream").is_none());
+    assert!(payload["concurrency"].get("admitted").is_none());
+    wait_for_test_redis_recovery(&state).await;
 }
 
 #[tokio::test]

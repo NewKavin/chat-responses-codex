@@ -444,6 +444,42 @@ async fn test_portal_overview_returns_quota_summary() {
 }
 
 #[tokio::test]
+async fn portal_overview_reports_only_authenticated_downstream_runtime() {
+    let (state, portal_key) = create_test_state();
+    let snapshot = state.routing_snapshot().await;
+    let downstream = snapshot.downstreams[0].clone();
+    let lease = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    state.mark_downstream_waiting(&lease).await.unwrap();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/overview")
+                .header(header::AUTHORIZATION, format!("Bearer {portal_key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["concurrency"]["available"], true);
+    assert_eq!(payload["concurrency"]["running"], 0);
+    assert_eq!(payload["concurrency"]["waiting_upstream"], 1);
+    assert_eq!(payload["concurrency"]["admitted"], 1);
+    assert_eq!(payload["concurrency"]["limit"], 10);
+}
+
+#[tokio::test]
 async fn test_portal_overview_uses_logs_for_token_and_model_summary_without_token_limits() {
     let (state, portal_key) = create_test_state_without_token_limits();
     let app = chat_responses_codex::server::build_router(state);

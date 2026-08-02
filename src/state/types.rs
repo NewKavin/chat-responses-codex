@@ -450,6 +450,46 @@ impl DownstreamConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DownstreamConcurrencySnapshot {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_upstream: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted: Option<u32>,
+    pub limit: u32,
+    pub updated_at: u64,
+}
+
+impl DownstreamConcurrencySnapshot {
+    pub fn from_counts(admitted: u32, waiting: u32, limit: u32, now: u64) -> Self {
+        match admitted.checked_sub(waiting) {
+            Some(running) => Self {
+                available: true,
+                running: Some(running),
+                waiting_upstream: Some(waiting),
+                admitted: Some(admitted),
+                limit,
+                updated_at: now,
+            },
+            None => Self::unavailable(limit, now),
+        }
+    }
+
+    pub fn unavailable(limit: u32, now: u64) -> Self {
+        Self {
+            available: false,
+            running: None,
+            waiting_upstream: None,
+            admitted: None,
+            limit,
+            updated_at: now,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompatibilityUsageMetadata {
     pub protocol_transition: String,

@@ -106,8 +106,9 @@ pub use types::{
     default_upstream_request_quota_5h, default_upstream_request_quota_requests,
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
-    CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
-    ModelContextConfig, ModelRequestCostConfig, PersistedState, RouteFailureClass,
+    CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConcurrencySnapshot,
+    DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
+    PersistedState, RouteFailureClass,
     RouteHealthSnapshotDto, UpstreamConfig, UpstreamMutationError, UsageLog,
     ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
@@ -3287,6 +3288,61 @@ impl AppState {
             waiting_upstream,
             running,
         })
+    }
+
+    pub async fn all_downstream_runtime_snapshots(
+        &self,
+    ) -> Result<Vec<(String, DownstreamConcurrencySnapshot)>, RuntimeCoordinationError> {
+        let routing = self.routing_snapshot().await;
+        let now = unix_seconds();
+
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let mut snapshots = Vec::with_capacity(routing.downstreams.len());
+            for downstream in routing.downstreams.iter() {
+                let counts = coordinator
+                    .downstream_runtime_snapshot(&downstream.id)
+                    .await?;
+                snapshots.push((
+                    downstream.id.clone(),
+                    DownstreamConcurrencySnapshot::from_counts(
+                        counts.admitted,
+                        counts.waiting_upstream,
+                        downstream.max_concurrency,
+                        now,
+                    ),
+                ));
+            }
+            return Ok(snapshots);
+        }
+
+        let runtime = self
+            .downstream_runtime
+            .lock()
+            .expect("downstream runtime lock poisoned");
+        Ok(routing
+            .downstreams
+            .iter()
+            .map(|downstream| {
+                let (admitted, waiting) = runtime
+                    .get(&downstream.id)
+                    .map(|state| {
+                        (
+                            u32::try_from(state.admitted.len()).unwrap_or(u32::MAX),
+                            u32::try_from(state.waiting.len()).unwrap_or(u32::MAX),
+                        )
+                    })
+                    .unwrap_or_default();
+                (
+                    downstream.id.clone(),
+                    DownstreamConcurrencySnapshot::from_counts(
+                        admitted,
+                        waiting,
+                        downstream.max_concurrency,
+                        now,
+                    ),
+                )
+            })
+            .collect())
     }
 
     pub async fn clear_downstream_runtime(
