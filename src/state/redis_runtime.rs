@@ -505,6 +505,42 @@ impl RedisRuntimeCoordinator {
         downstream_id: &str,
         downstream_lease_id: &str,
     ) -> Result<AccountWaitTicket, RuntimeCoordinationError> {
+        self.register_account_waiter_inner(
+            account,
+            request_id,
+            downstream_id,
+            downstream_lease_id,
+            false,
+        )
+        .await?
+        .ok_or(RuntimeCoordinationError)
+    }
+
+    pub(super) async fn register_account_waiter_if_saturated(
+        &self,
+        account: &AccountConcurrencyKey,
+        request_id: &str,
+        downstream_id: &str,
+        downstream_lease_id: &str,
+    ) -> Result<Option<AccountWaitTicket>, RuntimeCoordinationError> {
+        self.register_account_waiter_inner(
+            account,
+            request_id,
+            downstream_id,
+            downstream_lease_id,
+            true,
+        )
+        .await
+    }
+
+    async fn register_account_waiter_inner(
+        &self,
+        account: &AccountConcurrencyKey,
+        request_id: &str,
+        downstream_id: &str,
+        downstream_lease_id: &str,
+        only_if_saturated: bool,
+    ) -> Result<Option<AccountWaitTicket>, RuntimeCoordinationError> {
         let identity = account_identity(account);
         let queue_key = self.account_key(&identity, "waiters");
         let tickets_key = self.account_key(&identity, "tickets");
@@ -531,7 +567,11 @@ impl RedisRuntimeCoordinator {
                         .key(tickets_key)
                         .key(sequence_key)
                         .key(state_key)
-                        .arg("register")
+                        .arg(if only_if_saturated {
+                            "register_if_saturated"
+                        } else {
+                            "register"
+                        })
                         .arg(request_id)
                         .arg(downstream_id)
                         .arg(downstream_lease_id)
@@ -543,10 +583,13 @@ impl RedisRuntimeCoordinator {
                 }
             })
             .await?;
+        if result.first().map(String::as_str) == Some("1") && result.len() == 1 {
+            return Ok(None);
+        }
         if result.first().map(String::as_str) != Some("0") || result.len() != 3 {
             return Err(RuntimeCoordinationError);
         }
-        Ok(AccountWaitTicket {
+        Ok(Some(AccountWaitTicket {
             account: account.clone(),
             request_id: request_id.to_string(),
             downstream_id: downstream_id.to_string(),
@@ -554,7 +597,86 @@ impl RedisRuntimeCoordinator {
             generation: parse_u64(result.get(1))?,
             registered_at_ms: parse_u64(result.get(2))?,
             registration_token,
-        })
+        }))
+    }
+
+    pub(super) async fn account_requires_recovery(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<bool, RuntimeCoordinationError> {
+        let identity = account_identity(account);
+        let queue_key = self.account_key(&identity, "waiters");
+        let tickets_key = self.account_key(&identity, "tickets");
+        let state_key = self.account_key(&identity, "state");
+        let probe_key = self.account_key(&identity, "probe");
+        let result = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let queue_key = queue_key.clone();
+                let tickets_key = tickets_key.clone();
+                let state_key = state_key.clone();
+                let probe_key = probe_key.clone();
+                async move {
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/account_probe.lua"));
+                    let mut invocation = script.prepare_invoke();
+                    invocation
+                        .key(queue_key)
+                        .key(tickets_key)
+                        .key(state_key)
+                        .key(probe_key)
+                        .arg("requires_recovery");
+                    timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
+                        .await
+                }
+            })
+            .await?;
+        match result.as_slice() {
+            [status, saturated] if status == "0" && saturated == "0" => Ok(false),
+            [status, saturated] if status == "0" && saturated == "1" => Ok(true),
+            _ => Err(RuntimeCoordinationError),
+        }
+    }
+
+    pub(super) async fn account_recovery_retry_after(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<Duration, RuntimeCoordinationError> {
+        let identity = account_identity(account);
+        let queue_key = self.account_key(&identity, "waiters");
+        let tickets_key = self.account_key(&identity, "tickets");
+        let state_key = self.account_key(&identity, "state");
+        let probe_key = self.account_key(&identity, "probe");
+        let result = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let queue_key = queue_key.clone();
+                let tickets_key = tickets_key.clone();
+                let state_key = state_key.clone();
+                let probe_key = probe_key.clone();
+                async move {
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/account_probe.lua"));
+                    let mut invocation = script.prepare_invoke();
+                    invocation
+                        .key(queue_key)
+                        .key(tickets_key)
+                        .key(state_key)
+                        .key(probe_key)
+                        .arg("recovery_retry_after");
+                    timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
+                        .await
+                }
+            })
+            .await?;
+        match result.as_slice() {
+            [status, retry_after_ms] if status == "0" => Ok(Duration::from_millis(
+                retry_after_ms
+                    .parse::<u64>()
+                    .map_err(|_| RuntimeCoordinationError)?,
+            )),
+            _ => Err(RuntimeCoordinationError),
+        }
     }
 
     pub(super) async fn renew_account_waiter(
@@ -618,11 +740,40 @@ impl RedisRuntimeCoordinator {
         &self,
         ticket: &AccountWaitTicket,
     ) -> Result<ProbeDecision, RuntimeCoordinationError> {
+        self.try_acquire_account_probe_inner(ticket, None).await
+    }
+
+    pub(super) async fn try_acquire_account_probe_for_downstream_lease(
+        &self,
+        ticket: &AccountWaitTicket,
+        downstream_id: &str,
+        downstream_lease_id: &str,
+    ) -> Result<ProbeDecision, RuntimeCoordinationError> {
+        self.try_acquire_account_probe_inner(
+            ticket,
+            Some((downstream_id, downstream_lease_id)),
+        )
+        .await
+    }
+
+    async fn try_acquire_account_probe_inner(
+        &self,
+        ticket: &AccountWaitTicket,
+        downstream: Option<(&str, &str)>,
+    ) -> Result<ProbeDecision, RuntimeCoordinationError> {
         let identity = account_identity(&ticket.account);
         let queue_key = self.account_key(&identity, "waiters");
         let tickets_key = self.account_key(&identity, "tickets");
         let state_key = self.account_key(&identity, "state");
         let probe_key = self.account_key(&identity, "probe");
+        let downstream_keys = downstream.map(|(downstream_id, lease_id)| {
+            let identity = stable_identity(downstream_id);
+            (
+                self.key(&identity, "leases"),
+                self.key(&identity, "waiting"),
+                lease_id.to_string(),
+            )
+        });
         let owner_token = Uuid::new_v4().to_string();
         let result = self
             .retry_coordination_once(|| {
@@ -631,6 +782,7 @@ impl RedisRuntimeCoordinator {
                 let tickets_key = tickets_key.clone();
                 let state_key = state_key.clone();
                 let probe_key = probe_key.clone();
+                let downstream_keys = downstream_keys.clone();
                 let request_id = ticket.request_id.clone();
                 let owner_token = owner_token.clone();
                 async move {
@@ -641,7 +793,11 @@ impl RedisRuntimeCoordinator {
                         .key(queue_key)
                         .key(tickets_key)
                         .key(state_key)
-                        .key(probe_key)
+                        .key(probe_key);
+                    if let Some((lease_key, waiting_key, _)) = downstream_keys.as_ref() {
+                        invocation.key(lease_key).key(waiting_key);
+                    }
+                    invocation
                         .arg("grant")
                         .arg(request_id)
                         .arg(ticket.generation)
@@ -649,6 +805,9 @@ impl RedisRuntimeCoordinator {
                         .arg(&ticket.registration_token)
                         .arg(owner_token)
                         .arg(self.account_probe_ttl_ms);
+                    if let Some((_, _, lease_id)) = downstream_keys.as_ref() {
+                        invocation.arg(lease_id);
+                    }
                     timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
                         .await
                 }

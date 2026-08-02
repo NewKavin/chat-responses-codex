@@ -261,22 +261,15 @@ impl AccountConcurrencyRegistry {
         now: Instant,
     ) -> AccountWaitTicket {
         let mut registry = self.inner.lock().expect("account registry lock poisoned");
-        for state in registry.accounts.values_mut() {
-            self.prune_account(state, now);
-            let before = state.tickets.len();
-            state
-                .tickets
-                .retain(|record| record.ticket.request_id != request_id);
-            if state.tickets.len() != before {
-                state.last_access = now;
-            }
-        }
-
         let registered_at_ms = self.instant_ms(now);
         let state = registry
             .accounts
             .entry(key.clone())
             .or_insert_with(|| AccountState::new(now));
+        self.prune_account(state, now);
+        state
+            .tickets
+            .retain(|record| record.ticket.request_id != request_id);
         let ticket = AccountWaitTicket {
             account: key,
             request_id: request_id.to_string(),
@@ -293,6 +286,47 @@ impl AccountConcurrencyRegistry {
         });
         state.last_access = now;
         ticket
+    }
+
+    pub fn register_waiter_if_saturated(
+        &self,
+        key: AccountConcurrencyKey,
+        request_id: &str,
+        downstream_id: &str,
+        downstream_lease_id: &str,
+        now: Instant,
+    ) -> Option<AccountWaitTicket> {
+        let mut registry = self.inner.lock().expect("account registry lock poisoned");
+        let state = registry.accounts.get_mut(&key)?;
+        self.prune_account(state, now);
+        if !state.saturated {
+            return None;
+        }
+
+        let registered_at_ms = self.instant_ms(now);
+        let state = registry
+            .accounts
+            .get_mut(&key)
+            .expect("saturated account disappeared while registering waiter");
+        state
+            .tickets
+            .retain(|record| record.ticket.request_id != request_id);
+        let ticket = AccountWaitTicket {
+            account: key,
+            request_id: request_id.to_string(),
+            downstream_id: downstream_id.to_string(),
+            downstream_lease_id: downstream_lease_id.to_string(),
+            generation: state.generation,
+            registered_at_ms,
+            registration_token: Uuid::new_v4().to_string(),
+        };
+        state.tickets.push_back(TicketRecord {
+            ticket: ticket.clone(),
+            logical_deadline: now + self.tuning.waiter_budget,
+            lease_deadline: now + self.tuning.waiter_ttl,
+        });
+        state.last_access = now;
+        Some(ticket)
     }
 
     pub fn cancel_waiter(&self, ticket: &AccountWaitTicket) {

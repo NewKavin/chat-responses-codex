@@ -947,6 +947,73 @@ impl AppState {
         ))
     }
 
+    pub async fn register_account_waiter_if_saturated(
+        &self,
+        account: &AccountConcurrencyKey,
+        request_id: &str,
+        downstream_id: &str,
+        downstream_lease_id: &str,
+    ) -> Result<Option<AccountWaitTicket>, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .register_account_waiter_if_saturated(
+                    account,
+                    request_id,
+                    downstream_id,
+                    downstream_lease_id,
+                )
+                .await;
+        }
+        Ok(self.account_concurrency.register_waiter_if_saturated(
+            account.clone(),
+            request_id,
+            downstream_id,
+            downstream_lease_id,
+            tokio::time::Instant::now(),
+        ))
+    }
+
+    pub async fn register_account_waiter_for_downstream_lease_if_saturated(
+        &self,
+        account: &AccountConcurrencyKey,
+        request_id: &str,
+        lease: &DownstreamConcurrencyLease,
+    ) -> Result<Option<AccountWaitTicket>, RuntimeCoordinationError> {
+        self.register_account_waiter_if_saturated(
+            account,
+            request_id,
+            &lease.downstream_id,
+            lease.lease_id.as_deref().unwrap_or_default(),
+        )
+        .await
+    }
+
+    pub async fn account_requires_recovery(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<bool, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.account_requires_recovery(account).await;
+        }
+        Ok(self
+            .account_concurrency
+            .snapshot(account, tokio::time::Instant::now())
+            .saturated)
+    }
+
+    pub async fn account_recovery_retry_after(
+        &self,
+        account: &AccountConcurrencyKey,
+    ) -> Result<Duration, RuntimeCoordinationError> {
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator.account_recovery_retry_after(account).await;
+        }
+        Ok(self
+            .account_concurrency
+            .snapshot(account, tokio::time::Instant::now())
+            .retry_after)
+    }
+
     pub async fn renew_account_waiter(
         &self,
         ticket: &AccountWaitTicket,
@@ -980,6 +1047,49 @@ impl AppState {
         Ok(self
             .account_concurrency
             .try_probe(ticket, tokio::time::Instant::now()))
+    }
+
+    pub async fn try_acquire_account_probe_for_downstream_lease(
+        &self,
+        ticket: &AccountWaitTicket,
+        lease: &DownstreamConcurrencyLease,
+    ) -> Result<ProbeDecision, RuntimeCoordinationError> {
+        if ticket.downstream_id != lease.downstream_id {
+            return Err(RuntimeCoordinationError);
+        }
+        let Some(lease_id) = lease.lease_id.as_deref() else {
+            return self.try_acquire_account_probe(ticket).await;
+        };
+        if ticket.downstream_lease_id != lease_id {
+            return Err(RuntimeCoordinationError);
+        }
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .try_acquire_account_probe_for_downstream_lease(
+                    ticket,
+                    &lease.downstream_id,
+                    lease_id,
+                )
+                .await;
+        }
+
+        let mut runtime = self
+            .downstream_runtime
+            .lock()
+            .expect("downstream runtime lock poisoned");
+        let downstream = runtime
+            .get_mut(&lease.downstream_id)
+            .ok_or(RuntimeCoordinationError)?;
+        if !downstream.admitted.contains(lease_id) || !downstream.waiting.contains(lease_id) {
+            return Err(RuntimeCoordinationError);
+        }
+        let decision = self
+            .account_concurrency
+            .try_probe(ticket, tokio::time::Instant::now());
+        if matches!(decision, ProbeDecision::Granted(_)) {
+            downstream.waiting.remove(lease_id);
+        }
+        Ok(decision)
     }
 
     pub async fn renew_account_probe(

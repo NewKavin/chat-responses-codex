@@ -632,6 +632,15 @@ fn hedge_extra_attempt_limit(config: &AppConfig, available_accounts: usize) -> u
         .min(available_accounts)
 }
 
+fn send_account_attempt_feedback(
+    sender: &mut Option<tokio::sync::oneshot::Sender<crate::state::AccountProbeOutcome>>,
+    outcome: crate::state::AccountProbeOutcome,
+) {
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(outcome);
+    }
+}
+
 pub(super) fn hedge_error_is_terminal(error: &GatewayError) -> bool {
     error.error_category() == "runtime_coordination_unavailable"
 }
@@ -642,6 +651,21 @@ fn send_route_hedge_attempt(
     control: HedgeAttemptControl,
 ) -> futures_util::future::BoxFuture<'static, Result<RouteHedgeReady, GatewayError>> {
     async move {
+        let account = crate::state::AccountConcurrencyKey::new(
+            candidate.upstream.id.clone(),
+            candidate.key_fingerprint.clone(),
+        );
+        if context
+            .state
+            .account_requires_recovery(&account)
+            .await
+            .map_err(|_| super::runtime_coordination_unavailable_gateway_error())?
+        {
+            return Err(GatewayError::upstream_temporary_unavailable(
+                "hedged account is waiting for coordinated recovery",
+                "upstream_hedge_account_recovery",
+            ));
+        }
         let route_health_key = candidate.route_health_key.clone();
         let (_, key_health_key) = super::route_health_keys(
             &candidate.upstream,
@@ -739,6 +763,7 @@ fn send_route_hedge_attempt(
             None,
             Some(control.clone()),
             context.stream_only_recovery_request_safe,
+            None,
             &mut stream_only_recovery,
             &mut stream_only_recovery_leader,
             &mut stream_only_recovery_identity,
@@ -811,6 +836,20 @@ async fn send_hedge_stream_attempt(
         route_attempts,
         body_read_diagnostic_context,
     } = attempt;
+    let account = crate::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        upstream_key_fingerprint(&upstream.id, &api_key),
+    );
+    if state
+        .account_requires_recovery(&account)
+        .await
+        .map_err(|_| super::runtime_coordination_unavailable_gateway_error())?
+    {
+        return Err(GatewayError::upstream_temporary_unavailable(
+            "hedged account is waiting for coordinated recovery",
+            "upstream_hedge_account_recovery",
+        ));
+    }
     let upstream_request_lease = state
         .try_reserve_upstream_hedge(&upstream, &request_model)
         .await
@@ -1179,6 +1218,9 @@ pub(super) async fn send_to_upstream(
     active_request_guard: Option<&mut ActiveGatewayRequestGuard>,
     hedge_control: Option<HedgeAttemptControl>,
     stream_only_recovery_request_safe: bool,
+    mut account_attempt_feedback: Option<
+        tokio::sync::oneshot::Sender<crate::state::AccountProbeOutcome>,
+    >,
     stream_only_recovery: &mut StreamOnlyRecoveryState,
     stream_only_recovery_leader: &mut Option<StreamOnlyRecoveryLeader>,
     stream_only_recovery_identity: &mut Option<(DialectProfileKey, String)>,
@@ -1963,18 +2005,33 @@ pub(super) async fn send_to_upstream(
                     continue;
                 }
             }
-            return Err(GatewayError::upstream_context_limit(format!(
+            let error = GatewayError::upstream_context_limit(format!(
                 "upstream request exceeded the model context window; reduce prompt size or use a model with a larger context window (model={final_upstream_model}, upstream={}, status={}, detail={})",
                 upstream.name,
                 status.as_u16(),
                 error_excerpt
-            ), status));
+            ), status);
+            send_account_attempt_feedback(
+                &mut account_attempt_feedback,
+                crate::state::AccountProbeOutcome::Accepted,
+            );
+            return Err(error);
         }
 
-        return Err(GatewayError::from_classified_upstream_failure(
+        let error = GatewayError::from_classified_upstream_failure(
             classified_feedback,
             upstream_error_message,
-        ));
+        );
+        let outcome = match &error {
+            GatewayError::ConcurrencyFull { retry_after, .. } => {
+                crate::state::AccountProbeOutcome::ConcurrencyRejected {
+                    retry_after: *retry_after,
+                }
+            }
+            _ => crate::state::AccountProbeOutcome::Accepted,
+        };
+        send_account_attempt_feedback(&mut account_attempt_feedback, outcome);
+        return Err(error);
     };
 
     let applied_effort_control = applied_claude_effort_control_evidence(
@@ -1983,6 +2040,10 @@ pub(super) async fn send_to_upstream(
         claude_requested_effort.as_deref(),
     );
     let status = response.status();
+    send_account_attempt_feedback(
+        &mut account_attempt_feedback,
+        crate::state::AccountProbeOutcome::Accepted,
+    );
 
     if attempt_mode.aggregates_sse() {
         let content_type = response

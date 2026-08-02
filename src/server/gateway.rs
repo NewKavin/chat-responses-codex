@@ -16,11 +16,11 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, portal_model_is_allowed, unix_seconds, ActiveGatewayRequestStart, AppConfig,
-    AppState, CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile,
-    KeyHealthKey, RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome,
-    RouteRecovery, RouteSetAggregateKey, RuntimeCoordinationError, UpstreamConfig,
-    UpstreamRequestLease, UsageLog,
+    join_upstream_url, portal_model_is_allowed, unix_seconds, AccountConcurrencyKey,
+    AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
+    CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
+    RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
+    RouteSetAggregateKey, RuntimeCoordinationError, UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -42,12 +42,13 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex as TokioMutex};
 use tokio::time::Instant as TokioInstant;
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod account_recovery;
 mod capability_admin;
 mod capability_probe;
 mod capability_routing;
@@ -65,6 +66,7 @@ pub(super) mod thinking_signature;
 mod troubleshooting;
 mod upstream;
 
+use account_recovery::{AccountAdmission, AccountRecoverySession};
 use capability_admin::*;
 pub use capability_probe::*;
 use capability_routing::*;
@@ -415,7 +417,11 @@ async fn record_route_attempt(
         runtime_model_slug,
         protocol,
     } = route;
-    let Some(class) = error.route_failure_class() else {
+    let class = if matches!(error, GatewayError::ConcurrencyFull { .. }) {
+        FailureClass::ConcurrencySaturated
+    } else if let Some(class) = error.route_failure_class() {
+        class
+    } else {
         return Ok(());
     };
     if class == FailureClass::RequestRejected {
@@ -513,6 +519,19 @@ fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
             .map(|retry_after| RouteOutcome::RouteFailureWithRetry { class, retry_after })
             .unwrap_or(RouteOutcome::RouteFailure(class)),
         None => RouteOutcome::Cancelled,
+    }
+}
+
+fn account_attempt_outcome(result: &Result<DispatchResult, GatewayError>) -> AccountProbeOutcome {
+    match result {
+        Ok(_) => AccountProbeOutcome::Accepted,
+        Err(GatewayError::ConcurrencyFull { retry_after, .. }) => {
+            AccountProbeOutcome::ConcurrencyRejected {
+                retry_after: *retry_after,
+            }
+        }
+        Err(error) if error.upstream_status().is_some() => AccountProbeOutcome::Accepted,
+        Err(_) => AccountProbeOutcome::AttemptFailed,
     }
 }
 
@@ -2648,6 +2667,9 @@ static PRE_HEADER_PREPARATION_TEST_GATE: Mutex<Option<PreHeaderPreparationTestGa
     Mutex::new(None);
 
 #[cfg(test)]
+static UPSTREAM_RESERVATION_FAILURE_TEST_UPSTREAM: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(test)]
 fn install_pre_header_preparation_test_gate() -> (
     tokio::sync::oneshot::Receiver<()>,
     tokio::sync::oneshot::Sender<()>,
@@ -2666,6 +2688,30 @@ fn install_pre_header_preparation_test_gate() -> (
         release: release_rx,
     });
     (entered_rx, release)
+}
+
+#[cfg(test)]
+fn install_upstream_reservation_failure_test_hook(upstream_id: impl Into<String>) {
+    let mut failure = UPSTREAM_RESERVATION_FAILURE_TEST_UPSTREAM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        failure.is_none(),
+        "upstream reservation failure already armed"
+    );
+    *failure = Some(upstream_id.into());
+}
+
+#[cfg(test)]
+fn take_upstream_reservation_failure_test_hook(upstream_id: &str) -> bool {
+    let mut failure = UPSTREAM_RESERVATION_FAILURE_TEST_UPSTREAM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if failure.as_deref() != Some(upstream_id) {
+        return false;
+    }
+    failure.take();
+    true
 }
 
 #[cfg(test)]
@@ -3995,6 +4041,14 @@ async fn process_gateway_request_inner(
                 return Err(error);
             }
         };
+    let account_recovery_deadline = TokioInstant::now()
+        + Duration::from_millis(state.config.upstream_concurrency_recovery_max_wait_ms);
+    let mut account_recovery = AccountRecoverySession::new(
+        state.clone(),
+        request_id.clone(),
+        downstream_concurrency_lease.clone(),
+        account_recovery_deadline,
+    );
     let downstream_concurrency_guard =
         DownstreamConcurrencyGuard::new(state.clone(), downstream_concurrency_lease);
 
@@ -4880,8 +4934,10 @@ async fn process_gateway_request_inner(
                 let mut stream_only_recovery_leader = None;
                 let mut stream_only_recovery_identity = None;
                 let mut stream_only_recovery = StreamOnlyRecoveryState::default();
-                for (key_index, api_key) in candidate_keys.iter().enumerate() {
+                'key_candidates: for (key_index, api_key) in candidate_keys.iter().enumerate() {
                     let key_fingerprint = route_key_fingerprint(&upstream, api_key);
+                    let account_key =
+                        AccountConcurrencyKey::new(upstream.id.clone(), key_fingerprint.clone());
                     let (route_health_key, key_health_key) = route_health_keys(
                         &upstream,
                         &key_fingerprint,
@@ -4897,30 +4953,69 @@ async fn process_gateway_request_inner(
                     if !request_route_attempts.should_attempt(&route_health_key) {
                         continue;
                     }
-                    let route_health_permit = match state
-                        .reserve_route_health(&route_health_key, &key_health_key)
-                        .await
-                        .map_err(|_| runtime_coordination_unavailable_gateway_error())?
+                    if account_recovery
+                        .active_probe_account()
+                        .is_some_and(|active| active != &account_key)
                     {
-                        RouteAvailability::Ready(permit) => Arc::new(TokioMutex::new(Some(permit))),
-                        RouteAvailability::Cooling { class, retry_after }
-                        | RouteAvailability::HalfOpenBusy { class, retry_after } => {
-                            record_cooled_route_attempt(
-                                &request_route_attempts,
-                                &upstream,
-                                &key_fingerprint,
-                                &runtime_model_slug,
-                                protocol,
-                                class,
-                                retry_after,
-                            );
-                            last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
-                                "all eligible upstream routes are temporarily unavailable".into(),
-                            ));
-                            last_failure_upstream =
-                                Some((upstream.id.clone(), Some(upstream.name.clone())));
-                            continue;
+                        continue;
+                    }
+                    let route_health_permit = loop {
+                        match state
+                            .reserve_route_health(&route_health_key, &key_health_key)
+                            .await
+                            .map_err(|_| runtime_coordination_unavailable_gateway_error())?
+                        {
+                            RouteAvailability::Ready(permit) => {
+                                break Some(Arc::new(TokioMutex::new(Some(permit))));
+                            }
+                            RouteAvailability::Cooling { class, retry_after }
+                            | RouteAvailability::HalfOpenBusy { class, retry_after } => {
+                                if account_recovery.active_probe_account() == Some(&account_key) {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(retry_after) => {}
+                                        error = account_recovery.wait_for_probe_interruption() => {
+                                            account_recovery
+                                                .complete_attempt(
+                                                    &account_key,
+                                                    AccountProbeOutcome::Cancelled,
+                                                )
+                                                .await?;
+                                            if error.error_category()
+                                                == "runtime_coordination_unavailable"
+                                            {
+                                                return Err(error);
+                                            }
+                                            last_error = Some(error);
+                                            last_failure_upstream = Some((
+                                                upstream.id.clone(),
+                                                Some(upstream.name.clone()),
+                                            ));
+                                            break None;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                record_cooled_route_attempt(
+                                    &request_route_attempts,
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                    class,
+                                    retry_after,
+                                );
+                                last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
+                                    "all eligible upstream routes are temporarily unavailable"
+                                        .into(),
+                                ));
+                                last_failure_upstream =
+                                    Some((upstream.id.clone(), Some(upstream.name.clone())));
+                                continue 'key_candidates;
+                            }
                         }
+                    };
+                    let Some(route_health_permit) = route_health_permit else {
+                        break 'candidate_passes;
                     };
                     let mut same_route_retry_attempted = false;
                     let candidate_capability_snapshot = (*capability_snapshot).clone();
@@ -4932,18 +5027,86 @@ async fn process_gateway_request_inner(
                         select_upstream_attempt_mode(request_stream, resolved_route.as_ref())
                     };
                     loop {
-                        let upstream_request_lease = match state
-                            .try_reserve_upstream_request(&upstream, model)
-                            .await
-                        {
-                            Ok(lease) => lease,
-                            Err(error) => {
+                        let account_admission =
+                            match account_recovery.wait_for_account(account_key.clone()).await {
+                                Ok(admission) => admission,
+                                Err(error) => {
+                                    finish_route_health_permit(
+                                        &route_health_permit,
+                                        RouteOutcome::Cancelled,
+                                    )
+                                    .await?;
+                                    if error.error_category() == "runtime_coordination_unavailable"
+                                    {
+                                        return Err(error);
+                                    }
+                                    last_error = Some(error);
+                                    last_failure_upstream =
+                                        Some((upstream.id.clone(), Some(upstream.name.clone())));
+                                    break;
+                                }
+                            };
+                        let account_probe = match account_admission {
+                            AccountAdmission::Ordinary => None,
+                            AccountAdmission::Deferred { retry_after } => {
                                 finish_route_health_permit(
                                     &route_health_permit,
                                     RouteOutcome::Cancelled,
                                 )
                                 .await?;
-                                if error.is_runtime_coordination_unavailable() {
+                                record_cooled_route_attempt(
+                                    &request_route_attempts,
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                    FailureClass::ConcurrencySaturated,
+                                    retry_after,
+                                );
+                                last_error = Some(GatewayError::ConcurrencyFull {
+                                    message: "upstream account is waiting for recovery".into(),
+                                    retry_after: Some(retry_after),
+                                });
+                                last_failure_upstream =
+                                    Some((upstream.id.clone(), Some(upstream.name.clone())));
+                                continue 'key_candidates;
+                            }
+                            AccountAdmission::Probe(lease) => Some(lease),
+                        };
+                        let upstream_request_lease = {
+                            #[cfg(test)]
+                            if take_upstream_reservation_failure_test_hook(&upstream.id) {
+                                Err(false)
+                            } else {
+                                state
+                                    .try_reserve_upstream_request(&upstream, model)
+                                    .await
+                                    .map_err(|error| error.is_runtime_coordination_unavailable())
+                            }
+                            #[cfg(not(test))]
+                            state
+                                .try_reserve_upstream_request(&upstream, model)
+                                .await
+                                .map_err(|error| error.is_runtime_coordination_unavailable())
+                        };
+                        let upstream_request_lease = match upstream_request_lease {
+                            Ok(lease) => lease,
+                            Err(runtime_coordination_unavailable) => {
+                                if !runtime_coordination_unavailable && account_probe.is_some() {
+                                    account_recovery
+                                        .complete_attempt(
+                                            &account_key,
+                                            AccountProbeOutcome::AttemptFailed,
+                                        )
+                                        .await?;
+                                    continue;
+                                }
+                                finish_route_health_permit(
+                                    &route_health_permit,
+                                    RouteOutcome::Cancelled,
+                                )
+                                .await?;
+                                if runtime_coordination_unavailable {
                                     return Err(runtime_coordination_unavailable_gateway_error());
                                 }
                                 last_error = Some(GatewayError::Upstream(
@@ -5202,12 +5365,24 @@ async fn process_gateway_request_inner(
                             requested: &requested_features,
                             requested_value: inference_strength.as_deref(),
                         };
-                        let mut result = send_to_upstream(
+                        let (account_feedback_sender, account_feedback_receiver) =
+                            if account_probe.is_some() {
+                                let (sender, receiver) = oneshot::channel();
+                                (Some(sender), Some(receiver))
+                            } else {
+                                (None, None)
+                            };
+                        let effective_route_hedge_candidates = if account_probe.is_some() {
+                            &[][..]
+                        } else {
+                            route_hedge_candidates.as_slice()
+                        };
+                        let send_future = send_to_upstream(
                             &state,
                             &upstream,
                             api_key,
                             &[],
-                            &route_hedge_candidates,
+                            effective_route_hedge_candidates,
                             resolved_route.as_ref(),
                             &candidate_capability_snapshot,
                             &requested_features,
@@ -5234,11 +5409,74 @@ async fn process_gateway_request_inner(
                             Some(&mut active_request_guard),
                             None,
                             stream_only_recovery_request_safe,
+                            account_feedback_sender,
                             &mut stream_only_recovery,
                             &mut stream_only_recovery_leader,
                             &mut stream_only_recovery_identity,
-                        )
-                        .await;
+                        );
+                        let mut result =
+                            if let Some(mut feedback_receiver) = account_feedback_receiver {
+                                let mut send_future = Box::pin(send_future);
+                                tokio::select! {
+                                    biased;
+                                    error = account_recovery.wait_for_probe_interruption() => {
+                                        match account_recovery
+                                            .complete_attempt(
+                                                &account_key,
+                                                AccountProbeOutcome::Cancelled,
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => Err(error),
+                                            Err(cleanup_error) => Err(cleanup_error),
+                                        }
+                                    }
+                                    feedback = &mut feedback_receiver => {
+                                        match feedback {
+                                            Ok(outcome) => {
+                                                match account_recovery
+                                                    .complete_attempt(&account_key, outcome)
+                                                    .await
+                                                {
+                                                    Ok(()) => send_future.await,
+                                                    Err(error) => Err(error),
+                                                }
+                                            }
+                                            Err(_) => {
+                                                let result = send_future.await;
+                                                let outcome = account_attempt_outcome(&result);
+                                                match account_recovery
+                                                    .complete_attempt(&account_key, outcome)
+                                                    .await
+                                                {
+                                                    Ok(()) => result,
+                                                    Err(error) => Err(error),
+                                                }
+                                            }
+                                        }
+                                    }
+                                    result = &mut send_future => {
+                                        let outcome = account_attempt_outcome(&result);
+                                        match account_recovery
+                                            .complete_attempt(&account_key, outcome)
+                                            .await
+                                        {
+                                            Ok(()) => result,
+                                            Err(error) => Err(error),
+                                        }
+                                    }
+                                }
+                            } else {
+                                let result = send_future.await;
+                                let outcome = account_attempt_outcome(&result);
+                                match account_recovery
+                                    .complete_attempt(&account_key, outcome)
+                                    .await
+                                {
+                                    Ok(()) => result,
+                                    Err(error) => Err(error),
+                                }
+                            };
                         active_request_guard.clear_aggregate_cancellation_log();
                         if let Some(cancellation) = pre_header_cancellation.as_ref() {
                             cancellation.disarm();
@@ -5268,6 +5506,16 @@ async fn process_gateway_request_inner(
                         }
 
                         match result {
+                            Err(error)
+                                if error.error_category() == "runtime_coordination_unavailable" =>
+                            {
+                                finish_route_health_permit(
+                                    &route_health_permit,
+                                    RouteOutcome::Cancelled,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
                             Ok(mut result) => {
                                 let selected_upstream_id = result.selected_upstream_id.clone();
                                 let selected_upstream_name = result.selected_upstream_name.clone();
@@ -5462,6 +5710,11 @@ async fn process_gateway_request_inner(
                                     active_request_guard.disarm();
                                 } else {
                                     active_request_guard.finish();
+                                }
+                                if let Err(error) = account_recovery.finish().await {
+                                    downstream_concurrency_guard.release().await;
+                                    active_request_guard.fail_and_finish(error.error_category());
+                                    return Err(error);
                                 }
                                 return Ok(result);
                             }
@@ -5899,6 +6152,26 @@ async fn process_gateway_request_inner(
             _ => None,
         };
 
+        if round_terminal.is_some()
+            && round_ledger.is_pure_concurrency_exhaustion()
+            && account_recovery.has_pending_recovery()
+        {
+            match account_recovery.wait_for_pending_account().await {
+                Ok(true) => {
+                    request_route_attempts = request_route_attempts.next_round();
+                    continue 'routing_rounds;
+                }
+                Ok(false) => {}
+                Err(error) if error.error_category() == "runtime_coordination_unavailable" => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    break 'routing_rounds;
+                }
+            }
+        }
+
         if let Some(wait) = round_terminal.and_then(|failure| {
             route_retry_policy.decide(&route_retry_budget, failure, round_recovery, &request_id)
         }) {
@@ -5944,7 +6217,9 @@ async fn process_gateway_request_inner(
             terminal_route_failure_error(
                 &attempt_ledger,
                 request_route_attempts.routing_round(),
-                route_retry_budget.waited(),
+                route_retry_budget
+                    .waited()
+                    .saturating_add(account_recovery.waited()),
                 live_recovery,
             )
         } else {
@@ -5955,6 +6230,9 @@ async fn process_gateway_request_inner(
                 .rollback_downstream_request_reservation(downstream_request_reservation)
                 .await;
             error = replace_error_on_runtime_rollback_failure(error, rollback);
+        }
+        if let Err(cleanup_error) = account_recovery.finish().await {
+            error = cleanup_error;
         }
         let (upstream_id, upstream_name) = last_failure_upstream
             .as_ref()
@@ -6026,6 +6304,7 @@ async fn process_gateway_request_inner(
             cooldown_seconds,
             remaining_candidates = 0,
             routing_round = request_route_attempts.routing_round(),
+            account_recovery_rounds = account_recovery.rounds(),
             physical_attempt_count = request_route_attempts.physical_attempt_count(),
             error_category = %error.error_category(),
             "request failed after exhausting upstream candidates"
@@ -6033,7 +6312,10 @@ async fn process_gateway_request_inner(
         return Err(error);
     }
 
-    let error = no_routable_model_error(&routing_snapshot, model);
+    let mut error = no_routable_model_error(&routing_snapshot, model);
+    if let Err(cleanup_error) = account_recovery.finish().await {
+        error = cleanup_error;
+    }
     let _ = append_gateway_usage_log(
         &state,
         &request_id,

@@ -1,8 +1,10 @@
 use chat_responses_codex::state::{
     AccountConcurrencyKey, AccountConcurrencyRegistry, AccountConcurrencyTuning, AccountProbeLease,
-    AccountProbeOutcome, AppConfig, ProbeDecision,
+    AccountProbeOutcome, AppConfig, AppState, DownstreamConfig, PersistedState, ProbeDecision,
 };
+use std::sync::Arc;
 use std::time::Duration;
+use tempfile::tempdir;
 use tokio::time::Instant;
 
 fn test_tuning() -> AccountConcurrencyTuning {
@@ -29,6 +31,116 @@ fn provider_observation_freshness_is_not_extended_by_the_poll_interval() {
         AccountConcurrencyTuning::from_config(&config).observation_freshness,
         Duration::from_secs(5)
     );
+}
+
+#[test]
+fn healthy_accounts_do_not_register_recovery_waiters() {
+    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
+    let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");
+
+    assert!(coordinator
+        .register_waiter_if_saturated(
+            account.clone(),
+            "req-healthy",
+            "down-a",
+            "lease-healthy",
+            Instant::now(),
+        )
+        .is_none());
+
+    coordinator.reject(&account, None, Instant::now());
+    assert!(coordinator
+        .register_waiter_if_saturated(
+            account,
+            "req-saturated",
+            "down-a",
+            "lease-saturated",
+            Instant::now(),
+        )
+        .is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_probe_grant_atomically_requires_and_clears_downstream_waiting() {
+    let directory = tempdir().unwrap();
+    let downstream = DownstreamConfig {
+        id: "down-atomic-grant".into(),
+        name: "atomic grant".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 60,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    };
+    let state = AppState::new(
+        PersistedState {
+            downstreams: Arc::new(vec![downstream.clone()]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_concurrency_probe_delays_ms: vec![100],
+            ..AppConfig::default()
+        },
+    );
+    let account = AccountConcurrencyKey::new("up-atomic-grant", "fingerprint-atomic");
+    let lease = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    state
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let ticket = state
+        .register_account_waiter_for_downstream_lease_if_saturated(
+            &account,
+            "request-atomic-grant",
+            &lease,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::advance(Duration::from_millis(200)).await;
+
+    assert!(state
+        .try_acquire_account_probe_for_downstream_lease(&ticket, &lease)
+        .await
+        .is_err());
+    let unchanged = state
+        .account_concurrency_registry()
+        .snapshot(&account, Instant::now());
+    assert_eq!(unchanged.waiters, 1);
+    assert!(!unchanged.probe_in_flight);
+
+    state.mark_downstream_waiting(&lease).await.unwrap();
+    assert!(matches!(
+        state
+            .try_acquire_account_probe_for_downstream_lease(&ticket, &lease)
+            .await
+            .unwrap(),
+        ProbeDecision::Granted(_)
+    ));
+    let granted = state
+        .account_concurrency_registry()
+        .snapshot(&account, Instant::now());
+    assert_eq!(granted.waiters, 0);
+    assert!(granted.probe_in_flight);
+    let downstream_runtime = state
+        .downstream_runtime_snapshot(&downstream)
+        .await
+        .unwrap();
+    assert_eq!(downstream_runtime.waiting_upstream, 0);
+    assert_eq!(downstream_runtime.running, 1);
 }
 
 async fn grant_one_probe(
@@ -300,7 +412,7 @@ async fn logical_wait_budget_expires_before_cleanup_ttl() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn one_logical_request_has_only_one_ticket_across_accounts() {
+async fn one_logical_request_keeps_one_ticket_per_account() {
     let coordinator = AccountConcurrencyRegistry::new(test_tuning());
     let first = AccountConcurrencyKey::new("up-a", "fingerprint-a");
     let second = AccountConcurrencyKey::new("up-b", "fingerprint-a");
@@ -319,7 +431,7 @@ async fn one_logical_request_has_only_one_ticket_across_accounts() {
         Instant::now(),
     );
 
-    assert_eq!(coordinator.snapshot(&first, Instant::now()).waiters, 0);
+    assert_eq!(coordinator.snapshot(&first, Instant::now()).waiters, 1);
     assert_eq!(coordinator.snapshot(&second, Instant::now()).waiters, 1);
 }
 

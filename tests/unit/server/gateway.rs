@@ -585,6 +585,370 @@ async fn stream_completion_fixture(
 }
 
 #[tokio::test]
+async fn probe_reservation_failure_requeues_before_retrying_the_account() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits_for_handler = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = hits_for_handler.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "id": "chatcmpl-probe-reservation-retry",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "unit-probe-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "recovered"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = crate::keys::generate_downstream_key("gw");
+    let upstream = UpstreamConfig {
+        id: "up-probe-reservation-retry".into(),
+        name: "probe reservation retry".into(),
+        base_url: format!("http://{address}"),
+        api_key: "probe-reservation-secret".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["unit-probe-model".into()],
+        active: true,
+        ..Default::default()
+    };
+    let account = AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        route_key_fingerprint(&upstream, &upstream.api_key),
+    );
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream]),
+            downstreams: Arc::new(vec![crate::state::DownstreamConfig {
+                id: "down-probe-reservation-retry".into(),
+                name: "probe reservation client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["unit-probe-model".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 0,
+                max_concurrency: 2,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 2_000,
+            upstream_concurrency_recovery_max_rounds: 4,
+            upstream_concurrency_probe_delays_ms: vec![1],
+            ..AppConfig::default()
+        },
+    );
+    state
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    install_upstream_reservation_failure_test_hook(account.upstream_id.clone());
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        build_router(state.clone()).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "unit-probe-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("reservation failure recovery must stay within the account budget")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let snapshot = state
+        .account_concurrency_registry()
+        .snapshot(&account, tokio::time::Instant::now());
+    assert!(!snapshot.saturated);
+    assert!(!snapshot.probe_in_flight);
+    assert_eq!(snapshot.waiters, 0);
+}
+
+#[tokio::test]
+async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
+    let directory = tempdir().unwrap();
+    let downstream = crate::state::DownstreamConfig {
+        id: "down-multi-account-recovery".into(),
+        name: "multi-account recovery".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 60,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+    };
+    let state = AppState::new(
+        PersistedState {
+            downstreams: Arc::new(vec![downstream.clone()]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_concurrency_recovery_max_wait_ms: 2_000,
+            upstream_concurrency_recovery_max_rounds: 4,
+            upstream_concurrency_probe_delays_ms: vec![1],
+            ..AppConfig::default()
+        },
+    );
+    let first = AccountConcurrencyKey::new("up-first", "fingerprint-first");
+    let second = AccountConcurrencyKey::new("up-second", "fingerprint-second");
+    state
+        .observe_account_concurrency(&first, None)
+        .await
+        .unwrap();
+    state
+        .observe_account_concurrency(&second, None)
+        .await
+        .unwrap();
+    let downstream_lease = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    let mut session = AccountRecoverySession::new(
+        state.clone(),
+        "request-multi-account".into(),
+        downstream_lease,
+        tokio::time::Instant::now() + Duration::from_secs(2),
+    );
+
+    assert!(matches!(
+        session.wait_for_account(first.clone()).await.unwrap(),
+        AccountAdmission::Deferred { .. }
+    ));
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(matches!(
+        session.wait_for_account(second.clone()).await.unwrap(),
+        AccountAdmission::Deferred { .. }
+    ));
+    assert_eq!(
+        state
+            .account_concurrency_registry()
+            .snapshot(&first, tokio::time::Instant::now())
+            .waiters,
+        1
+    );
+    assert_eq!(
+        state
+            .account_concurrency_registry()
+            .snapshot(&second, tokio::time::Instant::now())
+            .waiters,
+        1
+    );
+
+    assert!(session.wait_for_pending_account().await.unwrap());
+    assert_eq!(session.active_probe_account(), Some(&first));
+    session.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhaustion() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits_for_handler = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = hits_for_handler.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "id": "chatcmpl-coordination-failure",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "unit-coordination-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let upstreams = (1..=4)
+        .map(|index| UpstreamConfig {
+            id: format!("up-coordination-{index}"),
+            name: format!("coordination {index}"),
+            base_url: format!("http://{address}"),
+            api_key: format!("coordination-secret-{index}"),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["unit-coordination-model".into()],
+            priority: 10 - index,
+            active: true,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    let recovery_upstream = upstreams[2].clone();
+    let recovery_account = AccountConcurrencyKey::new(
+        recovery_upstream.id.clone(),
+        route_key_fingerprint(&recovery_upstream, &recovery_upstream.api_key),
+    );
+    let downstream_key = crate::keys::generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(upstreams.clone()),
+            downstreams: Arc::new(vec![crate::state::DownstreamConfig {
+                id: "down-coordination-failure".into(),
+                name: "coordination failure client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["unit-coordination-model".into()],
+                rate_limit_enabled: true,
+                per_minute_limit: 60,
+                max_concurrency: 2,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_route_exhaustion_retry_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 2_000,
+            upstream_concurrency_recovery_max_rounds: 4,
+            upstream_concurrency_probe_delays_ms: vec![1],
+            ..AppConfig::default()
+        },
+    );
+    for upstream in &upstreams[..2] {
+        state
+            .observe_route_failure(
+                &RouteHealthKey {
+                    upstream_id: upstream.id.clone(),
+                    key_fingerprint: route_key_fingerprint(upstream, &upstream.api_key),
+                    runtime_model_slug: "unit-coordination-model".into(),
+                    protocol: WireProtocol::ChatCompletions,
+                },
+                FailureClass::ConcurrencySaturated,
+                Some(Duration::from_secs(60)),
+            )
+            .await
+            .unwrap();
+    }
+    let fallback = &upstreams[3];
+    state
+        .observe_route_failure(
+            &RouteHealthKey {
+                upstream_id: fallback.id.clone(),
+                key_fingerprint: route_key_fingerprint(fallback, &fallback.api_key),
+                runtime_model_slug: "unit-coordination-model".into(),
+                protocol: WireProtocol::ChatCompletions,
+            },
+            FailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+    state
+        .observe_account_concurrency(&recovery_account, Some(Duration::from_millis(200)))
+        .await
+        .unwrap();
+    account_recovery::install_probe_completion_failure_test_hook(
+        recovery_account.upstream_id.clone(),
+    );
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        build_router(state).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "unit-coordination-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("coordination failure should terminate immediately")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        payload["error"]["code"],
+        Value::String("runtime_coordination_unavailable".into())
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn stream_transport_failure_updates_only_its_exact_route_and_shared_aggregate() {
     let tempdir = tempdir().unwrap();
     let state = AppState::new(

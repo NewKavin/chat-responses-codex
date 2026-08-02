@@ -73,6 +73,19 @@ end
 prune_waiters()
 prune_probe()
 
+if operation == 'requires_recovery' then
+  if redis.call('HGET', KEYS[3], 'saturated') == '1' then
+    return {0, 1}
+  end
+  return {0, 0}
+end
+
+if operation == 'recovery_retry_after' then
+  local cooldown = tonumber(redis.call('HGET', KEYS[3], 'cooldown_until') or '0')
+  local explicit = tonumber(redis.call('HGET', KEYS[3], 'explicit_until') or '0')
+  return {0, math.max(0, math.max(cooldown, explicit) - now_ms)}
+end
+
 if operation == 'reject' then
   local identity = ARGV[2]
   local retry_after_ms = tonumber(ARGV[3])
@@ -96,10 +109,20 @@ if operation == 'grant' then
   local registration_token = ARGV[5]
   local owner_token = ARGV[6]
   local probe_ttl_ms = tonumber(ARGV[7])
+  local downstream_lease_id = ARGV[8]
+  local atomic_downstream = #KEYS >= 6 and downstream_lease_id and downstream_lease_id ~= ''
+  if atomic_downstream then
+    redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now_ms)
+    redis.call('ZREMRANGEBYSCORE', KEYS[6], '-inf', now_ms)
+  end
   local existing_request = redis.call('HGET', KEYS[4], 'request_id')
   local existing_owner = redis.call('HGET', KEYS[4], 'owner_token')
   local existing_expires = tonumber(redis.call('HGET', KEYS[4], 'expires_at') or '0')
   if existing_request == request_id and existing_owner == owner_token and existing_expires > now_ms then
+    if atomic_downstream then
+      if not redis.call('ZSCORE', KEYS[5], downstream_lease_id) then return {3} end
+      redis.call('ZREM', KEYS[6], downstream_lease_id)
+    end
     return {0,
       tonumber(redis.call('HGET', KEYS[4], 'generation')),
       owner_token,
@@ -120,9 +143,15 @@ if operation == 'grant' then
   local explicit = tonumber(redis.call('HGET', KEYS[3], 'explicit_until') or '0')
   local deadline = math.max(cooldown, explicit)
   if deadline > now_ms then return {1, deadline - now_ms} end
-
+  if atomic_downstream then
+    if not redis.call('ZSCORE', KEYS[5], downstream_lease_id) or
+        not redis.call('ZSCORE', KEYS[6], downstream_lease_id) then
+      return {3}
+    end
+  end
   redis.call('ZREM', KEYS[1], request_id)
   redis.call('HDEL', KEYS[2], request_id)
+  if atomic_downstream then redis.call('ZREM', KEYS[6], downstream_lease_id) end
   local generation = tonumber(redis.call('HGET', KEYS[3], 'generation') or '0')
   local expires_at = now_ms + probe_ttl_ms
   redis.call('HSET', KEYS[4],

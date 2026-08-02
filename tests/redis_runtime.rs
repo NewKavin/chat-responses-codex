@@ -685,6 +685,86 @@ async fn redis_account_queue_grants_one_fifo_probe_across_instances() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_healthy_accounts_do_not_register_recovery_waiters() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-a", "fingerprint-healthy");
+
+    assert!(first
+        .register_account_waiter_if_saturated(&account, "req-healthy", "down-a", "lease-healthy",)
+        .await
+        .unwrap()
+        .is_none());
+
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    assert!(first
+        .register_account_waiter_if_saturated(
+            &account,
+            "req-saturated",
+            "down-a",
+            "lease-saturated",
+        )
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_probe_grant_atomically_requires_and_clears_downstream_waiting() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let downstream = redis_test_downstream("down-atomic-probe-grant");
+    let lease = first
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    let account = AccountConcurrencyKey::new("up-atomic-probe-grant", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, None)
+        .await
+        .unwrap();
+    let ticket = first
+        .register_account_waiter_for_downstream_lease_if_saturated(
+            &account,
+            "req-atomic-probe-grant",
+            &lease,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    assert!(second
+        .try_acquire_account_probe_for_downstream_lease(&ticket, &lease)
+        .await
+        .is_err());
+    let before = second
+        .downstream_runtime_snapshot(&downstream)
+        .await
+        .unwrap();
+    assert_eq!((before.waiting_upstream, before.running), (0, 1));
+
+    first.mark_downstream_waiting(&lease).await.unwrap();
+    assert!(matches!(
+        second
+            .try_acquire_account_probe_for_downstream_lease(&ticket, &lease)
+            .await
+            .unwrap(),
+        ProbeDecision::Granted(_)
+    ));
+    let after = first
+        .downstream_runtime_snapshot(&downstream)
+        .await
+        .unwrap();
+    assert_eq!((after.waiting_upstream, after.running), (0, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_downstream_snapshot_counts_admitted_and_waiting_without_false_zero() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
@@ -1358,6 +1438,23 @@ async fn redis_account_observation_never_shortens_explicit_retry_after() {
         }
         other => panic!("explicit retry-after was shortened: {other:?}"),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_account_recovery_retry_after_is_queryable_across_instances() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let account = AccountConcurrencyKey::new("up-recovery-deadline", "fingerprint-a");
+    first
+        .observe_account_concurrency(&account, Some(Duration::from_secs(30)))
+        .await
+        .unwrap();
+
+    let retry_after = second.account_recovery_retry_after(&account).await.unwrap();
+
+    assert!(retry_after <= Duration::from_secs(30));
+    assert!(retry_after >= Duration::from_secs(29));
 }
 
 #[tokio::test]

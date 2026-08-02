@@ -27,7 +27,10 @@ end
 
 prune()
 
-if operation == 'register' then
+if operation == 'register' or operation == 'register_if_saturated' then
+  if operation == 'register_if_saturated' and redis.call('HGET', KEYS[4], 'saturated') ~= '1' then
+    return {1}
+  end
   local request_id = ARGV[2]
   local downstream_id = ARGV[3]
   local downstream_lease_id = ARGV[4]

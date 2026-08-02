@@ -370,6 +370,15 @@ impl AttemptLedger {
                 })
     }
 
+    pub fn is_pure_concurrency_exhaustion(&self) -> bool {
+        !self.is_empty()
+            && self
+                .failures
+                .iter()
+                .chain(self.cooled_candidates.iter())
+                .all(|failure| failure.class == FailureClass::ConcurrencySaturated)
+    }
+
     /// Per-class breakdown across attempted and cooled routes, largest class
     /// first, for the client-facing terminal error message.
     pub fn class_summaries(&self) -> Vec<FailureClassSummary> {

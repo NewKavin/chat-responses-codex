@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 #[tokio::test]
 async fn upstream_reference_quota_does_not_block_single_account_when_upstream_accepts_requests() {
@@ -785,6 +786,313 @@ async fn concurrent_waiters_share_one_concurrency_probe() {
 }
 
 #[tokio::test]
+async fn one_key_shares_fifo_recovery_across_models() {
+    let harness = AccountCapacityHarness::start().await;
+    harness.reject_next_concurrency_requests(2);
+    harness.hold_rejection_responses_after_first();
+    let (state, app) = harness
+        .gateway_with_state(AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 5_000,
+            upstream_concurrency_recovery_max_rounds: 16,
+            upstream_concurrency_probe_delays_ms: vec![100],
+            ..AppConfig::default()
+        })
+        .await;
+
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        upstream_model_key_fingerprint(&upstream, "glm-5.1"),
+    );
+    let first = tokio::spawn(
+        app.clone()
+            .oneshot(harness.chat_request("glm-5.1", "request-1")),
+    );
+    harness.wait_for_rejection_arrivals(1).await;
+    let second = tokio::spawn(app.oneshot(harness.chat_request("glm-5.2", "request-2")));
+    harness.wait_for_rejection_arrivals(2).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state
+                .account_concurrency_registry()
+                .snapshot(&account, tokio::time::Instant::now());
+            if snapshot.waiters == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first request should register before the second rejection is released");
+    harness.release_held_rejection_response();
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "both account waiters should finish; max probes={}, accepted={:?}",
+            harness.max_recovery_probes(),
+            harness.accepted_request_order(),
+        )
+    });
+
+    assert_eq!(first.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(second.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(harness.max_recovery_probes(), 1);
+    assert_eq!(
+        harness.accepted_request_order(),
+        ["request-1".to_string(), "request-2".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_account_waiter_does_not_block_the_next_request() {
+    let harness = AccountCapacityHarness::start().await;
+    harness.reject_next_concurrency_requests(2);
+    harness.set_accepted_delay(Duration::from_millis(250));
+    let app = harness
+        .gateway(AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 5_000,
+            upstream_concurrency_recovery_max_rounds: 16,
+            upstream_concurrency_probe_delays_ms: vec![100],
+            ..AppConfig::default()
+        })
+        .await;
+
+    let first = tokio::spawn(
+        app.clone()
+            .oneshot(harness.chat_request("glm-5.1", "request-1")),
+    );
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    let second = tokio::spawn(
+        app.clone()
+            .oneshot(harness.chat_request("glm-5.2", "request-2")),
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if harness.rejected_requests.load(Ordering::SeqCst) == 0
+                && harness.accepted_request_order().len() == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("one recovery probe should start while the second request waits");
+    second.abort();
+    assert!(second.await.unwrap_err().is_cancelled());
+
+    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+    let third = tokio::time::timeout(
+        Duration::from_secs(1),
+        app.oneshot(harness.chat_request("glm-5.2", "request-3")),
+    )
+    .await
+    .expect("cancelled waiter must be removed from the account queue")
+    .unwrap();
+
+    assert_eq!(third.status(), StatusCode::OK);
+    assert_eq!(harness.max_recovery_probes(), 1);
+    assert_eq!(
+        harness.accepted_request_order(),
+        ["request-1".to_string(), "request-3".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn account_recovery_budget_cancels_slow_probe_headers() {
+    let harness = AccountCapacityHarness::start().await;
+    harness.reject_next_concurrency_requests(1);
+    harness.set_accepted_delay(Duration::from_secs(3));
+    let app = harness
+        .gateway(AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_response_header_timeout_seconds: 10,
+            upstream_concurrency_recovery_max_wait_ms: 300,
+            upstream_concurrency_recovery_max_rounds: 8,
+            upstream_concurrency_probe_delays_ms: vec![10],
+            ..AppConfig::default()
+        })
+        .await;
+
+    let started = tokio::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        app.oneshot(harness.chat_request("glm-5.1", "slow-probe-headers")),
+    )
+    .await
+    .expect("account recovery budget must cancel a slow probe header wait")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        harness.accepted_request_order(),
+        ["slow-probe-headers".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn account_recovery_budget_cancels_exact_route_cooldown_after_probe_grant() {
+    let harness = AccountCapacityHarness::start().await;
+    harness.reject_next_concurrency_requests(1);
+    let (state, app) = harness
+        .gateway_with_state(AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 800,
+            upstream_concurrency_recovery_max_rounds: 8,
+            upstream_concurrency_probe_delays_ms: vec![500],
+            ..AppConfig::default()
+        })
+        .await;
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    let key_fingerprint = upstream_model_key_fingerprint(&upstream, "glm-5.1");
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+    );
+    let route = chat_responses_codex::state::RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug: "glm-5.1".into(),
+        protocol: chat_responses_codex::capabilities::WireProtocol::ChatCompletions,
+    };
+
+    let started = tokio::time::Instant::now();
+    let request = tokio::spawn(app.oneshot(harness.chat_request("glm-5.1", "long-route-cooldown")));
+    tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if state
+                .account_concurrency_registry()
+                .snapshot(&account, tokio::time::Instant::now())
+                .waiters
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the account waiter should be registered before its probe delay");
+    state
+        .observe_route_failure(
+            &route,
+            chat_responses_codex::state::RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+
+    let response = tokio::time::timeout(Duration::from_secs(2), request)
+        .await
+        .expect("account budget must interrupt exact-route cooldown")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(started.elapsed() < Duration::from_millis(1_500));
+    assert!(harness.accepted_request_order().is_empty());
+    assert_eq!(
+        state
+            .usage_logs()
+            .await
+            .last()
+            .expect("account budget failure must write a usage log")
+            .status_code,
+        429
+    );
+}
+
+#[tokio::test]
+async fn provider_retry_after_survives_account_budget_exhaustion() {
+    let harness = AccountCapacityHarness::start().await;
+    harness.reject_next_concurrency_requests(1);
+    harness.set_rejection_retry_after(Duration::from_secs(30));
+    let app = harness
+        .gateway(AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 250,
+            upstream_concurrency_recovery_max_rounds: 8,
+            upstream_concurrency_probe_delays_ms: vec![10],
+            ..AppConfig::default()
+        })
+        .await;
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        app.oneshot(harness.chat_request("glm-5.1", "long-retry-after")),
+    )
+    .await
+    .expect("account recovery budget should finish before provider Retry-After")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("30")
+    );
+}
+
+#[tokio::test]
+async fn preexisting_provider_retry_after_survives_waiter_budget_exhaustion() {
+    let harness = AccountCapacityHarness::start().await;
+    let (state, app) = harness
+        .gateway_with_state(AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 250,
+            upstream_concurrency_recovery_max_rounds: 8,
+            upstream_concurrency_probe_delays_ms: vec![10],
+            ..AppConfig::default()
+        })
+        .await;
+    let upstream = state.snapshot().await.upstreams[0].clone();
+    let account = chat_responses_codex::state::AccountConcurrencyKey::new(
+        upstream.id.clone(),
+        upstream_model_key_fingerprint(&upstream, "glm-5.1"),
+    );
+    state
+        .observe_account_concurrency(&account, Some(Duration::from_secs(30)))
+        .await
+        .unwrap();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        app.oneshot(harness.chat_request("glm-5.1", "preexisting-retry-after")),
+    )
+    .await
+    .expect("waiter budget should finish before the pre-existing provider deadline")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("30")
+    );
+    assert!(harness.accepted_request_order().is_empty());
+    assert_eq!(
+        state
+            .usage_logs()
+            .await
+            .last()
+            .expect("pre-existing account budget failure must write a usage log")
+            .status_code,
+        429
+    );
+}
+
+#[tokio::test]
 async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -1154,17 +1462,266 @@ fn route_retry_request(downstream_key: &GeneratedDownstreamKey) -> Request<Body>
         .unwrap()
 }
 
+struct AccountCapacityHarness {
+    base_url: String,
+    downstream_key: GeneratedDownstreamKey,
+    rejected_requests: Arc<AtomicUsize>,
+    hold_rejection_responses: Arc<AtomicBool>,
+    rejection_arrivals: Arc<AtomicUsize>,
+    all_rejections_arrived: Arc<tokio::sync::Notify>,
+    release_held_rejection: Arc<tokio::sync::Notify>,
+    rejection_retry_after_seconds: Arc<AtomicU64>,
+    accepted_delay_ms: Arc<AtomicU64>,
+    max_recovery_probes: Arc<AtomicUsize>,
+    accepted_request_order: Arc<Mutex<Vec<String>>>,
+    directory: tempfile::TempDir,
+}
+
+impl AccountCapacityHarness {
+    async fn start() -> Self {
+        let rejected_requests = Arc::new(AtomicUsize::new(0));
+        let hold_rejection_responses = Arc::new(AtomicBool::new(false));
+        let rejection_arrivals = Arc::new(AtomicUsize::new(0));
+        let all_rejections_arrived = Arc::new(tokio::sync::Notify::new());
+        let release_held_rejection = Arc::new(tokio::sync::Notify::new());
+        let rejection_retry_after_seconds = Arc::new(AtomicU64::new(0));
+        let active_recovery_probes = Arc::new(AtomicUsize::new(0));
+        let max_recovery_probes = Arc::new(AtomicUsize::new(0));
+        let accepted_delay_ms = Arc::new(AtomicU64::new(50));
+        let accepted_request_order = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rejected_requests = rejected_requests.clone();
+                let hold_rejection_responses = hold_rejection_responses.clone();
+                let rejection_arrivals = rejection_arrivals.clone();
+                let all_rejections_arrived = all_rejections_arrived.clone();
+                let release_held_rejection = release_held_rejection.clone();
+                let rejection_retry_after_seconds = rejection_retry_after_seconds.clone();
+                let active_recovery_probes = active_recovery_probes.clone();
+                let max_recovery_probes = max_recovery_probes.clone();
+                let accepted_delay_ms = accepted_delay_ms.clone();
+                let accepted_request_order = accepted_request_order.clone();
+                move |body: String| {
+                    let rejected_requests = rejected_requests.clone();
+                    let hold_rejection_responses = hold_rejection_responses.clone();
+                    let rejection_arrivals = rejection_arrivals.clone();
+                    let all_rejections_arrived = all_rejections_arrived.clone();
+                    let release_held_rejection = release_held_rejection.clone();
+                    let rejection_retry_after_seconds = rejection_retry_after_seconds.clone();
+                    let active_recovery_probes = active_recovery_probes.clone();
+                    let max_recovery_probes = max_recovery_probes.clone();
+                    let accepted_delay_ms = accepted_delay_ms.clone();
+                    let accepted_request_order = accepted_request_order.clone();
+                    async move {
+                        let request: Value = serde_json::from_str(&body).unwrap();
+                        let request_id = request["messages"][0]["content"]
+                            .as_str()
+                            .unwrap()
+                            .to_string();
+                        let model = request["model"].as_str().unwrap().to_string();
+                        if rejected_requests
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                                remaining.checked_sub(1)
+                            })
+                            .is_ok()
+                        {
+                            let arrival = rejection_arrivals.fetch_add(1, Ordering::SeqCst);
+                            all_rejections_arrived.notify_waiters();
+                            if hold_rejection_responses.load(Ordering::SeqCst) {
+                                loop {
+                                    let notified = all_rejections_arrived.notified();
+                                    if rejected_requests.load(Ordering::SeqCst) == 0 {
+                                        break;
+                                    }
+                                    notified.await;
+                                }
+                                if arrival > 0 {
+                                    release_held_rejection.notified().await;
+                                }
+                            }
+                            let mut headers = HeaderMap::new();
+                            let retry_after = rejection_retry_after_seconds.load(Ordering::SeqCst);
+                            if retry_after > 0 {
+                                headers.insert(
+                                    header::RETRY_AFTER,
+                                    HeaderValue::from_str(&retry_after.to_string()).unwrap(),
+                                );
+                            }
+                            return (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                headers,
+                                axum::Json(json!({
+                                    "error": {"message": "concurrency limit exceeded"}
+                                })),
+                            );
+                        }
+
+                        let active = active_recovery_probes.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_recovery_probes.fetch_max(active, Ordering::SeqCst);
+                        accepted_request_order.lock().unwrap().push(request_id);
+                        tokio::time::sleep(Duration::from_millis(
+                            accepted_delay_ms.load(Ordering::SeqCst),
+                        ))
+                        .await;
+                        active_recovery_probes.fetch_sub(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            HeaderMap::new(),
+                            axum::Json(json!({
+                                "id": "chatcmpl-account-recovery",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "ok"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        Self {
+            base_url: format!("http://{address}"),
+            downstream_key: generate_downstream_key("gw"),
+            rejected_requests,
+            hold_rejection_responses,
+            rejection_arrivals,
+            all_rejections_arrived,
+            release_held_rejection,
+            rejection_retry_after_seconds,
+            accepted_delay_ms,
+            max_recovery_probes,
+            accepted_request_order,
+            directory: tempdir().unwrap(),
+        }
+    }
+
+    fn reject_next_concurrency_requests(&self, count: usize) {
+        self.rejection_arrivals.store(0, Ordering::SeqCst);
+        self.rejected_requests.store(count, Ordering::SeqCst);
+    }
+
+    fn hold_rejection_responses_after_first(&self) {
+        self.hold_rejection_responses.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_rejection_arrivals(&self, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let notified = self.all_rejections_arrived.notified();
+                if self.rejection_arrivals.load(Ordering::SeqCst) >= expected {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("expected concurrency rejection request did not reach the upstream");
+    }
+
+    fn release_held_rejection_response(&self) {
+        self.release_held_rejection.notify_one();
+    }
+
+    fn set_accepted_delay(&self, delay: Duration) {
+        self.accepted_delay_ms.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
+    }
+
+    fn set_rejection_retry_after(&self, retry_after: Duration) {
+        self.rejection_retry_after_seconds
+            .store(retry_after.as_secs(), Ordering::SeqCst);
+    }
+
+    async fn gateway(&self, config: AppConfig) -> Router {
+        self.gateway_with_state(config).await.1
+    }
+
+    async fn gateway_with_state(&self, config: AppConfig) -> (AppState, Router) {
+        let mut upstream =
+            route_retry_upstream_config("up-account", "account", self.base_url.clone());
+        upstream.supported_models = vec!["glm-5.1".into(), "glm-5.2".into()];
+        let mut downstream = route_retry_downstream_config(&self.downstream_key);
+        downstream.model_allowlist = upstream.supported_models.clone();
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![downstream]),
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            },
+            self.directory.path().join("state.json"),
+            config,
+        );
+        for model in ["glm-5.1", "glm-5.2"] {
+            install_non_stream_profile_for_model(&state, &upstream, model).await;
+        }
+        (state.clone(), build_router(state))
+    }
+
+    fn chat_request(&self, model: &str, request_id: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.downstream_key.plaintext),
+            )
+            .header("Content-Type", "application/json")
+            .header("x-test-request-id", request_id)
+            .body(Body::from(
+                json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": request_id}]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    fn max_recovery_probes(&self) -> usize {
+        self.max_recovery_probes.load(Ordering::SeqCst)
+    }
+
+    fn accepted_request_order(&self) -> Vec<String> {
+        self.accepted_request_order.lock().unwrap().clone()
+    }
+}
+
 async fn install_non_stream_profile(state: &AppState, upstream: &UpstreamConfig) {
+    install_non_stream_profile_for_model(state, upstream, "gpt-4.1-mini").await;
+}
+
+async fn install_non_stream_profile_for_model(
+    state: &AppState,
+    upstream: &UpstreamConfig,
+    model: &str,
+) {
     use chat_responses_codex::capabilities::{
         Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
         WireProtocol,
     };
 
-    let key_fingerprint = upstream_model_key_fingerprint(upstream, "gpt-4.1-mini");
+    let key_fingerprint = upstream_model_key_fingerprint(upstream, model);
     let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
         key_fingerprint: key_fingerprint.clone(),
         upstream_id: upstream.id.clone(),
-        runtime_model_slug: "gpt-4.1-mini".into(),
+        runtime_model_slug: model.into(),
         protocol: WireProtocol::ChatCompletions,
     });
     profile.state = DialectProfileState::Verified;
@@ -1172,8 +1729,8 @@ async fn install_non_stream_profile(state: &AppState, upstream: &UpstreamConfig)
         .route_configuration_fingerprint(
             upstream,
             &key_fingerprint,
-            "gpt-4.1-mini",
-            "gpt-4.1-mini",
+            model,
+            model,
             UpstreamProtocol::ChatCompletions,
         )
         .unwrap();
