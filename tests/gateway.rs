@@ -20,6 +20,8 @@ mod images;
 mod responses;
 #[path = "gateway/responses/reasoning.rs"]
 mod responses_reasoning;
+#[path = "gateway/slow_stream.rs"]
+mod slow_stream;
 #[path = "gateway/stream_only.rs"]
 mod stream_only;
 #[path = "gateway/stream_only_learning.rs"]

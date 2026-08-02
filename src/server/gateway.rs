@@ -63,6 +63,7 @@ mod responses_fallback;
 mod route_attempts;
 mod route_retry;
 mod stream;
+mod stream_commit;
 pub(super) mod thinking_signature;
 mod troubleshooting;
 mod upstream;
@@ -2213,6 +2214,7 @@ async fn claude_messages(
         true,
         None,
         None,
+        None,
     )
     .await
     {
@@ -3721,7 +3723,7 @@ async fn process_gateway_request(
     body: Value,
     endpoint: EndpointKind,
 ) -> Result<DispatchResult, GatewayError> {
-    process_gateway_request_inner(state, headers, body, endpoint, false, None, None).await
+    process_gateway_request_inner(state, headers, body, endpoint, false, None, None, None).await
 }
 
 async fn process_gateway_request_with_pre_header_cancellation(
@@ -3731,6 +3733,7 @@ async fn process_gateway_request_with_pre_header_cancellation(
     endpoint: EndpointKind,
     request_id: String,
     cancellation: PreHeaderStreamCancellation,
+    first_semantic_deadline: stream_commit::FirstSemanticDeadline,
 ) -> Result<DispatchResult, GatewayError> {
     process_gateway_request_inner(
         state,
@@ -3740,11 +3743,13 @@ async fn process_gateway_request_with_pre_header_cancellation(
         false,
         Some(cancellation),
         Some(request_id),
+        Some(first_semantic_deadline),
     )
     .await
 }
 
 #[allow(unused_assignments)]
+#[allow(clippy::too_many_arguments)]
 async fn process_gateway_request_inner(
     state: AppState,
     headers: HeaderMap,
@@ -3753,6 +3758,7 @@ async fn process_gateway_request_inner(
     defer_success_usage_log: bool,
     pre_header_cancellation: Option<PreHeaderStreamCancellation>,
     request_id: Option<String>,
+    first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<DispatchResult, GatewayError> {
     let secret = downstream_secret_from_headers(&headers)?;
     let downstream = state
@@ -5444,6 +5450,7 @@ async fn process_gateway_request_inner(
                             &mut stream_only_recovery,
                             &mut stream_only_recovery_leader,
                             &mut stream_only_recovery_identity,
+                            first_semantic_deadline,
                         );
                         let mut result =
                             if let Some(mut feedback_receiver) = account_feedback_receiver {

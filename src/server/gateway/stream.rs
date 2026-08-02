@@ -308,6 +308,21 @@ pub(super) async fn dispatch_streaming_request(
             .max(1),
     );
 
+    // Create the shared first-semantic-output deadline.  All routing attempts,
+    // pre-fetch phases, and stream-body reads before the first semantic event
+    // are bounded by this single deadline so that a stalled upstream cannot
+    // hold the downstream stream open indefinitely.
+    let first_semantic_budget = Duration::from_secs(
+        state
+            .config
+            .upstream_first_semantic_output_timeout_seconds
+            .max(1),
+    );
+    let first_semantic_deadline = super::stream_commit::FirstSemanticDeadline::new(
+        TokioInstant::now(),
+        first_semantic_budget,
+    );
+
     let (tx, mut rx) = mpsc::channel::<Result<DispatchResult, GatewayError>>(1);
     let request_id = Uuid::new_v4().to_string();
     let background_request_id = request_id.clone();
@@ -322,6 +337,7 @@ pub(super) async fn dispatch_streaming_request(
             endpoint,
             background_request_id,
             request_cancellation,
+            first_semantic_deadline,
         );
         tokio::pin!(request);
         tokio::select! {
@@ -493,11 +509,26 @@ pub(super) async fn prefetch_first_usable_output(
     mut reader: UpstreamStreamReader,
     protocol: UpstreamProtocol,
     diagnostic_context: &StreamBodyReadDiagnosticContext,
+    first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<UpstreamStreamReader, GatewayError> {
     let mut classifier = FirstUsableOutputClassifier::new(protocol);
 
     loop {
-        match reader.next_network_chunk().await {
+        // Race the upstream read against the first-semantic deadline.
+        // If the deadline expires before semantic output is found, emit
+        // the canonical timeout error rather than an idle/network error.
+        let outcome = if let Some(deadline) = first_semantic_deadline {
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline.deadline()) => {
+                    return Err(stream_commit::first_semantic_output_timeout_error());
+                }
+                outcome = reader.next_network_chunk() => outcome,
+            }
+        } else {
+            reader.next_network_chunk().await
+        };
+        match outcome {
             StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                 reader.replay_later(chunk.clone());
                 match classifier
@@ -610,6 +641,7 @@ pub(super) fn proxied_stream_body(
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
+    first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<Body, GatewayError> {
     let canonicalizer = (endpoint == EndpointKind::ChatCompletions).then(|| {
         ChatStreamCanonicalizer::new(
@@ -651,7 +683,27 @@ pub(super) fn proxied_stream_body(
                 return Ok(None);
             }
 
-            match state.reader.next_chunk().await {
+            let chunk_outcome = if let Some(deadline) = first_semantic_deadline {
+                if !state.usable_output_seen {
+                    tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep_until(deadline.deadline()) => {
+                            let frame = state
+                                .finish_with_gateway_error(
+                                    stream_commit::first_semantic_output_timeout_error(),
+                                )
+                                .await;
+                            return Ok(Some((frame, state)));
+                        }
+                        outcome = state.reader.next_chunk() => outcome,
+                    }
+                } else {
+                    state.reader.next_chunk().await
+                }
+            } else {
+                state.reader.next_chunk().await
+            };
+            match chunk_outcome {
                 StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                     if let Some(log_context) = state.log_context.as_ref() {
                         log_context.touch_active_request();
@@ -1251,6 +1303,7 @@ pub(super) fn translated_stream_body(
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
+    first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<Body, GatewayError> {
     let tool_registry = response_history_context
         .as_ref()
@@ -1324,7 +1377,27 @@ pub(super) fn translated_stream_body(
                 return Ok(None);
             }
 
-            match state.reader.next_chunk().await {
+            let chunk_outcome = if let Some(deadline) = first_semantic_deadline {
+                if !state.usable_output_observed {
+                    tokio::select! {
+                        biased;
+                        _ = tokio::time::sleep_until(deadline.deadline()) => {
+                            let frame = state
+                                .finish_with_gateway_error(
+                                    stream_commit::first_semantic_output_timeout_error(),
+                                )
+                                .await;
+                            return Ok(Some((frame, state)));
+                        }
+                        outcome = state.reader.next_chunk() => outcome,
+                    }
+                } else {
+                    state.reader.next_chunk().await
+                }
+            } else {
+                state.reader.next_chunk().await
+            };
+            match chunk_outcome {
                 StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                     if let Some(log_context) = state.log_context.as_ref() {
                         log_context.touch_active_request();

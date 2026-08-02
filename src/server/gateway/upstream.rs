@@ -591,6 +591,7 @@ struct HedgeStreamAttempt {
     stream_timeouts: StreamTimeouts,
     route_attempts: RequestRouteAttempts,
     body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
+    first_semantic_deadline: Option<super::stream_commit::FirstSemanticDeadline>,
 }
 
 #[derive(Clone)]
@@ -767,6 +768,7 @@ fn send_route_hedge_attempt(
             &mut stream_only_recovery,
             &mut stream_only_recovery_leader,
             &mut stream_only_recovery_identity,
+            None,
         )
         .await;
         let result = match result {
@@ -835,6 +837,7 @@ async fn send_hedge_stream_attempt(
         stream_timeouts,
         route_attempts,
         body_read_diagnostic_context,
+        first_semantic_deadline,
     } = attempt;
     let account = crate::state::AccountConcurrencyKey::new(
         upstream.id.clone(),
@@ -903,6 +906,7 @@ async fn send_hedge_stream_attempt(
         UpstreamStreamReader::new(response, stream_timeouts),
         upstream_protocol,
         &body_read_diagnostic_context,
+        first_semantic_deadline,
     )
     .await?;
     Ok(HedgeStreamReady {
@@ -932,6 +936,7 @@ async fn prefetch_stream_with_hedges(
     started: Instant,
     route_attempts: &RequestRouteAttempts,
     primary_body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
+    first_semantic_deadline: Option<super::stream_commit::FirstSemanticDeadline>,
 ) -> Result<PrefetchedStreamWinner, GatewayError> {
     let route_hedge_count = route_hedge_context
         .as_ref()
@@ -944,6 +949,7 @@ async fn prefetch_stream_with_hedges(
             primary_reader,
             upstream_protocol,
             &primary_body_read_diagnostic_context,
+            first_semantic_deadline,
         )
         .await?;
         return Ok(PrefetchedStreamWinner::Reader(Box::new(HedgeStreamReady {
@@ -964,6 +970,7 @@ async fn prefetch_stream_with_hedges(
                     primary_reader,
                     upstream_protocol,
                     &primary_body_read_diagnostic_context,
+                    first_semantic_deadline,
                 )
                 .await
                 .map(|reader| {
@@ -1165,6 +1172,7 @@ async fn prefetch_stream_with_hedges(
                         stream_timeouts,
                         route_attempts: route_attempts.clone(),
                         body_read_diagnostic_context,
+                        first_semantic_deadline,
                     });
                     attempts.push(
                         async move {
@@ -1224,6 +1232,7 @@ pub(super) async fn send_to_upstream(
     stream_only_recovery: &mut StreamOnlyRecoveryState,
     stream_only_recovery_leader: &mut Option<StreamOnlyRecoveryLeader>,
     stream_only_recovery_identity: &mut Option<(DialectProfileKey, String)>,
+    first_semantic_deadline: Option<super::stream_commit::FirstSemanticDeadline>,
 ) -> Result<DispatchResult, GatewayError> {
     let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
     let runtime_capability_hints = state.runtime_capability_hints_snapshot();
@@ -1783,6 +1792,15 @@ pub(super) async fn send_to_upstream(
     let dialect_retry_source_body = upstream_body.clone();
     let response_header_timeout =
         Duration::from_secs(state.config.upstream_response_header_timeout_seconds.max(1));
+    // Clip the response-header timeout with the shared first-semantic deadline
+    // so that a stalled upstream cannot hold the stream open past the budget.
+    let response_header_timeout = if let Some(deadline) = first_semantic_deadline {
+        deadline
+            .clip(response_header_timeout)
+            .unwrap_or(response_header_timeout)
+    } else {
+        response_header_timeout
+    };
     if attempt_mode.aggregates_sse() {
         if let Some(active_request_guard) = active_request_guard {
             active_request_guard.arm_aggregate_cancellation_log(GatewayUsageLogContext {
@@ -2216,6 +2234,7 @@ pub(super) async fn send_to_upstream(
                         started,
                         &route_attempts,
                         primary_body_read_diagnostic_context,
+                        first_semantic_deadline,
                     )
                     .await?
                     {
@@ -2262,6 +2281,7 @@ pub(super) async fn send_to_upstream(
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
+                    first_semantic_deadline,
                 )?
             } else {
                 translated_stream_body(
@@ -2273,6 +2293,7 @@ pub(super) async fn send_to_upstream(
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
+                    first_semantic_deadline,
                 )?
             }
         } else {
