@@ -198,7 +198,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         premium_only: false,
         protect_premium_quota: false,
         active: true,
-        failure_count: 2,
+        failure_count: 0,
         strip_nonstandard_chat_fields: true,
         ..Default::default()
     };
@@ -236,6 +236,8 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         user_agent: None,
         request_id: "req-1".into(),
         status_code: 200,
+        wire_status_code: 200,
+        stream_diagnostics: None,
         error_message: None,
         error_category: None,
         prompt_tokens: 11,
@@ -351,6 +353,8 @@ async fn postgres_roundtrip_preserves_compatibility_metadata_and_first_token_lat
         user_agent: Some("Codex/0.144.0".into()),
         request_id: "req-compat-1".into(),
         status_code: 200,
+        wire_status_code: 200,
+        stream_diagnostics: None,
         error_message: None,
         error_category: None,
         prompt_tokens: 13,
@@ -675,8 +679,10 @@ async fn postgres_roundtrip_preserves_capability_state() {
         .await
         .expect("should persist capability configuration");
 
+    let key_fingerprint =
+        chat_responses_codex::keys::upstream_key_fingerprint("up-1", "upstream-secret");
     let key = DialectProfileKey {
-        key_fingerprint: String::new(),
+        key_fingerprint: key_fingerprint.clone(),
         upstream_id: "up-1".into(),
         runtime_model_slug: "Lab/Case-Sensitive".into(),
         protocol: WireProtocol::ChatCompletions,
@@ -1050,6 +1056,8 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         user_agent: None,
         request_id: "req-1".into(),
         status_code: 200,
+        wire_status_code: 200,
+        stream_diagnostics: None,
         error_message: None,
         error_category: None,
         prompt_tokens: 11,
@@ -1175,6 +1183,8 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         user_agent: None,
         request_id: "req-1".into(),
         status_code: 200,
+        wire_status_code: 200,
+        stream_diagnostics: None,
         error_message: None,
         error_category: None,
         prompt_tokens: 11,
@@ -1301,6 +1311,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             user_agent: None,
             request_id: format!("req-{suffix}"),
             status_code: 200,
+            wire_status_code: 0,
             error_message: None,
             error_category: None,
             prompt_tokens: 1,
@@ -1310,6 +1321,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             latency_ms: 1,
             created_at: 1_725_000_001,
             compatibility: None,
+            stream_diagnostics: None,
         })
         .await
         .expect("should append delete fixture usage log");
@@ -1527,4 +1539,176 @@ fn reset_test_database(database_url: &str) {
         "psql reset failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test]
+async fn stream_diagnostics_round_trip_through_postgres() {
+    use chat_responses_codex::state::StreamDiagnostics;
+
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database_async(&database_url).await;
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
+
+    let diagnostics = StreamDiagnostics {
+        account_wait_ms: 42,
+        response_header_wait_ms: 350,
+        first_semantic_output_ms: Some(1_200),
+        since_last_semantic_ms: Some(500),
+        last_keepalive_at: Some(1_800),
+        codex_version: Some("codex/0.146.0".into()),
+        routing_rounds: 2,
+        physical_attempt_count: 1,
+        semantic_output_observed: true,
+        semantic_terminal_observed: false,
+    };
+
+    let log = UsageLog {
+        id: "stream-diag-1".into(),
+        downstream_key_id: "down-diag".into(),
+        upstream_key_id: "up-diag".into(),
+        downstream_name: Some("Diagnostic Downstream".into()),
+        upstream_name: Some("Diagnostic Upstream".into()),
+        endpoint: "/v1/responses".into(),
+        model: "glm-5.2".into(),
+        inference_strength: None,
+        billing_mode: None,
+        request_count: Some(1),
+        user_agent: Some("codex/0.146.0".into()),
+        request_id: "req-diag-1".into(),
+        status_code: 502,
+        wire_status_code: 200,
+        error_message: Some("incomplete EOF".into()),
+        error_category: Some("stream_upstream_incomplete_eof".into()),
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
+        first_token_latency_ms: Some(1_200),
+        latency_ms: 2_000,
+        created_at: 1_785_695_500,
+        compatibility: None,
+        stream_diagnostics: Some(diagnostics.clone()),
+    };
+
+    state
+        .append_usage_log(log.clone())
+        .await
+        .expect("should persist usage log with stream diagnostics");
+    state
+        .flush_usage_logs_for_test()
+        .await
+        .expect("should flush usage log");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL");
+    let snapshot = reloaded.snapshot().await;
+    let reloaded_log = snapshot
+        .usage_logs
+        .iter()
+        .find(|item| item.id == "stream-diag-1")
+        .expect("should find the persisted usage log");
+
+    assert_eq!(reloaded_log.wire_status_code, 200);
+    assert_eq!(reloaded_log.status_code, 502);
+    let reloaded_diag = reloaded_log
+        .stream_diagnostics
+        .as_ref()
+        .expect("stream_diagnostics must round-trip");
+    assert_eq!(reloaded_diag.account_wait_ms, 42);
+    assert_eq!(reloaded_diag.response_header_wait_ms, 350);
+    assert_eq!(reloaded_diag.first_semantic_output_ms, Some(1_200));
+    assert_eq!(
+        reloaded_diag.codex_version.as_deref(),
+        Some("codex/0.146.0")
+    );
+    assert_eq!(reloaded_diag.physical_attempt_count, 1);
+    assert!(reloaded_diag.semantic_output_observed);
+    assert!(!reloaded_diag.semantic_terminal_observed);
+}
+
+#[tokio::test]
+async fn legacy_row_without_wire_status_gets_normalized_on_load() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database_async(&database_url).await;
+
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config.clone())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
+
+    // Simulate a legacy row with wire_status_code = 0 (default) and
+    // stream_diagnostics = NULL.
+    let log = UsageLog {
+        id: "legacy-wire-1".into(),
+        downstream_key_id: "down-legacy".into(),
+        upstream_key_id: "up-legacy".into(),
+        downstream_name: None,
+        upstream_name: None,
+        endpoint: "/v1/chat/completions".into(),
+        model: "gpt-4".into(),
+        inference_strength: None,
+        billing_mode: None,
+        request_count: None,
+        user_agent: None,
+        request_id: "req-legacy-1".into(),
+        status_code: 429,
+        wire_status_code: 0, // legacy default
+        error_message: None,
+        error_category: None,
+        prompt_tokens: 1,
+        completion_tokens: 1,
+        total_tokens: 2,
+        first_token_latency_ms: None,
+        latency_ms: 100,
+        created_at: 1_785_695_700,
+        compatibility: None,
+        stream_diagnostics: None,
+    };
+
+    state
+        .append_usage_log(log)
+        .await
+        .expect("should persist legacy usage log");
+    state
+        .flush_usage_logs_for_test()
+        .await
+        .expect("should flush");
+
+    let reloaded = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should reload state from PostgreSQL");
+    let snapshot = reloaded.snapshot().await;
+    let reloaded_log = snapshot
+        .usage_logs
+        .iter()
+        .find(|item| item.id == "legacy-wire-1")
+        .expect("should find the persisted usage log");
+
+    assert_eq!(
+        reloaded_log.wire_status_code, 429,
+        "legacy wire_status_code 0 must normalize to status_code"
+    );
+    assert!(reloaded_log.stream_diagnostics.is_none());
 }

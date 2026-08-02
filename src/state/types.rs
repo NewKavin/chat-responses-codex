@@ -521,7 +521,24 @@ pub struct CompatibilityUsageMetadata {
     pub fallback_stage: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Structured diagnostics for streaming requests. Contains only timings and
+/// booleans — never prompts, output, reasoning, tool arguments, provider
+/// bodies, or credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamDiagnostics {
+    pub account_wait_ms: u64,
+    pub response_header_wait_ms: u64,
+    pub first_semantic_output_ms: Option<u64>,
+    pub since_last_semantic_ms: Option<u64>,
+    pub last_keepalive_at: Option<u64>,
+    pub codex_version: Option<String>,
+    pub routing_rounds: u32,
+    pub physical_attempt_count: u32,
+    pub semantic_output_observed: bool,
+    pub semantic_terminal_observed: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageLog {
     pub id: String,
     pub downstream_key_id: String,
@@ -543,6 +560,8 @@ pub struct UsageLog {
     pub request_id: String,
     pub status_code: u16,
     #[serde(default)]
+    pub wire_status_code: u16,
+    #[serde(default)]
     pub error_message: Option<String>,
     #[serde(default)]
     pub error_category: Option<String>,
@@ -555,6 +574,18 @@ pub struct UsageLog {
     pub created_at: u64,
     #[serde(default)]
     pub compatibility: Option<CompatibilityUsageMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_diagnostics: Option<StreamDiagnostics>,
+}
+
+impl UsageLog {
+    /// Normalize a freshly loaded log: map a missing legacy wire status to
+    /// the logical `status_code` without changing valid new rows.
+    pub fn normalize_after_load(&mut self) {
+        if self.wire_status_code == 0 {
+            self.wire_status_code = self.status_code;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

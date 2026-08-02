@@ -280,7 +280,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
                  endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
-                 status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at \
+                 status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics \
                  FROM usage_logs WHERE created_at >= $1 ORDER BY created_at, request_id, id",
                 &[&runtime_usage_start],
             )
@@ -517,7 +517,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at
+                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at <= $2
@@ -1204,6 +1204,11 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
         let latency_ms = log.latency_ms as i64;
         let created_at = log.created_at as i64;
         let status_code = log.status_code as i32;
+        let wire_status_code = log.wire_status_code as i32;
+        let stream_diagnostics_json = log
+            .stream_diagnostics
+            .as_ref()
+            .map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null));
         let params: &[&(dyn ToSql + Sync)] = &[
             &log.id,
             &log.downstream_key_id,
@@ -1218,6 +1223,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
             &log.user_agent,
             &log.request_id,
             &status_code,
+            &wire_status_code,
             &log.error_message,
             &log.error_category,
             &compatibility,
@@ -1227,20 +1233,21 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
             &first_token_latency_ms,
             &latency_ms,
             &created_at,
+            &stream_diagnostics_json,
         ];
 
         tx.execute(
             "INSERT INTO usage_logs (
                 id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                 endpoint, model, inference_strength, billing_mode, request_count,
-                user_agent, request_id, status_code, error_message, error_category,
-                compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at
+                user_agent, request_id, status_code, wire_status_code, error_message, error_category,
+                compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20,
-                $21, $22
+                $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21,
+                $22, $23, $24
             ) ON CONFLICT (id) DO NOTHING",
             params,
         )
@@ -1293,7 +1300,7 @@ async fn load_announcement(
 }
 
 fn usage_log_from_row(row: &Row) -> UsageLog {
-    UsageLog {
+    let mut log = UsageLog {
         id: row.get::<_, String>(0),
         downstream_key_id: row.get::<_, String>(1),
         upstream_key_id: row.get::<_, String>(2),
@@ -1307,18 +1314,27 @@ fn usage_log_from_row(row: &Row) -> UsageLog {
         user_agent: row.get::<_, Option<String>>(10),
         request_id: row.get::<_, String>(11),
         status_code: row.get::<_, i32>(12).clamp(0, u16::MAX as i32) as u16,
-        error_message: row.get::<_, Option<String>>(13),
-        error_category: row.get::<_, Option<String>>(14),
+        wire_status_code: row
+            .get::<_, Option<i32>>(13)
+            .map(|v| v.clamp(0, u16::MAX as i32) as u16)
+            .unwrap_or(0),
+        error_message: row.get::<_, Option<String>>(14),
+        error_category: row.get::<_, Option<String>>(15),
         compatibility: row
-            .get::<_, Option<String>>(15)
+            .get::<_, Option<String>>(16)
             .and_then(|value| serde_json::from_str(&value).ok()),
-        prompt_tokens: i64_to_u64(row.get::<_, i64>(16)),
-        completion_tokens: i64_to_u64(row.get::<_, i64>(17)),
-        total_tokens: i64_to_u64(row.get::<_, i64>(18)),
-        first_token_latency_ms: row.get::<_, Option<i64>>(19).map(i64_to_u64),
-        latency_ms: i64_to_u64(row.get::<_, i64>(20)),
-        created_at: i64_to_u64(row.get::<_, i64>(21)),
-    }
+        prompt_tokens: i64_to_u64(row.get::<_, i64>(17)),
+        completion_tokens: i64_to_u64(row.get::<_, i64>(18)),
+        total_tokens: i64_to_u64(row.get::<_, i64>(19)),
+        first_token_latency_ms: row.get::<_, Option<i64>>(20).map(i64_to_u64),
+        latency_ms: i64_to_u64(row.get::<_, i64>(21)),
+        created_at: i64_to_u64(row.get::<_, i64>(22)),
+        stream_diagnostics: row
+            .get::<_, Option<serde_json::Value>>(23)
+            .and_then(|value| serde_json::from_value(value).ok()),
+    };
+    log.normalize_after_load();
+    log
 }
 
 fn runtime_usage_log_start(now: u64) -> i64 {
@@ -1571,6 +1587,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     user_agent TEXT NULL,
     request_id TEXT NOT NULL,
     status_code INTEGER NOT NULL,
+    wire_status_code INTEGER NOT NULL DEFAULT 0,
     error_message TEXT NULL,
     error_category TEXT NULL,
     compatibility TEXT NULL,
@@ -1579,7 +1596,8 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     total_tokens BIGINT NOT NULL,
     first_token_latency_ms BIGINT NULL,
     latency_ms BIGINT NOT NULL,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    stream_diagnostics JSONB NULL
 );
 
 ALTER TABLE usage_logs
@@ -1602,6 +1620,13 @@ ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS compatibility TEXT NULL;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS first_token_latency_ms BIGINT NULL;
+ALTER TABLE usage_logs
+    ADD COLUMN IF NOT EXISTS wire_status_code INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage_logs
+    ADD COLUMN IF NOT EXISTS stream_diagnostics JSONB NULL;
+UPDATE usage_logs SET wire_status_code = status_code WHERE wire_status_code = 0;
+ALTER TABLE usage_logs
+    ALTER COLUMN wire_status_code SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS capability_configuration (
     singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),

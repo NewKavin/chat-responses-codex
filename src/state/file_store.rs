@@ -91,7 +91,10 @@ impl FileStateStore {
                 continue;
             }
             let bytes = fs::read(&path).await?;
-            let logs: Vec<UsageLog> = serde_json::from_slice(&bytes).unwrap_or_default();
+            let mut logs: Vec<UsageLog> = serde_json::from_slice(&bytes).unwrap_or_default();
+            for log in &mut logs {
+                log.normalize_after_load();
+            }
             let retained: Vec<&UsageLog> =
                 logs.iter().filter(|log| log.created_at >= cutoff).collect();
             if retained.is_empty() {

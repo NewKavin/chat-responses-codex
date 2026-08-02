@@ -2754,3 +2754,65 @@ async fn synthesized_stream_response_releases_runtime_state() {
     let second = app.clone().oneshot(request()).await.unwrap();
     assert_eq!(second.status(), StatusCode::OK);
 }
+
+/// A committed SSE stream that returns HTTP 200 on the wire, delivers semantic
+/// output, then truncates (incomplete EOF) must record wire_status_code 200 and
+/// logical status_code 502 with structured stream diagnostics.
+#[tokio::test]
+async fn committed_stream_failure_records_wire_200_and_logical_502() {
+    let (response, state, _tempdir, _first_hits, _second_hits) =
+        native_responses_response_for_chunks(
+            vec![(
+                Duration::ZERO,
+                Bytes::from_static(
+                    concat!(
+                        "event: response.output_text.delta\n",
+                        "data: {\"type\":\"response.output_text.delta\",",
+                        "\"response_id\":\"resp-wire\",\"item_id\":\"msg-wire\",",
+                        "\"output_index\":0,\"content_index\":0,",
+                        "\"delta\":\"semantic-output-before-failure\"}\n\n"
+                    )
+                    .as_bytes(),
+                ),
+            )],
+            false,
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("incomplete EOF should become a typed Responses error")
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("semantic-output-before-failure"),
+        "body must preserve semantic output: {body}"
+    );
+    assert!(body.contains("event: response.failed"), "{body}");
+
+    wait_for_upstream_in_flight(&state, "up-1", 0).await;
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.usage_logs.len(), 1);
+    let log = &snapshot.usage_logs[0];
+    assert_eq!(log.wire_status_code, 200, "wire status must be 200");
+    assert_eq!(log.status_code, 502, "logical status must be 502");
+    let diagnostic = log
+        .stream_diagnostics
+        .as_ref()
+        .expect("stream_diagnostics must be populated");
+    assert!(
+        diagnostic.semantic_output_observed,
+        "semantic output must be observed"
+    );
+    assert!(
+        !diagnostic.semantic_terminal_observed,
+        "terminal must not be observed for incomplete EOF"
+    );
+    assert!(
+        diagnostic.physical_attempt_count >= 1,
+        "at least one physical attempt"
+    );
+}

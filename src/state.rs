@@ -109,7 +109,7 @@ pub use types::{
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConcurrencySnapshot,
     DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
     PersistedState, RouteFailureClass,
-    RouteHealthSnapshotDto, UpstreamConfig, UpstreamMutationError, UsageLog,
+    RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig, UpstreamMutationError, UsageLog,
     ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,

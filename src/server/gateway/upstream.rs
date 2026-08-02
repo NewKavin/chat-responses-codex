@@ -2245,11 +2245,14 @@ pub(super) async fn send_to_upstream(
                 compatibility: None,
                 normalized_model: normalized_model.to_string(),
                 status,
+                wire_status: status,
+                transport_committed: true,
                 error_message: None,
                 error_category: None,
                 started,
                 first_token_latency: body_read_diagnostic_context.first_token_latency.clone(),
                 hedge_control: hedge_control.clone(),
+                stream_diagnostics: None,
             };
             if upstream_protocol == endpoint.native_protocol() {
                 proxied_stream_body(

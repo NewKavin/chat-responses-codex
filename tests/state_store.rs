@@ -224,6 +224,7 @@ fn usage_log(
         user_agent: None,
         request_id: format!("req-{id}"),
         status_code,
+        wire_status_code: 0,
         error_message: None,
         error_category: None,
         prompt_tokens: total_tokens / 2,
@@ -233,6 +234,7 @@ fn usage_log(
         latency_ms: 100,
         created_at,
         compatibility: None,
+        stream_diagnostics: None,
     }
 }
 
@@ -320,6 +322,8 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     request_count: None,
                     user_agent: None,
                     status_code: 200,
+                    wire_status_code: 0,
+                    stream_diagnostics: None,
                     error_message: None,
                     error_category: None,
                     prompt_tokens: 10,
@@ -344,6 +348,8 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
                     request_count: None,
                     user_agent: None,
                     status_code: 200,
+                    wire_status_code: 0,
+                    stream_diagnostics: None,
                     error_message: None,
                     error_category: None,
                     prompt_tokens: 15,
@@ -660,6 +666,8 @@ async fn file_store_appends_usage_log_batches_without_rewriting_config_state() {
             user_agent: None,
             request_id: "req-1".into(),
             status_code: 200,
+            wire_status_code: 0,
+            stream_diagnostics: None,
             error_message: None,
             error_category: None,
             prompt_tokens: 1,

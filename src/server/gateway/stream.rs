@@ -800,6 +800,32 @@ struct ProxiedStreamState {
 }
 
 impl ProxiedStreamState {
+    fn populate_stream_diagnostics(&mut self) {
+        if let Some(log_context) = self.log_context.as_mut() {
+            let physical = self
+                .body_read_diagnostic_context
+                .route_attempts
+                .physical_attempt_count();
+            let routing = self
+                .body_read_diagnostic_context
+                .route_attempts
+                .routing_round();
+            log_context.stream_diagnostics = Some(crate::state::StreamDiagnostics {
+                response_header_wait_ms: self
+                    .body_read_diagnostic_context
+                    .started
+                    .elapsed()
+                    .as_millis() as u64,
+                first_semantic_output_ms: log_context.first_token_latency.get(),
+                routing_rounds: routing,
+                physical_attempt_count: physical as u32,
+                semantic_output_observed: self.usable_output_seen,
+                semantic_terminal_observed: self.semantic_terminal_emitted,
+                ..Default::default()
+            });
+        }
+    }
+
     async fn flush_usage_log_or_error_frame(&mut self) -> Result<Option<Bytes>, std::io::Error> {
         match self.flush_usage_log().await {
             Ok(()) => Ok(None),
@@ -1069,6 +1095,7 @@ impl ProxiedStreamState {
         let status = error.status_code();
         let error_category = error.error_category();
         let error_message = error.message().to_string();
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -1109,6 +1136,7 @@ impl ProxiedStreamState {
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -1122,6 +1150,7 @@ impl ProxiedStreamState {
         is_timeout: bool,
         is_decode: bool,
     ) {
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -1146,6 +1175,7 @@ impl Drop for ProxiedStreamState {
             return;
         }
 
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -1428,6 +1458,32 @@ struct TranslatedStreamState {
 }
 
 impl TranslatedStreamState {
+    fn populate_stream_diagnostics(&mut self) {
+        if let Some(log_context) = self.log_context.as_mut() {
+            let physical = self
+                .body_read_diagnostic_context
+                .route_attempts
+                .physical_attempt_count();
+            let routing = self
+                .body_read_diagnostic_context
+                .route_attempts
+                .routing_round();
+            log_context.stream_diagnostics = Some(crate::state::StreamDiagnostics {
+                response_header_wait_ms: self
+                    .body_read_diagnostic_context
+                    .started
+                    .elapsed()
+                    .as_millis() as u64,
+                first_semantic_output_ms: log_context.first_token_latency.get(),
+                routing_rounds: routing,
+                physical_attempt_count: physical as u32,
+                semantic_output_observed: self.usable_output_observed,
+                semantic_terminal_observed: self.semantic_terminal_emitted,
+                ..Default::default()
+            });
+        }
+    }
+
     async fn flush_usage_log_or_error_frame(&mut self) -> Result<Option<Bytes>, std::io::Error> {
         match self.flush_usage_log().await {
             Ok(()) => Ok(None),
@@ -1700,6 +1756,7 @@ impl TranslatedStreamState {
         let status = error.status_code();
         let error_category = error.error_category();
         let error_message = error.message().to_string();
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -1740,6 +1797,7 @@ impl TranslatedStreamState {
     }
 
     async fn mark_stream_interrupted(&mut self, error_message: String) {
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -1753,6 +1811,7 @@ impl TranslatedStreamState {
         is_timeout: bool,
         is_decode: bool,
     ) {
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -1777,6 +1836,7 @@ impl Drop for TranslatedStreamState {
             return;
         }
 
+        self.populate_stream_diagnostics();
         let completion_context = self.completion_context.take();
         let log_context = self.log_context.take();
         let usage = self.usage;
@@ -2142,11 +2202,14 @@ mod diagnostic_tests {
             compatibility: None,
             normalized_model: "excluded-normalized-model-marker".into(),
             status: StatusCode::OK,
+            wire_status: StatusCode::OK,
+            transport_committed: true,
             error_message: Some("tool-argument-secret".into()),
             error_category: Some("excluded-error-category-marker".into()),
             started: Instant::now(),
             first_token_latency: FirstTokenLatency::default(),
             hedge_control: None,
+            stream_diagnostics: None,
         };
         assert_eq!(usage_context.model, "prompt-secret");
         assert_eq!(

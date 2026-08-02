@@ -20,7 +20,8 @@ use crate::state::{
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, RuntimeCoordinationError, UpstreamConfig, UpstreamRequestLease, UsageLog,
+    RouteSetAggregateKey, RuntimeCoordinationError, StreamDiagnostics, UpstreamConfig,
+    UpstreamRequestLease, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -1210,11 +1211,14 @@ struct StreamUsageLogContext {
     compatibility: Option<CompatibilityUsageMetadata>,
     normalized_model: String,
     status: StatusCode,
+    wire_status: StatusCode,
+    transport_committed: bool,
     error_message: Option<String>,
     error_category: Option<String>,
     started: Instant,
     first_token_latency: FirstTokenLatency,
     hedge_control: Option<HedgeAttemptControl>,
+    stream_diagnostics: Option<StreamDiagnostics>,
 }
 
 impl std::fmt::Debug for StreamUsageLogContext {
@@ -1228,6 +1232,8 @@ impl std::fmt::Debug for StreamUsageLogContext {
             .field("model", &self.model)
             .field("normalized_model", &self.normalized_model)
             .field("status", &self.status)
+            .field("wire_status", &self.wire_status)
+            .field("transport_committed", &self.transport_committed)
             .field("error_category", &self.error_category)
             .finish()
     }
@@ -1281,12 +1287,20 @@ impl StreamUsageLogContext {
             compatibility,
             normalized_model,
             status,
+            wire_status,
+            transport_committed,
             error_message,
             error_category,
             started,
             first_token_latency,
             hedge_control: _,
+            stream_diagnostics,
         } = self;
+        let wire_status_code = if transport_committed {
+            wire_status.as_u16()
+        } else {
+            status.as_u16()
+        };
 
         let log = UsageLog {
             id: request_id.clone(),
@@ -1306,6 +1320,7 @@ impl StreamUsageLogContext {
             user_agent,
             request_id: request_id.clone(),
             status_code: status.as_u16(),
+            wire_status_code,
             error_message,
             error_category,
             prompt_tokens: usage.0,
@@ -1315,6 +1330,7 @@ impl StreamUsageLogContext {
             latency_ms: started.elapsed().as_millis() as u64,
             created_at: unix_seconds(),
             compatibility,
+            stream_diagnostics,
         };
 
         let result = state.append_usage_log(log).await;
@@ -1480,6 +1496,7 @@ async fn append_gateway_usage_log(
         user_agent: user_agent.map(str::to_string),
         request_id: request_id.to_string(),
         status_code: status_code.as_u16(),
+        wire_status_code: status_code.as_u16(),
         error_message,
         error_category,
         prompt_tokens,
@@ -1489,6 +1506,7 @@ async fn append_gateway_usage_log(
         latency_ms: started.elapsed().as_millis() as u64,
         created_at: unix_seconds(),
         compatibility,
+        stream_diagnostics: None,
     };
 
     let result = state.append_usage_log(log).await;
@@ -3421,6 +3439,9 @@ async fn finalize_stream_error(
 
     if let Some(mut log_context) = log_context {
         log_context.fail_active_request(error_category);
+        if !log_context.transport_committed {
+            log_context.wire_status = status;
+        }
         log_context.status = status;
         log_context.error_message = Some(error_message);
         log_context.error_category = Some(error_category.to_string());
@@ -5176,11 +5197,14 @@ async fn process_gateway_request_inner(
                                     compatibility: None,
                                     normalized_model: normalized_model.to_string(),
                                     status: StatusCode::OK,
+                                    wire_status: StatusCode::OK,
+                                    transport_committed: false,
                                     error_message: None,
                                     error_category: None,
                                     started,
                                     first_token_latency: FirstTokenLatency::default(),
                                     hedge_control: None,
+                                    stream_diagnostics: None,
                                 },
                             );
                         }
