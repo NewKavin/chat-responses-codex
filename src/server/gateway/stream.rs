@@ -646,6 +646,7 @@ fn log_stream_body_read_diagnostic(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn proxied_stream_body(
     reader: UpstreamStreamReader,
     endpoint: EndpointKind,
@@ -902,7 +903,6 @@ impl ProxiedStreamState {
                     || self.usable_output_seen,
                 semantic_terminal_observed: self.commit_tracker.terminal_observed()
                     || self.semantic_terminal_emitted,
-                ..Default::default()
             });
         }
     }
@@ -1611,7 +1611,6 @@ impl TranslatedStreamState {
                     || self.usable_output_observed,
                 semantic_terminal_observed: self.commit_tracker.terminal_observed()
                     || self.semantic_terminal_emitted,
-                ..Default::default()
             });
         }
     }
