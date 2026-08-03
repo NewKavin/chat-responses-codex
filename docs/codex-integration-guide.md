@@ -14,7 +14,7 @@
 
 | 客户端 | 协议族 | 端点 | 配置方式 |
 |--------|--------|------|----------|
-| Codex | Responses | `/v1/responses` | `config.toml` + `model-catalog.json` + `codex login --with-api-key` |
+| Codex | Responses | `/v1/responses` | `config.toml` + `model-catalog.json` + `agents/default.toml` + `codex login --with-api-key` |
 | Cline | Chat Completions | `/v1/chat/completions` | 门户 Cline preset（`baseURL` + `apiKey` + `model`） |
 | OpenCode | Chat Completions | `/v1/chat/completions` | `opencode.json` |
 | Claude Code | Messages | `/v1/messages` | `settings.json`（含 `ANTHROPIC_BASE_URL` 等环境变量） |
@@ -37,8 +37,9 @@
 
 1. Codex 本地配置：`~/.codex/config.toml`
 2. Codex 模型目录：`~/.codex/model-catalog.json`
-3. 网关状态：`STATE_PATH` 指向的 JSON 文件，通常通过网关管理页维护
-4. 门户集成页：`<gateway_origin>/portal/integration`
+3. Codex 子代理角色：`~/.codex/agents/default.toml`
+4. 网关状态：`STATE_PATH` 指向的 JSON 文件，通常通过网关管理页维护
+5. 门户集成页：`<gateway_origin>/portal/integration`
 
 项目里已经准备了客户端配置模板：
 
@@ -79,8 +80,9 @@ Codex catalog 必须从已配置的网关读取。下面的流程不会把下游
 ### 1. 先把 Codex 模板放到本机
 
 ```bash
-mkdir -p ~/.codex
+mkdir -p ~/.codex/agents
 cp templates/codex/config.toml.example ~/.codex/config.toml
+cp templates/codex/agents/default.toml.example ~/.codex/agents/default.toml
 ```
 
 然后执行上一节的 live catalog 获取和非空校验流程。
@@ -91,7 +93,7 @@ cp templates/codex/config.toml.example ~/.codex/config.toml
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
-model_reasoning_effort = "none"
+model_reasoning_effort = "<reasoning_effort_from_live_catalog>"
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
 web_search = "disabled"
@@ -116,6 +118,22 @@ stream_max_retries = 2
 ```
 
 完成配置后可运行 `codex --strict-config doctor --summary` 检查配置是否符合当前 Codex 版本。
+
+`~/.codex/agents/default.toml` 必须使用与 `config.toml` 相同的 live catalog
+模型 slug 和 `default_reasoning_level`。它是 Codex 委托启动子代理时读取的独立
+profile；如果门户切换模型，请同时替换这两个文件后再新建 Codex 会话。不要从
+开发机全局配置复制旧的 agent role，也不要把 key 写进这个 TOML 文件。
+
+遇到子代理 profile 不匹配时，只比较这两个非敏感字段，不要打印完整配置或凭据：
+
+```bash
+diff -u \
+  <(grep -E '^(model|model_reasoning_effort) =' ~/.codex/config.toml) \
+  <(grep -E '^(model|model_reasoning_effort) =' ~/.codex/agents/default.toml)
+```
+
+这个检查只用于确认模型 slug 和推理等级一致。不要执行 `cat ~/.codex/auth.json`，
+也不要把 auth 文件、下游 key 或 Authorization 头输出到终端、日志或工单。
 
 用下面的命令录入下游 key。它不会把明文 key 写进 shell 历史：
 
@@ -359,7 +377,7 @@ Codex 请求网关时，实际发送的是：
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
-model_reasoning_effort = "none"
+model_reasoning_effort = "<reasoning_effort_from_live_catalog>"
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
 web_search = "disabled"
@@ -378,6 +396,10 @@ wire_api = "responses"
 requires_openai_auth = true
 stream_max_retries = 2
 ```
+
+把同一组 `<model_slug>` 和 `<reasoning_effort_from_live_catalog>` 替换到
+`~/.codex/agents/default.toml`；该文件负责 Codex 委托启动的子代理，不能继续使用模板
+里的旧值。
 
 ### 4.3 每个字段是什么意思
 
@@ -585,7 +607,7 @@ Codex 启动后选你在目录里写的模型，比如：
 
 如果你是第一次接，建议按这个组合来：
 
-- Codex 本机：只放 `~/.codex/config.toml`
+- Codex 本机：放 `~/.codex/config.toml` 和 `~/.codex/agents/default.toml`
 - 模型目录：放 `~/.codex/model-catalog.json`
 - 网关机器：运行 `chat-responses-codex`
 - 网关管理页：配置上游和下游

@@ -14,6 +14,7 @@ fn deployment_capabilities() -> CapabilityConfiguration {
 #[test]
 fn template_files_live_under_templates_directory() {
     assert!(Path::new("templates/codex/config.toml.example").exists());
+    assert!(Path::new("templates/codex/agents/default.toml.example").exists());
     assert!(Path::new("templates/codex/model-catalog.json").exists());
     assert!(Path::new("templates/state/gateway-state.example.json").exists());
 }
@@ -46,6 +47,16 @@ fn codex_config_example_uses_live_model_slug_exactly() {
     assert!(!config.contains("disable_response_storage"));
     assert!(!config
         .contains("/absolute/path/to/chat-responses-codex/templates/codex/model-catalog.json"));
+}
+
+#[test]
+fn codex_default_agent_example_uses_live_selection_placeholders() {
+    let role = fs::read_to_string("templates/codex/agents/default.toml.example").unwrap();
+
+    assert!(role.contains(r#"model = "<model_slug>""#));
+    assert!(role.contains(r#"model_reasoning_effort = "<reasoning_effort_from_live_catalog>""#));
+    assert!(!role.contains("gpt-5.6-sol"));
+    assert!(!role.contains("model_reasoning_effort = \"low\""));
 }
 
 #[test]

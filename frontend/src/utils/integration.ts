@@ -40,6 +40,11 @@ type CodexConfigInput = {
   modelReasoningEffort: string
 }
 
+export type CodexAgentRoleInput = {
+  modelSlug: string
+  modelReasoningEffort: string
+}
+
 type HermesConfigInput = {
   gatewayBaseUrl: string
   portalKey: string
@@ -67,6 +72,36 @@ const internalCodexCatalogFields = new Set([
   'fingerprint'
 ])
 
+const sensitiveCodexCatalogFields = new Set([
+  'access_token',
+  'api_key',
+  'apikey',
+  'authorization',
+  'auth_token',
+  'bearer',
+  'billing',
+  'billing_fields',
+  'cost',
+  'costs',
+  'credential',
+  'credentials',
+  'password',
+  'price',
+  'pricing',
+  'prompt',
+  'prompts',
+  'refresh_token',
+  'secret',
+  'token',
+  'tool_arguments',
+  'tool_parameters'
+])
+
+const isSensitiveCodexCatalogField = (key: string) => {
+  const normalized = key.trim().replace(/[-\s]+/g, '_').toLowerCase()
+  return sensitiveCodexCatalogFields.has(normalized)
+}
+
 const sanitizeCodexCatalogValue = (value: JsonValue): JsonValue => {
   if (Array.isArray(value)) {
     return value.map(sanitizeCodexCatalogValue)
@@ -77,7 +112,7 @@ const sanitizeCodexCatalogValue = (value: JsonValue): JsonValue => {
 
   const sanitized: { [key: string]: JsonValue } = {}
   for (const [key, nestedValue] of Object.entries(value)) {
-    if (!internalCodexCatalogFields.has(key)) {
+    if (!internalCodexCatalogFields.has(key) && !isSensitiveCodexCatalogField(key)) {
       sanitized[key] = sanitizeCodexCatalogValue(nestedValue)
     }
   }
@@ -94,7 +129,43 @@ const normalizeModelMatchKey = (value: unknown) => {
   return slug ? slug.toLowerCase() : ''
 }
 
-const tomlEscape = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+const tomlEscape = (value: string) => {
+  let escaped = ''
+
+  for (const character of value) {
+    switch (character) {
+      case '\\':
+        escaped += '\\\\'
+        break
+      case '"':
+        escaped += '\\"'
+        break
+      case '\b':
+        escaped += '\\b'
+        break
+      case '\t':
+        escaped += '\\t'
+        break
+      case '\n':
+        escaped += '\\n'
+        break
+      case '\f':
+        escaped += '\\f'
+        break
+      case '\r':
+        escaped += '\\r'
+        break
+      default: {
+        const codePoint = character.codePointAt(0) ?? 0
+        escaped += codePoint < 0x20 || codePoint === 0x7f
+          ? `\\u${codePoint.toString(16).padStart(4, '0')}`
+          : character
+      }
+    }
+  }
+
+  return escaped
+}
 
 const tomlString = (value: string) => `"${tomlEscape(value)}"`
 
@@ -324,6 +395,24 @@ wire_api = "responses"
 requires_openai_auth = true
 stream_idle_timeout_ms = 3600000
 stream_max_retries = 2
+`
+}
+
+export const buildCodexDefaultAgentToml = (input: CodexAgentRoleInput) => {
+  const modelSlug = normalizeSlug(input.modelSlug)
+  if (!modelSlug) {
+    throw new Error('Codex subagent model is unavailable')
+  }
+
+  const modelReasoningEffort = normalizeSlug(input.modelReasoningEffort) || 'none'
+
+  return `name = "default"
+description = "General-purpose read-only exploration subagent."
+model = ${tomlString(modelSlug)}
+model_reasoning_effort = ${tomlString(modelReasoningEffort)}
+
+[features]
+image_generation = false
 `
 }
 

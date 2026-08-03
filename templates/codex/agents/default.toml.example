@@ -1,0 +1,9 @@
+# Copy this file to ~/.codex/agents/default.toml after replacing both placeholders
+# from the same live catalog selection used by ~/.codex/config.toml.
+name = "default"
+description = "General-purpose read-only exploration subagent."
+model = "<model_slug>"
+model_reasoning_effort = "<reasoning_effort_from_live_catalog>"
+
+[features]
+image_generation = false

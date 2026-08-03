@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildClaudeCodeSettingsJson,
   buildCodexAuthLoginCommand,
+  buildCodexDefaultAgentToml,
   buildCodexDoctorCommand,
   buildCodexConfigToml,
   buildCodexModelCatalogJson,
@@ -24,6 +25,30 @@ const codexTemplate = readFileSync(new URL('../../../templates/codex/config.toml
 const codexGuide = readFileSync(new URL('../../../docs/codex-integration-guide.md', import.meta.url), 'utf8')
 
 describe('integration config generators', () => {
+  it('builds a default Codex subagent role from the selected live model', () => {
+    const role = buildCodexDefaultAgentToml({
+      modelSlug: 'glm-5.2',
+      modelReasoningEffort: 'none'
+    })
+
+    expect(role).toContain('name = "default"')
+    expect(role).toContain('model = "glm-5.2"')
+    expect(role).toContain('model_reasoning_effort = "none"')
+    expect(role).not.toContain('gpt-5.6-sol')
+    expect(role).not.toContain('model_reasoning_effort = "low"')
+  })
+
+  it('escapes TOML control characters in the generated role', () => {
+    const role = buildCodexDefaultAgentToml({
+      modelSlug: 'glm\n5.2',
+      modelReasoningEffort: 'none\u0000'
+    })
+
+    expect(role).toContain('model = "glm\\n5.2"')
+    expect(role).toContain('model_reasoning_effort = "none\\u0000"')
+    expect(role).not.toContain('model = "glm\n5.2"')
+  })
+
   it('builds a gateway base url from an origin and trims trailing slash', () => {
     expect(buildGatewayBaseUrl('http://localhost:3001/')).toBe('http://localhost:3001')
     expect(buildGatewayBaseUrl('https://portal.example.com')).toBe('https://portal.example.com')
@@ -361,6 +386,28 @@ describe('integration config generators', () => {
     expect(JSON.stringify(emitted)).not.toContain('configuration_id')
     expect(JSON.stringify(emitted)).not.toContain('profile_key')
     expect(JSON.stringify(emitted)).not.toContain('fingerprint')
+  })
+
+  it('drops credential and billing fields from a live catalog before rendering it', () => {
+    const emitted = JSON.parse(buildCodexModelCatalogJson({
+      models: [{
+        slug: 'opaque',
+        input_modalities: ['text'],
+        api_key: 'secret-key',
+        authorization: 'Bearer secret',
+        credentials: { token: 'secret-token' },
+        billing: { input_cost: 1 },
+        safe_label: 'keep-me'
+      }]
+    } as never))
+
+    expect(emitted.models[0]).toEqual({
+      slug: 'opaque',
+      input_modalities: ['text'],
+      safe_label: 'keep-me'
+    })
+    expect(JSON.stringify(emitted)).not.toContain('secret')
+    expect(JSON.stringify(emitted)).not.toContain('billing')
   })
 
   it('fails catalog generation when the live catalog is unavailable', () => {

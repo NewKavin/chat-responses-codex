@@ -43,4 +43,11 @@ describe('portal integration live catalog wiring', () => {
     expect(integrationView).toContain('不需要配置 upstream_id 或指纹')
     expect(integrationView).toContain('新建 Codex 会话')
   })
+
+  it('exposes a default subagent role file generated from the selected model', () => {
+    expect(integrationView).toContain('~/.codex/agents/default.toml')
+    expect(integrationView).toContain('codexDefaultAgentToml')
+    expect(integrationView).toContain('buildCodexDefaultAgentToml')
+    expect(integrationView).toContain('子代理')
+  })
 })

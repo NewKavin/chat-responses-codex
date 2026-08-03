@@ -34,7 +34,7 @@
         type="info"
         :closable="false"
         show-icon
-        title="Codex 不把 key 写进 config.toml，而是通过 `codex login --with-api-key` 写进 `~/.codex/auth.json`。"
+        title="Codex 需要四个配置内容：config.toml、model-catalog.json、agents/default.toml，以及通过 codex login --with-api-key 写入的 auth.json。"
       />
 
       <el-alert
@@ -183,7 +183,7 @@
               type="info"
               :closable="false"
               show-icon
-              title="Codex 需要 3 个内容：`config.toml`、`model-catalog.json`，以及通过 `codex login --with-api-key` 写入的 `auth.json`。"
+              title="Codex 需要 4 个内容：`config.toml`、`model-catalog.json`、`agents/default.toml`，以及通过 `codex login --with-api-key` 写入的 `auth.json`。"
             />
             <el-alert
               class="section-alert"
@@ -258,7 +258,25 @@
             <div class="step-card">
               <div class="step-head">
                 <div>
-                  <h4>步骤 3: 写入 `~/.codex/auth.json`</h4>
+                  <h4>步骤 3: 写入 `~/.codex/agents/default.toml`</h4>
+                  <p>
+                    这个文件控制 Codex 委托启动的子代理。它与上面的主配置使用同一个模型和 live catalog
+                    推理等级；切换模型后需要一起替换，避免子代理继续使用旧 profile。
+                  </p>
+                </div>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(codexDefaultAgentToml)">
+                    <Copy :size="14" :stroke-width="1.8" />
+                  </el-button>
+                </el-tooltip>
+              </div>
+              <pre class="code-block">{{ codexDefaultAgentToml }}</pre>
+            </div>
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 4: 写入 `~/.codex/auth.json`</h4>
                   <p>
                     先确保 <code>config.toml</code> 里已经设置了
                     <code>cli_auth_credentials_store = "file"</code>，然后执行下面命令把当前门户
@@ -532,6 +550,7 @@ import {
   buildClaudeCodeSettingsJson,
   type CodexCatalogResponse,
   buildCodexAuthLoginCommand,
+  buildCodexDefaultAgentToml,
   buildCodexConfigToml,
   buildCodexModelCatalogJson,
   buildIntegrationCatalogViewState,
@@ -629,6 +648,15 @@ const codexModelCatalogJson = computed(() => {
   if (!canGenerateConfigContent.value || !codexCatalog.value) return ''
   return buildCodexModelCatalogJson(codexCatalog.value)
 })
+
+const codexDefaultAgentToml = computed(() =>
+  canGenerateConfigContent.value
+    ? buildCodexDefaultAgentToml({
+        modelSlug: codexModelSelection.value.modelSlug,
+        modelReasoningEffort: codexModelSelection.value.modelReasoningEffort
+      })
+    : ''
+)
 
 const codexAuthLoginCommand = computed(() =>
   canGenerateConfigContent.value ? buildCodexAuthLoginCommand() : ''
