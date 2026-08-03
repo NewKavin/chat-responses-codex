@@ -591,6 +591,8 @@ struct HedgeStreamAttempt {
     stream_timeouts: StreamTimeouts,
     route_attempts: RequestRouteAttempts,
     body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
+    endpoint: EndpointKind,
+    commit_tracker: super::stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<super::stream_commit::FirstSemanticDeadline>,
 }
 
@@ -613,6 +615,7 @@ struct RouteHedgeContext {
     route_attempts: RequestRouteAttempts,
     response_history_context: Option<ResponseHistoryContext>,
     stream_only_recovery_request_safe: bool,
+    account_wait_ms: u64,
 }
 
 fn hedge_launch_delay(config: &AppConfig, launched_extra_attempts: usize) -> Duration {
@@ -768,6 +771,7 @@ fn send_route_hedge_attempt(
             &mut stream_only_recovery,
             &mut stream_only_recovery_leader,
             &mut stream_only_recovery_identity,
+            context.account_wait_ms,
             None,
         )
         .await;
@@ -837,6 +841,8 @@ async fn send_hedge_stream_attempt(
         stream_timeouts,
         route_attempts,
         body_read_diagnostic_context,
+        endpoint,
+        commit_tracker,
         first_semantic_deadline,
     } = attempt;
     let account = crate::state::AccountConcurrencyKey::new(
@@ -906,6 +912,8 @@ async fn send_hedge_stream_attempt(
         UpstreamStreamReader::new(response, stream_timeouts),
         upstream_protocol,
         &body_read_diagnostic_context,
+        endpoint,
+        commit_tracker,
         first_semantic_deadline,
     )
     .await?;
@@ -936,6 +944,7 @@ async fn prefetch_stream_with_hedges(
     started: Instant,
     route_attempts: &RequestRouteAttempts,
     primary_body_read_diagnostic_context: StreamBodyReadDiagnosticContext,
+    commit_tracker: super::stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<super::stream_commit::FirstSemanticDeadline>,
 ) -> Result<PrefetchedStreamWinner, GatewayError> {
     let route_hedge_count = route_hedge_context
@@ -949,6 +958,8 @@ async fn prefetch_stream_with_hedges(
             primary_reader,
             upstream_protocol,
             &primary_body_read_diagnostic_context,
+            endpoint,
+            commit_tracker.clone(),
             first_semantic_deadline,
         )
         .await?;
@@ -962,6 +973,7 @@ async fn prefetch_stream_with_hedges(
     type HedgeFuture =
         futures_util::future::BoxFuture<'static, (u32, Result<HedgeWinnerReady, GatewayError>)>;
     let mut attempts = futures_stream::FuturesUnordered::<HedgeFuture>::new();
+    let primary_commit_tracker = commit_tracker.clone();
     attempts.push(
         async move {
             (
@@ -970,6 +982,8 @@ async fn prefetch_stream_with_hedges(
                     primary_reader,
                     upstream_protocol,
                     &primary_body_read_diagnostic_context,
+                    endpoint,
+                    primary_commit_tracker,
                     first_semantic_deadline,
                 )
                 .await
@@ -1095,7 +1109,7 @@ async fn prefetch_stream_with_hedges(
                     }
                 }
             }
-            _ = tokio::time::sleep_until(next_launch_at), if launched_extra_attempts < max_extra_attempts && next_candidate_index < extra_candidate_count => {
+            _ = tokio::time::sleep_until(next_launch_at), if commit_tracker.can_replay() && launched_extra_attempts < max_extra_attempts && next_candidate_index < extra_candidate_count => {
                 let candidate_index = next_candidate_index;
                 next_candidate_index += 1;
                 launched_extra_attempts += 1;
@@ -1172,6 +1186,8 @@ async fn prefetch_stream_with_hedges(
                         stream_timeouts,
                         route_attempts: route_attempts.clone(),
                         body_read_diagnostic_context,
+                        endpoint,
+                        commit_tracker: commit_tracker.clone(),
                         first_semantic_deadline,
                     });
                     attempts.push(
@@ -1232,6 +1248,7 @@ pub(super) async fn send_to_upstream(
     stream_only_recovery: &mut StreamOnlyRecoveryState,
     stream_only_recovery_leader: &mut Option<StreamOnlyRecoveryLeader>,
     stream_only_recovery_identity: &mut Option<(DialectProfileKey, String)>,
+    account_wait_ms: u64,
     first_semantic_deadline: Option<super::stream_commit::FirstSemanticDeadline>,
 ) -> Result<DispatchResult, GatewayError> {
     let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
@@ -2170,6 +2187,8 @@ pub(super) async fn send_to_upstream(
             .unwrap_or_default()
             .to_ascii_lowercase();
         let stream_timeouts = StreamTimeouts::from_config(&state.config);
+        let commit_tracker = super::stream_commit::StreamCommitTracker::default();
+        commit_tracker.commit_transport();
 
         let mut usage_body = None;
         let body = if content_type.contains("text/event-stream") {
@@ -2214,6 +2233,7 @@ pub(super) async fn send_to_upstream(
                                 route_attempts: route_attempts.clone(),
                                 response_history_context: response_history_context.clone(),
                                 stream_only_recovery_request_safe,
+                                account_wait_ms,
                             });
                     match prefetch_stream_with_hedges(
                         state,
@@ -2234,6 +2254,7 @@ pub(super) async fn send_to_upstream(
                         started,
                         &route_attempts,
                         primary_body_read_diagnostic_context,
+                        commit_tracker.clone(),
                         first_semantic_deadline,
                     )
                     .await?
@@ -2269,6 +2290,7 @@ pub(super) async fn send_to_upstream(
                 error_message: None,
                 error_category: None,
                 started,
+                account_wait_ms,
                 first_token_latency: body_read_diagnostic_context.first_token_latency.clone(),
                 hedge_control: hedge_control.clone(),
                 stream_diagnostics: None,
@@ -2281,6 +2303,7 @@ pub(super) async fn send_to_upstream(
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
+                    commit_tracker,
                     first_semantic_deadline,
                 )?
             } else {
@@ -2293,6 +2316,7 @@ pub(super) async fn send_to_upstream(
                     stream_log_context,
                     stream_completion_context,
                     response_history_context,
+                    commit_tracker,
                     first_semantic_deadline,
                 )?
             }

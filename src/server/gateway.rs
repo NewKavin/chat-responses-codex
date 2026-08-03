@@ -1217,6 +1217,7 @@ struct StreamUsageLogContext {
     error_message: Option<String>,
     error_category: Option<String>,
     started: Instant,
+    account_wait_ms: u64,
     first_token_latency: FirstTokenLatency,
     hedge_control: Option<HedgeAttemptControl>,
     stream_diagnostics: Option<StreamDiagnostics>,
@@ -1293,6 +1294,7 @@ impl StreamUsageLogContext {
             error_message,
             error_category,
             started,
+            account_wait_ms: _,
             first_token_latency,
             hedge_control: _,
             stream_diagnostics,
@@ -1362,6 +1364,27 @@ fn stream_usage_from_value(value: &Value) -> Option<(u64, u64, u64)> {
         .and_then(Value::as_object)
         .and_then(|response| response.get("usage"))
         .map(usage_from_usage_value)
+}
+
+fn bounded_codex_version(user_agent: Option<&str>) -> Option<String> {
+    let user_agent = user_agent?.trim();
+    let lower = user_agent.to_ascii_lowercase();
+    if !(lower.starts_with("codex/")
+        || lower.starts_with("codex-cli/")
+        || lower.starts_with("codex_cli_rs/"))
+    {
+        return None;
+    }
+    let version = user_agent.split('/').nth(1)?.split_whitespace().next()?;
+    if version.is_empty()
+        || version.len() > 32
+        || !version
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+    {
+        return None;
+    }
+    Some(version.to_string())
 }
 
 fn stream_event_has_usable_output(event: &Value) -> bool {
@@ -5209,6 +5232,7 @@ async fn process_gateway_request_inner(
                                     error_message: None,
                                     error_category: None,
                                     started,
+                                    account_wait_ms: 0,
                                     first_token_latency: FirstTokenLatency::default(),
                                     hedge_control: None,
                                     stream_diagnostics: None,
@@ -5451,6 +5475,7 @@ async fn process_gateway_request_inner(
                             &mut stream_only_recovery,
                             &mut stream_only_recovery_leader,
                             &mut stream_only_recovery_identity,
+                            account_recovery.waited().as_millis() as u64,
                             first_semantic_deadline,
                         );
                         let mut result =

@@ -509,6 +509,8 @@ pub(super) async fn prefetch_first_usable_output(
     mut reader: UpstreamStreamReader,
     protocol: UpstreamProtocol,
     diagnostic_context: &StreamBodyReadDiagnosticContext,
+    endpoint: EndpointKind,
+    commit_tracker: stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<UpstreamStreamReader, GatewayError> {
     let mut classifier = FirstUsableOutputClassifier::new(protocol);
@@ -532,7 +534,12 @@ pub(super) async fn prefetch_first_usable_output(
             StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                 reader.replay_later(chunk.clone());
                 match classifier
-                    .push(&chunk, sse_event_has_usable_output)
+                    .push(&chunk, |event| {
+                        if let Ok(value) = serde_json::from_str::<Value>(event.data()) {
+                            commit_tracker.observe_json(endpoint, &value);
+                        }
+                        sse_event_has_usable_output(event)
+                    })
                     .map_err(protocol_error_to_gateway)?
                 {
                     FirstUsableOutputResult::Pending => {}
@@ -549,7 +556,12 @@ pub(super) async fn prefetch_first_usable_output(
             }
             StreamReadOutcome::Chunk(Ok(None)) => {
                 return match classifier
-                    .finish(sse_event_has_usable_output)
+                    .finish(|event| {
+                        if let Ok(value) = serde_json::from_str::<Value>(event.data()) {
+                            commit_tracker.observe_json(endpoint, &value);
+                        }
+                        sse_event_has_usable_output(event)
+                    })
                     .map_err(protocol_error_to_gateway)?
                 {
                     FirstUsableOutputResult::Ready => {
@@ -641,6 +653,7 @@ pub(super) fn proxied_stream_body(
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
+    commit_tracker: stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<Body, GatewayError> {
     let canonicalizer = (endpoint == EndpointKind::ChatCompletions).then(|| {
@@ -667,6 +680,7 @@ pub(super) fn proxied_stream_body(
         semantic_terminal_emitted: false,
         usable_output_seen: false,
         usage_log_flushed: false,
+        commit_tracker,
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
         loop {
@@ -784,6 +798,7 @@ pub(super) fn proxied_stream_body(
                     return Ok(Some((frame, state)));
                 }
                 StreamReadOutcome::Heartbeat => {
+                    state.commit_tracker.observe_keepalive(TokioInstant::now());
                     return Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)));
                 }
                 StreamReadOutcome::IdleTimeout => {
@@ -849,6 +864,7 @@ struct ProxiedStreamState {
     semantic_terminal_emitted: bool,
     usable_output_seen: bool,
     usage_log_flushed: bool,
+    commit_tracker: stream_commit::StreamCommitTracker,
 }
 
 impl ProxiedStreamState {
@@ -863,16 +879,29 @@ impl ProxiedStreamState {
                 .route_attempts
                 .routing_round();
             log_context.stream_diagnostics = Some(crate::state::StreamDiagnostics {
+                account_wait_ms: log_context.account_wait_ms,
                 response_header_wait_ms: self
                     .body_read_diagnostic_context
                     .started
                     .elapsed()
                     .as_millis() as u64,
                 first_semantic_output_ms: log_context.first_token_latency.get(),
+                since_last_semantic_ms: self.commit_tracker.last_semantic_at().map(|at| {
+                    TokioInstant::now()
+                        .saturating_duration_since(at)
+                        .as_millis() as u64
+                }),
+                last_keepalive_at: self
+                    .commit_tracker
+                    .last_keepalive_at()
+                    .map(|_| unix_seconds()),
+                codex_version: bounded_codex_version(log_context.user_agent.as_deref()),
                 routing_rounds: routing,
                 physical_attempt_count: physical as u32,
-                semantic_output_observed: self.usable_output_seen,
-                semantic_terminal_observed: self.semantic_terminal_emitted,
+                semantic_output_observed: self.commit_tracker.semantic_output_observed()
+                    || self.usable_output_seen,
+                semantic_terminal_observed: self.commit_tracker.terminal_observed()
+                    || self.semantic_terminal_emitted,
                 ..Default::default()
             });
         }
@@ -994,6 +1023,12 @@ impl ProxiedStreamState {
                 vec![event]
             };
             for event in events {
+                let endpoint = if self.rewrite_responses_events {
+                    EndpointKind::Responses
+                } else {
+                    EndpointKind::ChatCompletions
+                };
+                self.commit_tracker.observe_json(endpoint, &event);
                 if self.rewrite_responses_events {
                     advance_responses_sequence_number(
                         &mut self.next_responses_sequence_number,
@@ -1102,6 +1137,12 @@ impl ProxiedStreamState {
                 }
             };
             for event in events {
+                let endpoint = if self.rewrite_responses_events {
+                    EndpointKind::Responses
+                } else {
+                    EndpointKind::ChatCompletions
+                };
+                self.commit_tracker.observe_json(endpoint, &event);
                 self.pending.push_back(serialize_sse_data(&event));
             }
             self.pending.push_back(sse_done_frame());
@@ -1117,6 +1158,7 @@ impl ProxiedStreamState {
             return Ok(());
         }
 
+        self.populate_stream_diagnostics();
         self.usage_log_flushed = true;
         if let Some(log_context) = self.log_context.take() {
             let active_request = log_context.clone();
@@ -1303,6 +1345,7 @@ pub(super) fn translated_stream_body(
     log_context: StreamUsageLogContext,
     stream_completion_context: Option<StreamCompletionContext>,
     response_history_context: Option<ResponseHistoryContext>,
+    commit_tracker: stream_commit::StreamCommitTracker,
     first_semantic_deadline: Option<stream_commit::FirstSemanticDeadline>,
 ) -> Result<Body, GatewayError> {
     let tool_registry = response_history_context
@@ -1343,6 +1386,7 @@ pub(super) fn translated_stream_body(
         usable_output_observed: false,
         usable_output_delivered: false,
         usage_log_flushed: false,
+        commit_tracker,
     };
     let stream = futures_stream::try_unfold(state, move |mut state| async move {
         loop {
@@ -1462,6 +1506,7 @@ pub(super) fn translated_stream_body(
                     return Ok(Some((frame, state)));
                 }
                 StreamReadOutcome::Heartbeat => {
+                    state.commit_tracker.observe_keepalive(TokioInstant::now());
                     return Ok(Some((sse_keepalive_frame_for_endpoint(endpoint), state)));
                 }
                 StreamReadOutcome::IdleTimeout => {
@@ -1528,6 +1573,7 @@ struct TranslatedStreamState {
     usable_output_observed: bool,
     usable_output_delivered: bool,
     usage_log_flushed: bool,
+    commit_tracker: stream_commit::StreamCommitTracker,
 }
 
 impl TranslatedStreamState {
@@ -1542,16 +1588,29 @@ impl TranslatedStreamState {
                 .route_attempts
                 .routing_round();
             log_context.stream_diagnostics = Some(crate::state::StreamDiagnostics {
+                account_wait_ms: log_context.account_wait_ms,
                 response_header_wait_ms: self
                     .body_read_diagnostic_context
                     .started
                     .elapsed()
                     .as_millis() as u64,
                 first_semantic_output_ms: log_context.first_token_latency.get(),
+                since_last_semantic_ms: self.commit_tracker.last_semantic_at().map(|at| {
+                    TokioInstant::now()
+                        .saturating_duration_since(at)
+                        .as_millis() as u64
+                }),
+                last_keepalive_at: self
+                    .commit_tracker
+                    .last_keepalive_at()
+                    .map(|_| unix_seconds()),
+                codex_version: bounded_codex_version(log_context.user_agent.as_deref()),
                 routing_rounds: routing,
                 physical_attempt_count: physical as u32,
-                semantic_output_observed: self.usable_output_observed,
-                semantic_terminal_observed: self.semantic_terminal_emitted,
+                semantic_output_observed: self.commit_tracker.semantic_output_observed()
+                    || self.usable_output_observed,
+                semantic_terminal_observed: self.commit_tracker.terminal_observed()
+                    || self.semantic_terminal_emitted,
                 ..Default::default()
             });
         }
@@ -1589,6 +1648,7 @@ impl TranslatedStreamState {
     }
 
     fn push_translated_event(&mut self, event: &Value) {
+        self.commit_tracker.observe_json(self.endpoint, event);
         if self.endpoint == EndpointKind::Responses {
             advance_responses_sequence_number(&mut self.next_responses_sequence_number, event);
         }
@@ -1799,6 +1859,7 @@ impl TranslatedStreamState {
             return Ok(());
         }
 
+        self.populate_stream_diagnostics();
         self.usage_log_flushed = true;
         if let Some(log_context) = self.log_context.take() {
             let active_request = log_context.clone();
@@ -2280,6 +2341,7 @@ mod diagnostic_tests {
             error_message: Some("tool-argument-secret".into()),
             error_category: Some("excluded-error-category-marker".into()),
             started: Instant::now(),
+            account_wait_ms: 0,
             first_token_latency: FirstTokenLatency::default(),
             hedge_control: None,
             stream_diagnostics: None,
