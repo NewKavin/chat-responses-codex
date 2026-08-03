@@ -85,7 +85,7 @@ fn canonical_upstream_state() -> (AppState, String) {
                 status_code: 200,
                 wire_status_code: 0,
                 stream_diagnostics: None,
-                error_message: None,
+                error_message: Some("secret-window".to_string()),
                 error_category: None,
                 prompt_tokens: 100,
                 completion_tokens: 50,
@@ -229,7 +229,7 @@ fn create_test_state() -> (AppState, String) {
                 status_code: 200,
                 wire_status_code: 0,
                 stream_diagnostics: None,
-                error_message: None,
+                error_message: Some("secret-window".to_string()),
                 error_category: None,
                 prompt_tokens: 100,
                 completion_tokens: 50,
@@ -842,8 +842,11 @@ async fn test_portal_usage_summary_returns_daily_stats() {
 
     assert!(result["daily_stats"].is_array());
     assert_eq!(result["time_range"], "7d");
+    assert_eq!(result["timezone"], "Asia/Shanghai");
+    assert!(result["start_time"].is_number());
+    assert!(result["end_time"].is_number());
 
-    // Also verify usage-history now returns recent_logs without daily_stats
+    // Usage history is a detail-only response with a flattened calendar window.
     let response2 = app
         .clone()
         .oneshot(
@@ -862,8 +865,35 @@ async fn test_portal_usage_summary_returns_daily_stats() {
         .unwrap();
     let result2: Value = serde_json::from_slice(&body2).unwrap();
 
-    assert!(result2["recent_logs"].is_array());
-    assert!(result2["window"].is_object());
+    assert!(result2["logs"].is_array());
+    assert!(result2["total"].is_number());
+    assert!(result2["page"].is_number());
+    assert!(result2["page_size"].is_number());
+    assert!(result2["total_pages"].is_number());
+    assert!(result2["window"].is_null());
+    assert!(result2["timezone"].is_string());
+    assert!(result2["start_time"].is_number());
+    assert!(result2["end_time"].is_number());
+}
+
+#[tokio::test]
+async fn portal_usage_summary_rejects_unknown_time_range() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-summary?time_range=2d")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -890,11 +920,16 @@ async fn test_portal_usage_history_returns_recent_logs() {
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
+    let body_text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!body_text.contains("secret-window"));
+    assert!(!body_text.contains("prompt_tokens"));
+    assert!(!body_text.contains("completion_tokens"));
+    assert!(!body_text.contains("total_tokens"));
 
-    let recent_logs = result["recent_logs"].as_array().unwrap();
-    assert!(!recent_logs.is_empty());
-    let with_latency = recent_logs.iter().find(|log| log["id"] == "log-1").unwrap();
-    let without_latency = recent_logs.iter().find(|log| log["id"] == "log-2").unwrap();
+    let logs = result["logs"].as_array().unwrap();
+    assert!(!logs.is_empty());
+    let with_latency = logs.iter().find(|log| log["id"] == "log-1").unwrap();
+    let without_latency = logs.iter().find(|log| log["id"] == "log-2").unwrap();
     assert_eq!(with_latency["first_token_latency_ms"], 10_650);
     assert!(without_latency["first_token_latency_ms"].is_null());
 }
@@ -984,11 +1019,11 @@ async fn test_portal_usage_history_supports_recent_logs_pagination() {
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(result["recent_logs_total"], 25);
-    assert_eq!(result["recent_logs_page"], 2);
-    assert_eq!(result["recent_logs_page_size"], 10);
-    assert_eq!(result["recent_logs_total_pages"], 3);
-    assert_eq!(result["recent_logs"].as_array().unwrap().len(), 10);
+    assert_eq!(result["total"], 25);
+    assert_eq!(result["page"], 2);
+    assert_eq!(result["page_size"], 10);
+    assert_eq!(result["total_pages"], 3);
+    assert_eq!(result["logs"].as_array().unwrap().len(), 10);
 }
 
 // ============================================================================
@@ -1759,7 +1794,7 @@ async fn portal_usage_history_rejects_legacy_time_range() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1788,13 +1823,37 @@ async fn portal_usage_history_rejects_legacy_epoch_bounds() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "expected 200 for {uri}");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 for {uri}"
+        );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let result: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(result["error"]["code"], "invalid_query", "for {uri}");
     }
+}
+
+#[tokio::test]
+async fn portal_usage_history_rejects_invalid_calendar_day() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-history?day=2026-02-30")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

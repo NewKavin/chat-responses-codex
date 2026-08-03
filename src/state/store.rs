@@ -1,4 +1,7 @@
-use super::{DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage, UsageLogQuery};
+use super::{
+    CalendarRange, DailyStats, DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage,
+    UsageLogQuery,
+};
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
 };
@@ -58,6 +61,14 @@ pub trait StateStore: Send + Sync {
         &'a self,
         _downstream_id: &'a str,
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn downstream_daily_stats<'a>(
+        &'a self,
+        _downstream_id: &'a str,
+        _calendar: &'a CalendarRange,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<DailyStats>>>> {
         Box::pin(async { Ok(None) })
     }
 

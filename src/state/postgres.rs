@@ -2,9 +2,9 @@ use super::log_queries::{
     current_month_start, enrich_usage_log, normalize_error_categories, query_time_bounds,
 };
 use super::{
-    unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig,
+    unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, CalendarRange,
     DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary, GlobalContextProfile,
-    ModelContextConfig, ModelRequestCostConfig, PersistedState, ResponseHistoryEntry,
+    DailyStats, ModelContextConfig, ModelRequestCostConfig, PersistedState, ResponseHistoryEntry,
     UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
 use crate::capabilities::{
@@ -660,6 +660,71 @@ impl PostgresStateStore {
             total_models,
             active_models: i64_to_usize(active_models),
         }))
+    }
+
+    pub async fn downstream_daily_stats(
+        &self,
+        downstream_id: &str,
+        calendar: &CalendarRange,
+    ) -> io::Result<Option<Vec<DailyStats>>> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let rows = conn
+            .query(
+                "SELECT
+                     to_char(to_timestamp(created_at) AT TIME ZONE $2::text, 'YYYY-MM-DD') AS day,
+                     COUNT(*)::BIGINT AS total_requests,
+                     COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens,
+                     COUNT(*) FILTER (WHERE status_code = 200)::BIGINT AS successful_requests
+                 FROM usage_logs
+                 WHERE downstream_key_id = $1
+                   AND created_at >= $3
+                   AND created_at < $4
+                 GROUP BY day
+                 ORDER BY day ASC",
+                &[
+                    &downstream_id,
+                    &calendar.timezone,
+                    &(calendar.start_time as i64),
+                    &(calendar.end_time as i64),
+                ],
+            )
+            .await
+            .map_err(io_other)?;
+
+        let mut aggregated = HashMap::new();
+        for row in rows {
+            let day: String = row.get("day");
+            let total_requests = i64_to_u32(row.get::<_, i64>("total_requests"));
+            let total_tokens = i64_to_u64(row.get::<_, i64>("total_tokens"));
+            let successful_requests = i64_to_u32(row.get::<_, i64>("successful_requests"));
+            aggregated.insert(
+                day,
+                (total_requests, total_tokens, successful_requests),
+            );
+        }
+
+        let stats = calendar
+            .days
+            .iter()
+            .map(|day| {
+                let (total_requests, total_tokens, successful_requests) = aggregated
+                    .get(&day.day)
+                    .copied()
+                    .unwrap_or_default();
+                DailyStats {
+                    day: day.day.clone(),
+                    start_time: day.start_time,
+                    total_requests,
+                    total_tokens,
+                    success_rate: if total_requests > 0 {
+                        successful_requests as f64 / total_requests as f64
+                    } else {
+                        0.0
+                    },
+                }
+            })
+            .collect();
+        Ok(Some(stats))
     }
 
     pub async fn upsert_response_history(
@@ -1356,6 +1421,10 @@ fn u64_to_i64(value: u64) -> i64 {
 
 fn i64_to_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
+}
+
+fn i64_to_u32(value: i64) -> u32 {
+    u32::try_from(value).unwrap_or(0)
 }
 
 fn i64_to_usize(value: i64) -> usize {

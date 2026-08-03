@@ -1,10 +1,45 @@
 use crate::keys::generate_downstream_key;
-use crate::state::{unix_seconds, AppState, DownstreamConcurrencySnapshot};
+use crate::state::{
+    unix_seconds, AppState, DownstreamConcurrencySnapshot, EnrichedUsageLog, UsageLogQuery,
+};
 use axum::extract::{Json, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+#[derive(serde::Serialize)]
+struct PortalUsageLog {
+    id: String,
+    endpoint: String,
+    model: String,
+    api_name: String,
+    inference_strength: String,
+    log_type: String,
+    status_code: u16,
+    error_category: Option<String>,
+    first_token_latency_ms: Option<u64>,
+    latency_ms: u64,
+    created_at: u64,
+}
+
+impl From<&EnrichedUsageLog> for PortalUsageLog {
+    fn from(log: &EnrichedUsageLog) -> Self {
+        Self {
+            id: log.log.id.clone(),
+            endpoint: log.log.endpoint.clone(),
+            model: log.log.model.clone(),
+            api_name: log.api_name.clone(),
+            inference_strength: log.inference_strength.clone(),
+            log_type: log.log_type.clone(),
+            status_code: log.log.status_code,
+            error_category: log.log.error_category.clone(),
+            first_token_latency_ms: log.log.first_token_latency_ms,
+            latency_ms: log.log.latency_ms,
+            created_at: log.log.created_at,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct PortalLoginRequest {
@@ -259,13 +294,16 @@ pub(super) async fn portal_usage_history(
 ) -> impl IntoResponse {
     // Reject legacy fields that are no longer accepted on the detail-only endpoint.
     if query.time_range.is_some() || query.start_time.is_some() || query.end_time.is_some() {
-        return Json(json!({
-            "error": {
-                "code": "invalid_query",
-                "message": "This endpoint accepts day, page, and page_size only."
-            }
-        }))
-        .into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_query",
+                    "message": "This endpoint accepts day, page, and page_size only."
+                }
+            })),
+        )
+            .into_response();
     }
 
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
@@ -278,48 +316,65 @@ pub(super) async fn portal_usage_history(
     let window = match calendar.resolve_detail(query.day.as_deref(), now) {
         Ok(w) => w,
         Err(_) => {
-            return Json(json!({
-                "error": {
-                    "code": "invalid_query",
-                    "message": "Invalid day format. Expected YYYY-MM-DD."
-                }
-            }))
-            .into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "invalid_query",
+                        "message": "Invalid day format. Expected YYYY-MM-DD."
+                    }
+                })),
+            )
+                .into_response();
         }
     };
 
-    let snapshot = state.snapshot().await;
-    let mut recent_logs: Vec<_> = snapshot
-        .usage_logs
-        .iter()
-        .filter(|log| {
-            log.downstream_key_id == downstream_id
-                && log.created_at >= window.start_time
-                && log.created_at < window.end_time
-        })
-        .cloned()
-        .collect();
-    recent_logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
-
-    let total = recent_logs.len();
     let page_size = query.page_size.clamp(1, 200);
-    let total_pages = total.div_ceil(page_size);
-    let page = query.page.max(1);
-    let start = (page - 1) * page_size;
-    let recent_logs = if start >= total {
-        Vec::new()
-    } else {
-        let end = (start + page_size).min(total);
-        recent_logs[start..end].to_vec()
+    let page = match state
+        .query_usage_logs_page(UsageLogQuery {
+            page: query.page.max(1),
+            page_size,
+            status_codes: Vec::new(),
+            error_categories: Vec::new(),
+            model_substring: None,
+            downstream_id: Some(downstream_id),
+            upstream_id: None,
+            start_time: window.start_time,
+            end_time: window.end_time,
+        })
+        .await
+    {
+        Ok(page) => page,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "code": "usage_history_unavailable",
+                        "message": "Usage history is temporarily unavailable."
+                    }
+                })),
+            )
+                .into_response();
+        }
     };
+    let portal_logs = page
+        .logs
+        .iter()
+        .map(PortalUsageLog::from)
+        .collect::<Vec<_>>();
 
     Json(json!({
-        "recent_logs": recent_logs,
-        "recent_logs_total": total,
-        "recent_logs_page": page,
-        "recent_logs_page_size": page_size,
-        "recent_logs_total_pages": total_pages,
-        "window": window,
+        "logs": portal_logs,
+        "total": page.total,
+        "page": page.page,
+        "page_size": page.page_size,
+        "total_pages": page.total_pages,
+        "mode": window.mode.clone(),
+        "day": window.day,
+        "timezone": window.timezone,
+        "start_time": window.start_time,
+        "end_time": window.end_time,
     }))
     .into_response()
 }
@@ -335,17 +390,52 @@ pub(super) async fn portal_usage_summary(
         Err(response) => return response,
     };
 
-    let days = match query.time_range.as_str() {
-        "1d" => 1,
-        "7d" => 7,
-        "30d" => 30,
-        _ => 7,
+    let summary_range = match query.time_range.as_str() {
+        "1d" => crate::state::SummaryRange::OneDay,
+        "7d" => crate::state::SummaryRange::SevenDays,
+        "30d" => crate::state::SummaryRange::ThirtyDays,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "invalid_query",
+                        "message": "time_range must be one of 1d, 7d, or 30d."
+                    }
+                })),
+            )
+                .into_response();
+        }
     };
 
-    let daily_stats = state.compute_daily_stats(&downstream_id, days).await;
+    let now = unix_seconds();
+    let range = match state
+        .deployment_calendar()
+        .resolve_summary(summary_range.clone(), now)
+    {
+        Ok(range) => range,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "code": "calendar_unavailable",
+                        "message": "Usage calendar is temporarily unavailable."
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let daily_stats = state
+        .compute_daily_stats_for_range(&downstream_id, &range)
+        .await;
 
     Json(json!({
         "time_range": query.time_range,
+        "timezone": range.timezone,
+        "start_time": range.start_time,
+        "end_time": range.end_time,
         "daily_stats": daily_stats,
     }))
     .into_response()

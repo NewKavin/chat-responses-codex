@@ -1,9 +1,9 @@
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::log_queries::build_downstream_usage_summary;
 use chat_responses_codex::state::{
-    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DownstreamConfig,
-    DownstreamUsageSummary, PersistedState, StateStore, StoreFuture, UpstreamConfig, UsageLog,
-    UsageLogPage, UsageLogQuery,
+    AnnouncementConfig, AnnouncementLevel, AppConfig, AppState, DailyStats, DeploymentCalendar,
+    DownstreamConfig, DownstreamUsageSummary, PersistedState, StateStore, StoreFuture,
+    UpstreamConfig, UsageLog, UsageLogPage, UsageLogQuery,
 };
 use std::io;
 use std::path::PathBuf;
@@ -574,6 +574,26 @@ struct QueryStore {
     summary: DownstreamUsageSummary,
 }
 
+#[derive(Clone)]
+struct DailyStatsStore {
+    stats: Vec<DailyStats>,
+}
+
+impl StateStore for DailyStatsStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn downstream_daily_stats<'a>(
+        &'a self,
+        _downstream_id: &'a str,
+        _calendar: &'a chat_responses_codex::state::CalendarRange,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<DailyStats>>>> {
+        let stats = self.stats.clone();
+        Box::pin(async move { Ok(Some(stats)) })
+    }
+}
+
 impl StateStore for QueryStore {
     fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async { Ok(()) })
@@ -594,6 +614,48 @@ impl StateStore for QueryStore {
         let summary = self.summary.clone();
         Box::pin(async move { Ok(Some(summary)) })
     }
+}
+
+#[tokio::test]
+async fn daily_stats_add_pending_logs_to_store_aggregate_without_detail_scan() {
+    let calendar = DeploymentCalendar::parse("Asia/Shanghai").unwrap();
+    let range = calendar.range_ending_on("2026-08-01", 1).unwrap();
+    let state = AppState::new_with_store(
+        PersistedState::default(),
+        unique_state_path(),
+        AppConfig {
+            deployment_timezone: "Asia/Shanghai".to_string(),
+            ..AppConfig::default()
+        },
+        Arc::new(DailyStatsStore {
+            stats: vec![DailyStats {
+                day: "2026-08-01".to_string(),
+                start_time: range.days[0].start_time,
+                total_requests: 2,
+                total_tokens: 20,
+                success_rate: 0.5,
+            }],
+        }),
+    );
+
+    state
+        .append_usage_log(usage_log(
+            "pending-log",
+            "downstream-1",
+            "gpt-4",
+            200,
+            5,
+            range.days[0].start_time + 1,
+        ))
+        .await
+        .unwrap();
+
+    let stats = state
+        .compute_daily_stats_for_range("downstream-1", &range)
+        .await;
+    assert_eq!(stats[0].total_requests, 3);
+    assert_eq!(stats[0].total_tokens, 25);
+    assert!((stats[0].success_rate - (2.0 / 3.0)).abs() < f64::EPSILON);
 }
 
 #[tokio::test]

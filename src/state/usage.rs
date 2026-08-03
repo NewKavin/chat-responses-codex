@@ -409,7 +409,6 @@ impl AppState {
     }
 
     pub async fn compute_daily_stats(&self, downstream_id: &str, days: usize) -> Vec<DailyStats> {
-        let snapshot = self.snapshot().await;
         let now = unix_seconds();
 
         let calendar = self.deployment_calendar();
@@ -439,6 +438,49 @@ impl AppState {
                         days: vec![],
                     })
             });
+
+        self.compute_daily_stats_for_range(downstream_id, &range).await
+    }
+
+    pub async fn compute_daily_stats_for_range(
+        &self,
+        downstream_id: &str,
+        range: &crate::state::CalendarRange,
+    ) -> Vec<DailyStats> {
+        let pending_usage_logs = self.pending_usage_logs.lock().await.clone();
+        if let Ok(Some(mut stats)) = self
+            .config_store
+            .downstream_daily_stats(downstream_id, range)
+            .await
+        {
+            for log in pending_usage_logs {
+                if log.downstream_key_id != downstream_id
+                    || log.created_at < range.start_time
+                    || log.created_at >= range.end_time
+                {
+                    continue;
+                }
+                let Some(day_index) = range.days.iter().position(|day| {
+                    log.created_at >= day.start_time && log.created_at < day.end_time
+                }) else {
+                    continue;
+                };
+                let Some(stat) = stats.get_mut(day_index) else {
+                    continue;
+                };
+                let previous_successes = (stat.success_rate * stat.total_requests as f64)
+                    .round()
+                    .clamp(0.0, stat.total_requests as f64)
+                    as u32;
+                stat.total_requests = stat.total_requests.saturating_add(1);
+                stat.total_tokens = stat.total_tokens.saturating_add(log.total_tokens);
+                let successful = previous_successes.saturating_add(u32::from(log.status_code == 200));
+                stat.success_rate = successful as f64 / stat.total_requests as f64;
+            }
+            return stats;
+        }
+
+        let snapshot = self.snapshot().await;
 
         let mut stats = Vec::new();
         for calendar_day in &range.days {

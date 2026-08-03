@@ -1,10 +1,14 @@
-use super::{DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage, UsageLogQuery};
+use super::{
+    CalendarRange, DailyStats, DownstreamUsageSummary, PersistedState, UsageLog, UsageLogPage,
+    UsageLogQuery,
+};
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
 };
 use crate::state::{StateStore, StoreFuture};
 use std::io;
 use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
@@ -112,6 +116,30 @@ impl FileStateStore {
             }
         }
         Ok(())
+    }
+
+    async fn usage_archive_paths(&self) -> io::Result<Vec<PathBuf>> {
+        let Some(parent) = self.config_path.parent() else {
+            return Ok(Vec::new());
+        };
+        let Some(base_name) = self.config_path.file_name().and_then(|value| value.to_str()) else {
+            return Ok(Vec::new());
+        };
+
+        let archive_prefix = format!("{base_name}.usage.");
+        let mut dir = fs::read_dir(parent).await?;
+        let mut paths = Vec::new();
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with(&archive_prefix) && file_name.ends_with(".json") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        Ok(paths)
     }
 }
 
@@ -222,6 +250,87 @@ impl StateStore for FileStateStore {
         _downstream_id: &'a str,
     ) -> StoreFuture<'a, io::Result<Option<DownstreamUsageSummary>>> {
         Box::pin(async { Ok(None) })
+    }
+
+    fn downstream_daily_stats<'a>(
+        &'a self,
+        downstream_id: &'a str,
+        calendar: &'a CalendarRange,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<DailyStats>>>> {
+        Box::pin(async move {
+            let paths = self.usage_archive_paths().await?;
+            let mut sources = Vec::<Vec<UsageLog>>::new();
+            if fs::try_exists(&self.config_path).await? {
+                let bytes = fs::read(&self.config_path).await?;
+                let state: PersistedState = serde_json::from_slice(&bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if !state.usage_logs.is_empty() {
+                    sources.push(state.usage_logs);
+                }
+            }
+            for path in paths {
+                let bytes = fs::read(path).await?;
+                let logs: Vec<UsageLog> = serde_json::from_slice(&bytes).unwrap_or_default();
+                sources.push(logs);
+            }
+            if sources.is_empty() {
+                return Ok(None);
+            }
+
+            let mut aggregated = HashMap::<String, (u32, u64, u32)>::new();
+            let mut seen = std::collections::HashSet::new();
+            for mut logs in sources {
+                for log in &mut logs {
+                    log.normalize_after_load();
+                }
+                for log in logs {
+                    if !seen.insert(log.id.clone()) {
+                        continue;
+                    }
+                    if log.downstream_key_id != downstream_id
+                        || log.created_at < calendar.start_time
+                        || log.created_at >= calendar.end_time
+                    {
+                        continue;
+                    }
+                    let Some(day) = calendar.days.iter().find(|day| {
+                        log.created_at >= day.start_time && log.created_at < day.end_time
+                    }) else {
+                        continue;
+                    };
+                    let entry = aggregated.entry(day.day.clone()).or_default();
+                    entry.0 = entry.0.saturating_add(1);
+                    entry.1 = entry.1.saturating_add(log.total_tokens);
+                    if log.status_code == 200 {
+                        entry.2 = entry.2.saturating_add(1);
+                    }
+                }
+            }
+
+            Ok(Some(
+                calendar
+                    .days
+                    .iter()
+                    .map(|day| {
+                        let (total_requests, total_tokens, successful_requests) = aggregated
+                            .get(&day.day)
+                            .copied()
+                            .unwrap_or_default();
+                        DailyStats {
+                            day: day.day.clone(),
+                            start_time: day.start_time,
+                            total_requests,
+                            total_tokens,
+                            success_rate: if total_requests > 0 {
+                                successful_requests as f64 / total_requests as f64
+                            } else {
+                                0.0
+                            },
+                        }
+                    })
+                    .collect(),
+            ))
+        })
     }
 
     fn delete_usage_logs_before<'a>(&'a self, cutoff: u64) -> StoreFuture<'a, io::Result<()>> {

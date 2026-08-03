@@ -530,6 +530,14 @@ impl StateStore for PostgresStateStore {
         Box::pin(async move { self.downstream_usage_summary(downstream_id).await })
     }
 
+    fn downstream_daily_stats<'a>(
+        &'a self,
+        downstream_id: &'a str,
+        calendar: &'a CalendarRange,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<DailyStats>>>> {
+        Box::pin(async move { self.downstream_daily_stats(downstream_id, calendar).await })
+    }
+
     fn delete_usage_logs_before<'a>(&'a self, cutoff: u64) -> StoreFuture<'a, io::Result<()>> {
         Box::pin(async move { self.delete_usage_logs_before(cutoff).await })
     }
