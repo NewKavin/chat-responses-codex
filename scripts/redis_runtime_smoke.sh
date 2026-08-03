@@ -40,6 +40,7 @@ STATE_DIR="${WORKDIR}/state-a"
 STATE_SNAPSHOT="${WORKDIR}/state-b.json"
 GATEWAY_ENV="${WORKDIR}/gateway.env"
 BACKGROUND_PID=""
+GATEWAY_B_WAITER_PID=""
 
 log_info() {
   printf '[INFO] %s\n' "$*" >&2
@@ -61,6 +62,10 @@ cleanup() {
   if [[ -n "$BACKGROUND_PID" ]]; then
     kill "$BACKGROUND_PID" >/dev/null 2>&1 || true
     wait "$BACKGROUND_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$GATEWAY_B_WAITER_PID" ]]; then
+    kill "$GATEWAY_B_WAITER_PID" >/dev/null 2>&1 || true
+    wait "$GATEWAY_B_WAITER_PID" >/dev/null 2>&1 || true
   fi
 
   docker rm -f \
@@ -119,6 +124,10 @@ assert_status() {
 for dependency in docker curl jq openssl; do
   need_cmd "$dependency"
 done
+
+curl() {
+  command curl --connect-timeout 5 --max-time "${SMOKE_CURL_MAX_TIME_SECONDS:-60}" "$@"
+}
 
 docker image inspect "$GATEWAY_IMAGE" >/dev/null 2>&1 \
   || fail "gateway image is unavailable: $GATEWAY_IMAGE"
@@ -343,15 +352,17 @@ UPSTREAM_STATUS="$(curl -sS \
   --data-binary "$UPSTREAM_PAYLOAD")"
 assert_status 201 "$UPSTREAM_STATUS" "upstream creation"
 
-DOWNSTREAM_PAYLOAD='{
-  "id": "smoke-downstream",
-  "name": "Redis smoke downstream",
-  "model_allowlist": ["smoke-model"],
-  "rate_limit_enabled": true,
-  "per_minute_limit": 1000,
-  "max_concurrency": $DOWNSTREAM_MAX_CONCURRENCY,
-  "active": true
-}'
+DOWNSTREAM_PAYLOAD="$(jq -nc \
+  --argjson max_concurrency "$DOWNSTREAM_MAX_CONCURRENCY" \
+  '{
+    id: "smoke-downstream",
+    name: "Redis smoke downstream",
+    model_allowlist: ["smoke-model"],
+    rate_limit_enabled: true,
+    per_minute_limit: 1000,
+    max_concurrency: $max_concurrency,
+    active: true
+  }')"
 DOWNSTREAM_STATUS="$(curl -sS \
   -o "${WORKDIR}/downstream-create.json" \
   -w '%{http_code}' \
@@ -396,9 +407,9 @@ BACKGROUND_PID=$!
 
 wait_for_file "${MOCK_DIR}/hold.started" "gateway A upstream hold"
 
+CAPACITY_PIDS=()
 if [[ -n "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
   CAPACITY_PAYLOAD='{"model":"smoke-model","messages":[{"role":"user","content":"authorized-capacity"}]}'
-  CAPACITY_PIDS=()
   for ((request = 1; request <= AUTHORIZED_CAPACITY_REQUESTS; request++)); do
     curl -sS --max-time "$((HOLD_SECONDS + 20))" \
       -o "${WORKDIR}/capacity-${request}.json" \
@@ -410,43 +421,47 @@ if [[ -n "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
       >"${WORKDIR}/capacity-${request}.status" &
     CAPACITY_PIDS+=("$!")
   done
-
-  RUNTIME_READY=0
-  for ((attempt = 1; attempt <= 30; attempt++)); do
-    if curl -fsS --max-time 5 \
-      "http://127.0.0.1:${GATEWAY_B_PORT}/api/admin/downstreams/runtime" \
-      -H "Authorization: Bearer $GATEWAY_B_ADMIN_TOKEN" \
-      >"${WORKDIR}/gateway-b-downstream-runtime.json" &&
-      jq -e '
-        .items[]
-        | select(.downstream_id == "smoke-downstream")
-        | .concurrency.available == true
-          and (.concurrency.admitted >= 1)
-          and (.concurrency.waiting_upstream >= 1)
-      ' "${WORKDIR}/gateway-b-downstream-runtime.json" >/dev/null; then
-      RUNTIME_READY=1
-      break
-    fi
-    sleep 0.2
-  done
-  [[ "$RUNTIME_READY" -eq 1 ]] || fail "runtime endpoint did not expose an upstream waiter"
-  log_pass "Redis runtime endpoint exposed admitted and waiting_upstream counts"
-
-  for pid in "${CAPACITY_PIDS[@]}"; do
-    wait "$pid" || true
-  done
-else
-  log_info "capacity load disabled; set AUTHORIZED_CAPACITY_REQUESTS explicitly to run it"
 fi
 
-if [[ -z "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
-GATEWAY_B_HOLD_STATUS="$(curl -sS --max-time 5 \
+curl -sS --max-time "$((HOLD_SECONDS + 20))" \
   -o "${WORKDIR}/gateway-b-hold.json" \
   -w '%{http_code}' \
   -X POST "http://127.0.0.1:${GATEWAY_B_PORT}/v1/chat/completions" \
   -H "Authorization: Bearer $DOWNSTREAM_KEY" \
   -H 'Content-Type: application/json' \
-  --data-binary "$HOLD_PAYLOAD")"
+  --data-binary "$HOLD_PAYLOAD" \
+  >"${WORKDIR}/gateway-b-hold.status" &
+GATEWAY_B_WAITER_PID=$!
+
+RUNTIME_READY=0
+for ((attempt = 1; attempt <= 30; attempt++)); do
+  if curl -fsS --max-time 5 \
+    "http://127.0.0.1:${GATEWAY_B_PORT}/api/admin/downstreams/runtime" \
+    -H "Authorization: Bearer $GATEWAY_B_ADMIN_TOKEN" \
+    >"${WORKDIR}/gateway-b-downstream-runtime.json" &&
+    jq -e '
+      .items[]
+      | select(.downstream_id == "smoke-downstream")
+      | .concurrency.available == true
+        and (.concurrency.admitted >= 1)
+        and (.concurrency.waiting_upstream >= 1)
+    ' "${WORKDIR}/gateway-b-downstream-runtime.json" >/dev/null; then
+    RUNTIME_READY=1
+    break
+  fi
+  sleep 0.2
+done
+[[ "$RUNTIME_READY" -eq 1 ]] || fail "runtime endpoint did not expose an upstream waiter"
+log_pass "Redis runtime endpoint exposed admitted and waiting_upstream counts"
+
+for pid in "${CAPACITY_PIDS[@]}"; do
+  wait "$pid" || true
+done
+
+if [[ -z "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
+wait "$GATEWAY_B_WAITER_PID" || true
+GATEWAY_B_WAITER_PID=""
+GATEWAY_B_HOLD_STATUS="$(<"${WORKDIR}/gateway-b-hold.status")"
 assert_status 429 "$GATEWAY_B_HOLD_STATUS" "gateway B shared concurrency admission"
 jq -e '.error.code == "gateway_concurrency_full"' \
   "${WORKDIR}/gateway-b-hold.json" >/dev/null \
@@ -457,6 +472,13 @@ BACKGROUND_PID=""
 GATEWAY_A_HOLD_STATUS="$(<"${WORKDIR}/gateway-a-hold.status")"
 assert_status 200 "$GATEWAY_A_HOLD_STATUS" "gateway A hold request"
 log_pass "gateway B enforced gateway A's downstream concurrency lease"
+fi
+
+if [[ -n "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
+  wait "$GATEWAY_B_WAITER_PID" || true
+  GATEWAY_B_WAITER_PID=""
+  wait "$BACKGROUND_PID" || fail "gateway A hold request failed"
+  BACKGROUND_PID=""
 fi
 
 COOLDOWN_PAYLOAD='{"model":"smoke-model","messages":[{"role":"user","content":"cooldown"}]}'

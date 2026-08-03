@@ -121,6 +121,9 @@ elif [[ "$client" == "hermes" ]]; then
 else
   cat probe.txt
 fi
+if [[ "$client" == "codex" ]]; then
+  printf '{"type":"turn.completed"}\n'
+fi
 "#;
     for client in ["codex", "opencode", "claude", "hermes"] {
         write_executable(&fake_bin.join(client), fake_client);
@@ -370,8 +373,8 @@ fn redis_runtime_smoke_is_isolated_and_secret_safe() {
     assert!(!script.contains("echo \"$DOWNSTREAM_KEY\""));
     assert!(script.contains(r#"(WORKDIR / "hold.started").write_text("started")"#));
     assert!(!script.contains(r#"(WORKDIR / "hold.started").touch()"#));
-    assert!(script.contains(r#""rate_limit_enabled": true"#));
-    assert!(!script.contains(r#""rate_limit_enabled": false"#));
+    assert!(script.contains("rate_limit_enabled: true"));
+    assert!(!script.contains("rate_limit_enabled: false"));
 
     let redis_run = script
         .find("--name \"$REDIS_CONTAINER\"")
@@ -827,6 +830,9 @@ elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
 else
   cat probe.txt
 fi
+if [[ "$client" == "codex" ]]; then
+  printf '{"type":"turn.completed"}\n'
+fi
 "#;
     for client in ["codex", "opencode", "claude", "hermes"] {
         write_executable(&fake_bin.join(client), fake_client);
@@ -1100,13 +1106,32 @@ fn long_running_smoke_scripts_require_bounded_runtime_and_safe_observability() {
 }
 
 #[test]
+fn task13_smokes_match_the_serial_release_contract() {
+    let installed = fs::read_to_string("scripts/installed_client_smoke.sh").unwrap();
+    assert!(installed.contains(": \"${API_BASE_URL:?API_BASE_URL is required}\""));
+    assert!(installed.contains("CLIENTS=\"${CLIENTS:-}\""));
+    assert!(installed.contains("record_codex_case"));
+
+    let delayed = fs::read_to_string("scripts/codex_delayed_output_smoke.sh").unwrap();
+    assert!(delayed.contains(
+        "timeout --kill-after=\"${CLIENT_KILL_AFTER_SECONDS}s\" \"$CLIENT_TIMEOUT_SECONDS\""
+    ));
+    assert!(delayed.contains("matched_usage_rows"));
+    assert!(delayed.contains("REQUEST_ID is required"));
+
+    let redis = fs::read_to_string("scripts/redis_runtime_smoke.sh").unwrap();
+    assert!(redis.contains("GATEWAY_B_WAITER_PID"));
+    assert!(redis.contains("runtime endpoint exposed admitted and waiting_upstream counts"));
+}
+
+#[test]
 fn installed_client_smoke_only_requests_tools_that_each_client_has() {
     let script = fs::read_to_string("scripts/installed_client_smoke.sh")
         .expect("read installed client smoke script");
 
     assert!(script.contains("READ_FILE_PROMPT="));
     assert!(script.contains("HERMES_READ_PROMPT="));
-    assert!(script.contains("record_case codex read_only_tool_task"));
+    assert!(script.contains("record_codex_case codex read_only_tool_task"));
     assert!(script.contains("--model \"$MODEL_SLUG\" \"$READ_FILE_PROMPT\""));
     assert!(script.contains("record_case opencode read_only_tool_task"));
     assert!(script.contains("\"$READ_FILE_PROMPT\""));

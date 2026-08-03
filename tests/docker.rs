@@ -583,6 +583,9 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "UPSTREAM_CONNECT_TIMEOUT_SECONDS=",
         "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS=",
         "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=",
+        "POSTGRES_POOL_MAX_SIZE=",
+        "ADMIN_LOGS_PAGE_SIZE_MAX=",
+        "UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=",
     ] {
         assert!(dotenv.contains(key), ".env.example should document {key}");
     }
@@ -623,6 +626,9 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${UPSTREAM_CONNECT_TIMEOUT_SECONDS:-30}",
         "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-600}",
         "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: ${UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS:-1800}",
+        "POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-16}",
+        "ADMIN_LOGS_PAGE_SIZE_MAX: ${ADMIN_LOGS_PAGE_SIZE_MAX:-200}",
+        "UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST: ${UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST:-32}",
     ] {
         assert!(
             compose.contains(snippet),

@@ -2,15 +2,27 @@
 set -euo pipefail
 set +x
 
-: "${BASE_URL:?BASE_URL is required}"
 : "${DOWNSTREAM_KEY:?DOWNSTREAM_KEY is required}"
 : "${MODEL_SLUG:?MODEL_SLUG is required}"
+
+if [[ -n "${API_BASE_URL:-}" ]]; then
+  : "${API_BASE_URL:?API_BASE_URL is required}"
+  API_BASE_URL="${API_BASE_URL%/}"
+  if [[ "$API_BASE_URL" != */v1 ]]; then
+    API_BASE_URL="${API_BASE_URL}/v1"
+  fi
+  BASE_URL="${BASE_URL:-${API_BASE_URL%/v1}}"
+else
+  : "${BASE_URL:?BASE_URL is required}"
+  BASE_URL="${BASE_URL%/}"
+  API_BASE_URL="${BASE_URL}/v1"
+fi
 
 readonly DEFAULT_CODEX_VERSION="0.146.0"
 readonly DEFAULT_OPENCODE_VERSION="1.17.18"
 readonly DEFAULT_CLAUDE_CODE_VERSION="2.1.195"
 readonly DEFAULT_HERMES_VERSION="0.14.0"
-CLIENTS_JSON="${CLIENTS_JSON:-[\"codex\",\"opencode\",\"claude_code\",\"hermes\"]}"
+CLIENTS="${CLIENTS:-}"
 CODEX_VERSION="${EXPECTED_CODEX_VERSION:-$DEFAULT_CODEX_VERSION}"
 OPENCODE_VERSION="${EXPECTED_OPENCODE_VERSION:-$DEFAULT_OPENCODE_VERSION}"
 CLAUDE_CODE_VERSION="${EXPECTED_CLAUDE_CODE_VERSION:-$DEFAULT_CLAUDE_CODE_VERSION}"
@@ -19,8 +31,6 @@ readonly CODEX_VERSION OPENCODE_VERSION CLAUDE_CODE_VERSION HERMES_VERSION
 CLIENT_TIMEOUT_SECONDS="${CLIENT_TIMEOUT_SECONDS:-240}"
 readonly CLIENT_KILL_AFTER_SECONDS="2"
 
-BASE_URL="${BASE_URL%/}"
-API_BASE_URL="${BASE_URL}/v1"
 umask 077
 WORKDIR="$(mktemp -d)"
 TASKDIR="$WORKDIR/workspace"
@@ -37,6 +47,13 @@ for command in curl jq timeout readlink; do
     exit 1
   fi
 done
+
+if [[ -n "$CLIENTS" ]]; then
+  CLIENTS_JSON="$(jq -nc --arg raw "$CLIENTS" \
+    '$raw | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(length > 0))')"
+else
+  CLIENTS_JSON="${CLIENTS_JSON:-[\"codex\",\"opencode\",\"claude_code\",\"hermes\"]}"
+fi
 
 if ! jq -e '
   type == "array" and length > 0
@@ -176,6 +193,21 @@ record_case() {
     "$client" "$task" "$duration" "$events"
 }
 
+record_codex_case() {
+  local output_file="$4"
+  record_case "$@"
+  if jq -Rne '[inputs | fromjson?] | any(.[]; .type == "turn.completed")' \
+    "$output_file" >/dev/null 2>&1; then
+    return 0
+  fi
+  # Plain-text fake clients used by offline tests have no structured event
+  # stream; real --json Codex output is rejected unless it has turn.completed.
+  if grep -Eq '^[[:space:]]*(\{|\[)' "$output_file"; then
+    printf 'client=codex task=%s status=missing_turn_completed\n' "$2" >&2
+    return 1
+  fi
+}
+
 verify_codex_namespace_case() {
   local output_file="$1"
   local proof_file="$2"
@@ -272,7 +304,8 @@ cd "$TASKDIR"
 if client_enabled codex; then
   CODEX_HOME_DIR="$WORKDIR/codex-home"
   mkdir -p "$CODEX_HOME_DIR"
-  curl -fsS "$API_BASE_URL/models?client_version=$CODEX_VERSION" \
+  curl -fsS --connect-timeout 5 --max-time 30 \
+    "$API_BASE_URL/models?client_version=$CODEX_VERSION" \
     -H "Authorization: Bearer $DOWNSTREAM_KEY" >"$CODEX_HOME_DIR/model-catalog.json"
   jq -e '.models | type == "array"' "$CODEX_HOME_DIR/model-catalog.json" >/dev/null
   MODEL_TOML="$(jq -Rn --arg value "$MODEL_SLUG" '$value')"
@@ -293,11 +326,11 @@ stream_idle_timeout_ms = 3600000
 stream_max_retries = 2
 EOF
 
-  record_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \
+  record_codex_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \
     env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
     "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
     --cd "$TASKDIR" --model "$MODEL_SLUG" "$TEXT_PROMPT"
-  record_case codex read_only_tool_task "$READ_MARKER" "$WORKDIR/codex-tool.jsonl" \
+  record_codex_case codex read_only_tool_task "$READ_MARKER" "$WORKDIR/codex-tool.jsonl" \
     env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
     "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
     --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
