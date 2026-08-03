@@ -131,6 +131,28 @@
       </article>
     </section>
 
+    <section class="overview-runtime-strip syscall-stagger" aria-label="下游运行并发">
+      <template v-if="data.concurrency && data.concurrency.available">
+        <span class="overview-runtime-metric">
+          <Activity :size="14" :stroke-width="1.8" />运行中 {{ data.concurrency.running ?? 0 }}
+        </span>
+        <span class="overview-runtime-metric">
+          <Clock3 :size="14" :stroke-width="1.8" />等待上游 {{ data.concurrency.waiting_upstream ?? 0 }}
+        </span>
+        <span class="overview-runtime-metric">
+          <Gauge :size="14" :stroke-width="1.8" />已占用 {{ data.concurrency.admitted ?? 0 }}
+        </span>
+        <span class="overview-runtime-metric">
+          <ShieldCheck :size="14" :stroke-width="1.8" />上限 {{ data.concurrency.limit }}
+        </span>
+      </template>
+      <template v-else-if="data.concurrency">
+        <span class="overview-runtime-unavailable">
+          <ShieldCheck :size="14" :stroke-width="1.8" />协调不可用 · 上限 {{ data.concurrency.limit }}
+        </span>
+      </template>
+    </section>
+
     <section class="quota-details-shell" v-loading="quotaLoading">
       <div class="quota-details-head">
         <div>
@@ -271,8 +293,11 @@ import {
   CalendarClock,
   CalendarDays,
   CalendarRange,
+  Clock3,
+  Gauge,
   KeyRound,
   Radio,
+  ShieldCheck,
   Zap
 } from '@lucide/vue'
 import CountUpValue from '@/components/CountUpValue.vue'
@@ -291,7 +316,8 @@ import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
 const data = ref<PortalOverview>({
   quota_summary: { request_quota: undefined, token_daily: undefined, token_monthly: undefined },
   token_summary: { today: 0, this_month: 0 },
-  model_summary: { total_models: 0, active_models: 0 }
+  model_summary: { total_models: 0, active_models: 0 },
+  concurrency: undefined
 })
 
 const quotaData = ref<PortalQuota>({

@@ -22,7 +22,8 @@ import type {
   TroubleshootingRunResponse,
   ApiKeyModelConfig,
   KeyModelDiscoveryResult,
-  UpstreamConfig
+  UpstreamConfig,
+  DownstreamRuntimeResponse
 } from '@/types'
 
 
@@ -293,6 +294,9 @@ export const adminApi = {
   toggleDownstream: (id: string) => adminHttp.post<{ active: boolean }>(`/admin/downstreams/${id}/toggle`),
   rotateDownstream: (id: string) => adminHttp.post<{ plaintext_key: string }>(`/admin/downstreams/${id}/rotate`),
 
+  getDownstreamRuntime: () =>
+    adminHttp.get<DownstreamRuntimeResponse>('/admin/downstreams/runtime'),
+
   // Logs
   getLogs: (params?: {
     page?: number
@@ -302,6 +306,7 @@ export const adminApi = {
     error_category?: string
     error_categories?: string
     model?: string
+    day?: string
     time_range?: string
     start_time?: number
     end_time?: number

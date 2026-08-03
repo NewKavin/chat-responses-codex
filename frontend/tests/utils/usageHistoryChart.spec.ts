@@ -8,8 +8,8 @@ describe('usage history chart buckets', () => {
     vi.setSystemTime(new Date('2026-05-26T09:00:00+08:00'))
 
     const stats: DailyStats[] = [
-      { date: Math.floor(new Date('2026-05-26T00:00:00+08:00').getTime() / 1000), total_requests: 10, total_tokens: 1000, success_rate: 1 },
-      { date: Math.floor(new Date('2026-05-24T00:00:00+08:00').getTime() / 1000), total_requests: 6, total_tokens: 600, success_rate: 1 }
+      { day: '2026-05-26', start_time: Math.floor(new Date('2026-05-26T00:00:00+08:00').getTime() / 1000), total_requests: 10, total_tokens: 1000, success_rate: 1 },
+      { day: '2026-05-24', start_time: Math.floor(new Date('2026-05-24T00:00:00+08:00').getTime() / 1000), total_requests: 6, total_tokens: 600, success_rate: 1 }
     ]
 
     const buckets = buildUsageHistoryBuckets(3, stats)
@@ -24,7 +24,7 @@ describe('usage history chart buckets', () => {
     vi.setSystemTime(new Date('2026-05-26T09:00:00+08:00'))
 
     const stats: DailyStats[] = [
-      { date: Math.floor(new Date('2026-05-20T00:00:00+08:00').getTime() / 1000), total_requests: 99, total_tokens: 9999, success_rate: 1 }
+      { day: '2026-05-20', start_time: Math.floor(new Date('2026-05-20T00:00:00+08:00').getTime() / 1000), total_requests: 99, total_tokens: 9999, success_rate: 1 }
     ]
 
     const buckets = buildUsageHistoryBuckets(3, stats)

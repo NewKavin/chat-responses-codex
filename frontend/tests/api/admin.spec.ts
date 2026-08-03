@@ -413,3 +413,39 @@ describe('admin announcement api', () => {
     })
   })
 })
+
+describe('admin downstream runtime api', () => {
+  it('fetches downstream runtime without fetching configuration secrets', async () => {
+    const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: { items: [], updated_at: 1780000000 }
+    } as never)
+
+    await adminApi.getDownstreamRuntime()
+
+    expect(spy).toHaveBeenCalledWith('/admin/downstreams/runtime')
+  })
+
+  it('accepts calendar-day log queries with day, page, and page_size', async () => {
+    const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: { logs: [], total: 0, page: 1, page_size: 10, total_pages: 0, window: {} }
+    } as never)
+
+    await adminApi.getLogs({ day: '2026-08-01', page: 1, page_size: 10 })
+
+    expect(spy).toHaveBeenCalledWith('/admin/logs', {
+      params: { day: '2026-08-01', page: 1, page_size: 10 }
+    })
+  })
+
+  it('accepts the rolling 1h legacy detail range', async () => {
+    const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: { logs: [], total: 0, page: 1, page_size: 10, total_pages: 0, window: {} }
+    } as never)
+
+    await adminApi.getLogs({ time_range: '1h', page: 1, page_size: 10 })
+
+    expect(spy).toHaveBeenCalledWith('/admin/logs', {
+      params: { time_range: '1h', page: 1, page_size: 10 }
+    })
+  })
+})

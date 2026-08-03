@@ -52,3 +52,36 @@ describe('portal api', () => {
   })
 
 })
+
+describe('portal usage api', () => {
+  it('keeps portal chart range separate from selected-day logs', async () => {
+    const summarySpy = vi.spyOn(portalHttp, 'get').mockResolvedValue({
+      data: { time_range: '7d', daily_stats: [] }
+    } as never)
+
+    await portalApi.getUsageSummary({ time_range: '7d' })
+
+    expect(summarySpy).toHaveBeenCalledWith('/portal/usage-summary', {
+      params: { time_range: '7d' }
+    })
+  })
+
+  it('requests selected-day logs with day, page, and page_size', async () => {
+    const historySpy = vi.spyOn(portalHttp, 'get').mockResolvedValue({
+      data: {
+        recent_logs: [],
+        recent_logs_total: 0,
+        recent_logs_page: 1,
+        recent_logs_page_size: 10,
+        recent_logs_total_pages: 0,
+        window: { mode: 'calendar_day', day: '2026-08-01', timezone: 'Asia/Shanghai', start_time: 1, end_time: 2 }
+      }
+    } as never)
+
+    await portalApi.getUsageHistory({ day: '2026-08-01', page: 1, page_size: 10 })
+
+    expect(historySpy).toHaveBeenCalledWith('/portal/usage-history', {
+      params: { day: '2026-08-01', page: 1, page_size: 10 }
+    })
+  })
+})

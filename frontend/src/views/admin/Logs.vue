@@ -74,21 +74,12 @@
             @clear="handleFilterChange"
           />
         </el-form-item>
-        <el-form-item label="时间范围">
-          <el-select v-model="filters.time_range" @change="handleFilterChange">
-            <el-option label="最近 1 天" value="1d" />
-            <el-option label="最近 7 天" value="7d" />
-            <el-option label="最近 30 天" value="30d" />
-            <el-option label="自定义范围" value="custom" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="filters.time_range === 'custom'" label="自定义">
+        <el-form-item label="日期">
           <el-date-picker
-            v-model="filters.custom_range"
-            type="datetimerange"
-            start-placeholder="开始时间"
-            end-placeholder="结束时间"
-            value-format="x"
+            v-model="filters.day"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择自然日"
             @change="handleFilterChange"
           />
         </el-form-item>
@@ -326,8 +317,7 @@ const filters = ref({
   status_codes: [] as number[],
   error_categories: [] as string[],
   model: '',
-  time_range: '1d',
-  custom_range: [] as string[]
+  day: '' as string
 })
 
 const pagination = ref({
@@ -452,8 +442,7 @@ const resetFilters = () => {
     status_codes: [],
     error_categories: [],
     model: '',
-    time_range: '1d',
-    custom_range: []
+    day: ''
   }
   handleFilterChange()
 }
@@ -470,16 +459,13 @@ const loadData = async () => {
     const params: {
       page: number
       page_size: number
-      time_range: string
+      day?: string
       status_codes?: string
       error_categories?: string
       model?: string
-      start_time?: number
-      end_time?: number
     } = {
       page: pagination.value.page,
-      page_size: pagination.value.page_size,
-      time_range: filters.value.time_range
+      page_size: pagination.value.page_size
     }
 
     if (filters.value.status_codes.length > 0) {
@@ -491,20 +477,22 @@ const loadData = async () => {
     if (filters.value.model.trim().length > 0) {
       params.model = filters.value.model.trim()
     }
-    if (filters.value.time_range === 'custom') {
-      const [start, end] = filters.value.custom_range
-      if (start && end) {
-        params.start_time = Math.floor(Number(start) / 1000)
-        params.end_time = Math.floor(Number(end) / 1000)
-      } else {
-        params.time_range = '1d'
-      }
+    // Detail logs are bounded to one selected calendar day; omitting day
+    // resolves to "today" server-side. Preserve status/model/category filters
+    // within the selected day.
+    if (filters.value.day) {
+      params.day = filters.value.day
     }
 
     const { data } = await adminApi.getLogs(params)
     logs.value = data.logs
     pagination.value.total = data.total
     pagination.value.total_pages = data.total_pages
+    // Echo the server-resolved day so the picker stays in sync with the
+    // selected calendar day after the response returns.
+    if (data.window?.day) {
+      filters.value.day = data.window.day
+    }
   } catch (error) {
     const errorMsg =
       (error as any)?.response?.data?.error?.message ||

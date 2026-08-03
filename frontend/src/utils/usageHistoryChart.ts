@@ -41,7 +41,7 @@ export const buildUsageHistoryBuckets = (rangeDays: number, stats: DailyStats[])
   }
 
   for (const stat of stats) {
-    const date = new Date(stat.date * 1000)
+    const date = new Date(stat.start_time * 1000)
     date.setHours(0, 0, 0, 0)
     const index = indexByKey.get(toDayKey(date))
     if (index === undefined) continue

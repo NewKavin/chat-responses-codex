@@ -5,7 +5,8 @@ import type {
   PortalModelStat,
   ModelProbeResponse,
   PortalQuota,
-  PortalUsageHistory
+  PortalUsageHistory,
+  PortalUsageSummary
 } from '@/types'
 
 export interface AnnouncementResponse {
@@ -53,9 +54,13 @@ export const portalApi = {
   // Quota
   getQuota: () => portalHttp.get<PortalQuota>('/portal/quota'),
 
-  // Usage History
-  getUsageHistory: (params?: { time_range?: string; page?: number; page_size?: number }) =>
+  // Usage History (detail-only, one calendar day)
+  getUsageHistory: (params?: { day?: string; page?: number; page_size?: number }) =>
     portalHttp.get<PortalUsageHistory>('/portal/usage-history', { params }),
+
+  // Usage Summary (independent seven-day chart aggregation)
+  getUsageSummary: (params: { time_range?: string }) =>
+    portalHttp.get<PortalUsageSummary>('/portal/usage-summary', { params }),
 
   // Key Management
   getKey: () => portalHttp.get<{ plaintext_key: string | null }>('/portal/key'),

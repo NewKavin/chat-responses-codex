@@ -13,6 +13,15 @@
         <el-radio-button label="7d" value="7d">7 天</el-radio-button>
         <el-radio-button label="30d" value="30d">30 天</el-radio-button>
       </el-radio-group>
+      <el-form-item label="日志日期" class="history-day-picker">
+        <el-date-picker
+          v-model="detailDay"
+          type="date"
+          value-format="YYYY-MM-DD"
+          placeholder="选择自然日"
+          @change="handleDayChange"
+        />
+      </el-form-item>
       <el-tooltip content="刷新用量历史" placement="top">
         <el-button
           aria-label="刷新用量历史"
@@ -50,7 +59,7 @@
           </div>
           <div class="crc-table-shell">
           <el-table
-            :data="data.recent_logs"
+            :data="recentLogs"
             stripe
             border
             class="recent-requests-table"
@@ -135,7 +144,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowUp, RefreshCw, Sigma } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
-import type { PortalUsageHistory } from '@/types'
+import type { PortalUsageSummary, UsageLog } from '@/types'
 import { buildUsageHistoryBuckets } from '@/utils/usageHistoryChart'
 import { loadEcharts } from '@/utils/echartsLoader'
 import type { EChartsType } from 'echarts/core'
@@ -162,14 +171,9 @@ let tokenChart: EChartsType | null = null
 let dailyResizeObserver: ResizeObserver | null = null
 let tokenResizeObserver: ResizeObserver | null = null
 
-const data = ref<PortalUsageHistory>({
-  daily_stats: [],
-  recent_logs: [],
-  recent_logs_total: 0,
-  recent_logs_page: 1,
-  recent_logs_page_size: 10,
-  recent_logs_total_pages: 0
-})
+const dailyStats = ref<PortalUsageSummary['daily_stats']>([])
+const recentLogs = ref<UsageLog[]>([])
+const detailDay = ref<string>('')
 
 const pagination = ref({
   page: 1,
@@ -179,7 +183,7 @@ const pagination = ref({
 })
 
 const tableHeight = computed(() => {
-  const rows = Math.max(1, data.value.recent_logs.length)
+  const rows = Math.max(1, recentLogs.value.length)
   const estimatedRowHeight = 60
   const tableHeaderHeight = 56
   return Math.max(280, Math.min(640, tableHeaderHeight + rows * estimatedRowHeight))
@@ -234,7 +238,7 @@ const setupResizeObservers = () => {
 const updateDailyChart = () => {
   if (!dailyChart) return
   const theme = buildChartTheme(resolvedTheme.value)
-  const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], data.value.daily_stats)
+  const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], dailyStats.value)
   const dates = buckets.map(item => item.label)
   const requests = buckets.map(item => item.requests)
 
@@ -280,7 +284,7 @@ const updateDailyChart = () => {
 const updateTokenChart = () => {
   if (!tokenChart) return
   const theme = buildChartTheme(resolvedTheme.value)
-  const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], data.value.daily_stats)
+  const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], dailyStats.value)
   const dates = buckets.map(item => item.label)
   const tokens = buckets.map(item => item.tokens)
 
@@ -339,50 +343,67 @@ const updateCharts = () => {
   updateTokenChart()
 }
 
-const syncPagination = (history: PortalUsageHistory) => {
-  pagination.value.total = history.recent_logs_total
-  pagination.value.page = history.recent_logs_page
-  pagination.value.pageSize = history.recent_logs_page_size
-  pagination.value.totalPages = history.recent_logs_total_pages
-}
-
-const loadData = async () => {
+const loadSummary = async () => {
   try {
     loading.value = true
-    const days = daysByRange[timeRange.value]
-    const { data: history } = await portalApi.getUsageHistory({
-      time_range: `${days}d`,
-      page: pagination.value.page,
-      page_size: pagination.value.pageSize
+    const { data: summary } = await portalApi.getUsageSummary({
+      time_range: `${daysByRange[timeRange.value]}d`
     })
-    data.value = history
-    syncPagination(history)
+    dailyStats.value = summary.daily_stats
 
     await nextTick()
     updateCharts()
   } catch (error) {
-    ElMessage.error('加载数据失败')
+    ElMessage.error('加载图表失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+const loadLogs = async () => {
+  try {
+    loading.value = true
+    const { data: history } = await portalApi.getUsageHistory({
+      day: detailDay.value || undefined,
+      page: pagination.value.page,
+      page_size: pagination.value.pageSize
+    })
+    recentLogs.value = history.recent_logs
+    pagination.value.total = history.recent_logs_total
+    pagination.value.page = history.recent_logs_page
+    pagination.value.pageSize = history.recent_logs_page_size
+    pagination.value.totalPages = history.recent_logs_total_pages
+    if (history.window?.day) {
+      detailDay.value = history.window.day
+    }
+  } catch (error) {
+    ElMessage.error('加载日志失败')
   } finally {
     loading.value = false
   }
 }
 
 const handleTimeRangeChange = () => {
+  void loadSummary()
+}
+
+const handleDayChange = () => {
   pagination.value.page = 1
-  void loadData()
+  void loadLogs()
 }
 
 const handlePageChange = () => {
-  void loadData()
+  void loadLogs()
 }
 
 const handlePageSizeChange = () => {
   pagination.value.page = 1
-  void loadData()
+  void loadLogs()
 }
 
 const reloadCurrentPage = () => {
-  void loadData()
+  void loadSummary()
+  void loadLogs()
 }
 
 const handleResize = () => {
@@ -406,7 +427,8 @@ onMounted(async () => {
   setupResizeObservers()
   dailyChart?.resize()
   tokenChart?.resize()
-  await loadData()
+  await loadSummary()
+  await loadLogs()
   window.addEventListener('resize', handleResize)
 })
 

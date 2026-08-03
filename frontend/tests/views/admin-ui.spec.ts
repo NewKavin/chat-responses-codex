@@ -184,3 +184,33 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('<el-card')
   })
 })
+
+describe('admin downstream runtime display', () => {
+  it('polls only lightweight downstream runtime and clears the timer', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('adminApi.getDownstreamRuntime()')
+    expect(page).toContain('window.setInterval(loadRuntime, 5000)')
+    expect(page).toContain('clearInterval(runtimeTimer)')
+    expect(page).not.toContain('window.setInterval(loadData')
+  })
+
+  it('renders running waiting admitted and limit in the admin view', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('运行中')
+    expect(page).toContain('等待上游')
+    expect(page).toContain('已占用')
+    expect(page).toContain('上限')
+  })
+})
+
+describe('admin logs single-day picker', () => {
+  it('uses a date-only picker and rejects datetimerange', () => {
+    const page = source('views/admin/Logs.vue')
+
+    expect(page).toContain('type="date"')
+    expect(page).toContain('value-format="YYYY-MM-DD"')
+    expect(page).not.toContain('type="datetimerange"')
+  })
+})

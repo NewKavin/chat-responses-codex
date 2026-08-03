@@ -117,3 +117,40 @@ describe('portal ui structure', () => {
     expect(probe).toContain('tone="portal"')
   })
 })
+
+describe('portal runtime concurrency display', () => {
+  it('renders running waiting admitted and limit in the overview', () => {
+    const overview = source('Overview')
+
+    expect(overview).toContain('运行中')
+    expect(overview).toContain('等待上游')
+    expect(overview).toContain('已占用')
+    expect(overview).toContain('上限')
+  })
+
+  it('reuses the existing overview poll instead of adding a timer', () => {
+    const overview = source('Overview')
+
+    expect(overview).toContain('loadOverview')
+    expect(overview).toContain('setInterval')
+    expect(overview).not.toContain('setInterval(loadRuntime')
+  })
+})
+
+describe('portal usage history independence', () => {
+  it('uses a date-only picker and rejects datetimerange', () => {
+    const page = source('UsageHistory')
+
+    expect(page).toContain('type="date"')
+    expect(page).toContain('value-format="YYYY-MM-DD"')
+    expect(page).not.toContain('type="datetimerange"')
+  })
+
+  it('keeps chart summary and log detail requests separate', () => {
+    const page = source('UsageHistory')
+
+    expect(page).toContain('loadSummary')
+    expect(page).toContain('loadLogs')
+    expect(page).toContain('pagination.value.page = 1')
+  })
+})

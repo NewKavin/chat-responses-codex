@@ -64,6 +64,26 @@
             </span>
           </template>
         </el-table-column>
+        <el-table-column label="运行并发" width="220">
+          <template #default="{ row }">
+            <div class="runtime-cell" v-if="runtimeById[row.id] && runtimeById[row.id].available">
+              <span class="runtime-metric">
+                <Activity :size="12" :stroke-width="1.8" />运行中 {{ runtimeById[row.id].running ?? 0 }}
+              </span>
+              <span class="runtime-metric">
+                <Clock3 :size="12" :stroke-width="1.8" />等待上游 {{ runtimeById[row.id].waiting_upstream ?? 0 }}
+              </span>
+              <span class="runtime-metric">
+                <Gauge :size="12" :stroke-width="1.8" />已占用 {{ runtimeById[row.id].admitted ?? 0 }}
+              </span>
+              <span class="runtime-metric">
+                <ShieldCheck :size="12" :stroke-width="1.8" />上限 {{ runtimeById[row.id].limit }}
+              </span>
+            </div>
+            <el-tag v-else-if="runtimeById[row.id]" type="info" size="small">Unavailable</el-tag>
+            <el-tag v-else type="info" size="small">上限 {{ row.max_concurrency ?? 10 }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="生命周期" width="120">
           <template #default="{ row }">
             <el-tag :type="row.expires_at ? 'warning' : 'success'">
@@ -238,11 +258,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Copy, Plus } from '@lucide/vue'
+import { Activity, Clock3, Copy, Gauge, Plus, ShieldCheck } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
-import type { DownstreamConfig } from '@/types'
+import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
 
 const loading = ref(false)
@@ -254,6 +274,8 @@ const submitting = ref(false)
 const formRef = ref()
 const newPlaintextKey = ref('')
 const expandedKeys = ref<string[]>([])
+const runtimeById = ref<Record<string, DownstreamConcurrencySnapshot>>({})
+let runtimeTimer: number | null = null
 const requestQuotaHours = ref(5)
 const requestQuotaCount = ref(600)
 const availableModels = ref<string[]>([])
@@ -355,6 +377,20 @@ const loadModels = async () => {
     availableModels.value = data.models
   } catch (error) {
     ElMessage.error('加载模型列表失败')
+  }
+}
+
+const loadRuntime = async () => {
+  try {
+    const { data } = await adminApi.getDownstreamRuntime()
+    const next: Record<string, DownstreamConcurrencySnapshot> = {}
+    for (const item of data.items) {
+      next[item.downstream_id] = item.concurrency
+    }
+    runtimeById.value = next
+  } catch {
+    // Lightweight runtime poll failures only mark coordination unavailable;
+    // never refetch the full downstream list and never block normal requests.
   }
 }
 
@@ -491,6 +527,15 @@ const handleDelete = async (row: DownstreamConfig) => {
 onMounted(() => {
   loadData()
   loadModels()
+  loadRuntime()
+  runtimeTimer = window.setInterval(loadRuntime, 5000)
+})
+
+onUnmounted(() => {
+  if (runtimeTimer !== null) {
+    clearInterval(runtimeTimer)
+    runtimeTimer = null
+  }
 })
 </script>
 
@@ -532,6 +577,20 @@ onMounted(() => {
   width: 100%;
   overflow-wrap: anywhere;
   user-select: all;
+}
+
+.runtime-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.runtime-metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--crc-text);
 }
 
 .key-cell {

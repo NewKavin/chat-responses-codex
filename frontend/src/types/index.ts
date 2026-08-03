@@ -195,11 +195,22 @@ export interface LogsResponse {
   page: number
   page_size: number
   total_pages: number
+  window?: ResolvedLogWindow
 }
 
 // ============================================================================
 // Portal Types
 // ============================================================================
+
+export type ChartTimeRange = '1d' | '7d' | '30d'
+
+export interface ResolvedLogWindow {
+  mode: 'calendar_day' | 'rolling_1h'
+  day?: string
+  timezone: string
+  start_time: number
+  end_time: number
+}
 
 export interface RequestQuotaUsage {
   used: number
@@ -222,10 +233,30 @@ export interface TokenUsage {
 }
 
 export interface DailyStats {
-  date: number
+  day: string
+  start_time: number
   total_requests: number
   total_tokens: number
   success_rate: number
+}
+
+export interface DownstreamConcurrencySnapshot {
+  available: boolean
+  running?: number
+  waiting_upstream?: number
+  admitted?: number
+  limit: number
+  updated_at: number
+}
+
+export interface DownstreamRuntimeItem {
+  downstream_id: string
+  concurrency: DownstreamConcurrencySnapshot
+}
+
+export interface DownstreamRuntimeResponse {
+  items: DownstreamRuntimeItem[]
+  updated_at: number
 }
 
 export interface PortalOverview {
@@ -242,6 +273,7 @@ export interface PortalOverview {
     total_models: number
     active_models: number
   }
+  concurrency?: DownstreamConcurrencySnapshot
 }
 
 export interface PortalModelStat {
@@ -279,6 +311,12 @@ export interface PortalUsageHistory {
   recent_logs_page: number
   recent_logs_page_size: number
   recent_logs_total_pages: number
+  window?: ResolvedLogWindow
+}
+
+export interface PortalUsageSummary {
+  time_range: ChartTimeRange
+  daily_stats: DailyStats[]
 }
 
 export interface ModelProbeSummary {
