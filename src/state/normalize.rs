@@ -275,6 +275,7 @@ impl UpstreamConfig {
             .first()
             .copied()
             .unwrap_or(UpstreamProtocol::ChatCompletions);
+        self.remark = self.remark.trim().to_string();
         self.api_key = self.api_key.trim().to_string();
         self.api_keys = normalized_string_list(std::mem::take(&mut self.api_keys));
         let current_keys = normalized_current_keys(&self.api_key, &self.api_keys);

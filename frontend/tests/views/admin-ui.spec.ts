@@ -61,6 +61,18 @@ describe('admin ui structure', () => {
     expect(page).toContain('upstream-account-drawer')
   })
 
+  it('shows display IDs and persists the final-column upstream remark', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('template #default="{ $index }"')
+    expect(page).toContain('{{ $index + 1 }}')
+    expect(page).not.toContain('<el-table-column prop="id" label="ID"')
+    expect(page).toContain('v-model="form.remark"')
+    expect(page).toContain("{{ row.remark || '-' }}")
+    expect(page.indexOf('label="备注"')).toBeLessThan(page.indexOf('label="操作"'))
+    expect(page).toContain('remark: String(form.value.remark || \'\').trim()')
+  })
+
   it('loads upstreams asynchronously without polling the whole workbench', () => {
     const page = source('views/admin/Upstreams.vue')
 

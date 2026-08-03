@@ -29,6 +29,7 @@ import type {
 
 export interface BatchCreateUpstreamPayload {
   name: string
+  remark?: string
   base_url: string
   keys: string[]
   supported_models: string[]

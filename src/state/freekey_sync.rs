@@ -395,6 +395,9 @@ impl AppState {
                     if let Some(name) = updates.get("name").and_then(|v| v.as_str()) {
                         upstream.name = name.to_string();
                     }
+                    if let Some(remark) = updates.get("remark").and_then(|v| v.as_str()) {
+                        upstream.remark = remark.to_string();
+                    }
                     if let Some(base_url) = updates.get("base_url").and_then(|v| v.as_str()) {
                         upstream.base_url = base_url.to_string();
                     }

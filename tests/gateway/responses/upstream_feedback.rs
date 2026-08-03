@@ -1545,6 +1545,7 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
             upstreams: std::sync::Arc::new(vec![UpstreamConfig {
                 id: "up-1".into(),
                 name: "my-upstream-name".into(),
+                remark: String::new(),
                 base_url: format!("http://{}", orphan_port),
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,

@@ -1034,6 +1034,91 @@ async fn concurrency_status_switch_round_trips_through_admin_create_and_update()
 }
 
 #[tokio::test]
+async fn upstream_remark_round_trips_through_admin_create_and_update() {
+    let state = create_test_state();
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "id": "remark-upstream",
+                        "name": "Remark Upstream",
+                        "base_url": "https://api.example.invalid",
+                        "api_key": "test-secret",
+                        "protocol": "Responses",
+                        "supported_models": ["glm-5.2"],
+                        "active": true,
+                        "remark": "  shared team account  "
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["remark"], "shared team account");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/remark-upstream")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"remark": "  rotated account  "}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let updated: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated["remark"], "rotated account");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let upstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        upstreams
+            .iter()
+            .find(|item| item["id"] == "remark-upstream")
+            .and_then(|item| item["remark"].as_str()),
+        Some("rotated account")
+    );
+}
+
+#[tokio::test]
 async fn test_upstreams_create_preserves_raw_model_names() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());
@@ -3722,6 +3807,7 @@ async fn batch_create_uses_explicit_models_without_automatic_discovery_by_defaul
     let token = get_admin_token(&app, "admin", "admin").await;
     let payload = json!({
         "name": "Manual Batch",
+        "remark": "  shared team account  ",
         "base_url": format!("http://{address}"),
         "keys": ["key-a", "key-b"],
         "supported_models": ["selected-a", "manual-shared"],
@@ -3769,6 +3855,7 @@ async fn batch_create_uses_explicit_models_without_automatic_discovery_by_defaul
             },
         ]
     );
+    assert_eq!(upstream.remark, "shared team account");
     assert!(!upstream.auto_managed);
     assert_eq!(upstream.last_synced_at, 0);
     assert!(upstream.keys_for_model("unselected-model").is_empty());

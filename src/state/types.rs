@@ -247,6 +247,8 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub remark: String,
     pub base_url: String,
     pub api_key: String,
     #[serde(default)]
@@ -322,6 +324,7 @@ impl Default for UpstreamConfig {
         Self {
             id: String::new(),
             name: String::new(),
+            remark: String::new(),
             base_url: String::new(),
             api_key: String::new(),
             api_keys: Vec::new(),

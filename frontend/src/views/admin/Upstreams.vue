@@ -13,7 +13,9 @@
 
     <div class="crc-table-shell">
       <el-table :data="upstreams" v-loading="loading" stripe style="width: 100%">
-        <el-table-column prop="id" label="ID" width="150" />
+        <el-table-column label="ID" width="72" align="center">
+          <template #default="{ $index }">{{ $index + 1 }}</template>
+        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="200" />
         <el-table-column label="协议" min-width="240">
           <template #default="{ row }">
@@ -66,6 +68,10 @@
             </el-tag>
           </template>
         </el-table-column>
+
+        <el-table-column label="备注" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.remark || '-' }}</template>
+        </el-table-column>
         
         <el-table-column label="操作" width="340" fixed="right">
           <template #default="{ row }">
@@ -95,6 +101,14 @@
         </el-form-item>
         <el-form-item label="名称" prop="name">
           <el-input v-model="form.name" placeholder="例如: OpenAI 主上游" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input
+            v-model="form.remark"
+            type="textarea"
+            :rows="2"
+            placeholder="例如: 共享账号、区域或维护说明"
+          />
         </el-form-item>
         <el-form-item label="Base URL" prop="base_url">
           <el-input v-model="form.base_url" placeholder="https://api.openai.com" />
@@ -313,6 +327,7 @@ const clearDefaultContext = ref(false)
 const form = ref<Partial<UpstreamConfig>>({
   id: '',
   name: '',
+  remark: '',
   base_url: '',
   api_key: '',
   protocol: 'ChatCompletions',
@@ -468,6 +483,7 @@ const handleCreate = () => {
   form.value = {
     id: '',
     name: '',
+    remark: '',
     base_url: '',
     api_key: '',
     protocol: 'ChatCompletions',
@@ -502,6 +518,7 @@ const handleCopy = (row: UpstreamConfig) => {
   form.value = {
     id: '',
     name: row.name + ' (副本)',
+    remark: row.remark || '',
     base_url: row.base_url,
     api_key: '',
     protocol: protocols[0] as UpstreamConfig['protocol'],
@@ -572,6 +589,7 @@ const handleSubmit = async () => {
     const submitData: Partial<UpstreamConfig> = {
       ...form.value
     }
+    submitData.remark = String(form.value.remark || '').trim()
     delete submitData.requests_per_minute
     delete submitData.request_quota_window_hours
     delete submitData.request_quota_requests
@@ -654,6 +672,7 @@ const handleSubmit = async () => {
         // 多 key：使用 batch 接口提交显式模型映射
         const batchPayload: BatchCreateUpstreamPayload = {
           name: form.value.name!,
+          remark: String(form.value.remark || '').trim(),
           base_url: form.value.base_url!,
           keys: submittedKeys,
           supported_models: submitData.supported_models || [],

@@ -76,6 +76,7 @@ export interface KeyModelDiscoveryResult {
 export interface UpstreamConfig {
   id: string
   name: string
+  remark: string
   base_url: string
   api_key: string
   api_keys?: string[]

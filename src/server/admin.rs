@@ -917,6 +917,8 @@ pub(super) async fn admin_sync_freekey_upstreams(
 #[derive(Debug, Deserialize)]
 pub(super) struct BatchCreateUpstreamPayload {
     name: String,
+    #[serde(default)]
+    remark: String,
     base_url: String,
     keys: Vec<String>,
     #[serde(default)]
@@ -1348,6 +1350,7 @@ pub(super) async fn admin_create_upstreams_batch(
     let mut upstream = UpstreamConfig {
         id: Uuid::new_v4().to_string(),
         name: payload.name.trim().to_string(),
+        remark: payload.remark.clone(),
         base_url: payload.base_url.trim().to_string(),
         api_key: primary_key.clone(),
         api_keys: current_keys.clone(),
