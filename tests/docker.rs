@@ -120,6 +120,24 @@ fn deployment_exposes_calendar_and_long_stream_configuration() {
 }
 
 #[test]
+fn compose_exports_validated_account_and_stream_budgets() {
+    let compose = fs::read_to_string("docker-compose.yml").unwrap();
+    for setting in [
+        "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-600}",
+        "UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS: ${UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS:-3}",
+        "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: ${UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS:-1800}",
+        "UPSTREAM_STREAM_MAX_DURATION_SECONDS: ${UPSTREAM_STREAM_MAX_DURATION_SECONDS:-86400}",
+        "UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS: ${UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS:-600000}",
+        "UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS: ${UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS:-320}",
+        "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS: ${UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS:-3300}",
+        "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS: ${UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS:-5}",
+        "CODEX_STREAM_IDLE_TIMEOUT_MS: ${CODEX_STREAM_IDLE_TIMEOUT_MS:-3600000}",
+    ] {
+        assert!(compose.contains(setting), "missing {setting}");
+    }
+}
+
+#[test]
 fn dockerignore_keeps_the_build_context_small_for_multistage_images() {
     let dockerignore =
         fs::read_to_string(".dockerignore").expect(".dockerignore should be readable");
@@ -284,7 +302,7 @@ fn docker_compose_provisions_postgres_15_on_the_internal_network() {
     );
     assert!(
         compose.contains(
-            "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-30}"
+            "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-600}"
         ),
         "docker-compose.yml should configure upstream response header timeout"
     );
@@ -603,7 +621,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO: ${ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO:-1.5}",
         "UPSTREAM_USER_AGENT: ${UPSTREAM_USER_AGENT:-codex/0.144.6}",
         "UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${UPSTREAM_CONNECT_TIMEOUT_SECONDS:-30}",
-        "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-30}",
+        "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-600}",
         "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: ${UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS:-1800}",
     ] {
         assert!(

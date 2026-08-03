@@ -10,6 +10,17 @@ MOCK_IMAGE="${MOCK_IMAGE:-python:3.12-alpine}"
 GATEWAY_A_PORT="${GATEWAY_A_PORT:-3301}"
 GATEWAY_B_PORT="${GATEWAY_B_PORT:-3302}"
 HOLD_SECONDS="${HOLD_SECONDS:-8}"
+AUTHORIZED_CAPACITY_REQUESTS="${AUTHORIZED_CAPACITY_REQUESTS:-}"
+
+if [[ -n "$AUTHORIZED_CAPACITY_REQUESTS" ]] &&
+  ! [[ "$AUTHORIZED_CAPACITY_REQUESTS" =~ ^[1-9][0-9]*$ ]]; then
+  printf '[FAIL] AUTHORIZED_CAPACITY_REQUESTS must be a positive integer\n' >&2
+  exit 1
+fi
+DOWNSTREAM_MAX_CONCURRENCY=1
+if [[ -n "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
+  DOWNSTREAM_MAX_CONCURRENCY=$((AUTHORIZED_CAPACITY_REQUESTS + 1))
+fi
 
 SMOKE_NONCE="$(openssl rand -hex 8)"
 SMOKE_PREFIX="chat2responses-redis-smoke-${SMOKE_NONCE}"
@@ -193,6 +204,15 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if "authorized-capacity" in message_text:
+            increment_counter("capacity.hits")
+            self.send_json(
+                429,
+                {"error": {"message": "concurrency limit reached"}},
+                {"Retry-After": "1"},
+            )
+            return
+
         if "cooldown" in message_text:
             increment_counter("cooldown.hits")
             self.send_json(
@@ -230,6 +250,9 @@ UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED=false
 UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=false
 UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=0
 UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=1
+UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=60000
+UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32
+UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000
 UPSTREAM_HEDGE_ENABLED=false
 UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=0
 EOF
@@ -326,7 +349,7 @@ DOWNSTREAM_PAYLOAD='{
   "model_allowlist": ["smoke-model"],
   "rate_limit_enabled": true,
   "per_minute_limit": 1000,
-  "max_concurrency": 1,
+  "max_concurrency": $DOWNSTREAM_MAX_CONCURRENCY,
   "active": true
 }'
 DOWNSTREAM_STATUS="$(curl -sS \
@@ -373,6 +396,50 @@ BACKGROUND_PID=$!
 
 wait_for_file "${MOCK_DIR}/hold.started" "gateway A upstream hold"
 
+if [[ -n "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
+  CAPACITY_PAYLOAD='{"model":"smoke-model","messages":[{"role":"user","content":"authorized-capacity"}]}'
+  CAPACITY_PIDS=()
+  for ((request = 1; request <= AUTHORIZED_CAPACITY_REQUESTS; request++)); do
+    curl -sS --max-time "$((HOLD_SECONDS + 20))" \
+      -o "${WORKDIR}/capacity-${request}.json" \
+      -w '%{http_code}' \
+      -X POST "http://127.0.0.1:${GATEWAY_B_PORT}/v1/chat/completions" \
+      -H "Authorization: Bearer $DOWNSTREAM_KEY" \
+      -H 'Content-Type: application/json' \
+      --data-binary "$CAPACITY_PAYLOAD" \
+      >"${WORKDIR}/capacity-${request}.status" &
+    CAPACITY_PIDS+=("$!")
+  done
+
+  RUNTIME_READY=0
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    if curl -fsS --max-time 5 \
+      "http://127.0.0.1:${GATEWAY_B_PORT}/api/admin/downstreams/runtime" \
+      -H "Authorization: Bearer $GATEWAY_B_ADMIN_TOKEN" \
+      >"${WORKDIR}/gateway-b-downstream-runtime.json" &&
+      jq -e '
+        .items[]
+        | select(.downstream_id == "smoke-downstream")
+        | .concurrency.available == true
+          and (.concurrency.admitted >= 1)
+          and (.concurrency.waiting_upstream >= 1)
+      ' "${WORKDIR}/gateway-b-downstream-runtime.json" >/dev/null; then
+      RUNTIME_READY=1
+      break
+    fi
+    sleep 0.2
+  done
+  [[ "$RUNTIME_READY" -eq 1 ]] || fail "runtime endpoint did not expose an upstream waiter"
+  log_pass "Redis runtime endpoint exposed admitted and waiting_upstream counts"
+
+  for pid in "${CAPACITY_PIDS[@]}"; do
+    wait "$pid" || true
+  done
+else
+  log_info "capacity load disabled; set AUTHORIZED_CAPACITY_REQUESTS explicitly to run it"
+fi
+
+if [[ -z "$AUTHORIZED_CAPACITY_REQUESTS" ]]; then
 GATEWAY_B_HOLD_STATUS="$(curl -sS --max-time 5 \
   -o "${WORKDIR}/gateway-b-hold.json" \
   -w '%{http_code}' \
@@ -390,6 +457,7 @@ BACKGROUND_PID=""
 GATEWAY_A_HOLD_STATUS="$(<"${WORKDIR}/gateway-a-hold.status")"
 assert_status 200 "$GATEWAY_A_HOLD_STATUS" "gateway A hold request"
 log_pass "gateway B enforced gateway A's downstream concurrency lease"
+fi
 
 COOLDOWN_PAYLOAD='{"model":"smoke-model","messages":[{"role":"user","content":"cooldown"}]}'
 GATEWAY_A_COOLDOWN_STATUS="$(curl -sS --max-time 10 \

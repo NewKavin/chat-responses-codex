@@ -6,7 +6,7 @@ set +x
 : "${DOWNSTREAM_KEY:?DOWNSTREAM_KEY is required}"
 : "${MODEL_SLUG:?MODEL_SLUG is required}"
 
-readonly DEFAULT_CODEX_VERSION="0.144.6"
+readonly DEFAULT_CODEX_VERSION="0.146.0"
 readonly DEFAULT_OPENCODE_VERSION="1.17.18"
 readonly DEFAULT_CLAUDE_CODE_VERSION="2.1.195"
 readonly DEFAULT_HERMES_VERSION="0.14.0"
@@ -289,6 +289,7 @@ name = "chat-responses-gateway"
 base_url = $API_BASE_TOML
 wire_api = "responses"
 env_key = "CHAT2RESPONSES_KEY"
+stream_idle_timeout_ms = 3600000
 stream_max_retries = 2
 EOF
 

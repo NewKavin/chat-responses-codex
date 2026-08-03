@@ -295,6 +295,7 @@ describe('integration config generators', () => {
     expect(toml).toContain('max_threads = 4')
     expect(toml).toContain('max_depth = 2')
     expect(toml).toContain('base_url = "https://portal.example.com/v1"')
+    expect(toml).toContain('stream_idle_timeout_ms = 3600000')
     expect(toml).toContain('stream_max_retries = 2')
     expect(toml.indexOf('web_search = "disabled"')).toBeLessThan(toml.indexOf('[features]'))
     expect(toml).not.toContain('disable_response_storage')

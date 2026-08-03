@@ -49,6 +49,13 @@ fn codex_config_example_uses_live_model_slug_exactly() {
 }
 
 #[test]
+fn codex_template_uses_the_internal_long_stream_profile() {
+    let config = fs::read_to_string("templates/codex/config.toml.example").unwrap();
+    assert!(config.contains("stream_idle_timeout_ms = 3600000"));
+    assert!(config.contains("stream_max_retries = 2"));
+}
+
+#[test]
 fn gateway_state_example_exposes_live_model_ids_exactly() {
     let state: Value = serde_json::from_str(
         &fs::read_to_string("templates/state/gateway-state.example.json").unwrap(),
