@@ -11,8 +11,8 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DefaultModelContextConfig, DownstreamConfig, ModelContextConfig,
-    PersistedState, UpstreamConfig, UsageLog,
+    AppConfig, AppState, DefaultModelContextConfig, DeploymentCalendar, DownstreamConfig,
+    ModelContextConfig, PersistedState, SummaryRange, UpstreamConfig, UsageLog,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -816,7 +816,7 @@ async fn test_portal_quota_includes_ip_allowlist() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_portal_usage_history_returns_daily_stats() {
+async fn test_portal_usage_summary_returns_daily_stats() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
 
@@ -825,7 +825,7 @@ async fn test_portal_usage_history_returns_daily_stats() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/portal/usage-history")
+                .uri("/api/portal/usage-summary")
                 .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
                 .body(Body::empty())
                 .unwrap(),
@@ -841,7 +841,29 @@ async fn test_portal_usage_history_returns_daily_stats() {
     let result: Value = serde_json::from_slice(&body).unwrap();
 
     assert!(result["daily_stats"].is_array());
-    assert!(result["recent_logs"].is_array());
+    assert_eq!(result["time_range"], "7d");
+
+    // Also verify usage-history now returns recent_logs without daily_stats
+    let response2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-history")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result2: Value = serde_json::from_slice(&body2).unwrap();
+
+    assert!(result2["recent_logs"].is_array());
+    assert!(result2["window"].is_object());
 }
 
 #[tokio::test]
@@ -878,7 +900,7 @@ async fn test_portal_usage_history_returns_recent_logs() {
 }
 
 #[tokio::test]
-async fn test_portal_usage_history_supports_time_range() {
+async fn test_portal_usage_summary_supports_time_range() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
 
@@ -888,7 +910,7 @@ async fn test_portal_usage_history_supports_time_range() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/portal/usage-history?time_range=7d")
+                .uri("/api/portal/usage-summary?time_range=7d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
                 .body(Body::empty())
                 .unwrap(),
@@ -908,7 +930,7 @@ async fn test_portal_usage_history_supports_time_range() {
 }
 
 #[tokio::test]
-async fn test_portal_usage_history_supports_30d_time_range() {
+async fn test_portal_usage_summary_supports_30d_time_range() {
     let (state, portal_key) = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
 
@@ -918,7 +940,7 @@ async fn test_portal_usage_history_supports_30d_time_range() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/portal/usage-history?time_range=30d")
+                .uri("/api/portal/usage-summary?time_range=30d")
                 .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
                 .body(Body::empty())
                 .unwrap(),
@@ -947,7 +969,7 @@ async fn test_portal_usage_history_supports_recent_logs_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/portal/usage-history?time_range=7d&page=2&page_size=10")
+                .uri("/api/portal/usage-history?page=2&page_size=10")
                 .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
                 .body(Body::empty())
                 .unwrap(),
@@ -1605,4 +1627,198 @@ async fn test_portal_quota_exposes_per_model_context_limits() {
         Some(200_000),
         "context_window should fall back to default_model_context.context_limit"
     );
+}
+
+// ============================================================================
+// Task 10: Natural-day summary and legacy field rejection
+// ============================================================================
+
+fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
+    let config = AppConfig {
+        deployment_timezone: timezone.to_string(),
+        ..Default::default()
+    };
+    let generated = generate_downstream_key("sk");
+
+    let now = chat_responses_codex::state::unix_seconds();
+
+    let state = PersistedState {
+        upstreams: std::sync::Arc::new(vec![]),
+        downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+            id: "downstream-1".to_string(),
+            name: "Test Downstream".to_string(),
+            hash: generated.hash,
+            plaintext_key: Some(generated.plaintext),
+            plaintext_key_prefix: None,
+            model_allowlist: vec!["gpt-4".to_string()],
+            per_minute_limit: 100,
+            rate_limit_enabled: true,
+            max_concurrency: 10,
+            daily_token_limit: Some(10000),
+            monthly_token_limit: Some(100000),
+            request_quota_window_hours: Some(24),
+            request_quota_requests: Some(1000),
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+        }]),
+        usage_logs: vec![UsageLog {
+            id: "tz-log-1".to_string(),
+            downstream_key_id: "downstream-1".to_string(),
+            upstream_key_id: "upstream-1".to_string(),
+            downstream_name: Some("Test Downstream".to_string()),
+            upstream_name: Some("Primary Upstream".to_string()),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "gpt-4".to_string(),
+            inference_strength: None,
+            billing_mode: None,
+            request_count: None,
+            user_agent: None,
+            request_id: "tz-req-1".to_string(),
+            status_code: 200,
+            wire_status_code: 0,
+            stream_diagnostics: None,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            first_token_latency_ms: None,
+            latency_ms: 500,
+            created_at: now,
+            compatibility: None,
+        }],
+        announcement: None,
+        global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+    };
+
+    let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
+    let app_state = AppState::new(state, unique_state_path(), config);
+    (app_state, portal_key)
+}
+
+#[tokio::test]
+async fn portal_summary_defaults_to_seven_zero_filled_calendar_days() {
+    let timezone = "America/New_York";
+    let (state, portal_key) = create_test_state_with_timezone(timezone);
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-summary")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["time_range"], "7d");
+    let days = payload["daily_stats"].as_array().unwrap();
+    assert_eq!(days.len(), 7);
+
+    // Compute expected days using the same calendar logic as the server
+    let calendar = DeploymentCalendar::parse(timezone).unwrap();
+    let now = chat_responses_codex::state::unix_seconds();
+    let range = calendar
+        .resolve_summary(SummaryRange::SevenDays, now)
+        .unwrap();
+    let expected_days: Vec<&str> = range.days.iter().map(|d| d.day.as_str()).collect();
+
+    assert_eq!(days[0]["day"].as_str().unwrap(), expected_days[0]);
+    assert_eq!(days[6]["day"].as_str().unwrap(), expected_days[6]);
+    assert!(
+        days.windows(2)
+            .all(|pair| pair[0]["day"].as_str() < pair[1]["day"].as_str()),
+        "days must be ascending"
+    );
+}
+
+#[tokio::test]
+async fn portal_usage_history_rejects_legacy_time_range() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-history?time_range=7d")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["error"]["code"], "invalid_query");
+}
+
+#[tokio::test]
+async fn portal_usage_history_rejects_legacy_epoch_bounds() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    for uri in [
+        "/api/portal/usage-history?start_time=1&end_time=2",
+        "/api/portal/usage-history?end_time=2",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "expected 200 for {uri}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["error"]["code"], "invalid_query", "for {uri}");
+    }
+}
+
+#[tokio::test]
+async fn portal_usage_summary_supports_1d_time_range() {
+    let (state, portal_key) = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/portal/usage-summary?time_range=1d")
+                .header(header::AUTHORIZATION, format!("Bearer {}", portal_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    let days = result["daily_stats"].as_array().unwrap();
+    assert_eq!(days.len(), 1);
 }

@@ -235,12 +235,21 @@ fn default_page_size() -> usize {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct PortalUsageHistoryQuery {
-    #[serde(default = "default_time_range")]
-    time_range: String,
+    day: Option<String>,
     #[serde(default = "default_page")]
     page: usize,
     #[serde(default = "default_page_size")]
     page_size: usize,
+    // Legacy fields that must not be used with the detail-only history endpoint.
+    time_range: Option<String>,
+    start_time: Option<u64>,
+    end_time: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct PortalUsageSummaryQuery {
+    #[serde(default = "default_time_range")]
+    time_range: String,
 }
 
 pub(super) async fn portal_usage_history(
@@ -248,25 +257,46 @@ pub(super) async fn portal_usage_history(
     Query(query): Query<PortalUsageHistoryQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Reject legacy fields that are no longer accepted on the detail-only endpoint.
+    if query.time_range.is_some() || query.start_time.is_some() || query.end_time.is_some() {
+        return Json(json!({
+            "error": {
+                "code": "invalid_query",
+                "message": "This endpoint accepts day, page, and page_size only."
+            }
+        }))
+        .into_response();
+    }
+
     let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
         Ok(id) => id,
         Err(response) => return response,
     };
 
-    let days = match query.time_range.as_str() {
-        "1d" => 1,
-        "7d" => 7,
-        "30d" => 30,
-        _ => 7,
+    let now = unix_seconds();
+    let calendar = state.deployment_calendar();
+    let window = match calendar.resolve_detail(query.day.as_deref(), now) {
+        Ok(w) => w,
+        Err(_) => {
+            return Json(json!({
+                "error": {
+                    "code": "invalid_query",
+                    "message": "Invalid day format. Expected YYYY-MM-DD."
+                }
+            }))
+            .into_response();
+        }
     };
-
-    let daily_stats = state.compute_daily_stats(&downstream_id, days).await;
 
     let snapshot = state.snapshot().await;
     let mut recent_logs: Vec<_> = snapshot
         .usage_logs
         .iter()
-        .filter(|log| log.downstream_key_id == downstream_id)
+        .filter(|log| {
+            log.downstream_key_id == downstream_id
+                && log.created_at >= window.start_time
+                && log.created_at < window.end_time
+        })
         .cloned()
         .collect();
     recent_logs.sort_by_key(|log| std::cmp::Reverse(log.created_at));
@@ -284,12 +314,39 @@ pub(super) async fn portal_usage_history(
     };
 
     Json(json!({
-        "daily_stats": daily_stats,
         "recent_logs": recent_logs,
         "recent_logs_total": total,
         "recent_logs_page": page,
         "recent_logs_page_size": page_size,
         "recent_logs_total_pages": total_pages,
+        "window": window,
+    }))
+    .into_response()
+}
+
+/// Portal usage summary (chart aggregation)
+pub(super) async fn portal_usage_summary(
+    State(state): State<AppState>,
+    Query(query): Query<PortalUsageSummaryQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let downstream_id = match extract_downstream_id_from_bearer(&state, &headers).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+
+    let days = match query.time_range.as_str() {
+        "1d" => 1,
+        "7d" => 7,
+        "30d" => 30,
+        _ => 7,
+    };
+
+    let daily_stats = state.compute_daily_stats(&downstream_id, days).await;
+
+    Json(json!({
+        "time_range": query.time_range,
+        "daily_stats": daily_stats,
     }))
     .into_response()
 }

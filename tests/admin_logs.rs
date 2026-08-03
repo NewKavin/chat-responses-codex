@@ -8,7 +8,9 @@
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use chat_responses_codex::state::{AppConfig, AppState, PersistedState, UsageLog};
+use chat_responses_codex::state::{
+    AppConfig, AppState, DeploymentCalendar, PersistedState, UsageLog,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tower::ServiceExt;
@@ -60,7 +62,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 150,
                 first_token_latency_ms: Some(10_650),
                 latency_ms: 15_120,
-                created_at: now,
+                created_at: now - 1, // 1 second ago
                 compatibility: None,
             },
             UsageLog {
@@ -86,7 +88,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 75,
                 first_token_latency_ms: None,
                 latency_ms: 300,
-                created_at: now - 3600, // 1 hour ago
+                created_at: now - 1800, // 30 minutes ago
                 compatibility: None,
             },
             UsageLog {
@@ -112,7 +114,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 0,
                 first_token_latency_ms: None,
                 latency_ms: 100,
-                created_at: now - 7200, // 2 hours ago
+                created_at: now - 120, // 2 minutes ago
                 compatibility: None,
             },
             UsageLog {
@@ -138,7 +140,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 0,
                 first_token_latency_ms: None,
                 latency_ms: 50,
-                created_at: now - 86000, // within 1 day
+                created_at: now - 60, // 1 minute ago
                 compatibility: None,
             },
             UsageLog {
@@ -164,7 +166,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_tokens: 300,
                 first_token_latency_ms: None,
                 latency_ms: 800,
-                created_at: now - 604000, // within 7 days
+                created_at: now - 30, // 30 seconds ago
                 compatibility: None,
             },
         ],
@@ -262,7 +264,7 @@ async fn test_logs_list_supports_pagination() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?page=1&page_size=2&time_range=7d")
+                .uri("/api/admin/logs?page=1&page_size=2")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -335,7 +337,7 @@ async fn test_logs_list_supports_filtering_by_status_code() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?status_code=200&time_range=7d")
+                .uri("/api/admin/logs?status_code=200")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -371,7 +373,7 @@ async fn test_logs_list_supports_filtering_by_model() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?model=gpt-4&time_range=7d")
+                .uri("/api/admin/logs?model=gpt-4")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -406,7 +408,7 @@ async fn test_logs_list_supports_filtering_by_model_substring_case_insensitive()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?model=GPT&time_range=7d")
+                .uri("/api/admin/logs?model=GPT")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -468,13 +470,13 @@ async fn test_logs_list_supports_filtering_by_time_range() {
 
     let token = get_admin_token(&app, "admin", "admin").await;
 
-    // Filter by time_range=1d (last 24 hours)
+    // Filter by time_range=1h (rolling 1 hour)
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?time_range=1d")
+                .uri("/api/admin/logs?time_range=1h")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -490,8 +492,8 @@ async fn test_logs_list_supports_filtering_by_time_range() {
     let result: Value = serde_json::from_slice(&body).unwrap();
 
     let logs = result["logs"].as_array().unwrap();
-    // Includes logs inside the last 24 hours.
-    assert_eq!(logs.len(), 4);
+    // All logs are within the last 30 minutes, so 1h window returns all.
+    assert_eq!(logs.len(), 5);
 }
 
 #[tokio::test]
@@ -506,7 +508,7 @@ async fn test_logs_list_supports_filtering_by_status_code_list() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?status_codes=200,400&time_range=7d")
+                .uri("/api/admin/logs?status_codes=200,400")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -540,7 +542,7 @@ async fn test_logs_list_supports_filtering_by_error_category_list() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?time_range=30d&error_categories=stream_interrupted,stream_upstream_body_decode_error")
+                .uri("/api/admin/logs?error_categories=stream_interrupted,stream_upstream_body_decode_error")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -566,59 +568,24 @@ async fn test_logs_list_supports_filtering_by_error_category_list() {
 }
 
 #[tokio::test]
-async fn test_logs_list_supports_filtering_by_custom_time_window() {
+async fn test_logs_list_rejects_epoch_time_window() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);
     let token = get_admin_token(&app, "admin", "admin").await;
-
-    let seed_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/admin/logs")
-                .header(header::AUTHORIZATION, format!("Bearer {}", token))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(seed_response.status(), StatusCode::OK);
-    let seed_body = axum::body::to_bytes(seed_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let seed_result: Value = serde_json::from_slice(&seed_body).unwrap();
-    let logs = seed_result["logs"].as_array().unwrap();
-    let log_2 = logs
-        .iter()
-        .find(|log| log["id"] == "log-2")
-        .expect("log-2 should exist");
-    let created_at = log_2["created_at"].as_u64().unwrap();
 
     let response = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!(
-                    "/api/admin/logs?start_time={}&end_time={}",
-                    created_at.saturating_sub(10),
-                    created_at + 10
-                ))
+                .uri("/api/admin/logs?start_time=1&end_time=2")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let result: Value = serde_json::from_slice(&body).unwrap();
-    let logs = result["logs"].as_array().unwrap();
-    assert_eq!(logs.len(), 1);
-    assert_eq!(logs[0]["id"], "log-2");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -674,7 +641,7 @@ async fn test_logs_list_combines_multiple_filters() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?status_code=200&model=gpt-4&time_range=1d")
+                .uri("/api/admin/logs?status_code=200&model=gpt-4")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -690,8 +657,8 @@ async fn test_logs_list_combines_multiple_filters() {
     let result: Value = serde_json::from_slice(&body).unwrap();
 
     let logs = result["logs"].as_array().unwrap();
-    // Should return only log-1 (status_code=200, model=gpt-4, within 1 day)
-    assert_eq!(logs.len(), 1);
+    // Should return log-1 and log-5 (both status_code=200, model=gpt-4)
+    assert_eq!(logs.len(), 2);
     assert_eq!(logs[0]["id"], "log-1");
 }
 
@@ -787,7 +754,7 @@ async fn test_logs_list_keeps_existing_shape_after_query_api_switch() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/admin/logs?status_codes=200&page=1&page_size=2&time_range=7d")
+                .uri("/api/admin/logs?status_codes=200&page=1&page_size=2")
                 .header(header::AUTHORIZATION, format!("Bearer {}", token))
                 .body(Body::empty())
                 .unwrap(),
@@ -949,4 +916,122 @@ async fn test_prune_expired_usage_logs_respects_zero_retention() {
     assert_eq!(removed, 0);
     let snapshot = app.snapshot().await;
     assert_eq!(snapshot.usage_logs.len(), 1);
+}
+
+// ============================================================================
+// Task 10: Calendar-day defaults and rolling-1h compatibility
+// ============================================================================
+
+#[tokio::test]
+async fn admin_logs_default_to_today_and_only_allow_one_rolling_compatibility_form() {
+    let timezone = "Asia/Shanghai";
+    let calendar = DeploymentCalendar::parse(timezone).unwrap();
+    let now = chat_responses_codex::state::unix_seconds();
+    let today = calendar.resolve_detail(None, now).unwrap();
+
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        deployment_timezone: timezone.to_string(),
+        ..Default::default()
+    };
+
+    let state = create_test_state_with_config(config);
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Default (no params) returns today's calendar-day window
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["window"]["mode"], "calendar_day");
+    assert_eq!(
+        result["window"]["day"].as_str().unwrap(),
+        today.day.as_deref().unwrap()
+    );
+    assert_eq!(result["window"]["timezone"], timezone);
+    assert_eq!(
+        result["window"]["start_time"].as_u64().unwrap(),
+        today.start_time
+    );
+    assert_eq!(
+        result["window"]["end_time"].as_u64().unwrap(),
+        today.end_time
+    );
+
+    // day=YYYY-MM-DD for a valid past date is accepted
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?day=2026-07-31")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // time_range=1h (rolling 1h legacy compatibility) is accepted
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?time_range=1h")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["window"]["mode"], "rolling1h");
+
+    // Invalid combinations return 400 BAD_REQUEST
+    for uri in [
+        "/api/admin/logs?time_range=7d",
+        "/api/admin/logs?start_time=1&end_time=2",
+        "/api/admin/logs?day=2026-08-01&time_range=1h",
+        "/api/admin/logs?day=2026-02-30",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 for {uri}"
+        );
+    }
 }

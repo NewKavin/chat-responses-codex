@@ -74,7 +74,10 @@ pub use account_concurrency::{
     AccountWaitTicket, ObservationError, ProbeDecision, ProviderConcurrencyObservation,
     ProviderConcurrencyObservationSource,
 };
-pub use calendar::{CalendarDay, CalendarError, CalendarRange, DeploymentCalendar};
+pub use calendar::{
+    CalendarDay, CalendarError, CalendarRange, DeploymentCalendar, LogWindowMode,
+    ResolvedLogWindow, SummaryRange,
+};
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
 pub use redis_runtime::{RuntimeCoordinationBackend, RuntimeCoordinationError};

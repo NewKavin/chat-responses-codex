@@ -2191,6 +2191,7 @@ pub(super) struct LogsQuery {
     error_category: Option<String>,
     error_categories: Option<String>,
     model: Option<String>,
+    day: Option<String>,
     #[serde(default = "default_time_range")]
     time_range: String,
     start_time: Option<u64>,
@@ -2207,6 +2208,23 @@ fn default_time_range() -> String {
     "1d".to_string()
 }
 
+fn bad_request_logs(
+    _page: usize,
+    _page_size: usize,
+    _state: &AppState,
+) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "code": "invalid_query",
+                "message": "Only day=YYYY-MM-DD, time_range=1h, or no time parameter is accepted."
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// List logs with filtering and pagination
 pub(super) async fn admin_list_logs(
     State(state): State<AppState>,
@@ -2217,22 +2235,43 @@ pub(super) async fn admin_list_logs(
 
     let now = unix_seconds();
 
-    let (start_time, end_time) = if query.start_time.is_some() || query.end_time.is_some() {
-        let start = query.start_time.unwrap_or(0);
-        let end = query.end_time.unwrap_or(now);
-        if start <= end {
-            (start, end)
-        } else {
-            (end, start)
+    // Validate parameter combinations. Only these forms are accepted:
+    //   1. No day/time_range/start_time/end_time → today (calendar day)
+    //   2. day=YYYY-MM-DD → that calendar day
+    //   3. time_range=1h → rolling 1h (legacy compatibility)
+    // All other combinations return 400 BAD_REQUEST.
+    let has_day = query.day.is_some();
+    let has_time_range = query.time_range != "1d"; // "1d" is the serde default
+    let has_epoch = query.start_time.is_some() || query.end_time.is_some();
+
+    // Reject conflicting combinations
+    if has_epoch {
+        return bad_request_logs(query.page, query.page_size, &state);
+    }
+    if has_day && has_time_range {
+        return bad_request_logs(query.page, query.page_size, &state);
+    }
+    // Only time_range=1h is allowed (rolling 1h legacy compat)
+    if has_time_range && query.time_range != "1h" {
+        return bad_request_logs(query.page, query.page_size, &state);
+    }
+
+    let calendar = state.deployment_calendar();
+    let (start_time, end_time, window) = if has_day {
+        let day = query.day.as_deref().unwrap();
+        match calendar.resolve_detail(Some(day), now) {
+            Ok(w) => (w.start_time, w.end_time, w),
+            Err(_) => return bad_request_logs(query.page, query.page_size, &state),
         }
+    } else if has_time_range && query.time_range == "1h" {
+        let w = calendar.resolve_rolling_1h(now);
+        (w.start_time, w.end_time, w)
     } else {
-        let time_range_seconds = match query.time_range.as_str() {
-            "1d" | "24h" => 86400,
-            "7d" => 7 * 86400,
-            "30d" => 30 * 86400,
-            _ => 86400,
-        };
-        (now.saturating_sub(time_range_seconds), now)
+        // Default: today
+        match calendar.resolve_detail(None, now) {
+            Ok(w) => (w.start_time, w.end_time, w),
+            Err(_) => return bad_request_logs(query.page, query.page_size, &state),
+        }
     };
 
     let mut status_codes = query
@@ -2327,8 +2366,10 @@ pub(super) async fn admin_list_logs(
             status_codes,
             error_categories,
             model_substring: query.model.clone(),
-            start_time: Some(start_time),
-            end_time: Some(end_time),
+            downstream_id: None,
+            upstream_id: None,
+            start_time,
+            end_time,
         })
         .await
         .map_err(|error| {
@@ -2353,6 +2394,7 @@ pub(super) async fn admin_list_logs(
         "page": page.page,
         "page_size": page.page_size,
         "total_pages": page.total_pages,
+        "window": window,
     }))
     .into_response()
 }

@@ -38,7 +38,8 @@ pub struct TokenQuota {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DailyStats {
-    pub date: u64,
+    pub day: String,
+    pub start_time: u64,
     pub total_requests: u32,
     pub total_tokens: u64,
     pub success_rate: f64,
@@ -411,20 +412,43 @@ impl AppState {
         let snapshot = self.snapshot().await;
         let now = unix_seconds();
 
+        let calendar = self.deployment_calendar();
+        let range = calendar
+            .resolve_summary(
+                match days {
+                    1 => crate::state::SummaryRange::OneDay,
+                    30 => crate::state::SummaryRange::ThirtyDays,
+                    _ => crate::state::SummaryRange::SevenDays,
+                },
+                now,
+            )
+            .unwrap_or_else(|_| {
+                // Fallback: UTC-based 7-day range if calendar fails
+                calendar
+                    .range_ending_on(
+                        &chrono::DateTime::<chrono::Utc>::from_timestamp(now as i64, 0)
+                            .unwrap()
+                            .date_naive()
+                            .to_string(),
+                        days.max(1),
+                    )
+                    .unwrap_or(crate::state::CalendarRange {
+                        timezone: calendar.timezone_string(),
+                        start_time: now.saturating_sub(days as u64 * 86400),
+                        end_time: now,
+                        days: vec![],
+                    })
+            });
+
         let mut stats = Vec::new();
-
-        for day_offset in 0..days {
-            let day_start = now.saturating_sub((day_offset as u64) * 86400);
-            let day_start = (day_start / 86400) * 86400;
-            let day_end = day_start + 86400;
-
+        for calendar_day in &range.days {
             let day_logs: Vec<_> = snapshot
                 .usage_logs
                 .iter()
                 .filter(|log| {
                     log.downstream_key_id == downstream_id
-                        && log.created_at >= day_start
-                        && log.created_at < day_end
+                        && log.created_at >= calendar_day.start_time
+                        && log.created_at < calendar_day.end_time
                 })
                 .collect();
 
@@ -439,7 +463,8 @@ impl AppState {
             };
 
             stats.push(DailyStats {
-                date: day_start,
+                day: calendar_day.day.clone(),
+                start_time: calendar_day.start_time,
                 total_requests: requests,
                 total_tokens: tokens,
                 success_rate,

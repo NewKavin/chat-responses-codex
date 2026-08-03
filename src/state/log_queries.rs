@@ -12,20 +12,25 @@ pub struct UsageLogQuery {
     pub status_codes: Vec<u16>,
     pub error_categories: Vec<String>,
     pub model_substring: Option<String>,
-    pub start_time: Option<u64>,
-    pub end_time: Option<u64>,
+    pub downstream_id: Option<String>,
+    pub upstream_id: Option<String>,
+    pub start_time: u64,
+    pub end_time: u64,
 }
 
 impl Default for UsageLogQuery {
     fn default() -> Self {
+        let now = crate::util::unix_seconds();
         Self {
             page: 1,
             page_size: 10,
             status_codes: Vec::new(),
             error_categories: Vec::new(),
             model_substring: None,
-            start_time: None,
-            end_time: None,
+            downstream_id: None,
+            upstream_id: None,
+            start_time: now.saturating_sub(7 * 86_400),
+            end_time: now,
         }
     }
 }
@@ -122,17 +127,11 @@ pub(crate) fn enrich_usage_log(log: &UsageLog) -> EnrichedUsageLog {
     }
 }
 
-pub(crate) fn query_time_bounds(query: &UsageLogQuery, now: u64) -> (u64, u64) {
-    if query.start_time.is_some() || query.end_time.is_some() {
-        let start = query.start_time.unwrap_or(0);
-        let end = query.end_time.unwrap_or(now);
-        if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        }
+pub(crate) fn query_time_bounds(query: &UsageLogQuery, _now: u64) -> (u64, u64) {
+    if query.start_time <= query.end_time {
+        (query.start_time, query.end_time)
     } else {
-        (now.saturating_sub(7 * 86_400), now)
+        (query.end_time, query.start_time)
     }
 }
 
@@ -245,6 +244,8 @@ impl AppState {
             status_codes: query.status_codes,
             error_categories: query.error_categories,
             model_substring: query.model_substring,
+            downstream_id: query.downstream_id,
+            upstream_id: query.upstream_id,
             start_time: query.start_time,
             end_time: query.end_time,
         };
@@ -274,7 +275,7 @@ impl AppState {
             .usage_logs
             .into_iter()
             .filter(|log| {
-                if log.created_at < start_time || log.created_at > end_time {
+                if log.created_at < start_time || log.created_at >= end_time {
                     return false;
                 }
 
@@ -297,6 +298,18 @@ impl AppState {
 
                 if let Some(model_substring) = &model_substring {
                     if !log.model.to_ascii_lowercase().contains(model_substring) {
+                        return false;
+                    }
+                }
+
+                if let Some(downstream_id) = &query.downstream_id {
+                    if log.downstream_key_id != *downstream_id {
+                        return false;
+                    }
+                }
+
+                if let Some(upstream_id) = &query.upstream_id {
+                    if log.upstream_key_id != *upstream_id {
                         return false;
                     }
                 }

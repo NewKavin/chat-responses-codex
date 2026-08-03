@@ -267,8 +267,8 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
             page_size: 2,
             status_codes: vec![200, 400],
             model_substring: Some("GPT".to_string()),
-            start_time: Some(now - 86_400),
-            end_time: Some(now),
+            start_time: now - 86_400,
+            end_time: now,
             ..Default::default()
         })
         .await
@@ -370,8 +370,8 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
 
     let page = state
         .query_usage_logs_page(UsageLogQuery {
-            start_time: Some(now - 86_400),
-            end_time: Some(now),
+            start_time: now - 86_400,
+            end_time: now,
             page: 1,
             page_size: 10,
             ..Default::default()
@@ -909,8 +909,8 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
         .query_usage_logs_page(UsageLogQuery {
             page: 1,
             page_size: 10,
-            start_time: Some(0),
-            end_time: Some(u64::MAX),
+            start_time: 0,
+            end_time: u64::MAX,
             model_substring: Some("glm".into()),
             ..Default::default()
         })

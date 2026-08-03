@@ -290,8 +290,10 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
 
     let page = reloaded
         .query_usage_logs_page(UsageLogQuery {
-            start_time: Some(0),
-            end_time: Some(u64::MAX),
+            start_time: 0,
+            end_time: u64::MAX,
+            downstream_id: None,
+            upstream_id: None,
             status_codes: vec![200],
             error_categories: vec![],
             model_substring: Some("glm".to_string()),
@@ -402,8 +404,10 @@ async fn postgres_roundtrip_preserves_compatibility_metadata_and_first_token_lat
         .expect("should reload state from PostgreSQL");
     let page = reloaded
         .query_usage_logs_page(UsageLogQuery {
-            start_time: Some(0),
-            end_time: Some(u64::MAX),
+            start_time: 0,
+            end_time: u64::MAX,
+            downstream_id: None,
+            upstream_id: None,
             status_codes: vec![],
             error_categories: vec![],
             model_substring: None,
@@ -1082,8 +1086,10 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
 
     let page = state
         .query_usage_logs_page(UsageLogQuery {
-            start_time: Some(0),
-            end_time: Some(u64::MAX),
+            start_time: 0,
+            end_time: u64::MAX,
+            downstream_id: None,
+            upstream_id: None,
             status_codes: vec![],
             error_categories: vec![],
             model_substring: None,
@@ -1711,4 +1717,113 @@ async fn legacy_row_without_wire_status_gets_normalized_on_load() {
         "legacy wire_status_code 0 must normalize to status_code"
     );
     assert!(reloaded_log.stream_diagnostics.is_none());
+}
+
+#[tokio::test]
+async fn postgres_usage_log_query_respects_half_open_day_bounds() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres half-open bounds test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database_async(&database_url).await;
+
+    let config = AppConfig {
+        deployment_timezone: "Asia/Shanghai".to_string(),
+        ..Default::default()
+    };
+    let state = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should connect to the PostgreSQL test database");
+
+    let calendar = chat_responses_codex::state::DeploymentCalendar::parse("Asia/Shanghai").unwrap();
+    let day = calendar.day("2026-08-01").unwrap();
+    // start_time is inclusive, end_time is exclusive
+    let boundary_log_start = UsageLog {
+        id: "boundary-start".into(),
+        downstream_key_id: "down-1".into(),
+        upstream_key_id: "up-1".into(),
+        downstream_name: None,
+        upstream_name: None,
+        endpoint: "/v1/chat/completions".into(),
+        model: "test".into(),
+        inference_strength: None,
+        billing_mode: None,
+        request_count: None,
+        user_agent: None,
+        request_id: "req-start".into(),
+        status_code: 200,
+        wire_status_code: 0,
+        stream_diagnostics: None,
+        error_message: None,
+        error_category: None,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        first_token_latency_ms: None,
+        latency_ms: 0,
+        created_at: day.start_time, // exactly at start boundary
+        compatibility: None,
+    };
+    let boundary_log_end = UsageLog {
+        id: "boundary-end".into(),
+        request_id: "req-end".into(),
+        created_at: day.end_time, // exactly at end boundary
+        ..boundary_log_start.clone()
+    };
+    let interior_log = UsageLog {
+        id: "interior".into(),
+        request_id: "req-interior".into(),
+        created_at: day.start_time + 3600, // 1 hour into the day
+        ..boundary_log_start.clone()
+    };
+
+    for log in [&boundary_log_start, &boundary_log_end, &interior_log] {
+        state
+            .append_usage_log(log.clone())
+            .await
+            .expect("should persist usage log");
+    }
+    state
+        .flush_usage_logs_for_test()
+        .await
+        .expect("should flush");
+
+    let page = state
+        .query_usage_logs_page(UsageLogQuery {
+            start_time: day.start_time,
+            end_time: day.end_time,
+            status_codes: vec![],
+            error_categories: vec![],
+            model_substring: None,
+            downstream_id: None,
+            upstream_id: None,
+            page: 1,
+            page_size: 50,
+        })
+        .await
+        .expect("query should succeed");
+
+    // start_time boundary log is included (>=), end_time boundary log is excluded (<)
+    let ids: Vec<&str> = page.logs.iter().map(|e| e.log.id.as_str()).collect();
+    assert!(
+        ids.contains(&"boundary-start"),
+        "log at start_time must be included (half-open >=)"
+    );
+    assert!(
+        ids.contains(&"interior"),
+        "log within the day must be included"
+    );
+    assert!(
+        !ids.contains(&"boundary-end"),
+        "log at end_time must be excluded (half-open <)"
+    );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
 }

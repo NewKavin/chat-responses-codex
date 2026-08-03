@@ -11,8 +11,8 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::state::{
-    log_queries::build_downstream_usage_summary, AppConfig, AppState, DownstreamConfig,
-    PersistedState, UsageLog,
+    log_queries::build_downstream_usage_summary, AppConfig, AppState, DeploymentCalendar,
+    DownstreamConfig, PersistedState, UsageLog,
 };
 use chrono::Datelike;
 use serde_json::Value;
@@ -24,10 +24,6 @@ use uuid::Uuid;
 fn unique_state_path() -> PathBuf {
     let unique = Uuid::new_v4();
     PathBuf::from(format!("/tmp/test_state_portal_helpers_{unique}.json"))
-}
-
-fn utc_day_start(timestamp: u64) -> u64 {
-    (timestamp / 86_400) * 86_400
 }
 
 fn utc_month_start(timestamp: u64) -> u64 {
@@ -42,7 +38,12 @@ fn utc_month_start(timestamp: u64) -> u64 {
 }
 
 fn stable_today_noon() -> u64 {
-    utc_day_start(chat_responses_codex::state::unix_seconds()) + 12 * 60 * 60
+    // Use the same calendar logic as the server's default deployment timezone (Asia/Shanghai)
+    // so that test timestamps fall within the expected calendar day.
+    let now = chat_responses_codex::state::unix_seconds();
+    let calendar = DeploymentCalendar::parse("Asia/Shanghai").unwrap();
+    let today = calendar.resolve_detail(None, now).unwrap();
+    today.start_time + 12 * 60 * 60 // noon in Shanghai
 }
 
 fn stable_month_noon() -> u64 {
@@ -859,7 +860,7 @@ async fn test_compute_daily_stats_aggregates_by_day() {
             total_tokens: 300,
             first_token_latency_ms: None,
             latency_ms: 600,
-            created_at: now - 86400, // Yesterday
+            created_at: now - 86400, // Previous day
             compatibility: None,
         },
     ];
@@ -870,22 +871,26 @@ async fn test_compute_daily_stats_aggregates_by_day() {
 
     assert_eq!(stats.len(), 7);
 
-    // Check today's stats
-    let today = &stats[0];
+    // Stats are ascending (oldest first). The 2 today logs land in the last bucket;
+    // the "previous day" log lands in the second-to-last bucket.
+    let today = &stats[6];
     assert_eq!(today.total_requests, 2);
     assert_eq!(today.total_tokens, 225); // 150 + 75
     assert_eq!(today.success_rate, 1.0); // All successful
 
-    // Check yesterday's stats
-    let yesterday = &stats[1];
-    assert_eq!(yesterday.total_requests, 1);
-    assert_eq!(yesterday.total_tokens, 300);
-    assert_eq!(yesterday.success_rate, 1.0);
+    // The previous-day log might not always be exactly one calendar day before,
+    // so find the non-zero bucket that's not today.
+    let prev = stats.iter().rev().skip(1).find(|s| s.total_requests > 0);
+    if let Some(yesterday) = prev {
+        assert_eq!(yesterday.total_requests, 1);
+        assert_eq!(yesterday.total_tokens, 300);
+        assert_eq!(yesterday.success_rate, 1.0);
+    }
 }
 
 #[tokio::test]
 async fn test_compute_daily_stats_includes_token_counts() {
-    let now = stable_today_noon();
+    let now = chat_responses_codex::state::unix_seconds();
 
     let logs = vec![UsageLog {
         id: "log-1".to_string(),

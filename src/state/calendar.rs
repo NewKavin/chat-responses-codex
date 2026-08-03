@@ -24,6 +24,48 @@ pub struct CalendarRange {
     pub days: Vec<CalendarDay>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogWindowMode {
+    CalendarDay,
+    Rolling1h,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ResolvedLogWindow {
+    pub mode: LogWindowMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub day: Option<String>,
+    pub timezone: String,
+    pub start_time: u64,
+    pub end_time: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SummaryRange {
+    OneDay,
+    SevenDays,
+    ThirtyDays,
+}
+
+impl SummaryRange {
+    pub fn day_count(&self) -> usize {
+        match self {
+            SummaryRange::OneDay => 1,
+            SummaryRange::SevenDays => 7,
+            SummaryRange::ThirtyDays => 30,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SummaryRange::OneDay => "1d",
+            SummaryRange::SevenDays => "7d",
+            SummaryRange::ThirtyDays => "30d",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DeploymentCalendar {
     timezone: Tz,
@@ -49,6 +91,10 @@ impl DeploymentCalendar {
             .parse::<Tz>()
             .map_err(|_| CalendarError::InvalidTimezone(timezone.to_string()))?;
         Ok(Self { timezone })
+    }
+
+    pub fn timezone_string(&self) -> String {
+        self.timezone.to_string()
     }
 
     pub fn today(&self, now: u64) -> Result<CalendarDay, CalendarError> {
@@ -90,6 +136,64 @@ impl DeploymentCalendar {
             end_time: calendar_days[days - 1].end_time,
             days: calendar_days,
         })
+    }
+
+    /// Resolve a detail log window for a given day (or today if None).
+    /// Returns a half-open [start, end) interval covering one calendar day.
+    pub fn resolve_detail(
+        &self,
+        day: Option<&str>,
+        now: u64,
+    ) -> Result<ResolvedLogWindow, CalendarError> {
+        let day_str = match day {
+            Some(d) => d.to_string(),
+            None => {
+                let now_ts = i64::try_from(now).map_err(|_| CalendarError::TimestampOutOfRange)?;
+                let now_dt = DateTime::<Utc>::from_timestamp(now_ts, 0)
+                    .ok_or(CalendarError::TimestampOutOfRange)?;
+                now_dt
+                    .with_timezone(&self.timezone)
+                    .date_naive()
+                    .to_string()
+            }
+        };
+        let calendar_day = self.day(&day_str)?;
+        Ok(ResolvedLogWindow {
+            mode: LogWindowMode::CalendarDay,
+            day: Some(day_str),
+            timezone: self.timezone.to_string(),
+            start_time: calendar_day.start_time,
+            end_time: calendar_day.end_time,
+        })
+    }
+
+    /// Resolve a rolling 1-hour window ending at `now`.
+    pub fn resolve_rolling_1h(&self, now: u64) -> ResolvedLogWindow {
+        let start = now.saturating_sub(3600);
+        ResolvedLogWindow {
+            mode: LogWindowMode::Rolling1h,
+            day: None,
+            timezone: self.timezone.to_string(),
+            start_time: start,
+            end_time: now,
+        }
+    }
+
+    /// Resolve a summary range ending on today (in the deployment timezone).
+    /// Returns ascending calendar days with zero-filled buckets.
+    pub fn resolve_summary(
+        &self,
+        range: SummaryRange,
+        now: u64,
+    ) -> Result<CalendarRange, CalendarError> {
+        let now_ts = i64::try_from(now).map_err(|_| CalendarError::TimestampOutOfRange)?;
+        let now_dt = DateTime::<Utc>::from_timestamp(now_ts, 0)
+            .ok_or(CalendarError::TimestampOutOfRange)?;
+        let today_str = now_dt
+            .with_timezone(&self.timezone)
+            .date_naive()
+            .to_string();
+        self.range_ending_on(&today_str, range.day_count())
     }
 
     fn day_for_date(&self, date: NaiveDate) -> Result<CalendarDay, CalendarError> {

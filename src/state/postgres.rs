@@ -487,10 +487,12 @@ impl PostgresStateStore {
                 "SELECT COUNT(*)::BIGINT
                  FROM usage_logs
                  WHERE created_at >= $1
-                   AND created_at <= $2
+                   AND created_at < $2
                    AND ($3 OR status_code = ANY($4))
                    AND ($5 OR LOWER(TRIM(COALESCE(error_category, ''))) = ANY($6))
-                   AND ($7::TEXT IS NULL OR POSITION($7 IN LOWER(TRIM(model))) > 0)",
+                   AND ($7::TEXT IS NULL OR POSITION($7 IN LOWER(TRIM(model))) > 0)
+                   AND ($8::TEXT IS NULL OR downstream_key_id = $8)
+                   AND ($9::TEXT IS NULL OR upstream_key_id = $9)",
                 &[
                     &start_time,
                     &end_time,
@@ -499,6 +501,8 @@ impl PostgresStateStore {
                     &no_error_category_filter,
                     &error_categories,
                     &model_substring,
+                    &query.downstream_id,
+                    &query.upstream_id,
                 ],
             )
             .await
@@ -520,12 +524,14 @@ impl PostgresStateStore {
                         status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
                  FROM usage_logs
                  WHERE created_at >= $1
-                   AND created_at <= $2
+                   AND created_at < $2
                    AND ($3 OR status_code = ANY($4))
                    AND ($5 OR LOWER(TRIM(COALESCE(error_category, ''))) = ANY($6))
                    AND ($7::TEXT IS NULL OR POSITION($7 IN LOWER(TRIM(model))) > 0)
+                   AND ($8::TEXT IS NULL OR downstream_key_id = $8)
+                   AND ($9::TEXT IS NULL OR upstream_key_id = $9)
                  ORDER BY created_at DESC, request_id ASC, id ASC
-                 LIMIT $8 OFFSET $9",
+                 LIMIT $10 OFFSET $11",
                 &[
                     &start_time,
                     &end_time,
@@ -534,6 +540,8 @@ impl PostgresStateStore {
                     &no_error_category_filter,
                     &error_categories,
                     &model_substring,
+                    &query.downstream_id,
+                    &query.upstream_id,
                     &limit,
                     &offset,
                 ],
