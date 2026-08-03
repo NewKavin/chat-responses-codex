@@ -132,21 +132,21 @@
     </section>
 
     <section class="overview-runtime-strip syscall-stagger" aria-label="下游运行并发">
-      <template v-if="data.concurrency && data.concurrency.available">
-        <span class="overview-runtime-metric">
-          <Activity :size="14" :stroke-width="1.8" />运行中 {{ data.concurrency.running ?? 0 }}
+      <template v-if="data.concurrency.available">
+        <span class="overview-runtime-metric" v-if="data.concurrency.running !== undefined">
+          <Activity :size="14" :stroke-width="1.8" />运行中 {{ data.concurrency.running }}
         </span>
-        <span class="overview-runtime-metric">
-          <Clock3 :size="14" :stroke-width="1.8" />等待上游 {{ data.concurrency.waiting_upstream ?? 0 }}
+        <span class="overview-runtime-metric" v-if="data.concurrency.waiting_upstream !== undefined">
+          <Clock3 :size="14" :stroke-width="1.8" />等待上游 {{ data.concurrency.waiting_upstream }}
         </span>
-        <span class="overview-runtime-metric">
-          <Gauge :size="14" :stroke-width="1.8" />已占用 {{ data.concurrency.admitted ?? 0 }}
+        <span class="overview-runtime-metric" v-if="data.concurrency.admitted !== undefined">
+          <Gauge :size="14" :stroke-width="1.8" />已占用 {{ data.concurrency.admitted }}
         </span>
         <span class="overview-runtime-metric">
           <ShieldCheck :size="14" :stroke-width="1.8" />上限 {{ data.concurrency.limit }}
         </span>
       </template>
-      <template v-else-if="data.concurrency">
+      <template v-else>
         <span class="overview-runtime-unavailable">
           <ShieldCheck :size="14" :stroke-width="1.8" />协调不可用 · 上限 {{ data.concurrency.limit }}
         </span>
@@ -317,7 +317,7 @@ const data = ref<PortalOverview>({
   quota_summary: { request_quota: undefined, token_daily: undefined, token_monthly: undefined },
   token_summary: { today: 0, this_month: 0 },
   model_summary: { total_models: 0, active_models: 0 },
-  concurrency: undefined
+  concurrency: { available: false, limit: 0, updated_at: 0 }
 })
 
 const quotaData = ref<PortalQuota>({
@@ -403,6 +403,14 @@ const loadOverview = async () => {
     const { data: payload } = await portalApi.getOverview()
     data.value = payload
   } catch (error) {
+    data.value = {
+      ...data.value,
+      concurrency: {
+        available: false,
+        limit: data.value.concurrency.limit,
+        updated_at: data.value.concurrency.updated_at
+      }
+    }
     console.error('加载门户概览失败', error)
   } finally {
     overviewLoaded.value = true

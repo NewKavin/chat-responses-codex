@@ -3,11 +3,11 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     fetch_models_from_upstream_keys_concurrently, model_discovery_url, portal_model_is_allowed,
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState,
-    DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig, FreekeySyncError,
-    FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
-    ModelQualificationEvidence, ModelQualificationLevel, RouteHealthSnapshotDto,
-    RuntimeCoordinationError, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision,
-    UsageLog, UsageLogQuery,
+    DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig, EnrichedUsageLog,
+    FreekeySyncError, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
+    ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
+    ResolvedLogWindow, RouteHealthSnapshotDto, RuntimeCoordinationError, UpstreamConfig,
+    UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -2192,8 +2192,7 @@ pub(super) struct LogsQuery {
     error_categories: Option<String>,
     model: Option<String>,
     day: Option<String>,
-    #[serde(default = "default_time_range")]
-    time_range: String,
+    time_range: Option<String>,
     start_time: Option<u64>,
     end_time: Option<u64>,
 }
@@ -2204,10 +2203,6 @@ fn default_page() -> usize {
 fn default_page_size() -> usize {
     10
 }
-fn default_time_range() -> String {
-    "1d".to_string()
-}
-
 fn bad_request_logs(
     _page: usize,
     _page_size: usize,
@@ -2223,6 +2218,33 @@ fn bad_request_logs(
         })),
     )
         .into_response()
+}
+
+#[derive(Debug, Serialize)]
+struct AdminLogsResponse {
+    logs: Vec<EnrichedUsageLog>,
+    total: usize,
+    page: usize,
+    page_size: usize,
+    total_pages: usize,
+    #[serde(flatten)]
+    window: ResolvedLogWindow,
+}
+
+fn empty_admin_logs_response(
+    page: usize,
+    page_size: usize,
+    window: &ResolvedLogWindow,
+) -> Response {
+    Json(AdminLogsResponse {
+        logs: Vec::new(),
+        total: 0,
+        page,
+        page_size,
+        total_pages: 0,
+        window: window.clone(),
+    })
+    .into_response()
 }
 
 /// List logs with filtering and pagination
@@ -2241,7 +2263,7 @@ pub(super) async fn admin_list_logs(
     //   3. time_range=1h → rolling 1h (legacy compatibility)
     // All other combinations return 400 BAD_REQUEST.
     let has_day = query.day.is_some();
-    let has_time_range = query.time_range != "1d"; // "1d" is the serde default
+    let has_time_range = query.time_range.is_some();
     let has_epoch = query.start_time.is_some() || query.end_time.is_some();
 
     // Reject conflicting combinations
@@ -2252,7 +2274,7 @@ pub(super) async fn admin_list_logs(
         return bad_request_logs(query.page, query.page_size, &state);
     }
     // Only time_range=1h is allowed (rolling 1h legacy compat)
-    if has_time_range && query.time_range != "1h" {
+    if has_time_range && query.time_range.as_deref() != Some("1h") {
         return bad_request_logs(query.page, query.page_size, &state);
     }
 
@@ -2263,7 +2285,7 @@ pub(super) async fn admin_list_logs(
             Ok(w) => (w.start_time, w.end_time, w),
             Err(_) => return bad_request_logs(query.page, query.page_size, &state),
         }
-    } else if has_time_range && query.time_range == "1h" {
+    } else if query.time_range.as_deref() == Some("1h") {
         let w = calendar.resolve_rolling_1h(now);
         (w.start_time, w.end_time, w)
     } else {
@@ -2294,14 +2316,7 @@ pub(super) async fn admin_list_logs(
                 .page_size
                 .clamp(1, state.config.admin_logs_page_size_max.max(1));
             let page = query.page.max(1);
-            return Json(json!({
-                "logs": Vec::<Value>::new(),
-                "total": 0,
-                "page": page,
-                "page_size": page_size,
-                "total_pages": 0,
-            }))
-            .into_response();
+            return empty_admin_logs_response(page, page_size, &window);
         }
     }
     let mut error_categories = query
@@ -2330,14 +2345,7 @@ pub(super) async fn admin_list_logs(
                 .page_size
                 .clamp(1, state.config.admin_logs_page_size_max.max(1));
             let page = query.page.max(1);
-            return Json(json!({
-                "logs": Vec::<Value>::new(),
-                "total": 0,
-                "page": page,
-                "page_size": page_size,
-                "total_pages": 0,
-            }))
-            .into_response();
+            return empty_admin_logs_response(page, page_size, &window);
         }
     }
     if query
@@ -2349,14 +2357,7 @@ pub(super) async fn admin_list_logs(
             .page_size
             .clamp(1, state.config.admin_logs_page_size_max.max(1));
         let page = query.page.max(1);
-        return Json(json!({
-            "logs": Vec::<Value>::new(),
-            "total": 0,
-            "page": page,
-            "page_size": page_size,
-            "total_pages": 0,
-        }))
-        .into_response();
+        return empty_admin_logs_response(page, page_size, &window);
     }
 
     let page = state
@@ -2388,14 +2389,14 @@ pub(super) async fn admin_list_logs(
         Err(response) => return response.into_response(),
     };
 
-    Json(json!({
-        "logs": page.logs,
-        "total": page.total,
-        "page": page.page,
-        "page_size": page.page_size,
-        "total_pages": page.total_pages,
-        "window": window,
-    }))
+    Json(AdminLogsResponse {
+        logs: page.logs,
+        total: page.total,
+        page: page.page,
+        page_size: page.page_size,
+        total_pages: page.total_pages,
+        window,
+    })
     .into_response()
 }
 

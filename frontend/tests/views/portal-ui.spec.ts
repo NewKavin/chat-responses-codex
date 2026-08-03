@@ -152,5 +152,15 @@ describe('portal usage history independence', () => {
     expect(page).toContain('loadSummary')
     expect(page).toContain('loadLogs')
     expect(page).toContain('pagination.value.page = 1')
+    expect(page).toContain('history.logs')
+    expect(page).toContain('history.total')
+    expect(page).not.toContain('history.recent_logs')
+  })
+
+  it('keeps the shared loading state active until parallel requests settle', () => {
+    const page = source('UsageHistory')
+
+    expect(page).toContain('activeLoads')
+    expect(page).toContain('loading.value = activeLoads.value > 0')
   })
 })

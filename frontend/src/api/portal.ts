@@ -6,7 +6,8 @@ import type {
   ModelProbeResponse,
   PortalQuota,
   PortalUsageHistory,
-  PortalUsageSummary
+  PortalUsageSummary,
+  ChartTimeRange
 } from '@/types'
 
 export interface AnnouncementResponse {
@@ -59,7 +60,7 @@ export const portalApi = {
     portalHttp.get<PortalUsageHistory>('/portal/usage-history', { params }),
 
   // Usage Summary (independent seven-day chart aggregation)
-  getUsageSummary: (params: { time_range?: string }) =>
+  getUsageSummary: (params: { time_range?: ChartTimeRange }) =>
     portalHttp.get<PortalUsageSummary>('/portal/usage-summary', { params }),
 
   // Key Management

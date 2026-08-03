@@ -195,7 +195,11 @@ export interface LogsResponse {
   page: number
   page_size: number
   total_pages: number
-  window?: ResolvedLogWindow
+  mode: ResolvedLogWindow['mode']
+  day?: string
+  timezone: string
+  start_time: number
+  end_time: number
 }
 
 // ============================================================================
@@ -273,7 +277,7 @@ export interface PortalOverview {
     total_models: number
     active_models: number
   }
-  concurrency?: DownstreamConcurrencySnapshot
+  concurrency: DownstreamConcurrencySnapshot
 }
 
 export interface PortalModelStat {
@@ -305,17 +309,37 @@ export interface PortalQuota {
 }
 
 export interface PortalUsageHistory {
-  daily_stats: DailyStats[]
-  recent_logs: UsageLog[]
-  recent_logs_total: number
-  recent_logs_page: number
-  recent_logs_page_size: number
-  recent_logs_total_pages: number
-  window?: ResolvedLogWindow
+  logs: PortalUsageLog[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+  mode: ResolvedLogWindow['mode']
+  day?: string
+  timezone: string
+  start_time: number
+  end_time: number
+}
+
+export interface PortalUsageLog {
+  id: string
+  endpoint: string
+  model: string
+  api_name?: string
+  inference_strength?: string
+  log_type?: string
+  status_code: number
+  error_category?: string | null
+  first_token_latency_ms?: number | null
+  latency_ms: number
+  created_at: number
 }
 
 export interface PortalUsageSummary {
   time_range: ChartTimeRange
+  timezone: string
+  start_time: number
+  end_time: number
   daily_stats: DailyStats[]
 }
 

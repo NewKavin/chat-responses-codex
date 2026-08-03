@@ -490,8 +490,8 @@ const loadData = async () => {
     pagination.value.total_pages = data.total_pages
     // Echo the server-resolved day so the picker stays in sync with the
     // selected calendar day after the response returns.
-    if (data.window?.day) {
-      filters.value.day = data.window.day
+    if (data.day) {
+      filters.value.day = data.day
     }
   } catch (error) {
     const errorMsg =

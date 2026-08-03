@@ -66,22 +66,22 @@
         </el-table-column>
         <el-table-column label="运行并发" width="220">
           <template #default="{ row }">
-            <div class="runtime-cell" v-if="runtimeById[row.id] && runtimeById[row.id].available">
-              <span class="runtime-metric">
-                <Activity :size="12" :stroke-width="1.8" />运行中 {{ runtimeById[row.id].running ?? 0 }}
+            <div class="runtime-cell" v-if="runtimeById[row.id]?.available">
+              <span class="runtime-metric" v-if="runtimeById[row.id]?.running !== undefined">
+                <Activity :size="12" :stroke-width="1.8" />运行中 {{ runtimeById[row.id]?.running }}
+              </span>
+              <span class="runtime-metric" v-if="runtimeById[row.id]?.waiting_upstream !== undefined">
+                <Clock3 :size="12" :stroke-width="1.8" />等待上游 {{ runtimeById[row.id]?.waiting_upstream }}
+              </span>
+              <span class="runtime-metric" v-if="runtimeById[row.id]?.admitted !== undefined">
+                <Gauge :size="12" :stroke-width="1.8" />已占用 {{ runtimeById[row.id]?.admitted }}
               </span>
               <span class="runtime-metric">
-                <Clock3 :size="12" :stroke-width="1.8" />等待上游 {{ runtimeById[row.id].waiting_upstream ?? 0 }}
-              </span>
-              <span class="runtime-metric">
-                <Gauge :size="12" :stroke-width="1.8" />已占用 {{ runtimeById[row.id].admitted ?? 0 }}
-              </span>
-              <span class="runtime-metric">
-                <ShieldCheck :size="12" :stroke-width="1.8" />上限 {{ runtimeById[row.id].limit }}
+                <ShieldCheck :size="12" :stroke-width="1.8" />上限 {{ runtimeById[row.id]?.limit }}
               </span>
             </div>
-            <el-tag v-else-if="runtimeById[row.id]" type="info" size="small">Unavailable</el-tag>
-            <el-tag v-else type="info" size="small">上限 {{ row.max_concurrency ?? 10 }}</el-tag>
+            <el-tag v-else-if="runtimeById[row.id]?.available === false" type="info" size="small">Unavailable</el-tag>
+            <el-tag v-else type="info" size="small">Unavailable</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="生命周期" width="120">
@@ -387,11 +387,29 @@ const loadRuntime = async () => {
     for (const item of data.items) {
       next[item.downstream_id] = item.concurrency
     }
+    for (const row of downstreams.value) {
+      if (!next[row.id]) {
+        next[row.id] = unavailableRuntime(row.max_concurrency ?? 10, data.updated_at)
+      }
+    }
     runtimeById.value = next
   } catch {
-    // Lightweight runtime poll failures only mark coordination unavailable;
-    // never refetch the full downstream list and never block normal requests.
+    markRuntimeUnavailable()
   }
+}
+
+const unavailableRuntime = (limit: number, updatedAt = 0): DownstreamConcurrencySnapshot => ({
+  available: false,
+  limit,
+  updated_at: updatedAt
+})
+
+const markRuntimeUnavailable = () => {
+  const next: Record<string, DownstreamConcurrencySnapshot> = {}
+  for (const row of downstreams.value) {
+    next[row.id] = unavailableRuntime(row.max_concurrency ?? 10)
+  }
+  runtimeById.value = next
 }
 
 const handleCreate = () => {

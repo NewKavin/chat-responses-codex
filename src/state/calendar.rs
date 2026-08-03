@@ -28,6 +28,7 @@ pub struct CalendarRange {
 #[serde(rename_all = "snake_case")]
 pub enum LogWindowMode {
     CalendarDay,
+    #[serde(rename = "rolling_1h")]
     Rolling1h,
 }
 

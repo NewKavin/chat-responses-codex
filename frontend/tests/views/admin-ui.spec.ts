@@ -130,6 +130,19 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('{{ row.latency_ms }}ms')
   })
 
+  it('uses the flattened server day and keeps runtime failures scoped to polling', () => {
+    const logs = source('views/admin/Logs.vue')
+    expect(logs).toContain('data.day')
+    expect(logs).not.toContain('data.window?.day')
+
+    const downstreams = source('views/admin/Downstreams.vue')
+    const loadDataBody = downstreams.slice(
+      downstreams.indexOf('const loadData = async () =>'),
+      downstreams.indexOf('const loadRuntime = async () =>')
+    )
+    expect(loadDataBody).not.toContain('markRuntimeUnavailable()')
+  })
+
   it('uses unframed troubleshooting sections and one matrix tool surface', () => {
     const page = source('views/admin/Troubleshooting.vue')
     const center = source('components/TroubleshootingCenter.vue')
@@ -202,6 +215,16 @@ describe('admin downstream runtime display', () => {
     expect(page).toContain('等待上游')
     expect(page).toContain('已占用')
     expect(page).toContain('上限')
+  })
+
+  it('marks runtime failures and missing ids unavailable without zero-filling counts', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('available: false')
+    expect(page).toContain('runtimeById[row.id]?.available === false')
+    expect(page).not.toContain('running ?? 0')
+    expect(page).not.toContain('waiting_upstream ?? 0')
+    expect(page).not.toContain('admitted ?? 0')
   })
 })
 

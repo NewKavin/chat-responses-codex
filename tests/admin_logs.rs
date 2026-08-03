@@ -461,6 +461,10 @@ async fn test_logs_list_with_blank_model_filter_returns_no_matches() {
     assert_eq!(result["total"], 0);
     assert_eq!(result["total_pages"], 0);
     assert_eq!(result["logs"].as_array().unwrap().len(), 0);
+    assert_eq!(result["mode"], "calendar_day");
+    assert!(result["timezone"].is_string());
+    assert!(result["start_time"].is_number());
+    assert!(result["end_time"].is_number());
 }
 
 #[tokio::test]
@@ -959,20 +963,14 @@ async fn admin_logs_default_to_today_and_only_allow_one_rolling_compatibility_fo
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(result["window"]["mode"], "calendar_day");
+    assert_eq!(result["mode"], "calendar_day");
     assert_eq!(
-        result["window"]["day"].as_str().unwrap(),
+        result["day"].as_str().unwrap(),
         today.day.as_deref().unwrap()
     );
-    assert_eq!(result["window"]["timezone"], timezone);
-    assert_eq!(
-        result["window"]["start_time"].as_u64().unwrap(),
-        today.start_time
-    );
-    assert_eq!(
-        result["window"]["end_time"].as_u64().unwrap(),
-        today.end_time
-    );
+    assert_eq!(result["timezone"], timezone);
+    assert_eq!(result["start_time"].as_u64().unwrap(), today.start_time);
+    assert_eq!(result["end_time"].as_u64().unwrap(), today.end_time);
 
     // day=YYYY-MM-DD for a valid past date is accepted
     let response = app
@@ -1007,11 +1005,12 @@ async fn admin_logs_default_to_today_and_only_allow_one_rolling_compatibility_fo
         .await
         .unwrap();
     let result: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(result["window"]["mode"], "rolling1h");
+    assert_eq!(result["mode"], "rolling_1h");
 
     // Invalid combinations return 400 BAD_REQUEST
     for uri in [
         "/api/admin/logs?time_range=7d",
+        "/api/admin/logs?time_range=1d",
         "/api/admin/logs?start_time=1&end_time=2",
         "/api/admin/logs?day=2026-08-01&time_range=1h",
         "/api/admin/logs?day=2026-02-30",

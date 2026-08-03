@@ -87,26 +87,6 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="Token" min-width="180">
-              <template #default="{ row }">
-                <div class="token-cell">
-                  <div class="token-pair">
-                    <div class="token-line token-line--prompt">
-                      <ArrowUp :size="12" :stroke-width="2.2" />
-                      <span>{{ formatToken(row.prompt_tokens) }}</span>
-                    </div>
-                    <div class="token-line token-line--completion">
-                      <ArrowDown :size="12" :stroke-width="2.2" />
-                      <span>{{ formatToken(row.completion_tokens) }}</span>
-                    </div>
-                  </div>
-                  <div class="token-line token-line--total">
-                    <Sigma :size="12" :stroke-width="2" />
-                    <strong>{{ formatToken(row.total_tokens) }}</strong>
-                  </div>
-                </div>
-              </template>
-            </el-table-column>
             <el-table-column label="延迟" width="132">
               <template #default="{ row }">
                 <div class="latency-cell">
@@ -115,9 +95,9 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="错误信息" min-width="220" show-overflow-tooltip>
+            <el-table-column label="错误类别" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">
-                {{ row.error_message?.trim() || '-' }}
+                {{ row.error_category?.trim() || '-' }}
               </template>
             </el-table-column>
           </el-table>
@@ -142,9 +122,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ArrowDown, ArrowUp, RefreshCw, Sigma } from '@lucide/vue'
+import { RefreshCw } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
-import type { PortalUsageSummary, UsageLog } from '@/types'
+import type { PortalUsageLog, PortalUsageSummary } from '@/types'
 import { buildUsageHistoryBuckets } from '@/utils/usageHistoryChart'
 import { loadEcharts } from '@/utils/echartsLoader'
 import type { EChartsType } from 'echarts/core'
@@ -172,8 +152,9 @@ let dailyResizeObserver: ResizeObserver | null = null
 let tokenResizeObserver: ResizeObserver | null = null
 
 const dailyStats = ref<PortalUsageSummary['daily_stats']>([])
-const recentLogs = ref<UsageLog[]>([])
+const recentLogs = ref<PortalUsageLog[]>([])
 const detailDay = ref<string>('')
+const activeLoads = ref(0)
 
 const pagination = ref({
   page: 1,
@@ -188,8 +169,6 @@ const tableHeight = computed(() => {
   const tableHeaderHeight = 56
   return Math.max(280, Math.min(640, tableHeaderHeight + rows * estimatedRowHeight))
 })
-
-const formatToken = (value: number) => value.toLocaleString('zh-CN')
 
 const getStatusType = (statusCode: number) => {
   if (statusCode >= 200 && statusCode < 300) return 'success'
@@ -343,11 +322,21 @@ const updateCharts = () => {
   updateTokenChart()
 }
 
+const beginLoad = () => {
+  activeLoads.value += 1
+  loading.value = true
+}
+
+const endLoad = () => {
+  activeLoads.value = Math.max(0, activeLoads.value - 1)
+  loading.value = activeLoads.value > 0
+}
+
 const loadSummary = async () => {
   try {
-    loading.value = true
+    beginLoad()
     const { data: summary } = await portalApi.getUsageSummary({
-      time_range: `${daysByRange[timeRange.value]}d`
+      time_range: timeRange.value
     })
     dailyStats.value = summary.daily_stats
 
@@ -356,30 +345,30 @@ const loadSummary = async () => {
   } catch (error) {
     ElMessage.error('加载图表失败')
   } finally {
-    loading.value = false
+    endLoad()
   }
 }
 
 const loadLogs = async () => {
   try {
-    loading.value = true
+    beginLoad()
     const { data: history } = await portalApi.getUsageHistory({
       day: detailDay.value || undefined,
       page: pagination.value.page,
       page_size: pagination.value.pageSize
     })
-    recentLogs.value = history.recent_logs
-    pagination.value.total = history.recent_logs_total
-    pagination.value.page = history.recent_logs_page
-    pagination.value.pageSize = history.recent_logs_page_size
-    pagination.value.totalPages = history.recent_logs_total_pages
-    if (history.window?.day) {
-      detailDay.value = history.window.day
+    recentLogs.value = history.logs
+    pagination.value.total = history.total
+    pagination.value.page = history.page
+    pagination.value.pageSize = history.page_size
+    pagination.value.totalPages = history.total_pages
+    if (history.day) {
+      detailDay.value = history.day
     }
   } catch (error) {
     ElMessage.error('加载日志失败')
   } finally {
-    loading.value = false
+    endLoad()
   }
 }
 

@@ -427,7 +427,10 @@ describe('admin downstream runtime api', () => {
 
   it('accepts calendar-day log queries with day, page, and page_size', async () => {
     const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
-      data: { logs: [], total: 0, page: 1, page_size: 10, total_pages: 0, window: {} }
+      data: {
+        logs: [], total: 0, page: 1, page_size: 10, total_pages: 0,
+        mode: 'calendar_day', timezone: 'Asia/Shanghai', start_time: 1, end_time: 2
+      }
     } as never)
 
     await adminApi.getLogs({ day: '2026-08-01', page: 1, page_size: 10 })
@@ -439,7 +442,10 @@ describe('admin downstream runtime api', () => {
 
   it('accepts the rolling 1h legacy detail range', async () => {
     const spy = vi.spyOn(adminHttp, 'get').mockResolvedValue({
-      data: { logs: [], total: 0, page: 1, page_size: 10, total_pages: 0, window: {} }
+      data: {
+        logs: [], total: 0, page: 1, page_size: 10, total_pages: 0,
+        mode: 'rolling_1h', timezone: 'Asia/Shanghai', start_time: 1, end_time: 2
+      }
     } as never)
 
     await adminApi.getLogs({ time_range: '1h', page: 1, page_size: 10 })
