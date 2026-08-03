@@ -1,6 +1,7 @@
 use futures_util::{stream, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 use std::time::Duration;
 
 pub const MODEL_DISCOVERY_MAX_CONCURRENCY: usize = 8;
@@ -9,12 +10,71 @@ pub fn model_discovery_url(base_url: &str) -> String {
     crate::util::join_upstream_url(base_url, "/v1/models")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelDiscoveryError {
+    Timeout,
+    Connection,
+    Request,
+    HttpStatus(u16),
+    InvalidJson,
+    MissingData,
+    EmptyModels,
+}
+
+impl ModelDiscoveryError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Connection => "connection",
+            Self::Request => "request",
+            Self::HttpStatus(_) => "http_status",
+            Self::InvalidJson => "invalid_json",
+            Self::MissingData => "missing_data",
+            Self::EmptyModels => "empty_models",
+        }
+    }
+
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::HttpStatus(status) => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ModelDiscoveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout => formatter.write_str("upstream model discovery timed out"),
+            Self::Connection => formatter.write_str("upstream model discovery connection failed"),
+            Self::Request => formatter.write_str("upstream model discovery request failed"),
+            Self::HttpStatus(status) => {
+                write!(
+                    formatter,
+                    "upstream model discovery returned status {status}"
+                )
+            }
+            Self::InvalidJson => {
+                formatter.write_str("upstream model discovery returned invalid JSON")
+            }
+            Self::MissingData => {
+                formatter.write_str("upstream model discovery response missing data")
+            }
+            Self::EmptyModels => formatter.write_str("upstream returned no models"),
+        }
+    }
+}
+
+impl std::error::Error for ModelDiscoveryError {}
+
 #[derive(Debug, Clone)]
 pub struct KeyModelDiscoveryResult {
     pub key_index: usize,
     pub models: Vec<String>,
     pub latency_ms: u64,
     pub error: Option<String>,
+    pub error_code: Option<String>,
+    pub http_status: Option<u16>,
 }
 
 pub async fn fetch_models_from_upstream(
@@ -22,7 +82,7 @@ pub async fn fetch_models_from_upstream(
     base_url: &str,
     api_key: &str,
     timeout_seconds: u64,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ModelDiscoveryError> {
     let url = model_discovery_url(base_url);
     let response = client
         .get(&url)
@@ -32,11 +92,11 @@ pub async fn fetch_models_from_upstream(
         .await
         .map_err(|error| {
             if error.is_timeout() {
-                "upstream model discovery timed out".to_string()
+                ModelDiscoveryError::Timeout
             } else if error.is_connect() {
-                "upstream model discovery connection failed".to_string()
+                ModelDiscoveryError::Connection
             } else {
-                "upstream model discovery request failed".to_string()
+                ModelDiscoveryError::Request
             }
         })?;
 
@@ -44,21 +104,18 @@ pub async fn fetch_models_from_upstream(
     if !status.is_success() {
         // Do not read or expose the provider body. It may contain credentials,
         // request data, or an unbounded diagnostic payload.
-        return Err(format!(
-            "upstream model discovery returned status {}",
-            status.as_u16()
-        ));
+        return Err(ModelDiscoveryError::HttpStatus(status.as_u16()));
     }
 
     let payload: Value = response
         .json()
         .await
-        .map_err(|_| "upstream model discovery returned invalid JSON".to_string())?;
+        .map_err(|_| ModelDiscoveryError::InvalidJson)?;
 
     let data = payload
         .get("data")
         .and_then(|value| value.as_array())
-        .ok_or_else(|| "upstream model discovery response missing data".to_string())?;
+        .ok_or(ModelDiscoveryError::MissingData)?;
 
     let mut models: Vec<String> = data
         .iter()
@@ -71,7 +128,7 @@ pub async fn fetch_models_from_upstream(
     models.dedup();
 
     if models.is_empty() {
-        return Err("upstream returned no models".to_string());
+        return Err(ModelDiscoveryError::EmptyModels);
     }
 
     Ok(models)
@@ -106,7 +163,12 @@ pub async fn fetch_models_from_upstream_keys_concurrently(
         let base_url = base_url.clone();
         async move {
             if key.is_empty() {
-                return (key_indices, Vec::new(), 0, Some("key is empty".to_string()));
+                return (
+                    key_indices,
+                    Vec::new(),
+                    0,
+                    Some(ModelDiscoveryError::Request),
+                );
             }
 
             let started = std::time::Instant::now();
@@ -133,11 +195,21 @@ pub async fn fetch_models_from_upstream_keys_concurrently(
     let mut results = Vec::with_capacity(keys.len());
     for (key_indices, models, latency_ms, error) in shared_results {
         for key_index in key_indices {
+            let (error_message, error_code, http_status) =
+                error.as_ref().map_or((None, None, None), |error| {
+                    (
+                        Some(error.to_string()),
+                        Some(error.code().to_string()),
+                        error.http_status(),
+                    )
+                });
             results.push(KeyModelDiscoveryResult {
                 key_index,
                 models: models.clone(),
                 latency_ms,
-                error: error.clone(),
+                error: error_message,
+                error_code,
+                http_status,
             });
         }
     }

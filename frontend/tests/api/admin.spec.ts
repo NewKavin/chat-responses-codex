@@ -142,6 +142,20 @@ describe('admin api auth behavior', () => {
     )
   })
 
+  it('explains an upstream HTTP 530 without calling it a certificate failure', () => {
+    expect(formatModelDiscoveryFailure({
+      models: [],
+      failed: 1,
+      total: 1,
+      results: [{
+        key_index: 0,
+        error_code: 'http_status',
+        http_status: 530,
+        error: 'upstream model discovery returned status 530'
+      }]
+    })).toBe('所有 Key 获取模型均失败：Key #1: 已收到上游 HTTP 530；可手动填写模型后继续保存')
+  })
+
   it('reconciles indexed discovery without reviving removed or failed new keys', () => {
     const previous: ApiKeyModelConfig[] = [
       { api_key: 'key-a', supported_models: ['old-a'] },

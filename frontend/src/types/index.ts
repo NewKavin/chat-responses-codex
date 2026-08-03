@@ -71,6 +71,8 @@ export interface KeyModelDiscoveryResult {
   models?: number
   model_list?: string[]
   error?: string
+  error_code?: 'timeout' | 'connection' | 'request' | 'http_status' | 'invalid_json' | 'missing_data' | 'empty_models'
+  http_status?: number
 }
 
 export interface UpstreamConfig {

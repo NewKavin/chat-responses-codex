@@ -69,7 +69,37 @@ export function formatModelDiscoveryFailure(result: DiscoverUpstreamModelsResult
   const summary = result.message?.trim() || '所有 Key 获取模型均失败'
   const details = result.results
     .filter(item => item.error?.trim())
-    .map(item => `Key #${item.key_index + 1}: ${item.error!.trim()}`)
+    .map(item => {
+      let message = item.error!.trim()
+      switch (item.error_code) {
+        case 'http_status': {
+          const status = Number(item.http_status)
+          if (Number.isInteger(status) && status >= 100 && status <= 599) {
+            message = `已收到上游 HTTP ${status}；可手动填写模型后继续保存`
+          }
+          break
+        }
+        case 'connection':
+          message = '无法连接上游；请检查 DNS、TLS/自定义 CA、防火墙和源站可达性'
+          break
+        case 'timeout':
+          message = '上游模型列表请求超时；请检查源站响应时间'
+          break
+        case 'invalid_json':
+          message = '上游模型列表不是有效 JSON；可手动填写模型后继续保存'
+          break
+        case 'missing_data':
+          message = '上游模型列表缺少 data；可手动填写模型后继续保存'
+          break
+        case 'empty_models':
+          message = '上游未返回模型；可手动填写模型后继续保存'
+          break
+        case 'request':
+          message = '上游模型列表请求失败；可手动填写模型后继续保存'
+          break
+      }
+      return `Key #${item.key_index + 1}: ${message}`
+    })
     .join('；')
   return details ? `${summary}：${details}` : summary
 }

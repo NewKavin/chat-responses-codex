@@ -87,7 +87,7 @@ pub use freekey_sync::{FreekeySyncError, FreekeySyncItem, FreekeySyncSummary};
 #[allow(unused_imports)]
 pub use model_discovery::{
     fetch_models_from_upstream, fetch_models_from_upstream_keys_concurrently, model_discovery_url,
-    KeyModelDiscoveryResult,
+    KeyModelDiscoveryResult, ModelDiscoveryError,
 };
 pub use model_key_sync::{
     ModelKeySyncService, ModelKeySyncSummary, TARGETED_DISCOVERY_QUEUE_CAPACITY,

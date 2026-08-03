@@ -2610,7 +2610,7 @@ async fn test_admin_discovery_empty_success_is_reported_as_indexed_failure() {
 }
 
 #[tokio::test]
-async fn test_batch_discovery_results_store_failed_keys_as_empty_mappings() {
+async fn model_discovery_returns_bounded_error_metadata_without_provider_body() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let upstream_app = Router::new().route(
@@ -2620,13 +2620,197 @@ async fn test_batch_discovery_results_store_failed_keys_as_empty_mappings() {
                 .get(header::AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            if auth == "Bearer failed-key-secret" {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error": {"message": "batch-provider-secret"}})),
+            match auth {
+                "Bearer status-530-key" => (
+                    StatusCode::from_u16(530).unwrap(),
+                    Json(json!({"error": {"message": "provider-body-secret"}})),
                 )
-            } else {
-                (StatusCode::OK, Json(json!({"data": [{"id": "glm-5.2"}]})))
+                    .into_response(),
+                "Bearer invalid-json-key" => (StatusCode::OK, "not-json").into_response(),
+                "Bearer missing-data-key" => {
+                    (StatusCode::OK, Json(json!({"object": "list"}))).into_response()
+                }
+                "Bearer empty-models-key" => {
+                    (StatusCode::OK, Json(json!({"data": []}))).into_response()
+                }
+                _ => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": {"message": "unexpected-key"}})),
+                )
+                    .into_response(),
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "base_url": format!("http://{}", address),
+        "keys": [
+            "status-530-key",
+            "invalid-json-key",
+            "missing-data-key",
+            "empty-models-key",
+            ""
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    let results = result["results"].as_array().unwrap();
+
+    assert_eq!(results[0]["error_code"], "http_status");
+    assert_eq!(results[0]["http_status"], 530);
+    assert_eq!(
+        results[0]["error"],
+        "upstream model discovery returned status 530"
+    );
+    assert_eq!(results[1]["error_code"], "invalid_json");
+    assert_eq!(results[2]["error_code"], "missing_data");
+    assert_eq!(results[3]["error_code"], "empty_models");
+    assert_eq!(results[4]["error_code"], "request");
+    assert!(!result.to_string().contains("provider-body-secret"));
+}
+
+#[tokio::test]
+async fn model_discovery_classifies_timeout_without_exposing_transport_details() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(|| async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            (
+                StatusCode::OK,
+                Json(json!({"data": [{"id": "late-model"}]})),
+            )
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams_and_config(
+        vec![],
+        AppConfig {
+            admin_username: "admin".into(),
+            admin_password: "admin".into(),
+            jwt_secret: "test_secret".into(),
+            admin_upstream_timeout_seconds: 1,
+            ..Default::default()
+        },
+    );
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "base_url": format!("http://{}", address),
+        "keys": ["slow-key"]
+    });
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("timeout discovery request hung")
+    .unwrap();
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["results"][0]["error_code"], "timeout");
+    assert!(!result.to_string().contains("reqwest"));
+}
+
+#[tokio::test]
+async fn model_discovery_classifies_connection_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "base_url": format!("http://{}", address),
+        "keys": ["unreachable-key"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["results"][0]["error_code"], "connection");
+}
+
+#[tokio::test]
+async fn test_batch_discovery_results_store_failed_keys_as_empty_mappings() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let request_count = requests.clone();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(move |headers: axum::http::HeaderMap| {
+            let request_count = request_count.clone();
+            async move {
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let auth = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if auth == "Bearer failed-key-secret" {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": {"message": "batch-provider-secret"}})),
+                    )
+                } else {
+                    (StatusCode::OK, Json(json!({"data": [{"id": "glm-5.2"}]})))
+                }
             }
         }),
     );
@@ -2650,7 +2834,12 @@ async fn test_batch_discovery_results_store_failed_keys_as_empty_mappings() {
     let payload = json!({
         "name": "Indexed Batch",
         "base_url": format!("http://{}", address),
-        "keys": ["good-key-secret", "failed-key-secret"]
+        "keys": ["good-key-secret", "failed-key-secret"],
+        "supported_models": [],
+        "api_key_models": [
+            {"api_key": "good-key-secret", "supported_models": []},
+            {"api_key": "failed-key-secret", "supported_models": []}
+        ]
     });
 
     let response = app
@@ -2675,6 +2864,7 @@ async fn test_batch_discovery_results_store_failed_keys_as_empty_mappings() {
     assert_eq!(result["created"], 1);
     assert_eq!(result["keys_count"], 2);
     assert_eq!(result["failed"], 1);
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
     assert_eq!(result["results"][0]["key_index"], 0);
     assert_eq!(result["results"][1]["key_index"], 1);
     assert!(!result.to_string().contains("key_prefix"));
@@ -3859,4 +4049,81 @@ async fn batch_create_uses_explicit_models_without_automatic_discovery_by_defaul
     assert!(!upstream.auto_managed);
     assert_eq!(upstream.last_synced_at, 0);
     assert!(upstream.keys_for_model("unselected-model").is_empty());
+}
+
+#[tokio::test]
+async fn batch_explicit_model_mapping_skips_discovery_when_auto_discovery_is_enabled() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_hits = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(move || {
+            let hits = upstream_hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::from_u16(530).unwrap(),
+                    Json(json!({"error": {"message": "batch-provider-secret"}})),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams_and_config(
+        vec![],
+        AppConfig {
+            admin_username: "admin".into(),
+            admin_password: "admin".into(),
+            jwt_secret: "test_secret".into(),
+            upstream_model_auto_discovery_enabled: true,
+            ..Default::default()
+        },
+    );
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "name": "Explicit Models With Broken Catalog",
+        "base_url": format!("http://{}", address),
+        "keys": ["key-a", "key-b"],
+        "supported_models": ["manual-model"],
+        "api_key_models": [
+            {"api_key": "key-a", "supported_models": ["manual-model"]},
+            {"api_key": "key-b", "supported_models": ["manual-model"]}
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["created"], 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    let snapshot = state.snapshot().await;
+    let upstream = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.name == "Explicit Models With Broken Catalog")
+        .unwrap();
+    assert_eq!(upstream.supported_models, vec!["manual-model"]);
+    assert_eq!(upstream.api_key_models.len(), 2);
 }

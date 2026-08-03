@@ -1145,6 +1145,25 @@ struct BatchModelConfiguration {
     failed: usize,
 }
 
+fn model_discovery_error_json(result: &KeyModelDiscoveryResult) -> Value {
+    let mut value = json!({
+        "key_index": result.key_index,
+        "error": result.error,
+    });
+    if let Some(object) = value.as_object_mut() {
+        if let Some(error_code) = result.error_code.as_deref() {
+            object.insert(
+                "error_code".to_string(),
+                Value::String(error_code.to_string()),
+            );
+        }
+        if let Some(http_status) = result.http_status {
+            object.insert("http_status".to_string(), json!(http_status));
+        }
+    }
+    value
+}
+
 fn explicit_batch_model_configuration(
     current_keys: &[String],
     supported_models: Vec<String>,
@@ -1210,9 +1229,9 @@ async fn discover_batch_model_configuration(
             .get(result.key_index)
             .map(|key| key.trim().to_string())
             .unwrap_or_default();
-        if let Some(error) = result.error {
+        if result.error.is_some() {
             failed = failed.saturating_add(1);
-            results.push(json!({"key_index": result.key_index, "error": error}));
+            results.push(model_discovery_error_json(&result));
             continue;
         }
         models_by_key
@@ -1315,7 +1334,22 @@ pub(super) async fn admin_create_upstreams_batch(
         }
     }
     let automatic_discovery = state.config.upstream_model_auto_discovery_enabled;
-    let model_configuration = if automatic_discovery {
+    let has_explicit_models = payload.api_key_models.iter().any(|mapping| {
+        mapping
+            .supported_models
+            .iter()
+            .any(|model| !model.trim().is_empty())
+    }) || payload
+        .supported_models
+        .iter()
+        .any(|model| !model.trim().is_empty());
+    let model_configuration = if has_explicit_models {
+        explicit_batch_model_configuration(
+            &current_keys,
+            payload.supported_models.clone(),
+            payload.api_key_models.clone(),
+        )
+    } else if automatic_discovery {
         discover_batch_model_configuration(&state, &payload, &current_keys, admin_timeout).await
     } else {
         explicit_batch_model_configuration(
@@ -1425,12 +1459,9 @@ pub(super) async fn admin_discover_upstream_models(
     let mut failed = 0usize;
 
     for result in discovery_results {
-        if let Some(error) = result.error {
+        if result.error.is_some() {
             failed = failed.saturating_add(1);
-            key_results.push(json!({
-                "key_index": result.key_index,
-                "error": error
-            }));
+            key_results.push(model_discovery_error_json(&result));
             continue;
         }
 
