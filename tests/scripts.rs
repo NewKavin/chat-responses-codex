@@ -114,7 +114,13 @@ if [[ "${1:-}" == "--version" ]]; then
 fi
 printf '%s\n' "$client" >>"$MODEL_TASK_MARKER"
 args=" $* "
-if [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
+  exit 0
+elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
+  printf 'CODEX_DELEGATION_MARKER\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+  printf '{"type":"turn.completed"}\n'
+elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
 elif [[ "$client" == "hermes" ]]; then
   node "$HERMES_MCP_DRIVER"
@@ -130,7 +136,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
     );
     write_hermes_python_launcher(fake_bin);
 }
@@ -807,7 +813,13 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 args=" $* "
-    if [[ "$client" == "hermes" && "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
+  exit 0
+elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
+  printf 'CODEX_DELEGATION_MARKER\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+  printf '{"type":"turn.completed"}\n'
+elif [[ "$client" == "hermes" && "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
       printf 'CLIENT_TEXT_SMOKE_OK\n'
 elif [[ "$client" == "hermes" ]]; then
   if [[ "${HERMES_SKIP_MCP_PROOF:-0}" == "1" ]]; then
@@ -839,7 +851,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -953,6 +965,237 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
         );
     }
     assert!(!script.contains("echo \"$DOWNSTREAM_KEY\""));
+}
+
+#[test]
+fn installed_client_smoke_uses_portal_codex_profile_and_checks_delegation() {
+    let script = fs::read_to_string("scripts/installed_client_smoke.sh")
+        .expect("read installed client smoke script");
+
+    for required in [
+        "[features]",
+        "multi_agent = true",
+        "[agents]",
+        "requires_openai_auth = true",
+        "login --with-api-key",
+        "$CODEX_HOME_DIR/agents/default.toml",
+        "model_reasoning_effort",
+        "collab_tool_call",
+        "turn.completed",
+    ] {
+        assert!(script.contains(required), "smoke script missing {required}");
+    }
+    assert!(
+        script.contains("CODEX_DELEGATION_MARKER"),
+        "smoke script must include a bounded delegation marker"
+    );
+    assert!(
+        script.contains("agent_profile") && script.contains("authentication"),
+        "smoke script must classify profile and authentication failures"
+    );
+    assert!(!script.contains("cat \"$WORKDIR/codex-namespace.jsonl\""));
+}
+
+#[test]
+fn installed_client_smoke_logs_in_inside_isolated_codex_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let smoke_tmp = temp.path().join("tmp");
+    let login_home = temp.path().join("login-home");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::create_dir(&smoke_tmp).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli 0.146.0\n'
+  exit 0
+fi
+if [[ "${1:-}" == "login" ]]; then
+  printf '%s' "${CODEX_HOME:-}" >"$CODEX_LOGIN_HOME_MARKER"
+  exit 0
+fi
+args=" $* "
+if [[ "$args" == *CODEX_DELEGATION_MARKER* ]]; then
+  printf 'CODEX_DELEGATION_MARKER\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+  printf 'CLIENT_TEXT_SMOKE_OK\n'
+else
+  cat probe.txt
+fi
+printf '{"type":"turn.completed"}\n'
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let output = Command::new("bash")
+        .arg("scripts/installed_client_smoke.sh")
+        .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+        .env("TMPDIR", &smoke_tmp)
+        .env_remove("CODEX_HOME")
+        .env("BASE_URL", "https://gateway.invalid")
+        .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+        .env("MODEL_SLUG", "opaque/exposed-slug")
+        .env("CLIENTS_JSON", r#"["codex"]"#)
+        .env("CODEX_LOGIN_HOME_MARKER", &login_home)
+        .env("CLIENT_TIMEOUT_SECONDS", "5")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "isolated Codex smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let captured_home = fs::read_to_string(login_home).unwrap();
+    assert!(
+        captured_home.starts_with(smoke_tmp.to_str().unwrap()),
+        "login must receive a temporary CODEX_HOME, got {captured_home:?}"
+    );
+}
+
+#[test]
+fn installed_client_smoke_rejects_model_missing_from_live_catalog() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let execution_marker = temp.path().join("codex-executed");
+    fs::create_dir(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli 0.146.0\n'
+  exit 0
+fi
+printf executed >"$CODEX_EXECUTION_MARKER"
+exit 0
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let output = Command::new("bash")
+        .arg("scripts/installed_client_smoke.sh")
+        .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+        .env("BASE_URL", "https://gateway.invalid")
+        .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+        .env("MODEL_SLUG", "opaque/exposed-slug")
+        .env("CLIENTS_JSON", r#"["codex"]"#)
+        .env("CODEX_EXECUTION_MARKER", &execution_marker)
+        .env("CLIENT_TIMEOUT_SECONDS", "5")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "missing catalog model must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("client=codex task=agent_profile category=agent_profile status=failed"),
+        "missing catalog model must be classified as agent_profile\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !execution_marker.exists(),
+        "Codex must not run when its selected catalog model is unavailable"
+    );
+}
+
+#[test]
+fn installed_client_smoke_uses_bounded_codex_failure_categories() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    fs::create_dir(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli 0.146.0\n'
+  exit 0
+fi
+if [[ "${1:-}" == "login" ]]; then
+  exit 0
+fi
+args=" $* "
+if [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+  case "$FAKE_CODEX_FAILURE" in
+    generic_400)
+      printf '{"type":"error","status":400,"error":{"category":"invalid_request_error"}}\n'
+      ;;
+    protocol_400)
+      printf '{"type":"error","status":400,"error":{"category":"gateway_protocol_capability_unsupported"}}\n'
+      ;;
+    protocol_200)
+      printf '{"type":"error","status":200,"error":{"category":"gateway_protocol_capability_unsupported"}}\n'
+      ;;
+    protocol_text_400)
+      printf '{"type":"error","message":"retry after 400 seconds","error":{"category":"gateway_protocol_capability_unsupported"}}\n'
+      ;;
+    generic_499)
+      printf '{"type":"error","status_code":499,"error":{"category":"request_cancelled"}}\n'
+      ;;
+    stream_499)
+      printf '{"type":"response.created"}\n'
+      printf '{"type":"error","status_code":499,"error":{"category":"stream_client_cancelled"}}\n'
+      ;;
+    stream_499_before)
+      printf '{"type":"error","status_code":499,"error":{"category":"stream_client_cancelled"}}\n'
+      printf '{"type":"response.created"}\n'
+      ;;
+  esac
+  exit 1
+fi
+exit 1
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let run = |failure: &str| {
+        Command::new("bash")
+            .arg("scripts/installed_client_smoke.sh")
+            .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+            .env("BASE_URL", "https://gateway.invalid")
+            .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+            .env("MODEL_SLUG", "opaque/exposed-slug")
+            .env("CLIENTS_JSON", r#"["codex"]"#)
+            .env("CODEX_SKIP_LOGIN", "1")
+            .env("FAKE_CODEX_FAILURE", failure)
+            .env("CLIENT_TIMEOUT_SECONDS", "5")
+            .output()
+            .unwrap()
+    };
+
+    for (failure, category) in [
+        ("generic_400", "unknown"),
+        ("generic_499", "unknown"),
+        ("protocol_200", "unknown"),
+        ("protocol_text_400", "unknown"),
+        ("protocol_400", "protocol"),
+        ("stream_499", "client_cancelled"),
+        ("stream_499_before", "unknown"),
+    ] {
+        let output = run(failure);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "failure mode {failure} must fail");
+        assert!(
+            stderr.contains(&format!("category={category}")),
+            "failure mode {failure} should be category {category}, stderr:\n{stderr}"
+        );
+    }
 }
 
 #[test]
@@ -1157,7 +1400,13 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 args=" $* "
-if [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+if [[ "$args" == *" login "* ]]; then
+  exit 0
+elif [[ "$args" == *CODEX_DELEGATION_MARKER* ]]; then
+  printf 'CODEX_DELEGATION_MARKER\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+  printf '{"type":"turn.completed"}\n'
+elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
 elif grep -q '^\[mcp_servers\.smoke_namespace\]$' "$CODEX_HOME/config.toml"; then
   config="$(<"$CODEX_HOME/config.toml")"
@@ -1197,7 +1446,7 @@ fi
     );
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1309,7 +1558,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1402,7 +1651,13 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 args=" $* "
-if [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
+  exit 0
+elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
+  printf 'CODEX_DELEGATION_MARKER\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+  printf '{"type":"turn.completed"}\n'
+elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
 elif [[ "$client" == "hermes" ]]; then
   exec node "$HERMES_MCP_DRIVER"
@@ -1415,7 +1670,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1521,6 +1776,13 @@ printf '%s' "$client" >>"$CAPTURE_FILE"
 printf '\t%q' "$@" >>"$CAPTURE_FILE"
 printf '\n' >>"$CAPTURE_FILE"
 args=" $* "
+if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
+  exit 0
+elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
+  printf 'CODEX_DELEGATION_MARKER\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+  printf '{"type":"turn.completed"}\n'
+fi
 if [[ "$args" == *' --dangerously-skip-permissions '* \
    || "$args" == *' --ignore-rules '* \
    || "$args" == *' --toolsets terminal '* \
@@ -1543,7 +1805,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();

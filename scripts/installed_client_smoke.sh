@@ -158,6 +158,7 @@ sanitized_event_types() {
           .type?,
           .event?.type?,
           .message?.type?,
+          .item?.type?,
           (.message?.content?[]?.type?),
           .part?.type?
         ]
@@ -168,13 +169,89 @@ sanitized_event_types() {
   printf '%s' "${events:-final_output}"
 }
 
+classify_failure_category() {
+  local output_file="$1"
+  local has_http_400="false"
+  if jq -Rne '
+    [inputs | fromjson?] as $events
+    | any($events[]?;
+        [.status_code?, .status?, .response?.status_code?, .response?.status?]
+        | any(.[]?; (if type == "number" then . else tonumber? end) == 400)
+      )
+  ' "$output_file" >/dev/null 2>&1 \
+    || grep -Eiq '^HTTP[[:space:]]+400([[:space:]]|$)' "$output_file"; then
+    has_http_400="true"
+  fi
+  if jq -Rne '
+      [inputs | fromjson?] as $events
+      | any($events[]?;
+          [.status_code?, .status?, .response?.status_code?, .response?.status?]
+          | any(.[]?; (if type == "number" then . else tonumber? end) == 401)
+        )
+    ' "$output_file" >/dev/null 2>&1 \
+    || grep -Eiq '^HTTP[[:space:]]+401([[:space:]]|$)' "$output_file"; then
+    printf 'authentication'
+  elif grep -Eiq 'agent[_ -]?profile|unsupported[^[:alnum:]]+(model|reasoning)|reasoning(_effort)?[^[:alnum:]]+(unsupported|invalid|unknown)' "$output_file"; then
+    printf 'agent_profile'
+  elif [[ "$has_http_400" == "true" ]] && jq -Rne '
+    [inputs | fromjson?] as $events
+    | any($events[]?;
+        [
+          .error?.category?, .error?.code?, .category?, .code?,
+          .response?.error?.category?, .response?.error?.code?,
+          .item?.error?.category?, .item?.error?.code?
+        ]
+        | any(.[]?; . == "gateway_protocol_capability_unsupported" or . == "gateway_protocol_semantic_invalid")
+      )
+  ' "$output_file" >/dev/null 2>&1; then
+    printf 'protocol'
+  elif jq -Rne '
+    [inputs | fromjson?] as $events
+    | any($events[]?;
+        [.status_code?, .status?, .response?.status_code?, .response?.status?]
+        | any(.[]?; (if type == "number" then . else tonumber? end) == 502
+          or (if type == "number" then . else tonumber? end) == 503)
+      )
+  ' "$output_file" >/dev/null 2>&1 \
+    || grep -Eiq '^HTTP[[:space:]]+(502|503)([[:space:]]|$)' "$output_file"; then
+    printf 'upstream_availability'
+  elif jq -Rne '
+    [inputs | fromjson?] as $events
+    | [range(0; ($events | length)) as $index
+      | select(
+          ($events[$index]
+            | ([.status_code?, .status?, .response?.status_code?, .response?.status?]
+              | any(.[]?; (if type == "number" then . else tonumber? end) == 499)))
+          and ($events[$index]
+            | ([
+                .error?.category?, .error?.code?, .category?, .code?,
+                .response?.error?.category?, .response?.error?.code?,
+                .item?.error?.category?, .item?.error?.code?
+              ] | any(.[]?; . == "stream_client_cancelled")))
+        )
+      | select(any($events[0:$index][]?;
+          (.type? // .event?.type?)
+            | . == "response.created"
+              or . == "response.in_progress"
+              or . == "response.output_text.delta"
+              or . == "turn.started"
+              or . == "item.started"
+        ))
+    ] | length > 0
+  ' "$output_file" >/dev/null 2>&1; then
+    printf 'client_cancelled'
+  else
+    printf 'unknown'
+  fi
+}
+
 record_case() {
   local client="$1"
   local task="$2"
   local expected_marker="$3"
   local output_file="$4"
   shift 4
-  local started finished status duration events
+  local started finished status duration events category
   started="$(date +%s%3N)"
   set +e
   timeout --kill-after="${CLIENT_KILL_AFTER_SECONDS}s" "$CLIENT_TIMEOUT_SECONDS" "$@" >"$output_file" 2>&1
@@ -183,10 +260,14 @@ record_case() {
   finished="$(date +%s%3N)"
   duration=$((finished - started))
   events="$(sanitized_event_types "$output_file")"
+  category="unknown"
+  if [[ "$client" == "codex" ]]; then
+    category="$(classify_failure_category "$output_file")"
+  fi
 
   if [[ "$status" -ne 0 ]] || ! grep -Fq "$expected_marker" "$output_file"; then
-    printf 'client=%s task=%s exit=%s duration_ms=%s events=%s status=failed\n' \
-      "$client" "$task" "$status" "$duration" "$events" >&2
+    printf 'client=%s task=%s exit=%s duration_ms=%s events=%s category=%s status=failed\n' \
+      "$client" "$task" "$status" "$duration" "$events" "$category" >&2
     return 1
   fi
   printf 'client=%s task=%s exit=0 duration_ms=%s events=%s status=passed\n' \
@@ -206,6 +287,18 @@ record_codex_case() {
     printf 'client=codex task=%s status=missing_turn_completed\n' "$2" >&2
     return 1
   fi
+}
+
+record_codex_delegation_case() {
+  local output_file="$4"
+  record_codex_case "$@"
+  local events
+  events="$(sanitized_event_types "$output_file")"
+  if ! grep -Eq '(^|,)collab_tool_call(,|$)' <<<"$events"; then
+    printf 'client=codex task=delegation status=missing_collab_tool_call\n' >&2
+    return 1
+  fi
+  printf 'client=codex task=delegation events=%s status=verified\n' "$events"
 }
 
 verify_codex_namespace_case() {
@@ -303,28 +396,82 @@ cd "$TASKDIR"
 
 if client_enabled codex; then
   CODEX_HOME_DIR="$WORKDIR/codex-home"
+  mkdir -p "$CODEX_HOME_DIR/agents"
   mkdir -p "$CODEX_HOME_DIR"
   curl -fsS --connect-timeout 5 --max-time 30 \
-    "$API_BASE_URL/models?client_version=$CODEX_VERSION" \
+    "$API_BASE_URL/models?format=codex&client_version=$CODEX_VERSION" \
     -H "Authorization: Bearer $DOWNSTREAM_KEY" >"$CODEX_HOME_DIR/model-catalog.json"
   jq -e '.models | type == "array"' "$CODEX_HOME_DIR/model-catalog.json" >/dev/null
   MODEL_TOML="$(jq -Rn --arg value "$MODEL_SLUG" '$value')"
+  if ! MODEL_REASONING_EFFORT="$(jq -er --arg model "$MODEL_SLUG" '
+    [ .models[]? | select((.slug // .id // "") == $model) ] as $matches
+    | if ($matches | length) != 1 then
+        error("selected model is missing from the live catalog")
+      elif ($matches[0].default_reasoning_level? | type) != "string" then
+        error("selected model has no reasoning metadata")
+      else
+        $matches[0].default_reasoning_level
+      end
+  ' "$CODEX_HOME_DIR/model-catalog.json" 2>/dev/null)" \
+    || [[ ! "$MODEL_REASONING_EFFORT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    printf 'client=codex task=agent_profile category=agent_profile status=failed\n' >&2
+    exit 1
+  fi
+  MODEL_REASONING_TOML="$(jq -Rn --arg value "$MODEL_REASONING_EFFORT" '$value')"
   API_BASE_TOML="$(jq -Rn --arg value "$API_BASE_URL" '$value')"
   cat >"$CODEX_HOME_DIR/config.toml" <<EOF
 model_provider = "gateway"
 model = $MODEL_TOML
 review_model = $MODEL_TOML
+model_reasoning_effort = $MODEL_REASONING_TOML
 model_catalog_json = "model-catalog.json"
 web_search = "disabled"
+
+[features]
+skill_mcp_dependency_install = true
+tool_suggest = true
+multi_agent = true
+
+[agents]
+max_threads = 4
+max_depth = 2
 
 [model_providers.gateway]
 name = "chat-responses-gateway"
 base_url = $API_BASE_TOML
 wire_api = "responses"
-env_key = "CHAT2RESPONSES_KEY"
+requires_openai_auth = true
 stream_idle_timeout_ms = 3600000
 stream_max_retries = 2
 EOF
+  cat >"$CODEX_HOME_DIR/agents/default.toml" <<EOF
+name = "default"
+description = "General-purpose read-only exploration subagent."
+model = $MODEL_TOML
+model_reasoning_effort = $MODEL_REASONING_TOML
+
+[features]
+image_generation = false
+EOF
+  if ! grep -Fq "model = $MODEL_TOML" "$CODEX_HOME_DIR/config.toml" \
+    || ! grep -Fq "model = $MODEL_TOML" "$CODEX_HOME_DIR/agents/default.toml" \
+    || ! grep -Fq "model_reasoning_effort = $MODEL_REASONING_TOML" "$CODEX_HOME_DIR/config.toml" \
+    || ! grep -Fq "model_reasoning_effort = $MODEL_REASONING_TOML" "$CODEX_HOME_DIR/agents/default.toml"; then
+    printf 'client=codex task=agent_profile category=agent_profile status=failed\n' >&2
+    exit 1
+  fi
+  if [[ "${CODEX_SKIP_LOGIN:-0}" == "1" ]]; then
+    printf 'client=codex task=authentication category=authentication status=skipped\n'
+  elif ! printf '%s' "$DOWNSTREAM_KEY" \
+    | env CODEX_HOME="$CODEX_HOME_DIR" "$CODEX_BIN" login --with-api-key \
+      >"$WORKDIR/codex-login.log" 2>&1; then
+    LOGIN_CATEGORY="$(classify_failure_category "$WORKDIR/codex-login.log")"
+    printf 'client=codex task=authentication category=%s status=failed\n' \
+      "$LOGIN_CATEGORY" >&2
+    exit 1
+  else
+    printf 'client=codex task=authentication category=authentication status=verified\n'
+  fi
 
   record_codex_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \
     env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
@@ -334,6 +481,12 @@ EOF
     env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
     "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
     --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
+  CODEX_DELEGATION_MARKER="CODEX_DELEGATION_MARKER"
+  CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to inspect the local probe file, then reply with exactly CODEX_DELEGATION_MARKER on its own line.'
+  record_codex_delegation_case codex delegation "$CODEX_DELEGATION_MARKER" "$WORKDIR/codex-delegation.jsonl" \
+    env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+    "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
+    --cd "$TASKDIR" --model "$MODEL_SLUG" "$CODEX_DELEGATION_PROMPT"
 fi
 
 if client_enabled opencode; then
