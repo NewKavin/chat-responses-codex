@@ -225,7 +225,12 @@ impl UpstreamConfig {
             && self
                 .premium_models
                 .iter()
-                .any(|premium| premium.trim() == model)
+                .any(|premium| {
+                    let premium = premium.trim();
+                    premium == model
+                        || super::codex_subagent_base_model(model)
+                            .is_some_and(|base| premium.eq_ignore_ascii_case(base))
+                })
     }
 
     pub fn request_cost_for_model(&self, model: &str) -> f64 {
@@ -234,9 +239,15 @@ impl UpstreamConfig {
             return 1.0;
         }
 
+        let resolved_model = self
+            .canonical_route_model(model)
+            .unwrap_or_else(|| model.to_string());
         self.model_request_costs
             .iter()
-            .find(|rule| rule.slug.trim() == model)
+            .find(|rule| {
+                let slug = rule.slug.trim();
+                slug == model || slug == resolved_model
+            })
             .map(|rule| rule.cost.max(1.0))
             .unwrap_or(1.0)
     }
@@ -333,11 +344,22 @@ impl UpstreamConfig {
 
         let route_models = self.route_models();
         if route_models.is_empty() {
-            return Some(model.to_string());
+            return super::codex_subagent_base_model(model)
+                .is_none()
+                .then(|| model.to_string());
         }
 
         if route_models.iter().any(|candidate| candidate == model) {
             return Some(model.to_string());
+        }
+
+        if let Some(base_model) = super::codex_subagent_base_model(model) {
+            if let Some(candidate) = route_models
+                .iter()
+                .find(|candidate| candidate.eq_ignore_ascii_case(base_model))
+            {
+                return Some(candidate.clone());
+            }
         }
 
         None

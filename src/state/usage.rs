@@ -227,6 +227,15 @@ pub fn portal_model_is_allowed(allowlist: &[String], model: &str) -> bool {
     let Some(model) = normalize_model_name(model) else {
         return false;
     };
+    let subagent_base_model = super::codex_subagent_base_model(model.as_str())
+        .and_then(normalize_model_name);
+    if let Some(base_model) = subagent_base_model.as_deref() {
+        return allowlist
+            .iter()
+            .filter_map(|allowed| normalize_model_name(allowed))
+            .any(|allowed| allowed == base_model);
+    }
+
     allowlist
         .iter()
         .filter_map(|allowed| normalize_model_name(allowed))

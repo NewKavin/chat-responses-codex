@@ -1,5 +1,38 @@
 use super::*;
 
+#[test]
+fn codex_fast_preview_variant_requires_base_authorization_and_route() {
+    let alias = "glm-5.2-fast-preview";
+    assert!(chat_responses_codex::state::portal_model_is_allowed(
+        &["glm-5.2".into()],
+        alias
+    ));
+    assert!(!chat_responses_codex::state::portal_model_is_allowed(
+        &[alias.into()],
+        alias
+    ));
+
+    let generic_upstream = UpstreamConfig {
+        supported_models: vec![],
+        ..Default::default()
+    };
+    assert_eq!(generic_upstream.resolved_model_name(alias), None);
+}
+
+#[test]
+fn codex_fast_preview_variant_inherits_base_request_cost() {
+    let upstream = UpstreamConfig {
+        supported_models: vec!["glm-5.2".into()],
+        model_request_costs: vec![ModelRequestCostConfig {
+            slug: "glm-5.2".into(),
+            cost: 3.0,
+        }],
+        ..Default::default()
+    };
+
+    assert_eq!(upstream.request_cost_for_model("glm-5.2-fast-preview"), 3.0);
+}
+
 #[tokio::test]
 async fn downstream_responses_supports_configured_portal_models() {
     let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
@@ -151,6 +184,135 @@ async fn downstream_responses_supports_configured_portal_models() {
             *expected_model
         );
     }
+}
+
+#[tokio::test]
+async fn codex_subagent_fast_preview_model_uses_authorized_base_route() {
+    let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
+    let tempdir = tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+
+    let upstream_app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                move |State(capture): State<Arc<Mutex<Vec<RequestCapture>>>>,
+                      request: Request<Body>| async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    capture.lock().unwrap().push(RequestCapture {
+                        path: parts.uri.path().to_string(),
+                        authorization: None,
+                        request_body: Some(payload.clone()),
+                    });
+
+                    (
+                        StatusCode::OK,
+                        axum::Json(json!({
+                            "id": "chatcmpl-subagent",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": payload["model"],
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "delegated"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })),
+                    )
+                },
+            ),
+        )
+        .with_state(capture_clone);
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "up-subagent".into(),
+                name: "subagent-upstream".into(),
+                base_url: format!("http://{}", address),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["glm-5.2".into()],
+                active: true,
+                failure_count: 0,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-subagent".into(),
+                name: "subagent-downstream".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["glm-5.2".into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        },
+        state_path,
+        AppConfig::default(),
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "glm-5.2-fast-preview",
+                        "input": "delegate"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["output"][0]["content"][0]["text"], "delegated");
+
+    let captures = capture.lock().unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].path, "/v1/chat/completions");
+    assert_eq!(
+        captures[0].request_body.as_ref().unwrap()["model"],
+        "glm-5.2"
+    );
 }
 
 #[tokio::test]
