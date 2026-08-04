@@ -229,7 +229,7 @@ impl UpstreamConfig {
                     let premium = premium.trim();
                     premium == model
                         || super::codex_subagent_base_model(model)
-                            .is_some_and(|base| premium.eq_ignore_ascii_case(base))
+                            .is_some_and(|base| premium == base)
                 })
     }
 
@@ -356,7 +356,7 @@ impl UpstreamConfig {
         if let Some(base_model) = super::codex_subagent_base_model(model) {
             if let Some(candidate) = route_models
                 .iter()
-                .find(|candidate| candidate.eq_ignore_ascii_case(base_model))
+                .find(|candidate| candidate == &base_model)
             {
                 return Some(candidate.clone());
             }

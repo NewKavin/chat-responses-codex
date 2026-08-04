@@ -73,7 +73,7 @@ pub(crate) fn codex_subagent_base_model(model: &str) -> Option<&str> {
     let model = model.trim();
     let base_len = model.len().checked_sub(CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX.len())?;
     let (base, suffix) = model.split_at(base_len);
-    (!base.is_empty() && suffix.eq_ignore_ascii_case(CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX))
+    (!base.is_empty() && suffix == CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX)
         .then_some(base)
 }
 

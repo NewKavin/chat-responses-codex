@@ -17,6 +17,17 @@ fn codex_fast_preview_variant_requires_base_authorization_and_route() {
         ..Default::default()
     };
     assert_eq!(generic_upstream.resolved_model_name(alias), None);
+
+    let mixed_case_alias = "glm-5.2-FAST-PREVIEW";
+    assert!(!chat_responses_codex::state::portal_model_is_allowed(
+        &["glm-5.2".into()],
+        mixed_case_alias
+    ));
+    let routed_upstream = UpstreamConfig {
+        supported_models: vec!["glm-5.2".into()],
+        ..Default::default()
+    };
+    assert_eq!(routed_upstream.resolved_model_name(mixed_case_alias), None);
 }
 
 #[test]

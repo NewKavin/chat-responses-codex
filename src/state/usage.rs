@@ -224,10 +224,11 @@ pub fn portal_model_is_allowed(allowlist: &[String], model: &str) -> bool {
         return true;
     }
 
-    let Some(model) = normalize_model_name(model) else {
+    let raw_model = model.trim();
+    let Some(model) = normalize_model_name(raw_model) else {
         return false;
     };
-    let subagent_base_model = super::codex_subagent_base_model(model.as_str())
+    let subagent_base_model = super::codex_subagent_base_model(raw_model)
         .and_then(normalize_model_name);
     if let Some(base_model) = subagent_base_model.as_deref() {
         return allowlist
