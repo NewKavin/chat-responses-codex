@@ -45,6 +45,7 @@ export interface DashboardAnalyticsRange {
     total_tokens: number
   }
   daily_series: Array<{
+    day: string
     date: number
     requests: number
     tokens: number

@@ -69,6 +69,28 @@ client_enabled() {
   jq -e --arg client "$1" 'index($client) != null' <<<"$CLIENTS_JSON" >/dev/null
 }
 
+CODEX_TASKS_JSON='[]'
+if client_enabled codex; then
+  CODEX_TASKS="${CODEX_TASKS:-text_task,read_only_tool_task,delegation}"
+  CODEX_TASKS_JSON="$(jq -nc --arg raw "$CODEX_TASKS" '
+    $raw
+    | split(",")
+    | map(gsub("^[[:space:]]+|[[:space:]]+$"; ""))
+    | map(select(length > 0))
+  ')"
+  if ! jq -e '
+    type == "array" and length > 0
+    and all(.[]; ["text_task", "read_only_tool_task", "delegation"] | index(.) != null)
+  ' <<<"$CODEX_TASKS_JSON" >/dev/null; then
+    printf 'client=codex task=selection status=invalid_tasks\n' >&2
+    exit 1
+  fi
+fi
+
+codex_task_enabled() {
+  jq -e --arg task "$1" 'index($task) != null' <<<"$CODEX_TASKS_JSON" >/dev/null
+}
+
 resolve_client_executable() {
   local client="$1"
   local command="$2"
@@ -473,20 +495,26 @@ EOF
     printf 'client=codex task=authentication category=authentication status=verified\n'
   fi
 
-  record_codex_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \
-    env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-    "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
-    --cd "$TASKDIR" --model "$MODEL_SLUG" "$TEXT_PROMPT"
-  record_codex_case codex read_only_tool_task "$READ_MARKER" "$WORKDIR/codex-tool.jsonl" \
-    env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-    "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
-    --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
-  CODEX_DELEGATION_MARKER="CODEX_DELEGATION_MARKER"
-  CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to inspect the local probe file, then reply with exactly CODEX_DELEGATION_MARKER on its own line.'
-  record_codex_delegation_case codex delegation "$CODEX_DELEGATION_MARKER" "$WORKDIR/codex-delegation.jsonl" \
-    env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
-    "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
-    --cd "$TASKDIR" --model "$MODEL_SLUG" "$CODEX_DELEGATION_PROMPT"
+  if codex_task_enabled text_task; then
+    record_codex_case codex text_task "$TEXT_MARKER" "$WORKDIR/codex-text.jsonl" \
+      env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+      "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
+      --cd "$TASKDIR" --model "$MODEL_SLUG" "$TEXT_PROMPT"
+  fi
+  if codex_task_enabled read_only_tool_task; then
+    record_codex_case codex read_only_tool_task "$READ_MARKER" "$WORKDIR/codex-tool.jsonl" \
+      env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+      "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
+      --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
+  fi
+  if codex_task_enabled delegation; then
+    CODEX_DELEGATION_MARKER="CODEX_DELEGATION_MARKER"
+    CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to inspect the local probe file, then reply with exactly CODEX_DELEGATION_MARKER on its own line.'
+    record_codex_delegation_case codex delegation "$CODEX_DELEGATION_MARKER" "$WORKDIR/codex-delegation.jsonl" \
+      env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+      "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
+      --cd "$TASKDIR" --model "$MODEL_SLUG" "$CODEX_DELEGATION_PROMPT"
+  fi
 fi
 
 if client_enabled opencode; then

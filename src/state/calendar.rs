@@ -100,8 +100,8 @@ impl DeploymentCalendar {
 
     pub fn today(&self, now: u64) -> Result<CalendarDay, CalendarError> {
         let now = i64::try_from(now).map_err(|_| CalendarError::TimestampOutOfRange)?;
-        let now = DateTime::<Utc>::from_timestamp(now, 0)
-            .ok_or(CalendarError::TimestampOutOfRange)?;
+        let now =
+            DateTime::<Utc>::from_timestamp(now, 0).ok_or(CalendarError::TimestampOutOfRange)?;
         self.day(&now.with_timezone(&self.timezone).date_naive().to_string())
     }
 
@@ -188,8 +188,8 @@ impl DeploymentCalendar {
         now: u64,
     ) -> Result<CalendarRange, CalendarError> {
         let now_ts = i64::try_from(now).map_err(|_| CalendarError::TimestampOutOfRange)?;
-        let now_dt = DateTime::<Utc>::from_timestamp(now_ts, 0)
-            .ok_or(CalendarError::TimestampOutOfRange)?;
+        let now_dt =
+            DateTime::<Utc>::from_timestamp(now_ts, 0).ok_or(CalendarError::TimestampOutOfRange)?;
         let today_str = now_dt
             .with_timezone(&self.timezone)
             .date_naive()

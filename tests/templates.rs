@@ -422,6 +422,27 @@ fn codex_integration_examples_document_multi_agent_validation() {
 }
 
 #[test]
+fn deployment_docs_cover_the_default_codex_agent_profile() {
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+    let readme = fs::read_to_string("README.md").unwrap();
+    let guide = fs::read_to_string("docs/codex-integration-guide.md").unwrap();
+
+    assert!(deployment.contains("~/.codex/agents/default.toml"));
+    assert!(deployment.contains("model_reasoning_effort"));
+    assert!(deployment.contains("same live catalog"));
+    assert!(deployment.contains("codex login --with-api-key"));
+    assert!(deployment.contains("Codex CLI `0.146.0`"));
+    assert!(readme.contains("Codex CLI `0.146.0`"));
+    assert!(!readme.contains("0.144.4"));
+    assert!(guide.contains(
+        "[codex-agent-default.toml.example](../templates/codex/agents/default.toml.example)"
+    ));
+    assert!(guide.contains("~/.codex/agents/default.toml"));
+    assert!(guide.contains("codex login --with-api-key"));
+    assert!(guide.contains("## 这四个地方分别在哪改"));
+}
+
+#[test]
 fn deployment_capabilities_are_external_versioned_and_model_agnostic_in_code() {
     let configuration = deployment_capabilities();
     assert_eq!(configuration.schema_version, 1);

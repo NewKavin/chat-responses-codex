@@ -6,9 +6,9 @@ use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
 };
 use crate::state::{StateStore, StoreFuture};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
@@ -122,7 +122,11 @@ impl FileStateStore {
         let Some(parent) = self.config_path.parent() else {
             return Ok(Vec::new());
         };
-        let Some(base_name) = self.config_path.file_name().and_then(|value| value.to_str()) else {
+        let Some(base_name) = self
+            .config_path
+            .file_name()
+            .and_then(|value| value.to_str())
+        else {
             return Ok(Vec::new());
         };
 
@@ -140,6 +144,30 @@ impl FileStateStore {
         }
         paths.sort();
         Ok(paths)
+    }
+
+    async fn usage_log_sources(&self) -> io::Result<Vec<Vec<UsageLog>>> {
+        let mut sources = Vec::new();
+        if fs::try_exists(&self.config_path).await? {
+            let bytes = fs::read(&self.config_path).await?;
+            let state: PersistedState = serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if !state.usage_logs.is_empty() {
+                sources.push(state.usage_logs);
+            }
+        }
+        for path in self.usage_archive_paths().await? {
+            let bytes = fs::read(path).await?;
+            let logs: Vec<UsageLog> = serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            sources.push(logs);
+        }
+        for logs in &mut sources {
+            for log in logs {
+                log.normalize_after_load();
+            }
+        }
+        Ok(sources)
     }
 }
 
@@ -245,6 +273,30 @@ impl StateStore for FileStateStore {
         Box::pin(async { Ok(None) })
     }
 
+    fn query_usage_logs_window<'a>(
+        &'a self,
+        start_time: u64,
+        end_time: u64,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<UsageLog>>>> {
+        Box::pin(async move {
+            let sources = self.usage_log_sources().await?;
+            if sources.is_empty() {
+                return Ok(None);
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            let mut logs = Vec::new();
+            for source in sources {
+                logs.extend(source.into_iter().filter(|log| {
+                    log.created_at >= start_time
+                        && log.created_at < end_time
+                        && seen.insert(log.id.clone())
+                }));
+            }
+            Ok(Some(logs))
+        })
+    }
+
     fn downstream_usage_summary<'a>(
         &'a self,
         _downstream_id: &'a str,
@@ -258,31 +310,14 @@ impl StateStore for FileStateStore {
         calendar: &'a CalendarRange,
     ) -> StoreFuture<'a, io::Result<Option<Vec<DailyStats>>>> {
         Box::pin(async move {
-            let paths = self.usage_archive_paths().await?;
-            let mut sources = Vec::<Vec<UsageLog>>::new();
-            if fs::try_exists(&self.config_path).await? {
-                let bytes = fs::read(&self.config_path).await?;
-                let state: PersistedState = serde_json::from_slice(&bytes)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                if !state.usage_logs.is_empty() {
-                    sources.push(state.usage_logs);
-                }
-            }
-            for path in paths {
-                let bytes = fs::read(path).await?;
-                let logs: Vec<UsageLog> = serde_json::from_slice(&bytes).unwrap_or_default();
-                sources.push(logs);
-            }
+            let sources = self.usage_log_sources().await?;
             if sources.is_empty() {
                 return Ok(None);
             }
 
             let mut aggregated = HashMap::<String, (u32, u64, u32)>::new();
             let mut seen = std::collections::HashSet::new();
-            for mut logs in sources {
-                for log in &mut logs {
-                    log.normalize_after_load();
-                }
+            for logs in sources {
                 for log in logs {
                     if !seen.insert(log.id.clone()) {
                         continue;
@@ -312,10 +347,8 @@ impl StateStore for FileStateStore {
                     .days
                     .iter()
                     .map(|day| {
-                        let (total_requests, total_tokens, successful_requests) = aggregated
-                            .get(&day.day)
-                            .copied()
-                            .unwrap_or_default();
+                        let (total_requests, total_tokens, successful_requests) =
+                            aggregated.get(&day.day).copied().unwrap_or_default();
                         DailyStats {
                             day: day.day.clone(),
                             start_time: day.start_time,

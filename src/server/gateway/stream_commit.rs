@@ -57,8 +57,9 @@ impl StreamCommitTracker {
     /// Responses semantic triggers:
     ///   - `response.output_text.delta` with non-empty `delta`
     ///   - `response.reasoning_summary_text.delta` with non-empty `delta`
-    ///   - `response.output_item.added` with `function_call` item + non-empty
-    ///     `call_id`
+    ///   - `response.output_item.added`/`done` with a semantic output item
+    ///     (`function_call`, `custom_tool_call`, `message`, or
+    ///     `agent_message`)
     ///   - `response.function_call_arguments.delta` with non-empty `delta`
     ///   - `response.completed` → terminal
     ///
@@ -114,11 +115,10 @@ impl StreamCommitTracker {
                         guard.semantic_output_observed = true;
                         guard.last_semantic_at = Some(now);
                     }
-                    "response.output_item.added"
-                        if let Some(item) = event.get("item")
-                            && item.get("type").and_then(Value::as_str)
-                                == Some("function_call")
-                            && has_non_empty_string(item, "call_id") =>
+                    "response.output_item.added" | "response.output_item.done"
+                        if event
+                            .get("item")
+                            .is_some_and(response_output_item_is_semantic) =>
                     {
                         guard.semantic_output_observed = true;
                         guard.last_semantic_at = Some(now);
@@ -184,6 +184,45 @@ fn has_non_empty_nested_string(value: &Value, path: &[&str]) -> bool {
         }
     }
     current.as_str().map(|s| !s.is_empty()).unwrap_or(false)
+}
+
+fn response_output_item_is_semantic(item: &Value) -> bool {
+    let Some(kind) = item.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+
+    match kind {
+        "function_call" => {
+            has_non_empty_string(item, "call_id")
+                || has_non_empty_string(item, "name")
+                || has_non_empty_string(item, "arguments")
+        }
+        "custom_tool_call" => {
+            has_non_empty_string(item, "call_id")
+                || has_non_empty_string(item, "name")
+                || has_non_empty_string(item, "input")
+        }
+        "message" | "agent_message" => {
+            has_non_empty_string(item, "text")
+                || item
+                    .get("encrypted_content")
+                    .is_some_and(|value| !value.is_null())
+                || item.get("content").is_some_and(value_has_semantic_payload)
+        }
+        _ => false,
+    }
+}
+
+fn value_has_semantic_payload(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Array(values) => values.iter().any(value_has_semantic_payload),
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            !matches!(key.as_str(), "id" | "role" | "status" | "type")
+                && value_has_semantic_payload(value)
+        }),
+        _ => false,
+    }
 }
 
 // ── FirstSemanticDeadline ─────────────────────────────────────────
@@ -286,6 +325,22 @@ mod tests {
             ),
             (
                 EndpointKind::Responses,
+                json!({"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"custom_1","input":"{"}}),
+            ),
+            (
+                EndpointKind::Responses,
+                json!({"type":"response.output_item.added","item":{"type":"agent_message","text":"delegated output"}}),
+            ),
+            (
+                EndpointKind::Responses,
+                json!({"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"custom_1","input":"{}"}}),
+            ),
+            (
+                EndpointKind::Responses,
+                json!({"type":"response.output_item.done","item":{"type":"agent_message","content":[{"type":"input_text","text":"delegated output"}]}}),
+            ),
+            (
+                EndpointKind::Responses,
                 json!({"type":"response.function_call_arguments.delta","delta":"{"}),
             ),
         ];
@@ -327,6 +382,10 @@ mod tests {
             (
                 EndpointKind::Responses,
                 json!({"type":"response.output_item.added","item":{"type":"function_call","call_id":""}}),
+            ),
+            (
+                EndpointKind::Responses,
+                json!({"type":"response.output_item.added","item":{"type":"agent_message","content":[{"type":"input_text","text":""}]}}),
             ),
         ];
         for (endpoint, event) in cases {

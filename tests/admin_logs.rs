@@ -397,6 +397,39 @@ async fn test_logs_list_supports_filtering_by_model() {
 }
 
 #[tokio::test]
+async fn test_logs_list_supports_filtering_by_upstream_and_downstream() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/logs?downstream_id=downstream-2&upstream_id=upstream-2")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    let logs = result["logs"].as_array().unwrap();
+
+    assert_eq!(result["total"], 1);
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0]["id"], "log-3");
+}
+
+#[tokio::test]
 async fn test_logs_list_supports_filtering_by_model_substring_case_insensitive() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);

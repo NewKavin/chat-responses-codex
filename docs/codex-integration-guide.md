@@ -33,7 +33,7 @@
 
 ## 你需要改哪些地方
 
-一共有三类配置，再加一个推荐入口，分别在不同地方改：
+一共有四类配置，再加一个推荐入口，分别在不同地方改：
 
 1. Codex 本地配置：`~/.codex/config.toml`
 2. Codex 模型目录：`~/.codex/model-catalog.json`
@@ -44,6 +44,7 @@
 项目里已经准备了客户端配置模板：
 
 - [codex-config.toml.example](../templates/codex/config.toml.example)
+- [codex-agent-default.toml.example](../templates/codex/agents/default.toml.example)
 - [gateway-state.example.json](../templates/state/gateway-state.example.json)
 - [opencode.json](../templates/opencode/opencode.json)
 - [claude-code-settings.json](../templates/claude-code/settings.json)
@@ -179,11 +180,12 @@ Codex 里选模型时，直接选你在目录里写的 slug，例如：
 - `MiniMax/MiniMax-M2.7`
 - `deepseek-ai/DeepSeek-R1-0528`
 
-## 这三个地方分别在哪改
+## 这四个地方分别在哪改
 
 1. Codex 本地配置：`~/.codex/config.toml`
 2. Codex 模型目录：`~/.codex/model-catalog.json`
-3. 网关状态：`STATE_PATH` 对应的 JSON，或者直接通过管理页改
+3. Codex 子代理角色：`~/.codex/agents/default.toml`
+4. 网关状态：`STATE_PATH` 对应的 JSON，或者直接通过管理页改
 
 ## 第一步: 启动网关
 

@@ -1062,6 +1062,78 @@ printf '{"type":"turn.completed"}\n'
 }
 
 #[test]
+fn installed_client_smoke_can_run_only_the_codex_delegation_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let smoke_tmp = temp.path().join("tmp");
+    let execution_marker = temp.path().join("codex-executions");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::create_dir(&smoke_tmp).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli 0.146.0\n'
+  exit 0
+fi
+if [[ "${1:-}" == "login" ]]; then
+  exit 0
+fi
+printf 'exec\n' >>"$CODEX_EXECUTION_MARKER"
+args=" $* "
+if [[ "$args" == *CODEX_DELEGATION_MARKER* ]]; then
+  printf 'CODEX_DELEGATION_MARKER\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+  printf 'CLIENT_TEXT_SMOKE_OK\n'
+else
+  cat probe.txt
+fi
+printf '{"type":"turn.completed"}\n'
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let output = Command::new("bash")
+        .arg("scripts/installed_client_smoke.sh")
+        .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+        .env("TMPDIR", &smoke_tmp)
+        .env("BASE_URL", "https://gateway.invalid")
+        .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+        .env("MODEL_SLUG", "opaque/exposed-slug")
+        .env("CLIENTS_JSON", r#"["codex"]"#)
+        .env("CODEX_TASKS", "delegation")
+        .env("CODEX_EXECUTION_MARKER", &execution_marker)
+        .env("CLIENT_TIMEOUT_SECONDS", "5")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "delegation-only Codex smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(execution_marker)
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "delegation-only smoke must execute Codex exactly once"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("client=codex task=delegation"));
+    assert!(!stdout.contains("client=codex task=text_task"));
+    assert!(!stdout.contains("client=codex task=read_only_tool_task"));
+}
+
+#[test]
 fn installed_client_smoke_rejects_model_missing_from_live_catalog() {
     let temp = tempfile::tempdir().unwrap();
     let fake_bin = temp.path().join("bin");

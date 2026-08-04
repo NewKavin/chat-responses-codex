@@ -217,7 +217,11 @@ const setupResizeObservers = () => {
 const updateDailyChart = () => {
   if (!dailyChart) return
   const theme = buildChartTheme(resolvedTheme.value)
-  const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], dailyStats.value)
+  const buckets = buildUsageHistoryBuckets(
+    daysByRange[timeRange.value],
+    dailyStats.value,
+    dailyStats.value[dailyStats.value.length - 1]?.day
+  )
   const dates = buckets.map(item => item.label)
   const requests = buckets.map(item => item.requests)
 
@@ -263,7 +267,11 @@ const updateDailyChart = () => {
 const updateTokenChart = () => {
   if (!tokenChart) return
   const theme = buildChartTheme(resolvedTheme.value)
-  const buckets = buildUsageHistoryBuckets(daysByRange[timeRange.value], dailyStats.value)
+  const buckets = buildUsageHistoryBuckets(
+    daysByRange[timeRange.value],
+    dailyStats.value,
+    dailyStats.value[dailyStats.value.length - 1]?.day
+  )
   const dates = buckets.map(item => item.label)
   const tokens = buckets.map(item => item.tokens)
 

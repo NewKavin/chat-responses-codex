@@ -107,11 +107,19 @@ impl StructuredError {
     }
 
     fn normalized_message(&self, fallback: Option<&str>) -> String {
+        if self.messages.is_empty() {
+            return fallback
+                .map(|body| body.to_ascii_lowercase())
+                .unwrap_or_default();
+        }
+
+        // Keep semantic matching across all parsed messages without retaining
+        // or exposing the raw upstream response body.
         self.messages
-            .first()
+            .iter()
             .map(|message| message.to_ascii_lowercase())
-            .or_else(|| fallback.map(|body| body.to_ascii_lowercase()))
-            .unwrap_or_default()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn has_code(&self, values: &[&str]) -> bool {
@@ -139,6 +147,17 @@ impl StructuredError {
             .iter()
             .any(|scope| matches!(scope.as_str(), "key" | "api_key"))
             && self.has_code_fragment("quota"))
+    }
+
+    fn is_concurrency_capacity(&self) -> bool {
+        self.codes.iter().any(|code| {
+            code.contains("concurr")
+                || code.contains("in_flight")
+                || matches!(
+                    code.as_str(),
+                    "capacity_unavailable" | "capacity_exhausted" | "concurrency_full"
+                )
+        })
     }
 }
 
@@ -283,6 +302,20 @@ fn message_is_capacity_unavailable(message: &str) -> bool {
     .any(|pattern| message.contains(pattern))
 }
 
+fn message_is_concurrency_capacity(message: &str) -> bool {
+    [
+        "concurrency",
+        "concurrent",
+        "in-flight",
+        "capacity unavailable",
+        "并发",
+        "负载饱和",
+        "负载已饱和",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
 fn message_is_rate_limited(message: &str) -> bool {
     [
         "rate limit",
@@ -298,6 +331,49 @@ fn message_is_rate_limited(message: &str) -> bool {
     ]
     .iter()
     .any(|pattern| message.contains(pattern))
+}
+
+fn message_is_request_rejected(message: &str) -> bool {
+    [
+        "request rejected",
+        "request_rejected",
+        "invalid request",
+        "invalid_request",
+        "bad request",
+        "validation error",
+        "invalid parameter",
+        "parameter invalid",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn message_is_credentials(message: &str) -> bool {
+    [
+        "invalid api key",
+        "invalid_api_key",
+        "api key is invalid",
+        "incorrect api key",
+        "invalid token",
+        "invalid_token",
+        "authentication failed",
+        "authentication error",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn is_explicit_request_rejection(parsed: &StructuredError, message: &str) -> bool {
+    parsed.has_code(&[
+        "request_rejected",
+        "request_rejected_error",
+        "invalid_request",
+        "invalid_request_error",
+        "bad_request",
+        "invalid_parameter",
+        "validation_error",
+    ]) || message_is_request_rejected(message)
 }
 
 pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> ClassifiedUpstreamFailure {
@@ -316,7 +392,42 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
     } else if input.status == 429 {
         if parsed.is_key_quota() {
             FailureClass::KeyQuota
-        } else if message_is_capacity_unavailable(&message) {
+        } else if parsed.has_status(401)
+            || parsed.has_status(403)
+            || parsed.has_code(&[
+                "authentication_error",
+                "invalid_api_key",
+                "invalid_token",
+                "unauthorized",
+            ])
+            || message_is_credentials(&message)
+        {
+            FailureClass::Credentials
+        } else if parsed.has_code(&[
+            "model_not_found",
+            "model_unsupported",
+            "unsupported_model",
+            "invalid_model",
+        ]) || message_is_model_unsupported(&message)
+        {
+            FailureClass::ModelUnsupported
+        } else if parsed.has_code(&[
+            "feature_unsupported",
+            "unsupported_feature",
+            "capability_not_supported",
+        ]) || message_is_feature_unsupported(&message)
+        {
+            FailureClass::FeatureUnsupported
+        } else if parsed.has_code(&[
+            "endpoint_not_found",
+            "protocol_unsupported",
+            "unsupported_protocol",
+        ]) || message_is_protocol_unsupported(&message)
+        {
+            FailureClass::ProtocolUnsupported
+        } else if is_explicit_request_rejection(&parsed, &message) {
+            FailureClass::RequestRejected
+        } else if parsed.is_concurrency_capacity() || message_is_concurrency_capacity(&message) {
             FailureClass::CapacityUnavailable
         } else {
             FailureClass::RateLimited
@@ -335,6 +446,8 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
         ])
     {
         FailureClass::Credentials
+    } else if is_explicit_request_rejection(&parsed, &message) {
+        FailureClass::RequestRejected
     } else if parsed.has_status(429)
         || parsed.has_code(&["rate_limit_error", "rate_limited", "too_many_requests"])
         || message_is_rate_limited(&message)

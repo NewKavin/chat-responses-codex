@@ -29,7 +29,7 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
         if let Some(tools) = object.get("tools").and_then(Value::as_array) {
             let adaptation = build_chat_fallback_tool_adaptation(tools)?;
             downgrade_codes.extend(adaptation.downgrades.iter().cloned());
-            tool_registry = adaptation.registry.clone();
+            tool_registry = tool_registry.merged_with(&adaptation.registry);
             let has_supported_tools = !adaptation.upstream_tools.is_empty();
             object.insert("tools".into(), Value::Array(adaptation.upstream_tools));
             if let Some(tool_choice) = object.get("tool_choice").cloned() {

@@ -57,6 +57,14 @@ pub trait StateStore: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
+    fn query_usage_logs_window<'a>(
+        &'a self,
+        _start_time: u64,
+        _end_time: u64,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<UsageLog>>>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn downstream_usage_summary<'a>(
         &'a self,
         _downstream_id: &'a str,

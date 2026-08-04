@@ -302,9 +302,9 @@ flowchart LR
 - [docs/codex-integration-guide.md](docs/codex-integration-guide.md)
 - [docs/PROTOCOL_COMPATIBILITY.md](docs/PROTOCOL_COMPATIBILITY.md)
 
-那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>` 和 `<model_slug>`，按步骤替换即可。Codex 的 `model_catalog_json` 示例也已经做成了同目录相对路径，复制到 `~/.codex/` 后不需要再手工改路径。
+那份指南已经把可替换项统一成了 `<gateway_origin>`、`<downstream_key>`、`<model_slug>` 和 live catalog 中的推理等级，按步骤替换即可。Codex 的 `model_catalog_json` 示例也已经做成了同目录相对路径，复制到 `~/.codex/` 后不需要再手工改路径。
 
-当前示例按 Codex CLI `0.144.4` 验证，并默认启用 `multi_agent`。调整 `[agents]` 下的 `max_threads` 可以增加并发代理线程数，`max_depth` 用于限制嵌套委派深度；这些客户端设置不会覆盖网关配额。复制配置后运行 `codex --strict-config doctor --summary` 检查配置是否实际生效。
+当前示例按 Codex CLI `0.146.0` 验证，并默认启用 `multi_agent`。调整 `[agents]` 下的 `max_threads` 可以增加并发代理线程数，`max_depth` 用于限制嵌套委派深度；这些客户端设置不会覆盖网关配额。主配置和 `~/.codex/agents/default.toml` 必须使用同一 live catalog 条目的 `model` 和 `model_reasoning_effort`，然后运行 `codex login --with-api-key` 写入下游 key，并用 `codex --strict-config doctor --summary` 检查配置是否实际生效。
 
 ### 开发
 
@@ -583,7 +583,7 @@ The full integration guide lives here:
 
 That guide uses one placeholder set: `<gateway_origin>`, `<downstream_key>`, and `<model_slug>`. Replace those values and follow the steps.
 
-The sample is validated against Codex CLI `0.144.4`. Tune `[agents].max_threads` for concurrent agent threads and `[agents].max_depth` for nested delegation, then run `codex --strict-config doctor --summary` to validate the loaded configuration.
+The sample is validated against Codex CLI `0.146.0`. Keep `model` and `model_reasoning_effort` in `~/.codex/agents/default.toml` synchronized with the same live catalog entry used by the main config. Run `codex login --with-api-key`, tune `[agents].max_threads` for concurrent agent threads and `[agents].max_depth` for nested delegation, then run `codex --strict-config doctor --summary` to validate the loaded configuration.
 
 ### Development
 

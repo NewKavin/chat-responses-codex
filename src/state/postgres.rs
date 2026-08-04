@@ -3,9 +3,9 @@ use super::log_queries::{
 };
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, CalendarRange,
-    DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary, GlobalContextProfile,
-    DailyStats, ModelContextConfig, ModelRequestCostConfig, PersistedState, ResponseHistoryEntry,
-    UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
+    DailyStats, DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary,
+    GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig, PersistedState,
+    ResponseHistoryEntry, UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
@@ -564,6 +564,28 @@ impl PostgresStateStore {
         }))
     }
 
+    pub async fn query_usage_logs_window(
+        &self,
+        start_time: u64,
+        end_time: u64,
+    ) -> io::Result<Option<Vec<UsageLog>>> {
+        let conn = self.pool.get().await.map_err(io_other)?;
+        let rows = conn
+            .query(
+                "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
+                        endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
+                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
+                 FROM usage_logs
+                 WHERE created_at >= $1
+                   AND created_at < $2
+                 ORDER BY created_at ASC, request_id ASC, id ASC",
+                &[&u64_to_i64(start_time), &u64_to_i64(end_time)],
+            )
+            .await
+            .map_err(io_other)?;
+        Ok(Some(rows.iter().map(usage_log_from_row).collect()))
+    }
+
     pub async fn downstream_usage_summary(
         &self,
         downstream_id: &str,
@@ -698,20 +720,15 @@ impl PostgresStateStore {
             let total_requests = i64_to_u32(row.get::<_, i64>("total_requests"));
             let total_tokens = i64_to_u64(row.get::<_, i64>("total_tokens"));
             let successful_requests = i64_to_u32(row.get::<_, i64>("successful_requests"));
-            aggregated.insert(
-                day,
-                (total_requests, total_tokens, successful_requests),
-            );
+            aggregated.insert(day, (total_requests, total_tokens, successful_requests));
         }
 
         let stats = calendar
             .days
             .iter()
             .map(|day| {
-                let (total_requests, total_tokens, successful_requests) = aggregated
-                    .get(&day.day)
-                    .copied()
-                    .unwrap_or_default();
+                let (total_requests, total_tokens, successful_requests) =
+                    aggregated.get(&day.day).copied().unwrap_or_default();
                 DailyStats {
                     day: day.day.clone(),
                     start_time: day.start_time,

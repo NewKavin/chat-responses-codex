@@ -369,7 +369,7 @@ const { resolvedTheme } = useTheme()
 const loading = ref(false)
 const modelProbeLoading = ref(false)
 const modelProbeError = ref('')
-const chartRange = ref<ChartRange>('1d')
+const chartRange = ref<ChartRange>('7d')
 const lastRefreshedAt = ref(0)
 
 const showKpiSkeleton = computed(() => loading.value && lastRefreshedAt.value === 0)
@@ -387,7 +387,7 @@ const dashboard = ref<DashboardData>({
 })
 
 const analytics = ref<DashboardAnalyticsRange>({
-  range: '1d',
+  range: '7d',
   summary: {
     total_requests: 0,
     success_rate: 0,
@@ -491,12 +491,6 @@ const failureSummary = computed(() => {
 
 const userAgentSummary = computed(() => buildUserAgentChartSummary(analytics.value.user_agent_clusters))
 
-const toShortDate = (timestamp: number) =>
-  new Date(timestamp * 1000).toLocaleDateString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit'
-  })
-
 const safeBreakdownSeries = (items: DashboardBreakdownItem[]) => (items.length > 0 ? items : [])
 
 const renderTrendChart = () => {
@@ -505,7 +499,7 @@ const renderTrendChart = () => {
   const theme = chartTheme.value
   const series = analytics.value.daily_series
   const hasData = series.length > 0
-  const labels = series.map(item => toShortDate(item.date))
+  const labels = series.map(item => item.day.slice(5).replace('-', '/'))
   const requestSeries = series.map(item => item.requests)
   const tokenSeries = series.map(item => item.tokens)
   const latencySeries = series.map(item => item.avg_latency_ms)

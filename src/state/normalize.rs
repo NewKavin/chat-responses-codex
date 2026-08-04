@@ -222,15 +222,11 @@ impl UpstreamConfig {
 
         let model = model.trim();
         !model.is_empty()
-            && self
-                .premium_models
-                .iter()
-                .any(|premium| {
-                    let premium = premium.trim();
-                    premium == model
-                        || super::codex_subagent_base_model(model)
-                            .is_some_and(|base| premium == base)
-                })
+            && self.premium_models.iter().any(|premium| {
+                let premium = premium.trim();
+                premium == model
+                    || super::codex_subagent_base_model(model).is_some_and(|base| premium == base)
+            })
     }
 
     pub fn request_cost_for_model(&self, model: &str) -> f64 {

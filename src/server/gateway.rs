@@ -2833,6 +2833,11 @@ impl ResponseHistoryContext {
     }
 
     fn set_tool_registry(&mut self, registry: ToolAdapterRegistry) {
+        let registry = self
+            .tool_registry
+            .as_ref()
+            .map(|existing| existing.merged_with(&registry))
+            .unwrap_or(registry);
         if let Ok(value) = serde_json::to_value(&registry) {
             self.history_request_state
                 .insert("gateway_tool_registry".to_string(), value);
@@ -2904,11 +2909,6 @@ impl ResponseHistoryContext {
 
     fn tool_registry_version(&self) -> Option<u32> {
         self.tool_registry.as_ref().map(|registry| registry.version)
-    }
-
-    fn has_continuation_state(&self) -> bool {
-        self.history_request_state
-            .contains_key("_gateway_continuation")
     }
 
     fn has_trusted_tool_registry_version(&self, continuation: &GatewayContinuationState) -> bool {
@@ -4156,14 +4156,16 @@ async fn process_gateway_request_inner(
 
     if endpoint == EndpointKind::Responses {
         if let Some(context) = response_history_context.as_mut() {
-            if context.tool_registry().is_none() && !context.has_continuation_state() {
-                if let Some(tools) = body.get("tools").and_then(Value::as_array) {
-                    if let Ok(adaptation) = ToolAdapterRegistry::build(
-                        &Value::Array(tools.clone()),
-                        ToolTarget::FunctionsOnly,
-                    ) {
-                        context.set_tool_registry(adaptation.registry);
-                    }
+            if let Some(tools) = original_responses_body
+                .as_ref()
+                .and_then(|request| request.get("tools"))
+                .and_then(Value::as_array)
+            {
+                if let Ok(adaptation) = ToolAdapterRegistry::build(
+                    &Value::Array(tools.clone()),
+                    ToolTarget::FunctionsOnly,
+                ) {
+                    context.set_tool_registry(adaptation.registry);
                 }
             }
         }

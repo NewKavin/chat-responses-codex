@@ -13,12 +13,12 @@ use crate::routing::{
     select_upstream, RouteError, RouteRequest, UpstreamCandidate, UpstreamProtocol,
 };
 
-#[path = "state/file_store.rs"]
-mod file_store;
 #[path = "state/account_concurrency.rs"]
 mod account_concurrency;
 #[path = "state/calendar.rs"]
 mod calendar;
+#[path = "state/file_store.rs"]
+mod file_store;
 #[path = "state/log_queries.rs"]
 pub mod log_queries;
 #[path = "state/postgres.rs"]
@@ -71,13 +71,13 @@ const CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX: &str = "-fast-preview";
 
 pub(crate) fn codex_subagent_base_model(model: &str) -> Option<&str> {
     let model = model.trim();
-    let base_len = model.len().checked_sub(CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX.len())?;
+    let base_len = model
+        .len()
+        .checked_sub(CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX.len())?;
     let (base, suffix) = model.split_at(base_len);
-    (!base.is_empty() && suffix == CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX)
-        .then_some(base)
+    (!base.is_empty() && suffix == CODEX_SUBAGENT_MODEL_VARIANT_SUFFIX).then_some(base)
 }
 
-use file_store::FileStateStore;
 pub use account_concurrency::{
     AccountConcurrencyKey, AccountConcurrencyRegistry, AccountConcurrencySnapshot,
     AccountConcurrencyTuning, AccountLeaseError, AccountProbeLease, AccountProbeOutcome,
@@ -88,6 +88,7 @@ pub use calendar::{
     CalendarDay, CalendarError, CalendarRange, DeploymentCalendar, LogWindowMode,
     ResolvedLogWindow, SummaryRange,
 };
+use file_store::FileStateStore;
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
 pub use redis_runtime::{RuntimeCoordinationBackend, RuntimeCoordinationError};
@@ -121,10 +122,9 @@ pub use types::{
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConcurrencySnapshot,
     DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
-    PersistedState, RouteFailureClass,
-    RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig, UpstreamMutationError, UsageLog,
-    ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
-    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+    PersistedState, RouteFailureClass, RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig,
+    UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
+    DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS, DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
@@ -439,9 +439,7 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
     )))
 }
 
-fn account_concurrency_registry_from_config(
-    config: &AppConfig,
-) -> Arc<AccountConcurrencyRegistry> {
+fn account_concurrency_registry_from_config(config: &AppConfig) -> Arc<AccountConcurrencyRegistry> {
     Arc::new(AccountConcurrencyRegistry::new(
         AccountConcurrencyTuning::from_config(config),
     ))
@@ -531,6 +529,14 @@ impl StateStore for PostgresStateStore {
         query: &'a UsageLogQuery,
     ) -> StoreFuture<'a, io::Result<Option<UsageLogPage>>> {
         Box::pin(async move { self.query_usage_logs_page(query).await })
+    }
+
+    fn query_usage_logs_window<'a>(
+        &'a self,
+        start_time: u64,
+        end_time: u64,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<UsageLog>>>> {
+        Box::pin(async move { self.query_usage_logs_window(start_time, end_time).await })
     }
 
     fn downstream_usage_summary<'a>(
@@ -961,12 +967,7 @@ impl AppState {
     ) -> Result<AccountWaitTicket, RuntimeCoordinationError> {
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             return coordinator
-                .register_account_waiter(
-                    account,
-                    request_id,
-                    downstream_id,
-                    downstream_lease_id,
-                )
+                .register_account_waiter(account, request_id, downstream_id, downstream_lease_id)
                 .await;
         }
         Ok(self.account_concurrency.register_waiter(
@@ -1924,6 +1925,36 @@ impl AppState {
         }
         state.usage_logs = deduped;
         state
+    }
+
+    pub async fn dashboard_usage_logs(
+        &self,
+        start_time: u64,
+        end_time: u64,
+    ) -> io::Result<Vec<UsageLog>> {
+        let pending = self.pending_usage_logs.lock().await.clone();
+        let durable = self
+            .config_store
+            .query_usage_logs_window(start_time, end_time)
+            .await?
+            .unwrap_or_default();
+        let snapshot = self.snapshot().await;
+
+        let mut seen = HashSet::new();
+        let mut logs = pending
+            .into_iter()
+            .chain(durable)
+            .chain(snapshot.usage_logs)
+            .filter(|log| log.created_at >= start_time && log.created_at < end_time)
+            .filter(|log| seen.insert(log.id.clone()))
+            .collect::<Vec<_>>();
+        logs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then(left.request_id.cmp(&right.request_id))
+                .then(left.id.cmp(&right.id))
+        });
+        Ok(logs)
     }
 
     pub async fn routing_snapshot(&self) -> PersistedState {
@@ -3243,13 +3274,11 @@ impl AppState {
                     .downstream_runtime
                     .lock()
                     .expect("downstream runtime lock poisoned");
-                let remove_entry = runtime
-                    .get_mut(&lease.downstream_id)
-                    .is_some_and(|state| {
-                        state.admitted.remove(&lease_id);
-                        state.waiting.remove(&lease_id);
-                        state.admitted.is_empty() && state.waiting.is_empty()
-                    });
+                let remove_entry = runtime.get_mut(&lease.downstream_id).is_some_and(|state| {
+                    state.admitted.remove(&lease_id);
+                    state.waiting.remove(&lease_id);
+                    state.admitted.is_empty() && state.waiting.is_empty()
+                });
                 if remove_entry {
                     runtime.remove(&lease.downstream_id);
                 }

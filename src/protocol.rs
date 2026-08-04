@@ -1155,6 +1155,17 @@ fn translate_responses_input_item(
                     }
                     Ok(())
                 }
+                Some("agent_message") => {
+                    let message =
+                        agent_message_object_to_chat_message(object, context.image_dialect)?;
+                    if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                        merge_assistant_chat_message(pending_assistant, message)?;
+                    } else {
+                        flush_pending_assistant_message(pending_assistant, messages);
+                        messages.push(message);
+                    }
+                    Ok(())
+                }
                 Some(other) if object.contains_key("role") || object.contains_key("content") => {
                     let mut cloned = object.clone();
                     cloned.insert("type".into(), Value::String(other.to_string()));
@@ -1196,6 +1207,102 @@ fn translate_responses_input_item(
         _ => Err(ProtocolError::InvalidPayload(
             "unsupported input item".into(),
         )),
+    }
+}
+
+const ENCRYPTED_CONTENT_PLACEHOLDER: &str = "[encrypted content omitted]";
+
+fn agent_message_object_to_chat_message(
+    object: &Map<String, Value>,
+    dialect: image_adapter::ImageDialect,
+) -> Result<Value, ProtocolError> {
+    let mut content_parts = Vec::new();
+
+    match object.get("content") {
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                append_agent_message_content_part(&mut content_parts, part);
+            }
+        }
+        Some(Value::String(text)) => content_parts.push(json!({
+            "type": "input_text",
+            "text": text,
+        })),
+        Some(Value::Null) | None => {}
+        Some(content) => {
+            append_agent_message_content_part(&mut content_parts, content);
+        }
+    }
+
+    if let Some(text) = object.get("text").and_then(Value::as_str) {
+        content_parts.push(json!({
+            "type": "input_text",
+            "text": text,
+        }));
+    }
+
+    if object
+        .get("encrypted_content")
+        .is_some_and(|value| !value.is_null())
+    {
+        content_parts.push(json!({
+            "type": "input_text",
+            "text": ENCRYPTED_CONTENT_PLACEHOLDER,
+        }));
+    }
+
+    Ok(json!({
+        "role": "assistant",
+        "content": responses_content_to_chat_content_with_dialect(
+            &Value::Array(content_parts),
+            dialect,
+        )?,
+    }))
+}
+
+fn append_agent_message_content_part(parts: &mut Vec<Value>, part: &Value) {
+    let Some(object) = part.as_object() else {
+        if let Some(text) = part.as_str() {
+            parts.push(json!({
+                "type": "input_text",
+                "text": text,
+            }));
+        }
+        return;
+    };
+
+    let kind = object.get("type").and_then(Value::as_str);
+    let has_encrypted_content = object
+        .get("encrypted_content")
+        .is_some_and(|value| !value.is_null());
+    if kind == Some("encrypted_content") || has_encrypted_content {
+        if let Some(text) = object.get("text").and_then(Value::as_str) {
+            parts.push(json!({
+                "type": "input_text",
+                "text": text,
+            }));
+        }
+        parts.push(json!({
+            "type": "input_text",
+            "text": ENCRYPTED_CONTENT_PLACEHOLDER,
+        }));
+    } else if let Some(text) = object.get("text").and_then(Value::as_str) {
+        parts.push(json!({
+            "type": "input_text",
+            "text": text,
+        }));
+    } else if let Some(content) = object.get("content") {
+        match content {
+            Value::Array(nested) => {
+                for part in nested {
+                    append_agent_message_content_part(parts, part);
+                }
+            }
+            nested => append_agent_message_content_part(parts, nested),
+        }
+    } else {
+        // Chat assistant history cannot represent arbitrary Responses media
+        // or provider-specific parts. Keep only visible text above.
     }
 }
 
@@ -1399,9 +1506,19 @@ fn response_output_item_to_chat_message(item: &Value) -> Result<Option<Value>, P
         ResponseOutputItemKind::FunctionCall
         | ResponseOutputItemKind::CustomToolCall
         | ResponseOutputItemKind::Reasoning => Ok(None),
-        ResponseOutputItemKind::Message => Ok(Some(
-            response_output_message_object_to_chat_message(object)?,
-        )),
+        ResponseOutputItemKind::Message | ResponseOutputItemKind::AgentMessage => {
+            Ok(Some(response_output_message_item_to_chat_message(object)?))
+        }
+    }
+}
+
+fn response_output_message_item_to_chat_message(
+    object: &Map<String, Value>,
+) -> Result<Value, ProtocolError> {
+    if object.get("type").and_then(Value::as_str) == Some("agent_message") {
+        agent_message_object_to_chat_message(object, image_adapter::ImageDialect::all())
+    } else {
+        response_output_message_object_to_chat_message(object)
     }
 }
 
@@ -1420,7 +1537,9 @@ fn response_output_item_to_chat_tool_call(
         ResponseOutputItemKind::CustomToolCall => Ok(Some(
             response_custom_tool_call_item_to_chat_tool_call(object, tool_registry)?,
         )),
-        ResponseOutputItemKind::Message | ResponseOutputItemKind::Reasoning => Ok(None),
+        ResponseOutputItemKind::Message
+        | ResponseOutputItemKind::AgentMessage
+        | ResponseOutputItemKind::Reasoning => Ok(None),
     }
 }
 
@@ -1518,6 +1637,7 @@ fn response_chat_tool_name(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseOutputItemKind {
     Message,
+    AgentMessage,
     FunctionCall,
     CustomToolCall,
     Reasoning,
@@ -1528,12 +1648,13 @@ fn response_output_item_kind(
 ) -> Result<ResponseOutputItemKind, ProtocolError> {
     match object.get("type").and_then(Value::as_str) {
         Some("message") => Ok(ResponseOutputItemKind::Message),
+        Some("agent_message") => Ok(ResponseOutputItemKind::AgentMessage),
         Some("function_call") => Ok(ResponseOutputItemKind::FunctionCall),
         Some("custom_tool_call") => Ok(ResponseOutputItemKind::CustomToolCall),
         Some("reasoning") => Ok(ResponseOutputItemKind::Reasoning),
-        Some(other) => Err(ProtocolError::InvalidPayload(format!(
-            "unsupported responses output item type: {other}"
-        ))),
+        Some(_) => Err(ProtocolError::InvalidPayload(
+            "unsupported responses output item type".into(),
+        )),
         None => {
             if object.contains_key("role")
                 || object.contains_key("content")
@@ -2955,6 +3076,10 @@ struct ResponsesToChatState {
     completed_emitted: bool,
     assistant_message_output_index: Option<usize>,
     text: String,
+    text_output_emitted: bool,
+    text_output_done: bool,
+    agent_message_content_emitted: bool,
+    pending_agent_message: Option<Map<String, Value>>,
     tool_calls: BTreeMap<usize, ResponsesToolCallState>,
     tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
 }
@@ -2981,6 +3106,10 @@ impl ResponsesToChatState {
             completed_emitted: false,
             assistant_message_output_index: None,
             text: String::new(),
+            text_output_emitted: false,
+            text_output_done: false,
+            agent_message_content_emitted: false,
+            pending_agent_message: None,
             tool_calls: BTreeMap::new(),
             tool_registry,
         }
@@ -3006,8 +3135,8 @@ impl ResponsesToChatState {
                             self.emit_assistant_role(&mut output);
                             self.emit_function_call_item_added(event, item, &mut output)?;
                         }
-                        ResponseOutputItemKind::Message => {
-                            response_output_message_object_to_chat_message(item)?;
+                        ResponseOutputItemKind::Message | ResponseOutputItemKind::AgentMessage => {
+                            response_output_message_item_to_chat_message(item)?;
                             let output_index = event
                                 .get("output_index")
                                 .and_then(Value::as_u64)
@@ -3015,6 +3144,11 @@ impl ResponsesToChatState {
                                 .unwrap_or(0);
                             self.ensure_single_assistant_message_output_index(output_index)?;
                             self.emit_assistant_role(&mut output);
+                            if response_output_item_kind(item)?
+                                == ResponseOutputItemKind::AgentMessage
+                            {
+                                self.pending_agent_message = Some(item.clone());
+                            }
                         }
                         ResponseOutputItemKind::Reasoning => {}
                     }
@@ -3038,7 +3172,7 @@ impl ResponsesToChatState {
                     .map(|value| value as usize)
                     .unwrap_or(0);
                 self.ensure_single_assistant_message_output_index(output_index)?;
-                self.emit_output_text_done(event, &mut output);
+                self.emit_output_text_done(event, &mut output)?;
             }
             "response.function_call_arguments.delta" => {
                 self.emit_assistant_role(&mut output);
@@ -3063,6 +3197,7 @@ impl ResponsesToChatState {
             "response.completed" => {
                 self.emit_assistant_role(&mut output);
                 self.validate_completed_response_output(event)?;
+                self.emit_completed_agent_message_content(event, &mut output)?;
                 output.extend(self.finish()?);
             }
             _ => {}
@@ -3078,6 +3213,10 @@ impl ResponsesToChatState {
 
         let mut output = Vec::new();
         self.emit_assistant_role(&mut output);
+
+        if let Some(item) = self.pending_agent_message.take() {
+            self.emit_agent_message_content_if_needed(&item, &mut output)?;
+        }
 
         let response_id = self.response_id_value();
         let model = self.model_value();
@@ -3215,10 +3354,19 @@ impl ResponsesToChatState {
             .get("delta")
             .and_then(Value::as_str)
             .ok_or(ProtocolError::MissingField("delta"))?;
+        if self.agent_message_content_emitted {
+            return Ok(());
+        }
+        if self.text_output_done {
+            return Ok(());
+        }
         let response_id = self.response_id_value();
         let model = self.model_value();
         let created_at = self.created_at_value();
         self.text.push_str(delta);
+        if !delta.is_empty() {
+            self.text_output_emitted = true;
+        }
         output.push(make_chat_completion_chunk(
             &response_id,
             created_at,
@@ -3231,11 +3379,39 @@ impl ResponsesToChatState {
         Ok(())
     }
 
-    fn emit_output_text_done(&mut self, event: &Value, _output: &mut Vec<Value>) {
+    fn emit_output_text_done(
+        &mut self,
+        event: &Value,
+        output: &mut Vec<Value>,
+    ) -> Result<(), ProtocolError> {
         if let Some(text) = event.get("text").and_then(Value::as_str) {
-            self.text.clear();
-            self.text.push_str(text);
+            self.emit_complete_text(text, output);
         }
+        self.text_output_done = true;
+        Ok(())
+    }
+
+    fn emit_complete_text(&mut self, text: &str, output: &mut Vec<Value>) {
+        let suffix = if self.text_output_emitted {
+            text.strip_prefix(&self.text).unwrap_or(text)
+        } else {
+            text
+        };
+        self.text.clear();
+        self.text.push_str(text);
+        if !suffix.is_empty() {
+            let response_id = self.response_id_value();
+            let model = self.model_value();
+            let created_at = self.created_at_value();
+            output.push(make_chat_completion_chunk(
+                &response_id,
+                created_at,
+                &model,
+                json!({"content": suffix}),
+                None,
+            ));
+        }
+        self.text_output_emitted |= !text.is_empty();
     }
 
     fn emit_function_call_item_added(
@@ -3567,17 +3743,73 @@ impl ResponsesToChatState {
                 }
                 self.emit_custom_tool_call_input_done(&normalized, output)?;
             }
-            ResponseOutputItemKind::Message => {
-                response_output_message_object_to_chat_message(item)?;
+            ResponseOutputItemKind::Message | ResponseOutputItemKind::AgentMessage => {
+                response_output_message_item_to_chat_message(item)?;
                 let output_index = event
                     .get("output_index")
                     .and_then(Value::as_u64)
                     .map(|value| value as usize)
                     .unwrap_or(0);
                 self.ensure_single_assistant_message_output_index(output_index)?;
+                if response_output_item_kind(item)? == ResponseOutputItemKind::AgentMessage {
+                    self.pending_agent_message = None;
+                    self.emit_agent_message_content_if_needed(item, output)?;
+                }
                 self.emit_function_call_arguments_done(event);
             }
             ResponseOutputItemKind::Reasoning => {}
+        }
+        Ok(())
+    }
+
+    fn emit_agent_message_content_if_needed(
+        &mut self,
+        item: &Map<String, Value>,
+        output: &mut Vec<Value>,
+    ) -> Result<(), ProtocolError> {
+        let message =
+            agent_message_object_to_chat_message(item, image_adapter::ImageDialect::all())?;
+        let Some(content) = message.get("content") else {
+            return Ok(());
+        };
+        let content = visible_chat_content_text(content);
+        if content.is_empty() {
+            return Ok(());
+        }
+
+        self.emit_complete_text(&content, output);
+        self.agent_message_content_emitted = true;
+        Ok(())
+    }
+
+    fn emit_completed_agent_message_content(
+        &mut self,
+        event: &Value,
+        output: &mut Vec<Value>,
+    ) -> Result<(), ProtocolError> {
+        if self.agent_message_content_emitted {
+            return Ok(());
+        }
+        let Some(items) = event
+            .get("response")
+            .and_then(Value::as_object)
+            .and_then(|response| response.get("output"))
+            .and_then(Value::as_array)
+        else {
+            return Ok(());
+        };
+
+        for (output_index, item) in items.iter().enumerate() {
+            let Some(object) = item.as_object() else {
+                continue;
+            };
+            if response_output_item_kind(object)? != ResponseOutputItemKind::AgentMessage {
+                continue;
+            }
+            self.ensure_single_assistant_message_output_index(output_index)?;
+            self.pending_agent_message = None;
+            self.emit_agent_message_content_if_needed(object, output)?;
+            break;
         }
         Ok(())
     }
@@ -3603,8 +3835,8 @@ impl ResponsesToChatState {
                 ResponseOutputItemKind::CustomToolCall => {
                     response_custom_tool_call_item_to_chat_tool_call(object, None)?;
                 }
-                ResponseOutputItemKind::Message => {
-                    response_output_message_object_to_chat_message(object)?;
+                ResponseOutputItemKind::Message | ResponseOutputItemKind::AgentMessage => {
+                    response_output_message_item_to_chat_message(object)?;
                     assistant_message_count = assistant_message_count.saturating_add(1);
                     if assistant_message_count > 1 {
                         return Err(ProtocolError::InvalidPayload(
@@ -3624,6 +3856,23 @@ impl ResponsesToChatState {
         self.tool_calls
             .iter()
             .find_map(|(index, tool_call)| (tool_call.item_id == item_id).then_some(*index))
+    }
+}
+
+fn visible_chat_content_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(visible_chat_content_text)
+            .collect::<String>(),
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| object.get("content").map(visible_chat_content_text))
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 

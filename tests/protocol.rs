@@ -452,6 +452,487 @@ fn responses_request_drops_opaque_reasoning_history_for_chat_payload() {
 }
 
 #[test]
+fn responses_agent_message_preserves_input_text_and_replaces_encrypted_content() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": [{
+            "type": "agent_message",
+            "role": "assistant",
+            "content": [
+                {"type": "input_text", "text": "Visible delegated result."},
+                {"type": "encrypted_content", "encrypted_content": "opaque-secret"}
+            ]
+        }]
+    });
+
+    let converted = responses_request_to_chat_payload(&responses)
+        .expect("agent_message input should be accepted");
+    let content = converted["messages"][0]["content"]
+        .as_str()
+        .expect("agent message should become text content");
+    assert!(content.contains("Visible delegated result."));
+    assert!(content.contains("[encrypted content omitted]"));
+    assert!(!content.contains("opaque-secret"));
+
+    let top_level = json!({
+        "model": "gpt-4.1-mini",
+        "input": [{
+            "type": "agent_message",
+            "text": "Top-level delegated result.",
+            "encrypted_content": "opaque-top-level"
+        }]
+    });
+    let converted = responses_request_to_chat_payload(&top_level)
+        .expect("top-level agent_message content should be accepted");
+    let content = converted["messages"][0]["content"].as_str().unwrap();
+    assert!(content.contains("Top-level delegated result."));
+    assert!(content.contains("[encrypted content omitted]"));
+    assert!(!content.contains("opaque-top-level"));
+}
+
+#[test]
+fn responses_output_agent_message_preserves_text_without_forwarding_encrypted_content() {
+    let response = json!({
+        "id": "resp-agent-message",
+        "model": "gpt-4.1-mini",
+        "output": [{
+            "type": "agent_message",
+            "content": [
+                {"type": "input_text", "text": "Visible output."},
+                {"type": "encrypted_content", "encrypted_content": "opaque-output"}
+            ]
+        }]
+    });
+
+    let converted = responses_response_to_chat_payload(&response)
+        .expect("agent_message output should be accepted");
+    let content = converted["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("agent_message output should become text");
+    assert!(content.contains("Visible output."));
+    assert!(content.contains("[encrypted content omitted]"));
+    assert!(!content.contains("opaque-output"));
+}
+
+#[test]
+fn responses_stream_accepts_agent_message_output_items() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let added = json!({
+        "type": "response.output_item.added",
+        "response_id": "resp-agent-stream",
+        "output_index": 0,
+        "item": {
+            "type": "agent_message",
+            "content": [{"type": "input_text", "text": "streamed agent text"}]
+        }
+    });
+
+    translator
+        .translate_event(&added)
+        .expect("agent_message stream item should be accepted");
+    let done = json!({
+        "type": "response.output_item.done",
+        "response_id": "resp-agent-stream",
+        "output_index": 0,
+        "item": {
+            "type": "agent_message",
+            "content": [{"type": "input_text", "text": "streamed agent text"}]
+        }
+    });
+    let translated = translator
+        .translate_event(&done)
+        .expect("agent_message stream item should emit content");
+    assert!(translated
+        .iter()
+        .any(|event| { event["choices"][0]["delta"]["content"] == "streamed agent text" }));
+
+    let mut completed_translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let completed = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp-agent-completed",
+            "model": "gpt-4.1-mini",
+            "output": [{
+                "type": "agent_message",
+                "content": [{"type": "input_text", "text": "completed agent text"}]
+            }]
+        }
+    });
+    let translated = completed_translator
+        .translate_event(&completed)
+        .expect("completed agent_message should be accepted");
+    assert!(translated
+        .iter()
+        .any(|event| { event["choices"][0]["delta"]["content"] == "completed agent text" }));
+}
+
+#[test]
+fn agent_message_role_is_assistant_and_visible_text_survives_encrypted_parts() {
+    let responses = json!({
+        "model": "gpt-4.1-mini",
+        "input": [{
+            "type": "agent_message",
+            "role": "developer",
+            "content": null,
+            "text": "Visible text with a null content field.",
+            "encrypted_content": "opaque-role"
+        }, {
+            "type": "agent_message",
+            "content": [{
+                "type": "output_text",
+                "text": "Visible output_text.",
+                "encrypted_content": "opaque-part"
+            }]
+        }]
+    });
+
+    let converted = responses_request_to_chat_payload(&responses)
+        .expect("agent_message variants should be accepted");
+    assert_eq!(converted["messages"][0]["role"], "assistant");
+    let content = converted["messages"][0]["content"].as_str().unwrap();
+    assert!(content.contains("Visible text with a null content field."));
+    assert!(content.contains("Visible output_text."));
+    assert!(content.contains("[encrypted content omitted]"));
+    assert!(!content.contains("opaque-role"));
+    assert!(!content.contains("opaque-part"));
+}
+
+#[test]
+fn agent_message_keeps_top_level_and_encrypted_part_text() {
+    let request = json!({
+        "model": "gpt-4.1-mini",
+        "input": [{
+            "type": "agent_message",
+            "text": "Top-level visible text.",
+            "content": [{
+                "type": "encrypted_content",
+                "text": "Visible text beside the encrypted part.",
+                "encrypted_content": "opaque-secret"
+            }]
+        }]
+    });
+    let converted = responses_request_to_chat_payload(&request).unwrap();
+    let content = converted["messages"][0]["content"].as_str().unwrap();
+    assert!(content.contains("Top-level visible text."));
+    assert!(content.contains("Visible text beside the encrypted part."));
+    assert!(content.contains("[encrypted content omitted]"));
+    assert!(!content.contains("opaque-secret"));
+
+    let response = json!({
+        "id": "resp-agent-visible",
+        "model": "gpt-4.1-mini",
+        "output": [{
+            "type": "agent_message",
+            "text": "Top-level visible text.",
+            "content": [{
+                "type": "encrypted_content",
+                "text": "Visible text beside the encrypted part.",
+                "encrypted_content": "opaque-secret"
+            }]
+        }]
+    });
+    let converted = responses_response_to_chat_payload(&response).unwrap();
+    let content = converted["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+    assert!(content.contains("Top-level visible text."));
+    assert!(content.contains("Visible text beside the encrypted part."));
+    assert!(content.contains("[encrypted content omitted]"));
+    assert!(!content.contains("opaque-secret"));
+}
+
+#[test]
+fn agent_message_drops_non_text_media_for_chat_fallback() {
+    let request = json!({
+        "model": "gpt-4.1-mini",
+        "input": [{
+            "type": "agent_message",
+            "content": [
+                {"type": "input_text", "text": "Visible assistant text."},
+                {"type": "input_image", "image_url": "https://images.example/agent.png"}
+            ]
+        }]
+    });
+    let converted = responses_request_to_chat_payload(&request).unwrap();
+    let content = converted["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(content, "Visible assistant text.");
+    assert!(!converted.to_string().contains("images.example/agent.png"));
+}
+
+#[test]
+fn agent_message_drops_output_images_and_files_for_chat_fallback() {
+    let request = json!({
+        "model": "gpt-4.1-mini",
+        "input": [{
+            "type": "agent_message",
+            "content": [
+                {"type": "input_text", "text": "Visible assistant text."},
+                {"type": "output_image", "image_url": "https://images.example/output.png"},
+                {"type": "input_file", "file_id": "file-secret"}
+            ]
+        }]
+    });
+
+    let converted = responses_request_to_chat_payload(&request).unwrap();
+    assert_eq!(
+        converted["messages"][0]["content"],
+        "Visible assistant text."
+    );
+    let serialized = converted.to_string();
+    assert!(!serialized.contains("images.example/output.png"));
+    assert!(!serialized.contains("file-secret"));
+}
+
+#[test]
+fn responses_stream_agent_message_preserves_text_for_mixed_content() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let added = json!({
+        "type": "response.output_item.added",
+        "response_id": "resp-agent-mixed",
+        "output_index": 0,
+        "item": {
+            "type": "agent_message",
+            "content": [
+                {"type": "input_text", "text": "Visible mixed text."},
+                {"type": "input_image", "image_url": "https://images.example/mixed.png"}
+            ]
+        }
+    });
+    translator.translate_event(&added).unwrap();
+    let done = json!({
+        "type": "response.output_item.done",
+        "response_id": "resp-agent-mixed",
+        "output_index": 0,
+        "item": added["item"].clone()
+    });
+    let translated = translator.translate_event(&done).unwrap();
+    assert!(translated
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "Visible mixed text."));
+}
+
+#[test]
+fn responses_stream_ignores_late_output_text_delta_after_agent_message_done() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let done = json!({
+        "type": "response.output_item.done",
+        "response_id": "resp-agent-duplicate",
+        "output_index": 0,
+        "item": {
+            "type": "agent_message",
+            "content": [{"type": "input_text", "text": "Complete agent text."}]
+        }
+    });
+    let first = translator.translate_event(&done).unwrap();
+    assert!(first
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "Complete agent text."));
+
+    let late_delta = json!({
+        "type": "response.output_text.delta",
+        "response_id": "resp-agent-duplicate",
+        "output_index": 0,
+        "delta": "Complete agent text."
+    });
+    let second = translator.translate_event(&late_delta).unwrap();
+    assert!(!second
+        .iter()
+        .any(|event| { event["choices"][0]["delta"]["content"] == "Complete agent text." }));
+}
+
+#[test]
+fn responses_stream_agent_message_done_emits_suffix_after_partial_text_delta() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let partial = json!({
+        "type": "response.output_text.delta",
+        "response_id": "resp-agent-partial",
+        "output_index": 0,
+        "delta": "Hel"
+    });
+    let first = translator.translate_event(&partial).unwrap();
+    assert!(first
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "Hel"));
+
+    let done = json!({
+        "type": "response.output_item.done",
+        "response_id": "resp-agent-partial",
+        "output_index": 0,
+        "item": {
+            "type": "agent_message",
+            "content": [{"type": "input_text", "text": "Hello"}]
+        }
+    });
+    let second = translator.translate_event(&done).unwrap();
+    assert!(second
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "lo"));
+}
+
+#[test]
+fn responses_stream_completed_agent_message_emits_suffix_after_partial_text_delta() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let partial = json!({
+        "type": "response.output_text.delta",
+        "response_id": "resp-agent-completed-partial",
+        "output_index": 0,
+        "delta": "Hel"
+    });
+    translator.translate_event(&partial).unwrap();
+
+    let completed = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp-agent-completed-partial",
+            "model": "gpt-4.1-mini",
+            "output": [{
+                "type": "agent_message",
+                "content": [{"type": "input_text", "text": "Hello"}]
+            }]
+        }
+    });
+    let translated = translator.translate_event(&completed).unwrap();
+    assert!(translated
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "lo"));
+}
+
+#[test]
+fn responses_stream_output_text_done_emits_missing_suffix_after_partial_delta() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let partial = json!({
+        "type": "response.output_text.delta",
+        "response_id": "resp-text-partial",
+        "output_index": 0,
+        "delta": "Hel"
+    });
+    translator.translate_event(&partial).unwrap();
+
+    let done = json!({
+        "type": "response.output_text.done",
+        "response_id": "resp-text-partial",
+        "output_index": 0,
+        "text": "Hello"
+    });
+    let translated = translator.translate_event(&done).unwrap();
+    assert!(translated
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "lo"));
+}
+
+#[test]
+fn responses_stream_ignores_late_duplicate_delta_after_output_text_done() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let done = json!({
+        "type": "response.output_text.done",
+        "response_id": "resp-text-duplicate",
+        "output_index": 0,
+        "text": "Complete text."
+    });
+    let first = translator.translate_event(&done).unwrap();
+    assert!(first
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "Complete text."));
+
+    let late_delta = json!({
+        "type": "response.output_text.delta",
+        "response_id": "resp-text-duplicate",
+        "output_index": 0,
+        "delta": "Complete text."
+    });
+    let second = translator.translate_event(&late_delta).unwrap();
+    assert!(!second
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "Complete text."));
+}
+
+#[test]
+fn unknown_responses_output_type_is_not_echoed_in_protocol_error() {
+    let secret_type = "upstream-secret-marker";
+    let response = json!({
+        "id": "resp-unknown-type",
+        "model": "gpt-4.1-mini",
+        "output": [{"type": secret_type}]
+    });
+    let error = responses_response_to_chat_payload(&response).unwrap_err();
+    assert!(!error.to_string().contains(secret_type));
+}
+
+#[test]
+fn responses_stream_emits_text_when_output_text_done_has_no_delta() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let done = json!({
+        "type": "response.output_text.done",
+        "response_id": "resp-agent-done-only",
+        "output_index": 0,
+        "text": "Done-only visible text."
+    });
+    let translated = translator.translate_event(&done).unwrap();
+    assert!(translated
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "Done-only visible text."));
+}
+
+#[test]
+fn responses_stream_flushes_complete_agent_message_when_item_done_is_missing() {
+    let mut translator = StreamTranslator::new(
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+    )
+    .unwrap();
+    let added = json!({
+        "type": "response.output_item.added",
+        "response_id": "resp-agent-added-only",
+        "output_index": 0,
+        "item": {
+            "type": "agent_message",
+            "content": [{"type": "input_text", "text": "Added-only visible text."}]
+        }
+    });
+    translator.translate_event(&added).unwrap();
+    let translated = translator.finish().unwrap();
+    assert!(translated
+        .iter()
+        .any(|event| event["choices"][0]["delta"]["content"] == "Added-only visible text."));
+}
+
+#[test]
 fn chat_response_replays_namespace_function_calls_with_registry() {
     let tools = json!([
         {

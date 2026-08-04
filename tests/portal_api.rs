@@ -26,7 +26,12 @@ fn unique_state_path() -> PathBuf {
 
 fn stable_today_noon() -> u64 {
     let now = chat_responses_codex::state::unix_seconds();
-    (now / 86_400) * 86_400 + 12 * 60 * 60
+    DeploymentCalendar::parse("Asia/Shanghai")
+        .unwrap()
+        .today(now)
+        .unwrap()
+        .start_time
+        + 12 * 60 * 60
 }
 
 fn canonical_upstream_state() -> (AppState, String) {
@@ -188,7 +193,7 @@ fn create_test_state() -> (AppState, String) {
     let config = AppConfig::default();
     let generated = generate_downstream_key("sk");
 
-    let now = chat_responses_codex::state::unix_seconds();
+    let now = stable_today_noon();
 
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),

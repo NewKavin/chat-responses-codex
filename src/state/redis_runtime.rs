@@ -386,9 +386,8 @@ impl RedisRuntimeCoordinator {
                 let waiting_key = waiting_key.clone();
                 let lease_id = lease_id.to_string();
                 async move {
-                    let script = redis::Script::new(include_str!(
-                        "redis_runtime/downstream_runtime.lua"
-                    ));
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/downstream_runtime.lua"));
                     let mut invocation = script.prepare_invoke();
                     invocation
                         .key(lease_key)
@@ -419,14 +418,10 @@ impl RedisRuntimeCoordinator {
                 let lease_key = lease_key.clone();
                 let waiting_key = waiting_key.clone();
                 async move {
-                    let script = redis::Script::new(include_str!(
-                        "redis_runtime/downstream_runtime.lua"
-                    ));
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/downstream_runtime.lua"));
                     let mut invocation = script.prepare_invoke();
-                    invocation
-                        .key(lease_key)
-                        .key(waiting_key)
-                        .arg("snapshot");
+                    invocation.key(lease_key).key(waiting_key).arg("snapshot");
                     timeout_coordination(invocation.invoke_async::<Vec<u64>>(&mut connection)).await
                 }
             })
@@ -742,11 +737,8 @@ impl RedisRuntimeCoordinator {
         downstream_id: &str,
         downstream_lease_id: &str,
     ) -> Result<ProbeDecision, RuntimeCoordinationError> {
-        self.try_acquire_account_probe_inner(
-            ticket,
-            Some((downstream_id, downstream_lease_id)),
-        )
-        .await
+        self.try_acquire_account_probe_inner(ticket, Some((downstream_id, downstream_lease_id)))
+            .await
     }
 
     async fn try_acquire_account_probe_inner(
@@ -894,9 +886,11 @@ impl RedisRuntimeCoordinator {
                                         .arg("concurrency_rejected")
                                         .arg(&mutation_token)
                                         .arg(identity)
-                                        .arg(retry_after.map(duration_millis).map_or(-1_i64, |ms| {
-                                            i64::try_from(ms).unwrap_or(i64::MAX)
-                                        }))
+                                        .arg(
+                                            retry_after.map(duration_millis).map_or(-1_i64, |ms| {
+                                                i64::try_from(ms).unwrap_or(i64::MAX)
+                                            }),
+                                        )
                                         .arg(100_u64)
                                         .arg(self.concurrency_probe_delays.len());
                                     for delay in &self.concurrency_probe_delays {
@@ -931,7 +925,11 @@ impl RedisRuntimeCoordinator {
         let result = self
             .run_account_status(
                 account,
-                &["acquire_poller", owner_token, &self.account_poller_ttl_ms.to_string()],
+                &[
+                    "acquire_poller",
+                    owner_token,
+                    &self.account_poller_ttl_ms.to_string(),
+                ],
             )
             .await?;
         if result.first().map(String::as_str) != Some("0") || result.len() != 2 {
@@ -955,7 +953,12 @@ impl RedisRuntimeCoordinator {
         let result = self
             .run_account_status(
                 account,
-                &["store", &current, &limit, &self.account_observation_freshness_ms.to_string()],
+                &[
+                    "store",
+                    &current,
+                    &limit,
+                    &self.account_observation_freshness_ms.to_string(),
+                ],
             )
             .await?;
         parse_provider_observation(&result)

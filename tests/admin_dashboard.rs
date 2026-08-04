@@ -8,10 +8,13 @@ use axum::http::{header, Request, StatusCode};
 use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, PersistedState, UpstreamConfig, UsageLog,
+    AppConfig, AppState, DownstreamConfig, PersistedState, StateStore, StoreFuture, UpstreamConfig,
+    UsageLog,
 };
 use serde_json::{json, Value};
+use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -275,6 +278,242 @@ async fn get_admin_token(app: &axum::Router, username: &str, password: &str) -> 
     let json: Value = serde_json::from_slice(&body).unwrap();
 
     json["token"].as_str().unwrap().to_string()
+}
+
+#[derive(Clone)]
+struct DashboardWindowStore {
+    logs: Vec<UsageLog>,
+}
+
+impl StateStore for DashboardWindowStore {
+    fn persist_config<'a>(&'a self, _state: &'a PersistedState) -> StoreFuture<'a, io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn query_usage_logs_window<'a>(
+        &'a self,
+        start_time: u64,
+        end_time: u64,
+    ) -> StoreFuture<'a, io::Result<Option<Vec<UsageLog>>>> {
+        let logs = self
+            .logs
+            .iter()
+            .filter(|log| log.created_at >= start_time && log.created_at < end_time)
+            .cloned()
+            .collect();
+        Box::pin(async move { Ok(Some(logs)) })
+    }
+}
+
+fn dashboard_usage_log(id: &str, created_at: u64) -> UsageLog {
+    UsageLog {
+        id: id.to_string(),
+        downstream_key_id: "downstream-store".to_string(),
+        upstream_key_id: "upstream-store".to_string(),
+        downstream_name: Some("Stored client".to_string()),
+        upstream_name: Some("Stored upstream".to_string()),
+        endpoint: "/v1/responses".to_string(),
+        model: "glm-5.2".to_string(),
+        inference_strength: None,
+        billing_mode: None,
+        request_count: None,
+        user_agent: Some("Codex/0.146.0".to_string()),
+        request_id: format!("request-{id}"),
+        status_code: 200,
+        wire_status_code: 200,
+        stream_diagnostics: None,
+        error_message: None,
+        error_category: None,
+        prompt_tokens: 10,
+        completion_tokens: 20,
+        total_tokens: 30,
+        first_token_latency_ms: Some(50),
+        latency_ms: 100,
+        created_at,
+        compatibility: None,
+    }
+}
+
+#[tokio::test]
+async fn admin_dashboard_uses_store_backed_window_logs() {
+    let now = chat_responses_codex::state::unix_seconds();
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+    let state = AppState::new_with_store(
+        PersistedState::default(),
+        unique_state_path(),
+        config,
+        Arc::new(DashboardWindowStore {
+            logs: vec![dashboard_usage_log("durable", now.saturating_sub(60))],
+        }),
+    );
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/dashboard?range=7d")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["analytics"]["summary"]["total_requests"], 1);
+    assert_eq!(result["analytics"]["summary"]["total_tokens"], 30);
+    assert_eq!(result["analytics"]["model_usage"][0]["name"], "glm-5.2");
+}
+
+#[tokio::test]
+async fn admin_dashboard_buckets_by_deployment_calendar_day() {
+    let now = chat_responses_codex::state::unix_seconds();
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        deployment_timezone: "Asia/Shanghai".to_string(),
+        ..Default::default()
+    };
+    let calendar = chat_responses_codex::state::DeploymentCalendar::parse("Asia/Shanghai").unwrap();
+    let today = calendar.today(now).unwrap();
+    let state = AppState::new(
+        PersistedState {
+            usage_logs: vec![dashboard_usage_log(
+                "shanghai-midnight",
+                today.start_time.saturating_add(1),
+            )],
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        config,
+    );
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/dashboard?range=1d")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    let daily_series = result["analytics"]["daily_series"].as_array().unwrap();
+
+    assert_eq!(daily_series.len(), 1);
+    assert_eq!(daily_series[0]["day"], today.day);
+    assert_eq!(daily_series[0]["date"], today.start_time);
+    assert_eq!(daily_series[0]["requests"], 1);
+}
+
+#[tokio::test]
+async fn admin_dashboard_reports_corrupt_file_store_usage_archives() {
+    let store_path = unique_state_path();
+    let file_name = store_path.file_name().unwrap().to_string_lossy();
+    let archive_path = store_path.with_file_name(format!("{file_name}.usage.corrupt.json"));
+    std::fs::write(&archive_path, b"not-json").unwrap();
+
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+    let state = AppState::new(PersistedState::default(), &store_path, config);
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/dashboard?range=7d")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        result["error"]["message"],
+        "Failed to load dashboard analytics"
+    );
+
+    std::fs::remove_file(archive_path).unwrap();
+}
+
+#[tokio::test]
+async fn admin_dashboard_merges_legacy_memory_logs_with_file_archives() {
+    let now = chat_responses_codex::state::unix_seconds();
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            usage_logs: vec![dashboard_usage_log(
+                "legacy-memory",
+                now.saturating_sub(120),
+            )],
+            ..PersistedState::default()
+        },
+        unique_state_path(),
+        config,
+    );
+    state
+        .append_usage_log(dashboard_usage_log("file-archive", now.saturating_sub(60)))
+        .await
+        .unwrap();
+    state.flush_usage_logs_for_test().await.unwrap();
+    let app = chat_responses_codex::server::build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/dashboard?range=7d")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["analytics"]["summary"]["total_requests"], 2);
+    assert_eq!(result["analytics"]["summary"]["total_tokens"], 60);
 }
 
 #[tokio::test]

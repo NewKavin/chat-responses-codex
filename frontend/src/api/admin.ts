@@ -337,6 +337,8 @@ export const adminApi = {
     error_category?: string
     error_categories?: string
     model?: string
+    downstream_id?: string
+    upstream_id?: string
     day?: string
     time_range?: '1h'
   }) => adminHttp.get<LogsResponse>('/admin/logs', { params }),

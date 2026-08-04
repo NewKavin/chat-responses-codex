@@ -228,8 +228,8 @@ pub fn portal_model_is_allowed(allowlist: &[String], model: &str) -> bool {
     let Some(model) = normalize_model_name(raw_model) else {
         return false;
     };
-    let subagent_base_model = super::codex_subagent_base_model(raw_model)
-        .and_then(normalize_model_name);
+    let subagent_base_model =
+        super::codex_subagent_base_model(raw_model).and_then(normalize_model_name);
     if let Some(base_model) = subagent_base_model.as_deref() {
         return allowlist
             .iter()
@@ -449,7 +449,8 @@ impl AppState {
                     })
             });
 
-        self.compute_daily_stats_for_range(downstream_id, &range).await
+        self.compute_daily_stats_for_range(downstream_id, &range)
+            .await
     }
 
     pub async fn compute_daily_stats_for_range(
@@ -484,7 +485,8 @@ impl AppState {
                     as u32;
                 stat.total_requests = stat.total_requests.saturating_add(1);
                 stat.total_tokens = stat.total_tokens.saturating_add(log.total_tokens);
-                let successful = previous_successes.saturating_add(u32::from(log.status_code == 200));
+                let successful =
+                    previous_successes.saturating_add(u32::from(log.status_code == 200));
                 stat.success_rate = successful as f64 / stat.total_requests as f64;
             }
             return stats;

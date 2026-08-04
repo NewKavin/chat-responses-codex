@@ -6,8 +6,8 @@ use crate::state::{
     DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig, EnrichedUsageLog,
     FreekeySyncError, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
     ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
-    ResolvedLogWindow, RouteHealthSnapshotDto, RuntimeCoordinationError, UpstreamConfig,
-    UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    ResolvedLogWindow, RouteHealthSnapshotDto, RuntimeCoordinationError, SummaryRange,
+    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -198,6 +198,7 @@ struct DashboardAnalyticsSummary {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DashboardDailySeriesItem {
+    day: String,
     date: u64,
     requests: u64,
     tokens: u64,
@@ -258,26 +259,51 @@ pub(super) async fn admin_dashboard(
         "30d" => "30d",
         _ => "7d",
     };
-    let snapshot = state.snapshot().await;
     let now = unix_seconds();
-    let days = match range {
-        "1d" => 1,
-        "30d" => 30,
-        _ => 7,
+    let summary_range = match range {
+        "1d" => SummaryRange::OneDay,
+        "30d" => SummaryRange::ThirtyDays,
+        _ => SummaryRange::SevenDays,
     };
-    let window_start = now.saturating_sub((days as u64 - 1) * 24 * 60 * 60);
-    let daily_start = (window_start / 86400) * 86400;
-    let mut daily_series = Vec::with_capacity(days);
-    for offset in (0..days).rev() {
-        let date = daily_start.saturating_add((offset as u64) * 86400);
-        daily_series.push(DashboardDailySeriesItem {
-            date,
+    let calendar_range = match state
+        .deployment_calendar()
+        .resolve_summary(summary_range, now)
+    {
+        Ok(range) => range,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to resolve dashboard range"}})),
+            )
+                .into_response();
+        }
+    };
+    let usage_logs = match state
+        .dashboard_usage_logs(calendar_range.start_time, calendar_range.end_time)
+        .await
+    {
+        Ok(logs) => logs,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "Failed to load dashboard analytics"}})),
+            )
+                .into_response();
+        }
+    };
+    let snapshot = state.snapshot().await;
+    let mut daily_series = calendar_range
+        .days
+        .iter()
+        .map(|day| DashboardDailySeriesItem {
+            day: day.day.clone(),
+            date: day.start_time,
             requests: 0,
             tokens: 0,
             avg_latency_ms: 0,
             success_rate: 0.0,
-        });
-    }
+        })
+        .collect::<Vec<_>>();
 
     let mut total_requests = 0u64;
     let mut total_success = 0u64;
@@ -288,17 +314,7 @@ pub(super) async fn admin_dashboard(
     let mut model_usage_counter: HashMap<String, u64> = HashMap::new();
     let mut downstream_usage_counter: HashMap<String, u64> = HashMap::new();
 
-    let day_index = daily_series
-        .iter()
-        .enumerate()
-        .map(|(index, item)| (item.date, index))
-        .collect::<HashMap<_, _>>();
-
-    for log in snapshot
-        .usage_logs
-        .iter()
-        .filter(|log| log.created_at >= window_start)
-    {
+    for log in &usage_logs {
         total_requests += 1;
         if (200..300).contains(&log.status_code) {
             total_success += 1;
@@ -306,8 +322,11 @@ pub(super) async fn admin_dashboard(
         total_latency += log.latency_ms;
         total_tokens += log.total_tokens;
 
-        let day_key = (log.created_at / 86400) * 86400;
-        if let Some(&index) = day_index.get(&day_key) {
+        if let Some(index) = calendar_range
+            .days
+            .iter()
+            .position(|day| log.created_at >= day.start_time && log.created_at < day.end_time)
+        {
             let bucket = &mut daily_series[index];
             bucket.requests += 1;
             bucket.tokens += log.total_tokens;
@@ -2225,6 +2244,8 @@ pub(super) struct LogsQuery {
     error_category: Option<String>,
     error_categories: Option<String>,
     model: Option<String>,
+    downstream_id: Option<String>,
+    upstream_id: Option<String>,
     day: Option<String>,
     time_range: Option<String>,
     start_time: Option<u64>,
@@ -2401,8 +2422,8 @@ pub(super) async fn admin_list_logs(
             status_codes,
             error_categories,
             model_substring: query.model.clone(),
-            downstream_id: None,
-            upstream_id: None,
+            downstream_id: query.downstream_id.clone(),
+            upstream_id: query.upstream_id.clone(),
             start_time,
             end_time,
         })

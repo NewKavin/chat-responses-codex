@@ -17,10 +17,26 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
         ]},
         {"type":"custom","name":"apply_patch"}
     ]);
+    let replacement_tools = json!([
+        {"type":"namespace","name":"replacement_agents","tools":[
+            {"type":"function","name":"spawn_agent","parameters":{"type":"object"}}
+        ]},
+        {"type":"custom","name":"apply_patch"}
+    ]);
     let adaptation = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
+    let replacement_adaptation =
+        ToolAdapterRegistry::build(&replacement_tools, ToolTarget::FunctionsOnly).unwrap();
     let namespace_name = adaptation
         .registry
         .upstream_name(&ToolIdentity::namespace("multi_agent_v1", "spawn_agent"))
+        .unwrap()
+        .to_string();
+    let replacement_name = replacement_adaptation
+        .registry
+        .upstream_name(&ToolIdentity::namespace(
+            "replacement_agents",
+            "spawn_agent",
+        ))
         .unwrap()
         .to_string();
     let custom_name = adaptation
@@ -33,12 +49,23 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
         post(move |request: Request<Body>| {
             let capture = capture_clone.clone();
             let namespace_name = namespace_name.clone();
+            let replacement_name = replacement_name.clone();
             let custom_name = custom_name.clone();
             async move {
                 let (_parts, body) = request.into_parts();
                 let body = to_bytes(body, usize::MAX).await.unwrap();
                 let payload: Value = serde_json::from_slice(&body).unwrap();
-                capture.lock().unwrap().push(payload);
+                let request_index = {
+                    let mut requests = capture.lock().unwrap();
+                    let request_index = requests.len();
+                    requests.push(payload);
+                    request_index
+                };
+                let response_namespace_name = if request_index == 0 {
+                    &namespace_name
+                } else {
+                    &replacement_name
+                };
                 (
                     StatusCode::OK,
                     axum::Json(json!({
@@ -52,7 +79,7 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
                                 "role": "assistant",
                                 "content": null,
                                 "tool_calls": [
-                                    {"id":"call-a","type":"function","function":{"name":namespace_name,"arguments":"{}"}},
+                                    {"id":"call-a","type":"function","function":{"name":response_namespace_name,"arguments":"{}"}},
                                     {"id":"call-b","type":"function","function":{"name":custom_name,"arguments":"{\"input\":\"patch-body\"}"}}
                                 ]
                             },
@@ -133,6 +160,7 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
     }
     stamp_current_dialect_profile(&state, model, &mut profile).await;
     state.upsert_dialect_profile(profile).await.unwrap();
+    let state_for_history = state.clone();
     let app = build_router(state);
     let auth = HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap();
     let first_response = app
@@ -157,6 +185,17 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
         .await
         .unwrap();
     assert_eq!(first_response.status(), StatusCode::OK);
+    let stored_history = state_for_history
+        .response_history("chatcmpl-fallback-tools")
+        .await
+        .expect("first response history should be stored");
+    assert!(
+        stored_history.request_state["gateway_tool_registry"]["mappings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|mapping| mapping["identity"]["namespace"] == "multi_agent_v1")
+    );
 
     let continuation_response = app
         .oneshot(
@@ -172,6 +211,7 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
                         "input": [
                             {"type":"custom_tool_call_output","call_id":"call-b","output":"applied"}
                         ],
+                        "tools": replacement_tools,
                         "stream": false
                     })
                     .to_string(),
@@ -181,6 +221,18 @@ async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
         .await
         .unwrap();
     assert_eq!(continuation_response.status(), StatusCode::OK);
+    let continuation_body = to_bytes(continuation_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let continuation_payload: Value = serde_json::from_slice(&continuation_body).unwrap();
+    let restored_call = continuation_payload["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    assert_eq!(restored_call["name"], "spawn_agent");
+    assert_eq!(restored_call["namespace"], "replacement_agents");
 
     let requests = capture.lock().unwrap();
     assert_eq!(requests.len(), 2);

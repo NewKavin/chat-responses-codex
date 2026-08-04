@@ -74,6 +74,24 @@
             @clear="handleFilterChange"
           />
         </el-form-item>
+        <el-form-item label="下游 ID">
+          <el-input
+            v-model="filters.downstream_id"
+            clearable
+            placeholder="按下游 ID 筛选"
+            @keyup.enter="handleFilterChange"
+            @clear="handleFilterChange"
+          />
+        </el-form-item>
+        <el-form-item label="上游 ID">
+          <el-input
+            v-model="filters.upstream_id"
+            clearable
+            placeholder="按上游 ID 筛选"
+            @keyup.enter="handleFilterChange"
+            @clear="handleFilterChange"
+          />
+        </el-form-item>
         <el-form-item label="日期">
           <el-date-picker
             v-model="filters.day"
@@ -317,6 +335,8 @@ const filters = ref({
   status_codes: [] as number[],
   error_categories: [] as string[],
   model: '',
+  downstream_id: '',
+  upstream_id: '',
   day: '' as string
 })
 
@@ -442,6 +462,8 @@ const resetFilters = () => {
     status_codes: [],
     error_categories: [],
     model: '',
+    downstream_id: '',
+    upstream_id: '',
     day: ''
   }
   handleFilterChange()
@@ -463,6 +485,8 @@ const loadData = async () => {
       status_codes?: string
       error_categories?: string
       model?: string
+      downstream_id?: string
+      upstream_id?: string
     } = {
       page: pagination.value.page,
       page_size: pagination.value.page_size
@@ -476,6 +500,12 @@ const loadData = async () => {
     }
     if (filters.value.model.trim().length > 0) {
       params.model = filters.value.model.trim()
+    }
+    if (filters.value.downstream_id.trim().length > 0) {
+      params.downstream_id = filters.value.downstream_id.trim()
+    }
+    if (filters.value.upstream_id.trim().length > 0) {
+      params.upstream_id = filters.value.upstream_id.trim()
     }
     // Detail logs are bounded to one selected calendar day; omitting day
     // resolves to "today" server-side. Preserve status/model/category filters

@@ -8,45 +8,45 @@ export interface UsageHistoryBucket {
 }
 
 const toDayKey = (date: Date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
+  const year = date.getUTCFullYear()
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(date.getUTCDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
 }
 
-const toDayLabel = (date: Date) => {
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
+const shiftDay = (dayKey: string, offset: number) => {
+  const [year, month, day] = dayKey.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  date.setUTCDate(date.getUTCDate() + offset)
+  return toDayKey(date)
+}
+
+const toDayLabel = (dayKey: string) => {
+  const [, month, day] = dayKey.split('-')
   return `${month}/${day}`
 }
 
-export const buildUsageHistoryBuckets = (rangeDays: number, stats: DailyStats[]) => {
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
+export const buildUsageHistoryBuckets = (
+  rangeDays: number,
+  stats: DailyStats[],
+  endDay?: string
+) => {
+  const normalizedRange = Math.max(0, Math.floor(rangeDays))
+  const statsByDay = new Map(stats.map(stat => [stat.day, stat]))
+  const anchorDay = endDay || toDayKey(new Date())
+  const firstDay = shiftDay(anchorDay, -(normalizedRange - 1))
 
   const buckets: UsageHistoryBucket[] = []
-  const indexByKey = new Map<string, number>()
 
-  for (let offset = rangeDays - 1; offset >= 0; offset -= 1) {
-    const date = new Date(today)
-    date.setDate(today.getDate() - offset)
-    const key = toDayKey(date)
+  for (let offset = 0; offset < normalizedRange; offset += 1) {
+    const key = shiftDay(firstDay, offset)
+    const stat = statsByDay.get(key)
     buckets.push({
       key,
-      label: toDayLabel(date),
-      requests: 0,
-      tokens: 0
+      label: toDayLabel(key),
+      requests: stat?.total_requests ?? 0,
+      tokens: stat?.total_tokens ?? 0
     })
-    indexByKey.set(key, buckets.length - 1)
-  }
-
-  for (const stat of stats) {
-    const date = new Date(stat.start_time * 1000)
-    date.setHours(0, 0, 0, 0)
-    const index = indexByKey.get(toDayKey(date))
-    if (index === undefined) continue
-    buckets[index].requests = stat.total_requests
-    buckets[index].tokens = stat.total_tokens
   }
 
   return buckets

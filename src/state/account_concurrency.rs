@@ -94,9 +94,7 @@ impl AccountConcurrencyTuning {
                 config.upstream_concurrency_probe_delays_ms.clone(),
             ),
             jitter_max: Duration::from_millis(100),
-            waiter_budget: Duration::from_millis(
-                config.upstream_concurrency_recovery_max_wait_ms,
-            ),
+            waiter_budget: Duration::from_millis(config.upstream_concurrency_recovery_max_wait_ms),
             waiter_ttl: Duration::from_millis(
                 config
                     .upstream_concurrency_recovery_max_wait_ms
@@ -238,12 +236,7 @@ impl AccountConcurrencyRegistry {
         }
     }
 
-    pub fn reject(
-        &self,
-        key: &AccountConcurrencyKey,
-        retry_after: Option<Duration>,
-        now: Instant,
-    ) {
+    pub fn reject(&self, key: &AccountConcurrencyKey, retry_after: Option<Duration>, now: Instant) {
         let mut registry = self.inner.lock().expect("account registry lock poisoned");
         let state = registry
             .accounts
@@ -531,7 +524,10 @@ impl AccountConcurrencyRegistry {
             probe_in_flight: state.probe.is_some(),
             saturated: state.saturated,
             retry_after: self.retry_after(state, now),
-            observation: state.observation.as_ref().map(|record| record.value.clone()),
+            observation: state
+                .observation
+                .as_ref()
+                .map(|record| record.value.clone()),
         }
     }
 
@@ -543,9 +539,7 @@ impl AccountConcurrencyRegistry {
         now: Instant,
     ) -> bool {
         let mut registry = self.inner.lock().expect("account registry lock poisoned");
-        registry
-            .pollers
-            .retain(|_, poller| poller.expires_at > now);
+        registry.pollers.retain(|_, poller| poller.expires_at > now);
         match registry.pollers.get_mut(key) {
             Some(poller) if poller.owner_token == owner_token => {
                 poller.expires_at = now + ttl;
@@ -567,9 +561,7 @@ impl AccountConcurrencyRegistry {
 
     pub fn prune_idle(&self, now: Instant) -> usize {
         let mut registry = self.inner.lock().expect("account registry lock poisoned");
-        registry
-            .pollers
-            .retain(|_, poller| poller.expires_at > now);
+        registry.pollers.retain(|_, poller| poller.expires_at > now);
         for state in registry.accounts.values_mut() {
             self.prune_account(state, now);
         }

@@ -11,8 +11,9 @@ describe('admin ui structure', () => {
     const dashboard = source('views/admin/Dashboard.vue')
 
     expect(dashboard).toContain('crc-page dashboard-page')
-    expect(dashboard).toContain("const chartRange = ref<ChartRange>('1d')")
-    expect(dashboard).toContain("range: '1d'")
+    expect(dashboard).toContain("const chartRange = ref<ChartRange>('7d')")
+    expect(dashboard).toContain("range: '7d'")
+    expect(dashboard).toContain('item.day.slice(5)')
     expect(dashboard).not.toContain('hero-panel')
   })
 
@@ -164,6 +165,18 @@ describe('admin ui structure', () => {
       downstreams.indexOf('const loadRuntime = async () =>')
     )
     expect(loadDataBody).not.toContain('markRuntimeUnavailable()')
+  })
+
+  it('keeps upstream and downstream log filters inside the selected day', () => {
+    const page = source('views/admin/Logs.vue')
+    const api = source('api/admin.ts')
+
+    expect(page).toContain('v-model="filters.downstream_id"')
+    expect(page).toContain('v-model="filters.upstream_id"')
+    expect(page).toContain('params.downstream_id = filters.value.downstream_id.trim()')
+    expect(page).toContain('params.upstream_id = filters.value.upstream_id.trim()')
+    expect(api).toContain('downstream_id?: string')
+    expect(api).toContain('upstream_id?: string')
   })
 
   it('uses unframed troubleshooting sections and one matrix tool surface', () => {

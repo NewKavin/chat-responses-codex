@@ -128,6 +128,23 @@ impl ToolAdapterRegistry {
         }
     }
 
+    /// Preserve previously observed upstream names while adding mappings from
+    /// a later tool declaration. Historical response items must continue to
+    /// resolve when a continuation introduces another tool set.
+    pub fn merged_with(&self, additional: &Self) -> Self {
+        let mut merged = self.clone();
+        for mapping in &additional.mappings {
+            if merged
+                .mappings
+                .iter()
+                .all(|known| known.upstream_name != mapping.upstream_name)
+            {
+                merged.mappings.push(mapping.clone());
+            }
+        }
+        merged
+    }
+
     pub fn build(tools: &Value, target: ToolTarget) -> Result<ToolAdaptation, ProtocolError> {
         <Self as ReversibleToolAdapter>::build(tools, target)
     }

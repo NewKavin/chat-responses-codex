@@ -97,6 +97,166 @@ fn chinese_concurrency_429_is_capacity_unavailable() {
 }
 
 #[test]
+fn numeric_429_status_code_without_concurrency_semantics_stays_rate_limited() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"429","message":"relay unavailable"}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
+fn generic_busy_429_without_concurrency_semantics_stays_rate_limited() {
+    assert_class(
+        429,
+        r#"{"error":{"message":"server is busy, please retry later"}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
+fn explicit_concurrency_semantics_win_over_rate_limit_wording() {
+    assert_class(
+        429,
+        r#"{"error":{"message":"concurrency limit exceeded; rate limit reached"}}"#,
+        FailureClass::CapacityUnavailable,
+    );
+}
+
+#[test]
+fn structured_concurrency_code_is_capacity_unavailable_without_message() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"concurrency_limit_exceeded","message":"relay unavailable"}}"#,
+        FailureClass::CapacityUnavailable,
+    );
+}
+
+#[test]
+fn concurrency_code_only_429_is_capacity_unavailable() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"concurrency_limit_exceeded"}}"#,
+        FailureClass::CapacityUnavailable,
+    );
+}
+
+#[test]
+fn structured_429_preserves_model_feature_and_protocol_rejections() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"model_not_found","message":"model not found"}}"#,
+        FailureClass::ModelUnsupported,
+    );
+    assert_class(
+        429,
+        r#"{"error":{"code":"feature_unsupported","message":"stream not supported"}}"#,
+        FailureClass::FeatureUnsupported,
+    );
+    assert_class(
+        429,
+        r#"{"error":{"code":"protocol_unsupported","message":"responses not supported"}}"#,
+        FailureClass::ProtocolUnsupported,
+    );
+}
+
+#[test]
+fn unknown_structured_429_without_status_signal_stays_rate_limited() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"relay_error","message":"relay unavailable"}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
+fn request_rejection_429_does_not_enter_account_recovery() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"request_rejected","message":"request rejected"}}"#,
+        FailureClass::RequestRejected,
+    );
+}
+
+#[test]
+fn quota_429_without_key_scope_does_not_enter_account_recovery() {
+    assert_class(
+        429,
+        r#"{"error":{"type":"insufficient_quota","message":"check your plan and billing details"}}"#,
+        FailureClass::RateLimited,
+    );
+    assert_class(
+        429,
+        r#"{"error":{"code":"quota_exhausted","message":"billing limit reached"}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
+fn explicit_rate_limit_429_remains_rate_limited() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"rate_limit_error","message":"try again later"}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
+fn later_structured_message_preserves_quota_semantics() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"429","details":[{"message":"relay unavailable"},{"message":"quota exceeded"}]}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
+fn later_structured_message_preserves_rejection_and_capacity_semantics() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"429","details":[{"message":"relay unavailable"},{"message":"request rejected"}]}}"#,
+        FailureClass::RequestRejected,
+    );
+    assert_class(
+        429,
+        r#"{"error":{"code":"429","details":[{"message":"relay unavailable"},{"message":"concurrency limit exceeded"}]}}"#,
+        FailureClass::CapacityUnavailable,
+    );
+}
+
+#[test]
+fn explicit_later_rejection_wins_over_wrapper_busy_message() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"429","details":[{"message":"server is busy"},{"message":"request rejected"}]}}"#,
+        FailureClass::RequestRejected,
+    );
+    assert_class(
+        429,
+        r#"{"error":{"code":"429","details":[{"message":"server is busy"},{"message":"quota exceeded"}]}}"#,
+        FailureClass::RateLimited,
+    );
+}
+
+#[test]
+fn explicit_rejection_wins_over_busy_wrapper_for_non_429_responses() {
+    assert_class(
+        400,
+        r#"{"error":{"details":[{"message":"server is busy"},{"message":"request rejected"}]}}"#,
+        FailureClass::RequestRejected,
+    );
+}
+
+#[test]
+fn explicit_credential_message_does_not_enter_account_recovery() {
+    assert_class(
+        429,
+        r#"{"error":{"code":"429","message":"invalid API key"}}"#,
+        FailureClass::Credentials,
+    );
+}
+
+#[test]
 fn chinese_rate_limit_bodies_classify_as_rate_limited() {
     assert_class(
         429,
