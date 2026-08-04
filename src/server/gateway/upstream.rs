@@ -1810,17 +1810,8 @@ pub(super) async fn send_to_upstream(
     let mut context_retry_attempted = false;
     let mut dialect_retry_attempted = false;
     let dialect_retry_source_body = upstream_body.clone();
-    let response_header_timeout =
+    let response_header_timeout_limit =
         Duration::from_secs(state.config.upstream_response_header_timeout_seconds.max(1));
-    // Clip the response-header timeout with the shared first-semantic deadline
-    // so that a stalled upstream cannot hold the stream open past the budget.
-    let response_header_timeout = if let Some(deadline) = first_semantic_deadline {
-        deadline
-            .clip(response_header_timeout)
-            .unwrap_or(response_header_timeout)
-    } else {
-        response_header_timeout
-    };
     if attempt_mode.aggregates_sse() {
         if let Some(active_request_guard) = active_request_guard {
             active_request_guard.arm_aggregate_cancellation_log(GatewayUsageLogContext {
@@ -1840,6 +1831,14 @@ pub(super) async fn send_to_upstream(
         }
     }
     let response = loop {
+        // Recompute the remaining header budget for every physical send. A
+        // same-route retry must not receive a fresh full timeout after the
+        // shared first-semantic deadline has started counting down.
+        let response_header_timeout = if let Some(deadline) = first_semantic_deadline {
+            deadline.clip(response_header_timeout_limit)?
+        } else {
+            response_header_timeout_limit
+        };
         route_attempts.record_physical_attempt(route_health_key.clone());
         let send_future = state
             .client_for_url(&url)
@@ -2243,6 +2242,12 @@ pub(super) async fn send_to_upstream(
                                 stream_only_recovery_request_safe,
                                 account_wait_ms,
                             });
+                    let hedge_response_header_timeout =
+                        if let Some(deadline) = first_semantic_deadline {
+                            deadline.clip(response_header_timeout_limit)?
+                        } else {
+                            response_header_timeout_limit
+                        };
                     match prefetch_stream_with_hedges(
                         state,
                         upstream,
@@ -2256,7 +2261,7 @@ pub(super) async fn send_to_upstream(
                         &route_health_key.runtime_model_slug,
                         upstream_protocol,
                         endpoint,
-                        response_header_timeout,
+                        hedge_response_header_timeout,
                         stream_timeouts,
                         request_id,
                         started,

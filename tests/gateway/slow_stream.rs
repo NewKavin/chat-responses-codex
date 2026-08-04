@@ -480,9 +480,10 @@ async fn all_attempts_share_one_first_semantic_deadline() {
         body.contains("first_semantic_output_timeout"),
         "body should contain timeout error: {body}"
     );
+    let physical_attempts = fixture.physical_attempts().await;
     assert!(
-        fixture.physical_attempts().await <= 2,
-        "physical attempts should be bounded"
+        physical_attempts <= 2,
+        "physical attempts should be bounded, got {physical_attempts}"
     );
     let status = fixture.logical_status().await;
     assert_ne!(status, 499, "logical status must not be 499");
