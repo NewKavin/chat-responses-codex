@@ -4,8 +4,9 @@ use chat_responses_codex::protocol::{
     chat_response_to_responses_payload_with_context,
     chat_response_to_responses_payload_with_tool_registry, image_adapter,
     responses_request_to_chat_payload, responses_request_to_chat_payload_with_context,
-    responses_response_to_chat_payload, ChatStreamCanonicalizer, ConversionContext,
-    StreamAggregateResult, StreamResponseAggregator, StreamTranslator,
+    responses_request_to_chat_payload_with_tool_registry, responses_response_to_chat_payload,
+    responses_response_to_chat_payload_with_tool_registry, ChatStreamCanonicalizer,
+    ConversionContext, StreamAggregateResult, StreamResponseAggregator, StreamTranslator,
 };
 use chat_responses_codex::routing::UpstreamProtocol;
 use serde_json::json;
@@ -131,6 +132,226 @@ fn responses_request_converts_flat_tools_to_chat_payload() {
         converted["tools"][0]["function"]["parameters"]["type"],
         "object"
     );
+}
+
+#[test]
+fn responses_request_replays_namespace_and_custom_calls_with_registry() {
+    let tools = json!([
+        {"type":"namespace","name":"multi_agent_v1","tools":[
+            {"type":"function","name":"spawn_agent","parameters":{"type":"object"}}
+        ]},
+        {"type":"custom","name":"apply_patch","description":"patch"}
+    ]);
+    let adaptation = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
+    let namespace_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::namespace("multi_agent_v1", "spawn_agent"))
+        .unwrap()
+        .to_string();
+    let custom_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::custom(None, "apply_patch"))
+        .unwrap()
+        .to_string();
+    let request = json!({
+        "model":"opaque",
+        "input":[
+            {"type":"function_call","call_id":"call-a","name":"spawn_agent","namespace":"multi_agent_v1","arguments":"{}"},
+            {"type":"custom_tool_call","call_id":"call-b","name":"apply_patch","input":"patch-body"},
+            {"type":"custom_tool_call_output","call_id":"call-b","output":"applied"}
+        ]
+    });
+
+    let converted =
+        responses_request_to_chat_payload_with_tool_registry(&request, Some(&adaptation.registry))
+            .unwrap();
+    let messages = converted["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "assistant");
+    let tool_calls = messages[0]["tool_calls"].as_array().unwrap();
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0]["id"], "call-a");
+    assert_eq!(tool_calls[0]["function"]["name"], namespace_name);
+    assert_eq!(tool_calls[1]["id"], "call-b");
+    assert_eq!(tool_calls[1]["function"]["name"], custom_name);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            tool_calls[1]["function"]["arguments"].as_str().unwrap()
+        )
+        .unwrap(),
+        json!({"input":"patch-body"})
+    );
+    assert_eq!(messages[1]["role"], "tool");
+    assert_eq!(messages[1]["tool_call_id"], "call-b");
+    assert_eq!(messages[1]["content"], "applied");
+}
+
+#[test]
+fn responses_request_preserves_multiple_namespace_call_order_with_registry() {
+    let tools = json!([{"type":"namespace","name":"multi_agent_v1","tools":[
+        {"type":"function","name":"spawn_agent","parameters":{"type":"object"}},
+        {"type":"function","name":"wait_agent","parameters":{"type":"object"}}
+    ]}]);
+    let adaptation = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
+    let request = json!({
+        "model":"opaque",
+        "input":[
+            {"type":"function_call","call_id":"call-a","name":"spawn_agent","namespace":"multi_agent_v1","arguments":"{}"},
+            {"type":"function_call","call_id":"call-b","name":"wait_agent","namespace":"multi_agent_v1","arguments":"{}"}
+        ]
+    });
+
+    let converted =
+        responses_request_to_chat_payload_with_tool_registry(&request, Some(&adaptation.registry))
+            .unwrap();
+    let tool_calls = converted["messages"][0]["tool_calls"].as_array().unwrap();
+    assert_eq!(
+        tool_calls
+            .iter()
+            .map(|call| call["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["call-a", "call-b"]
+    );
+}
+
+#[test]
+fn responses_custom_output_item_converts_to_chat_tool_call() {
+    let response = json!({
+        "id": "resp-custom",
+        "object": "response",
+        "model": "opaque",
+        "output": [{
+            "type": "custom_tool_call",
+            "id": "item-custom",
+            "call_id": "call-custom",
+            "name": "apply_patch",
+            "input": "patch-body"
+        }]
+    });
+
+    let chat = responses_response_to_chat_payload(&response).unwrap();
+    assert_eq!(
+        chat["choices"][0]["message"]["tool_calls"][0]["id"],
+        "call-custom"
+    );
+    assert_eq!(
+        chat["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+        "apply_patch"
+    );
+    assert_eq!(
+        chat["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+        "{\"input\":\"patch-body\"}"
+    );
+}
+
+#[test]
+fn responses_output_uses_registry_for_namespace_and_custom_names() {
+    let tools = json!([
+        {"type":"namespace","name":"multi_agent_v1","tools":[
+            {"type":"function","name":"spawn_agent","parameters":{"type":"object"}}
+        ]},
+        {"type":"custom","name":"apply_patch"}
+    ]);
+    let adaptation = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
+    let namespace_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::namespace("multi_agent_v1", "spawn_agent"))
+        .unwrap();
+    let custom_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::custom(None, "apply_patch"))
+        .unwrap();
+    let response = json!({
+        "id": "resp-registry",
+        "object": "response",
+        "model": "opaque",
+        "output": [
+            {"type":"function_call","call_id":"call-a","name":"spawn_agent","namespace":"multi_agent_v1","arguments":"{}"},
+            {"type":"custom_tool_call","call_id":"call-b","name":"apply_patch","input":"patch-body"}
+        ]
+    });
+
+    let chat = responses_response_to_chat_payload_with_tool_registry(
+        &response,
+        Some(&adaptation.registry),
+    )
+    .unwrap();
+    let tool_calls = chat["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap();
+    assert_eq!(tool_calls[0]["function"]["name"], namespace_name);
+    assert_eq!(tool_calls[1]["function"]["name"], custom_name);
+}
+
+#[test]
+fn responses_tool_output_errors_do_not_echo_output_values() {
+    let error = responses_request_to_chat_payload(&json!({
+        "model": "opaque",
+        "input": [{
+            "type": "custom_tool_call_output",
+            "call_id": "call-custom",
+            "output": 987654321
+        }]
+    }))
+    .expect_err("scalar tool output should be rejected");
+    assert!(!error.to_string().contains("987654321"));
+    assert_eq!(error.to_string(), "unsupported content payload");
+}
+
+#[test]
+fn malformed_responses_items_do_not_echo_tool_values() {
+    let input_error = responses_request_to_chat_payload(&json!({
+        "model": "opaque",
+        "input": [{
+            "type": "unsupported_tool_item",
+            "input": "SECRET_TOOL_INPUT",
+            "arguments": "SECRET_TOOL_ARGUMENTS"
+        }]
+    }))
+    .expect_err("unsupported input item should be rejected");
+    assert_eq!(input_error.to_string(), "unsupported responses input item");
+    assert!(!input_error.to_string().contains("SECRET_TOOL"));
+
+    let output_error = responses_response_to_chat_payload(&json!({
+        "model": "opaque",
+        "output": [{
+            "output": "SECRET_TOOL_OUTPUT",
+            "arguments": "SECRET_TOOL_ARGUMENTS"
+        }]
+    }))
+    .expect_err("malformed output item should be rejected");
+    assert_eq!(
+        output_error.to_string(),
+        "unsupported responses output item"
+    );
+    assert!(!output_error.to_string().contains("SECRET_TOOL"));
+}
+
+#[test]
+fn malformed_nonstream_output_items_do_not_echo_tool_values() {
+    let scalar_error = responses_response_to_chat_payload(&json!({
+        "model": "opaque",
+        "output": ["SECRET_TOOL_OUTPUT"]
+    }))
+    .expect_err("scalar output item should be rejected");
+    assert_eq!(
+        scalar_error.to_string(),
+        "unsupported responses output item"
+    );
+    assert!(!scalar_error.to_string().contains("SECRET_TOOL_OUTPUT"));
+
+    let tool_call_error = responses_response_to_chat_payload(&json!({
+        "model": "opaque",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": null,
+            "tool_calls": ["SECRET_TOOL_CALL"]
+        }]
+    }))
+    .expect_err("scalar tool call should be rejected");
+    assert_eq!(tool_call_error.to_string(), "unsupported tool call");
+    assert!(!tool_call_error.to_string().contains("SECRET_TOOL_CALL"));
 }
 
 #[test]

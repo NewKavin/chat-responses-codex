@@ -768,6 +768,13 @@ pub fn chat_response_to_responses_payload_with_context(
 }
 
 pub fn responses_response_to_chat_payload(input: &Value) -> Result<Value, ProtocolError> {
+    responses_response_to_chat_payload_with_tool_registry(input, None)
+}
+
+pub fn responses_response_to_chat_payload_with_tool_registry(
+    input: &Value,
+    tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+) -> Result<Value, ProtocolError> {
     let model = string_field(input, "model")?;
     let output_items = array_field(input, "output")?;
     let mut assistant_message = None;
@@ -791,7 +798,7 @@ pub fn responses_response_to_chat_payload(input: &Value) -> Result<Value, Protoc
             continue;
         }
 
-        if let Some(tool_call) = response_output_item_to_chat_tool_call(item)? {
+        if let Some(tool_call) = response_output_item_to_chat_tool_call(item, tool_registry)? {
             tool_calls.push(tool_call);
         }
     }
@@ -1098,15 +1105,41 @@ fn translate_responses_input_item(
                     Ok(())
                 }
                 Some("function_call") => {
+                    let tool_call = context.tool_registry.adapt_responses_function_call(item)?;
                     merge_assistant_chat_message(
                         pending_assistant,
-                        response_function_call_item_to_chat_message(object)?,
+                        json!({
+                            "role": "assistant",
+                            "content": Value::Null,
+                            "tool_calls": [tool_call],
+                        }),
+                    )?;
+                    Ok(())
+                }
+                Some("custom_tool_call") => {
+                    let tool_call = context.tool_registry.adapt_responses_function_call(item)?;
+                    merge_assistant_chat_message(
+                        pending_assistant,
+                        json!({
+                            "role": "assistant",
+                            "content": Value::Null,
+                            "tool_calls": [tool_call],
+                        }),
                     )?;
                     Ok(())
                 }
                 Some("function_call_output") => {
                     flush_pending_assistant_message(pending_assistant, messages);
                     messages.push(response_function_call_output_to_chat_message(object)?);
+                    Ok(())
+                }
+                Some("custom_tool_call_output") => {
+                    flush_pending_assistant_message(pending_assistant, messages);
+                    let adapted = context.tool_registry.adapt_call_output(item)?;
+                    let adapted = adapted.as_object().ok_or(ProtocolError::InvalidPayload(
+                        "adapted tool output is not an object".into(),
+                    ))?;
+                    messages.push(response_function_call_output_to_chat_message(adapted)?);
                     Ok(())
                 }
                 Some("message") => {
@@ -1155,14 +1188,14 @@ fn translate_responses_input_item(
                     }
                     Ok(())
                 }
-                _ => Err(ProtocolError::InvalidPayload(format!(
-                    "unsupported responses input item: {object:?}"
-                ))),
+                _ => Err(ProtocolError::InvalidPayload(
+                    "unsupported responses input item".into(),
+                )),
             }
         }
-        other => Err(ProtocolError::InvalidPayload(format!(
-            "unsupported input item: {other}"
-        ))),
+        _ => Err(ProtocolError::InvalidPayload(
+            "unsupported input item".into(),
+        )),
     }
 }
 
@@ -1179,9 +1212,9 @@ fn merge_assistant_chat_message(
     pending_assistant: &mut Option<Map<String, Value>>,
     message: Value,
 ) -> Result<(), ProtocolError> {
-    let object = message.as_object().ok_or_else(|| {
-        ProtocolError::InvalidPayload(format!("unsupported assistant message: {message}"))
-    })?;
+    let object = message
+        .as_object()
+        .ok_or_else(|| ProtocolError::InvalidPayload("unsupported assistant message".into()))?;
     let role = object
         .get("role")
         .and_then(Value::as_str)
@@ -1312,10 +1345,10 @@ fn responses_message_object_to_chat_message_with_dialect(
         let converted = tool_calls
             .iter()
             .map(|tool_call| {
-                let tool_call = tool_call.as_object().ok_or_else(|| {
-                    ProtocolError::InvalidPayload(format!("unsupported tool call: {tool_call}"))
-                })?;
-                response_function_call_item_to_chat_tool_call(tool_call)
+                let tool_call = tool_call
+                    .as_object()
+                    .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
+                response_function_call_item_to_chat_tool_call(tool_call, None)
             })
             .collect::<Result<Vec<_>, _>>()?;
         if !converted.is_empty() {
@@ -1358,27 +1391,35 @@ fn responses_tool_output_object_to_chat_message_with_dialect(
 }
 
 fn response_output_item_to_chat_message(item: &Value) -> Result<Option<Value>, ProtocolError> {
-    let object = item.as_object().ok_or_else(|| {
-        ProtocolError::InvalidPayload(format!("unsupported responses output item: {item}"))
-    })?;
+    let object = item
+        .as_object()
+        .ok_or_else(|| ProtocolError::InvalidPayload("unsupported responses output item".into()))?;
 
     match response_output_item_kind(object)? {
-        ResponseOutputItemKind::FunctionCall | ResponseOutputItemKind::Reasoning => Ok(None),
+        ResponseOutputItemKind::FunctionCall
+        | ResponseOutputItemKind::CustomToolCall
+        | ResponseOutputItemKind::Reasoning => Ok(None),
         ResponseOutputItemKind::Message => Ok(Some(
             response_output_message_object_to_chat_message(object)?,
         )),
     }
 }
 
-fn response_output_item_to_chat_tool_call(item: &Value) -> Result<Option<Value>, ProtocolError> {
-    let object = item.as_object().ok_or_else(|| {
-        ProtocolError::InvalidPayload(format!("unsupported responses output item: {item}"))
-    })?;
+fn response_output_item_to_chat_tool_call(
+    item: &Value,
+    tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+) -> Result<Option<Value>, ProtocolError> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| ProtocolError::InvalidPayload("unsupported responses output item".into()))?;
 
     match response_output_item_kind(object)? {
-        ResponseOutputItemKind::FunctionCall => {
-            Ok(Some(response_function_call_item_to_chat_tool_call(object)?))
-        }
+        ResponseOutputItemKind::FunctionCall => Ok(Some(
+            response_function_call_item_to_chat_tool_call(object, tool_registry)?,
+        )),
+        ResponseOutputItemKind::CustomToolCall => Ok(Some(
+            response_custom_tool_call_item_to_chat_tool_call(object, tool_registry)?,
+        )),
         ResponseOutputItemKind::Message | ResponseOutputItemKind::Reasoning => Ok(None),
     }
 }
@@ -1391,6 +1432,7 @@ fn response_function_call_output_to_chat_message(
 
 fn response_function_call_item_to_chat_tool_call(
     object: &Map<String, Value>,
+    tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
 ) -> Result<Value, ProtocolError> {
     let call_id = object
         .get("call_id")
@@ -1401,6 +1443,7 @@ fn response_function_call_item_to_chat_tool_call(
         .get("name")
         .and_then(Value::as_str)
         .ok_or(ProtocolError::MissingField("name"))?;
+    let name = response_chat_tool_name(object, name, tool_registry);
     let arguments = object
         .get("arguments")
         .and_then(Value::as_str)
@@ -1416,21 +1459,67 @@ fn response_function_call_item_to_chat_tool_call(
     }))
 }
 
-fn response_function_call_item_to_chat_message(
+fn response_custom_tool_call_item_to_chat_tool_call(
     object: &Map<String, Value>,
+    tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
 ) -> Result<Value, ProtocolError> {
-    let tool_call = response_function_call_item_to_chat_tool_call(object)?;
+    let call_id = object
+        .get("call_id")
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str)
+        .ok_or(ProtocolError::MissingField("call_id"))?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or(ProtocolError::MissingField("name"))?;
+    let name = response_chat_tool_name(object, name, tool_registry);
+    let input = object
+        .get("input")
+        .and_then(Value::as_str)
+        .ok_or(ProtocolError::MissingField("input"))?;
+    let arguments = serde_json::to_string(&json!({"input": input})).map_err(|_| {
+        ProtocolError::InvalidPayload("custom tool input could not be encoded".into())
+    })?;
+
     Ok(json!({
-        "role": "assistant",
-        "content": Value::Null,
-        "tool_calls": [tool_call],
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
     }))
+}
+
+fn response_chat_tool_name(
+    object: &Map<String, Value>,
+    original_name: &str,
+    tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
+) -> String {
+    let Some(tool_registry) = tool_registry else {
+        return original_name.to_string();
+    };
+    let namespace = object
+        .get("namespace")
+        .and_then(Value::as_str)
+        .filter(|namespace| !namespace.is_empty());
+    let identity = match object.get("type").and_then(Value::as_str) {
+        Some("custom_tool_call") => tool_adapter::ToolIdentity::custom(namespace, original_name),
+        _ => namespace
+            .map(|namespace| tool_adapter::ToolIdentity::namespace(namespace, original_name))
+            .unwrap_or_else(|| tool_adapter::ToolIdentity::function(original_name)),
+    };
+    tool_registry
+        .upstream_name(&identity)
+        .unwrap_or(original_name)
+        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResponseOutputItemKind {
     Message,
     FunctionCall,
+    CustomToolCall,
     Reasoning,
 }
 
@@ -1440,6 +1529,7 @@ fn response_output_item_kind(
     match object.get("type").and_then(Value::as_str) {
         Some("message") => Ok(ResponseOutputItemKind::Message),
         Some("function_call") => Ok(ResponseOutputItemKind::FunctionCall),
+        Some("custom_tool_call") => Ok(ResponseOutputItemKind::CustomToolCall),
         Some("reasoning") => Ok(ResponseOutputItemKind::Reasoning),
         Some(other) => Err(ProtocolError::InvalidPayload(format!(
             "unsupported responses output item type: {other}"
@@ -1452,9 +1542,9 @@ fn response_output_item_kind(
             {
                 Ok(ResponseOutputItemKind::Message)
             } else {
-                Err(ProtocolError::InvalidPayload(format!(
-                    "unsupported responses output item: {object:?}"
-                )))
+                Err(ProtocolError::InvalidPayload(
+                    "unsupported responses output item".into(),
+                ))
             }
         }
     }
@@ -1487,10 +1577,10 @@ fn response_output_message_object_to_chat_message(
         let converted = tool_calls
             .iter()
             .map(|tool_call| {
-                let tool_call = tool_call.as_object().ok_or_else(|| {
-                    ProtocolError::InvalidPayload(format!("unsupported tool call: {tool_call}"))
-                })?;
-                response_function_call_item_to_chat_tool_call(tool_call)
+                let tool_call = tool_call
+                    .as_object()
+                    .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
+                response_function_call_item_to_chat_tool_call(tool_call, None)
             })
             .collect::<Result<Vec<_>, _>>()?;
         if !converted.is_empty() {
@@ -1502,9 +1592,9 @@ fn response_output_message_object_to_chat_message(
 }
 
 fn chat_tool_call_to_function_call(tool_call: &Value) -> Result<Value, ProtocolError> {
-    let object = tool_call.as_object().ok_or_else(|| {
-        ProtocolError::InvalidPayload(format!("unsupported tool call: {tool_call}"))
-    })?;
+    let object = tool_call
+        .as_object()
+        .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
     let Some((name, arguments)) = extract_tool_call_details(object) else {
         return Err(ProtocolError::MissingField("function"));
     };
@@ -1772,9 +1862,9 @@ fn chat_content_to_responses_input_content_with_dialect(
             Ok(Value::Array(converted))
         }
         Value::Null => Ok(Value::Null),
-        other => Err(ProtocolError::InvalidPayload(format!(
-            "unsupported content payload: {other}"
-        ))),
+        _ => Err(ProtocolError::InvalidPayload(
+            "unsupported content payload".into(),
+        )),
     }
 }
 
@@ -1999,9 +2089,9 @@ fn content_to_plain_text(content: &Value) -> Result<String, ProtocolError> {
             Ok(text)
         }
         Value::Object(_) => content_part_text(content),
-        other => Err(ProtocolError::InvalidPayload(format!(
-            "unsupported content payload: {other}"
-        ))),
+        _ => Err(ProtocolError::InvalidPayload(
+            "unsupported content payload".into(),
+        )),
     }
 }
 
@@ -2010,15 +2100,15 @@ fn content_part_text(value: &Value) -> Result<String, ProtocolError> {
         return Ok(text.to_string());
     }
 
-    let object = value.as_object().ok_or_else(|| {
-        ProtocolError::InvalidPayload(format!("unsupported content part: {value}"))
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| ProtocolError::InvalidPayload("unsupported content part".into()))?;
     if let Some(text) = object.get("text").and_then(Value::as_str) {
         return Ok(text.to_string());
     }
-    Err(ProtocolError::InvalidPayload(format!(
-        "unsupported content part: {value}"
-    )))
+    Err(ProtocolError::InvalidPayload(
+        "unsupported content part".into(),
+    ))
 }
 
 fn is_chat_text_part(value: &Value) -> bool {
@@ -2080,7 +2170,9 @@ impl StreamTranslator {
                 )),
             }),
             (UpstreamProtocol::Responses, UpstreamProtocol::ChatCompletions) => Some(Self {
-                state: StreamTranslatorState::ResponsesToChat(ResponsesToChatState::new()),
+                state: StreamTranslatorState::ResponsesToChat(ResponsesToChatState::new(
+                    tool_registry,
+                )),
             }),
             _ => None,
         }
@@ -2577,9 +2669,9 @@ impl ChatToResponsesState {
         fallback_index: usize,
         output: &mut Vec<Value>,
     ) -> Result<(), ProtocolError> {
-        let object = tool_call.as_object().ok_or_else(|| {
-            ProtocolError::InvalidPayload(format!("unsupported tool call: {tool_call}"))
-        })?;
+        let object = tool_call
+            .as_object()
+            .ok_or_else(|| ProtocolError::InvalidPayload("unsupported tool call".into()))?;
         let Some((name, arguments)) = extract_tool_call_details(object) else {
             return Ok(());
         };
@@ -2864,6 +2956,7 @@ struct ResponsesToChatState {
     assistant_message_output_index: Option<usize>,
     text: String,
     tool_calls: BTreeMap<usize, ResponsesToolCallState>,
+    tool_registry: Option<tool_adapter::ToolAdapterRegistry>,
 }
 
 #[derive(Debug)]
@@ -2873,10 +2966,13 @@ struct ResponsesToolCallState {
     name: Option<String>,
     arguments: String,
     added_emitted: bool,
+    custom_input: bool,
+    custom_input_value: String,
+    custom_input_closed: bool,
 }
 
 impl ResponsesToChatState {
-    fn new() -> Self {
+    fn new(tool_registry: Option<tool_adapter::ToolAdapterRegistry>) -> Self {
         Self {
             response_id: None,
             model: None,
@@ -2886,6 +2982,7 @@ impl ResponsesToChatState {
             assistant_message_output_index: None,
             text: String::new(),
             tool_calls: BTreeMap::new(),
+            tool_registry,
         }
     }
 
@@ -2904,7 +3001,8 @@ impl ResponsesToChatState {
             "response.output_item.added" => {
                 if let Some(item) = event.get("item").and_then(Value::as_object) {
                     match response_output_item_kind(item)? {
-                        ResponseOutputItemKind::FunctionCall => {
+                        ResponseOutputItemKind::FunctionCall
+                        | ResponseOutputItemKind::CustomToolCall => {
                             self.emit_assistant_role(&mut output);
                             self.emit_function_call_item_added(event, item, &mut output)?;
                         }
@@ -2949,6 +3047,14 @@ impl ResponsesToChatState {
             "response.function_call_arguments.done" => {
                 self.emit_assistant_role(&mut output);
                 self.emit_function_call_arguments_done(event);
+            }
+            "response.custom_tool_call_input.delta" => {
+                self.emit_assistant_role(&mut output);
+                self.emit_function_call_arguments_delta(event, &mut output)?;
+            }
+            "response.custom_tool_call_input.done" => {
+                self.emit_assistant_role(&mut output);
+                self.emit_custom_tool_call_input_done(event, &mut output)?;
             }
             "response.output_item.done" => {
                 self.emit_assistant_role(&mut output);
@@ -3158,11 +3264,19 @@ impl ResponsesToChatState {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let arguments = item
-            .get("arguments")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let name = response_chat_tool_name(item, &name, self.tool_registry.as_ref());
+        let is_custom = item.get("type").and_then(Value::as_str) == Some("custom_tool_call");
+        let arguments = if is_custom {
+            let input = item.get("input").and_then(Value::as_str).unwrap_or("");
+            let mut arguments = "{\"input\":\"".to_string();
+            arguments.push_str(&json_string_fragment(input)?);
+            arguments
+        } else {
+            item.get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         let response_id = self.response_id_value();
         let model = self.model_value();
         let created_at = self.created_at_value();
@@ -3178,6 +3292,9 @@ impl ResponsesToChatState {
                         name: Some(name.clone()),
                         arguments: String::new(),
                         added_emitted: false,
+                        custom_input: is_custom,
+                        custom_input_value: String::new(),
+                        custom_input_closed: false,
                     });
             if entry.item_id.is_empty() {
                 entry.item_id = item_id.clone();
@@ -3187,6 +3304,12 @@ impl ResponsesToChatState {
             }
             if entry.name.is_none() && !name.is_empty() {
                 entry.name = Some(name.clone());
+            }
+            if is_custom {
+                entry.custom_input = true;
+                if let Some(input) = item.get("input").and_then(Value::as_str) {
+                    entry.custom_input_value = input.to_string();
+                }
             }
             if !arguments.is_empty() {
                 entry.arguments.push_str(&arguments);
@@ -3203,6 +3326,11 @@ impl ResponsesToChatState {
         }
 
         if let Some((item_id, name, arguments)) = added_event {
+            let call_id = self
+                .tool_calls
+                .get(&output_index)
+                .map(|entry| entry.call_id.clone())
+                .unwrap_or(item_id);
             output.push(make_chat_completion_chunk(
                 &response_id,
                 created_at,
@@ -3210,7 +3338,7 @@ impl ResponsesToChatState {
                 json!({
                     "tool_calls": [{
                         "index": output_index,
-                        "id": item_id,
+                        "id": call_id,
                         "type": "function",
                         "function": {
                             "name": name,
@@ -3245,7 +3373,15 @@ impl ResponsesToChatState {
         let response_id = self.response_id_value();
         let model = self.model_value();
         let created_at = self.created_at_value();
-        let (item_id, name) = {
+        let mapped_name = event.as_object().and_then(|object| {
+            object
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|name| response_chat_tool_name(object, name, self.tool_registry.as_ref()))
+        });
+        let is_custom = event.get("type").and_then(Value::as_str)
+            == Some("response.custom_tool_call_input.delta");
+        let (call_id, name, fragment) = {
             let entry =
                 self.tool_calls
                     .entry(output_index)
@@ -3260,17 +3396,33 @@ impl ResponsesToChatState {
                             .and_then(Value::as_str)
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| format!("call-{}", output_index)),
-                        name: event
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .map(|value| value.to_string()),
+                        name: mapped_name.clone(),
                         arguments: String::new(),
                         added_emitted: false,
+                        custom_input: is_custom,
+                        custom_input_value: String::new(),
+                        custom_input_closed: false,
                     });
-            entry.arguments.push_str(delta);
+            if is_custom {
+                entry.custom_input = true;
+                entry.custom_input_value.push_str(delta);
+            }
+            if entry.name.is_none() {
+                entry.name = mapped_name;
+            }
+            let fragment = if is_custom {
+                json_string_fragment(delta)?
+            } else {
+                delta.to_string()
+            };
+            if is_custom && entry.arguments.is_empty() {
+                entry.arguments.push_str("{\"input\":\"");
+            }
+            entry.arguments.push_str(&fragment);
             (
-                entry.item_id.clone(),
+                entry.call_id.clone(),
                 entry.name.clone().unwrap_or_default(),
+                fragment,
             )
         };
 
@@ -3281,11 +3433,11 @@ impl ResponsesToChatState {
             json!({
                 "tool_calls": [{
                     "index": output_index,
-                    "id": item_id,
+                    "id": call_id,
                     "type": "function",
                     "function": {
                         "name": name,
-                        "arguments": delta
+                        "arguments": fragment
                     }
                 }]
             }),
@@ -3314,10 +3466,86 @@ impl ResponsesToChatState {
         }
     }
 
+    fn emit_custom_tool_call_input_done(
+        &mut self,
+        event: &Value,
+        output: &mut Vec<Value>,
+    ) -> Result<(), ProtocolError> {
+        let output_index = event
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .or_else(|| {
+                self.find_tool_call_index_by_item_id(event.get("item_id").and_then(Value::as_str))
+            })
+            .unwrap_or(0);
+        let input = event
+            .get("input")
+            .and_then(Value::as_str)
+            .ok_or(ProtocolError::MissingField("input"))?;
+        let (call_id, fragment, suffix) = {
+            let entry = self
+                .tool_calls
+                .get_mut(&output_index)
+                .ok_or(ProtocolError::MissingField("custom_tool_call"))?;
+            if !entry.custom_input {
+                return Err(ProtocolError::InvalidPayload(
+                    "custom tool input event did not have a custom tool call".into(),
+                ));
+            }
+            let mut fragment = String::new();
+            if entry.custom_input_value != input {
+                let missing = input
+                    .strip_prefix(&entry.custom_input_value)
+                    .ok_or_else(|| {
+                        ProtocolError::InvalidPayload("custom tool input delta mismatch".into())
+                    })?;
+                fragment = json_string_fragment(missing)?;
+                entry.custom_input_value = input.to_string();
+                if entry.arguments.is_empty() {
+                    entry.arguments.push_str("{\"input\":\"");
+                }
+                entry.arguments.push_str(&fragment);
+            }
+            let suffix = if entry.custom_input_closed {
+                String::new()
+            } else {
+                entry.custom_input_closed = true;
+                entry.arguments.push_str("\"}");
+                "\"}".to_string()
+            };
+            (entry.call_id.clone(), fragment, suffix)
+        };
+
+        if fragment.is_empty() && suffix.is_empty() {
+            return Ok(());
+        }
+        let response_id = self.response_id_value();
+        let model = self.model_value();
+        let created_at = self.created_at_value();
+        output.push(make_chat_completion_chunk(
+            &response_id,
+            created_at,
+            &model,
+            json!({
+                "tool_calls": [{
+                    "index": output_index,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "arguments": format!("{fragment}{suffix}")
+                    }
+                }]
+            }),
+            None,
+        ));
+        Ok(())
+    }
+
     fn emit_output_item_done(
         &mut self,
         event: &Value,
-        _output: &mut Vec<Value>,
+        output: &mut Vec<Value>,
     ) -> Result<(), ProtocolError> {
         let Some(item) = event.get("item").and_then(Value::as_object) else {
             return Ok(());
@@ -3325,6 +3553,19 @@ impl ResponsesToChatState {
         match response_output_item_kind(item)? {
             ResponseOutputItemKind::FunctionCall => {
                 self.emit_function_call_arguments_done(event);
+            }
+            ResponseOutputItemKind::CustomToolCall => {
+                let mut normalized = event.clone();
+                if let Some(object) = normalized.as_object_mut() {
+                    object.insert(
+                        "item_id".into(),
+                        item.get("id").cloned().unwrap_or(Value::Null),
+                    );
+                    if let Some(input) = item.get("input") {
+                        object.insert("input".into(), input.clone());
+                    }
+                }
+                self.emit_custom_tool_call_input_done(&normalized, output)?;
             }
             ResponseOutputItemKind::Message => {
                 response_output_message_object_to_chat_message(item)?;
@@ -3352,12 +3593,15 @@ impl ResponsesToChatState {
 
         for item in output {
             let object = item.as_object().ok_or_else(|| {
-                ProtocolError::InvalidPayload(format!("unsupported responses output item: {item}"))
+                ProtocolError::InvalidPayload("unsupported responses output item".into())
             })?;
 
             match response_output_item_kind(object)? {
                 ResponseOutputItemKind::FunctionCall => {
-                    response_function_call_item_to_chat_tool_call(object)?;
+                    response_function_call_item_to_chat_tool_call(object, None)?;
+                }
+                ResponseOutputItemKind::CustomToolCall => {
+                    response_custom_tool_call_item_to_chat_tool_call(object, None)?;
                 }
                 ResponseOutputItemKind::Message => {
                     response_output_message_object_to_chat_message(object)?;
@@ -3381,6 +3625,13 @@ impl ResponsesToChatState {
             .iter()
             .find_map(|(index, tool_call)| (tool_call.item_id == item_id).then_some(*index))
     }
+}
+
+fn json_string_fragment(value: &str) -> Result<String, ProtocolError> {
+    let encoded = serde_json::to_string(value).map_err(|_| {
+        ProtocolError::InvalidPayload("custom tool input could not be encoded".into())
+    })?;
+    Ok(encoded[1..encoded.len() - 1].to_string())
 }
 
 fn make_response_created_event(

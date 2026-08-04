@@ -144,6 +144,68 @@ impl ToolAdapterRegistry {
         <Self as ReversibleToolAdapter>::restore_function_call(self, call)
     }
 
+    pub fn adapt_responses_function_call(&self, call: &Value) -> Result<Value, ProtocolError> {
+        let object = call.as_object().ok_or(ProtocolError::InvalidPayload(
+            "unsupported Responses function call".into(),
+        ))?;
+        let call_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(ProtocolError::MissingField("type"))?;
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or(ProtocolError::MissingField("name"))?;
+        let call_id = object
+            .get("call_id")
+            .or_else(|| object.get("id"))
+            .and_then(Value::as_str)
+            .ok_or(ProtocolError::MissingField("call_id"))?;
+        let namespace = object
+            .get("namespace")
+            .and_then(Value::as_str)
+            .filter(|namespace| !namespace.is_empty());
+
+        let (identity, arguments) = match call_type {
+            "function_call" => {
+                let identity = namespace
+                    .map(|namespace| ToolIdentity::namespace(namespace, name))
+                    .unwrap_or_else(|| ToolIdentity::function(name));
+                let arguments = object
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                (identity, arguments.to_string())
+            }
+            "custom_tool_call" => {
+                let identity = ToolIdentity::custom(namespace, name);
+                let input = object
+                    .get("input")
+                    .and_then(Value::as_str)
+                    .ok_or(ProtocolError::MissingField("input"))?;
+                let arguments = serde_json::to_string(&json!({"input": input})).map_err(|_| {
+                    ProtocolError::InvalidPayload("custom tool input could not be encoded".into())
+                })?;
+                (identity, arguments)
+            }
+            _ => {
+                return Err(ProtocolError::InvalidPayload(
+                    "unsupported Responses function call type".into(),
+                ));
+            }
+        };
+        let upstream_name = self.upstream_name(&identity).unwrap_or(name).to_string();
+
+        Ok(json!({
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": upstream_name,
+                "arguments": arguments,
+            }
+        }))
+    }
+
     pub fn adapt_call_output(&self, output: &Value) -> Result<Value, ProtocolError> {
         <Self as ReversibleToolAdapter>::adapt_call_output(self, output)
     }
@@ -619,9 +681,9 @@ impl ReversibleToolAdapter for ToolAdapterRegistry {
     }
 
     fn adapt_call_output(&self, output: &Value) -> Result<Value, ProtocolError> {
-        let object = output.as_object().ok_or_else(|| {
-            ProtocolError::InvalidPayload(format!("unsupported call output: {output}"))
-        })?;
+        let object = output
+            .as_object()
+            .ok_or_else(|| ProtocolError::InvalidPayload("unsupported call output".into()))?;
         let mut adapted = object.clone();
         match object.get("type").and_then(Value::as_str) {
             Some("custom_tool_call_output") => {
@@ -629,9 +691,9 @@ impl ReversibleToolAdapter for ToolAdapterRegistry {
                 Ok(Value::Object(adapted))
             }
             Some("function_call_output") | None => Ok(Value::Object(adapted)),
-            Some(other) => Err(ProtocolError::InvalidPayload(format!(
-                "unsupported call output type: {other}"
-            ))),
+            Some(_) => Err(ProtocolError::InvalidPayload(
+                "unsupported call output type".into(),
+            )),
         }
     }
 

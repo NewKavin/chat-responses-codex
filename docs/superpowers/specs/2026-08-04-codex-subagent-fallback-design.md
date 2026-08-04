@@ -8,6 +8,14 @@ configuration intentionally uses `requires_openai_auth = true`; every Codex
 HTTP request, including a subagent request, must therefore have the downstream
 Bearer credential installed with `codex login --with-api-key`.
 
+Codex also loads the spawned agent's model profile independently from the main
+`config.toml`. The verified local `~/.codex/agents/default.toml` pins
+`gpt-5.6-sol` with `model_reasoning_effort = "low"`, while the portal-selected
+`glm-5.2` catalog entry resolves to `none`. This mismatch rejects delegation
+before the gateway can repair any protocol conversion. The portal setup must
+therefore generate the default role file from the same selected live catalog
+entry as the main config.
+
 The deployed gateway currently routes the configured models to Chat
 Completions-only upstreams. It already flattens namespace and custom tool
 definitions and restores function calls in responses, but a later Responses
@@ -19,13 +27,15 @@ multi-agent, MCP, or freeform tool loop.
 
 1. Make authentication failures diagnosable without weakening downstream key
    enforcement or logging credentials.
-2. Preserve Codex namespace and custom tool loops through the existing
+2. Make the default spawned agent use the portal-selected model and its
+   catalog-validated reasoning effort.
+3. Preserve Codex namespace and custom tool loops through the existing
    Responses-to-Chat fallback, including `previous_response_id` replay.
-3. Preserve call IDs, tool order, namespace identity, and custom input bytes
+4. Preserve call IDs, tool order, namespace identity, and custom input bytes
    wherever the Chat wire format can represent them.
-4. Keep unknown or semantically unrepresentable tool kinds as stable,
+5. Keep unknown or semantically unrepresentable tool kinds as stable,
    capability-scoped errors instead of silently dropping them.
-5. Verify both the pure converters and a real portal-configured `glm-5.2`
+6. Verify both the pure converters and a real portal-configured `glm-5.2`
    Codex invocation.
 
 ## Non-goals
@@ -58,6 +68,20 @@ from protocol incompatibility.
 The gateway continues to return ordinary `401` for missing or invalid
 downstream credentials. No new credential-sharing endpoint or server-side
 session is introduced.
+
+### Default subagent role contract
+
+The portal exposes a fourth Codex setup artifact at
+`~/.codex/agents/default.toml`. Its `model` and `model_reasoning_effort` are
+generated from the same selected live catalog entry used by `config.toml`.
+Changing the selected model requires replacing both files before starting a
+new Codex session. The project template uses placeholders and never pins an
+OpenAI model or invents a reasoning level.
+
+The installed-client smoke creates this role file inside its isolated
+`CODEX_HOME`; it never copies the developer's global role configuration. A
+model/effort mismatch is classified as an agent-profile failure, separately
+from authentication, protocol, upstream availability, and client cancellation.
 
 ### Responses-to-Chat tool continuation
 
@@ -96,18 +120,22 @@ The implementation follows red-green-refactor:
 
 1. Add protocol tests that currently fail for namespace/custom input and output
    replay, including multiple calls with stable IDs and order.
-2. Add a Chat-only gateway two-turn test proving a custom call from the first
+2. Add portal generator tests proving main and default-agent model/reasoning
+   values come from one selected catalog entry.
+3. Add a Chat-only gateway two-turn test proving a custom call from the first
    response can be submitted as a custom output continuation.
-3. Add Responses-to-Chat JSON/SSE tests for a representable custom output item
+4. Add Responses-to-Chat JSON/SSE tests for a representable custom output item
    and a rejection test for an unknown output type.
-4. Run each focused test while red, implement the smallest converter/context
+5. Run each focused test while red, implement the smallest converter/context
    changes, and rerun green.
-5. Run the existing Rust protocol/gateway suites, clippy, and the portal
+6. Run the existing Rust protocol/gateway suites, clippy, and the portal
    frontend tests.
-6. Run the real Codex smoke twice against `glm-5.2`: the logged-in portal
+7. Run the real Codex smoke against `glm-5.2`: the logged-in portal
    configuration must emit `collab_tool_call` and `turn.completed`; the
    intentionally unauthenticated control must report only authentication
-   failure and must not be mistaken for a protocol rejection.
+   failure and must not be mistaken for a protocol rejection. Repeat the
+   logged-in delegation sequentially so intermittent 502/503/499 failures are
+   not hidden by one successful run.
 
 ## Rollout
 

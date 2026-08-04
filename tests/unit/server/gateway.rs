@@ -35,6 +35,19 @@ fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
 }
 
 #[test]
+fn custom_tool_replay_counts_as_tool_replay_semantics() {
+    assert!(responses_body_contains_tool_replay_semantics(
+        &serde_json::json!({
+            "input": [{
+                "type": "custom_tool_call_output",
+                "call_id": "call-custom",
+                "output": "opaque"
+            }]
+        })
+    ));
+}
+
+#[test]
 fn route_attempts_groups_homogeneous_terminal_classes() {
     for (class, expected) in [
         (FailureClass::Credentials, TerminalFailure::Credentials),
@@ -1566,6 +1579,7 @@ fn chat_fallback_marks_dropped_reasoning_history() {
                 {"role": "user", "content": "continue"}
             ]
         }),
+        None,
         None,
         &mut downgrades,
     )

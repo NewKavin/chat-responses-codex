@@ -8,7 +8,8 @@ use crate::capabilities::{
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::{
     chat_request_to_responses_payload_with_context,
-    chat_response_to_responses_payload_with_tool_registry, responses_response_to_chat_payload,
+    chat_response_to_responses_payload_with_tool_registry,
+    responses_response_to_chat_payload_with_tool_registry,
     tool_adapter::{ToolAdapterRegistry, ToolTarget},
     ChatStreamCanonicalizer, ConversionContext, FirstUsableOutputClassifier,
     FirstUsableOutputResult, ProtocolError, StreamAggregateResult, StreamResponseAggregator,
@@ -3021,7 +3022,12 @@ fn responses_input_item_is_chat_fallback_safe(item: &Value) -> bool {
         Value::Object(object) => {
             if matches!(
                 object.get("type").and_then(Value::as_str),
-                Some("function_call" | "function_call_output")
+                Some(
+                    "function_call"
+                        | "function_call_output"
+                        | "custom_tool_call"
+                        | "custom_tool_call_output",
+                )
             ) {
                 return false;
             }
@@ -3257,7 +3263,12 @@ fn responses_body_contains_tool_replay_semantics(body: &Value) -> bool {
         Value::Object(object) => {
             matches!(
                 object.get("type").and_then(Value::as_str),
-                Some("function_call" | "function_call_output")
+                Some(
+                    "function_call"
+                        | "function_call_output"
+                        | "custom_tool_call"
+                        | "custom_tool_call_output",
+                )
             ) || object.contains_key("tool_call_id")
                 || object.contains_key("tool_calls")
                 || matches!(

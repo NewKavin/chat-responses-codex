@@ -17,14 +17,19 @@ pub(super) fn responses_request_requires_responses_upstream(body: &Value) -> boo
 pub(super) fn responses_request_to_chat_payload_with_fallback(
     body: &Value,
     resolved_capabilities: Option<&ResolvedCapabilities>,
+    inherited_tool_registry: Option<&tool_adapter::ToolAdapterRegistry>,
     downgrade_codes: &mut BTreeSet<String>,
 ) -> Result<Value, ProtocolError> {
     let mut sanitized = body.clone();
+    let mut tool_registry = inherited_tool_registry
+        .cloned()
+        .unwrap_or_else(tool_adapter::ToolAdapterRegistry::empty);
 
     if let Some(object) = sanitized.as_object_mut() {
         if let Some(tools) = object.get("tools").and_then(Value::as_array) {
             let adaptation = build_chat_fallback_tool_adaptation(tools)?;
             downgrade_codes.extend(adaptation.downgrades.iter().cloned());
+            tool_registry = adaptation.registry.clone();
             let has_supported_tools = !adaptation.upstream_tools.is_empty();
             object.insert("tools".into(), Value::Array(adaptation.upstream_tools));
             if let Some(tool_choice) = object.get("tool_choice").cloned() {
@@ -62,10 +67,13 @@ pub(super) fn responses_request_to_chat_payload_with_fallback(
     let conversion_context = if preserves_reasoning {
         ConversionContext::new(
             resolved_capabilities.expect("reasoning preservation requires capabilities"),
-            tool_adapter::ToolAdapterRegistry::empty(),
+            tool_registry,
         )
     } else {
-        ConversionContext::default()
+        ConversionContext {
+            tool_registry,
+            ..ConversionContext::default()
+        }
     };
     if !preserves_reasoning && responses_input_contains_reasoning(&sanitized) {
         downgrade_codes.insert("reasoning_history_dropped".to_string());

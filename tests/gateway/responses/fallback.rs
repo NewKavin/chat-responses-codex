@@ -3,6 +3,211 @@ use chat_responses_codex::capabilities::{
     Capability, DialectProfileKey, DialectProfileState, EvidenceState, ReasoningCarrier,
     UpstreamDialectProfile, WireProtocol,
 };
+use chat_responses_codex::protocol::tool_adapter::{ToolAdapterRegistry, ToolIdentity, ToolTarget};
+
+#[tokio::test]
+async fn chat_only_fallback_replays_namespace_and_custom_tool_output() {
+    let capture = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture_clone = capture.clone();
+    let tools = json!([
+        {"type":"namespace","name":"multi_agent_v1","tools":[
+            {"type":"function","name":"spawn_agent","parameters":{"type":"object"}}
+        ]},
+        {"type":"custom","name":"apply_patch"}
+    ]);
+    let adaptation = ToolAdapterRegistry::build(&tools, ToolTarget::FunctionsOnly).unwrap();
+    let namespace_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::namespace("multi_agent_v1", "spawn_agent"))
+        .unwrap()
+        .to_string();
+    let custom_name = adaptation
+        .registry
+        .upstream_name(&ToolIdentity::custom(None, "apply_patch"))
+        .unwrap()
+        .to_string();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let capture = capture_clone.clone();
+            let namespace_name = namespace_name.clone();
+            let custom_name = custom_name.clone();
+            async move {
+                let (_parts, body) = request.into_parts();
+                let body = to_bytes(body, usize::MAX).await.unwrap();
+                let payload: Value = serde_json::from_slice(&body).unwrap();
+                capture.lock().unwrap().push(payload);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-fallback-tools",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "synthetic/fallback-tools",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "tool_calls": [
+                                    {"id":"call-a","type":"function","function":{"name":namespace_name,"arguments":"{}"}},
+                                    {"id":"call-b","type":"function","function":{"name":custom_name,"arguments":"{\"input\":\"patch-body\"}"}}
+                                ]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let model = "synthetic/fallback-tools";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "fallback-tools".into(),
+                name: "fallback-tools".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-1".into(),
+                name: "team-a".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_route_exhaustion_retry_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
+        upstream_id: "fallback-tools".into(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [
+        Capability::TextInput,
+        Capability::NonStreamingResponse,
+        Capability::FunctionTools,
+        Capability::NamespaceTools,
+        Capability::CustomTools,
+        Capability::ToolContinuation,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+    let app = build_router(state);
+    let auth = HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap();
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, auth.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "input": "start",
+                        "tools": tools,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+
+    let continuation_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(header::AUTHORIZATION, auth)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "previous_response_id": "chatcmpl-fallback-tools",
+                        "input": [
+                            {"type":"custom_tool_call_output","call_id":"call-b","output":"applied"}
+                        ],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(continuation_response.status(), StatusCode::OK);
+
+    let requests = capture.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .unwrap();
+    let tool_calls = assistant["tool_calls"].as_array().unwrap();
+    assert_eq!(tool_calls[0]["id"], "call-a");
+    assert_eq!(
+        tool_calls[0]["function"]["name"],
+        adaptation
+            .registry
+            .upstream_name(&ToolIdentity::namespace("multi_agent_v1", "spawn_agent"))
+            .unwrap()
+    );
+    assert_eq!(tool_calls[1]["id"], "call-b");
+    assert_eq!(tool_calls[1]["function"]["name"], "apply_patch");
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count(),
+        1
+    );
+}
 
 #[tokio::test]
 async fn chat_only_fallback_loads_exact_continuation_before_candidate_failover() {

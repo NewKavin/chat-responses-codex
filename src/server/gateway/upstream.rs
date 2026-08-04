@@ -1378,6 +1378,9 @@ pub(super) async fn send_to_upstream(
             responses_request_to_chat_payload_with_fallback(
                 body,
                 resolved_capabilities.as_ref(),
+                response_history_context
+                    .as_ref()
+                    .and_then(ResponseHistoryContext::tool_registry),
                 &mut downgrade_codes,
             )
             .map_err(protocol_error_to_gateway)?
@@ -2109,8 +2112,13 @@ pub(super) async fn send_to_upstream(
         let body = match (endpoint, upstream_protocol) {
             (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
             (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
-                responses_response_to_chat_payload(&upstream_json)
-                    .map_err(protocol_error_to_gateway)?
+                responses_response_to_chat_payload_with_tool_registry(
+                    &upstream_json,
+                    response_history_context
+                        .as_ref()
+                        .and_then(ResponseHistoryContext::tool_registry),
+                )
+                .map_err(protocol_error_to_gateway)?
             }
             (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
             (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
@@ -2336,8 +2344,13 @@ pub(super) async fn send_to_upstream(
             let final_body = match (endpoint, upstream_protocol) {
                 (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
                 (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
-                    responses_response_to_chat_payload(&upstream_json)
-                        .map_err(protocol_error_to_gateway)?
+                    responses_response_to_chat_payload_with_tool_registry(
+                        &upstream_json,
+                        response_history_context
+                            .as_ref()
+                            .and_then(ResponseHistoryContext::tool_registry),
+                    )
+                    .map_err(protocol_error_to_gateway)?
                 }
                 (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
                 (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
@@ -2435,7 +2448,13 @@ pub(super) async fn send_to_upstream(
     let body = match (endpoint, upstream_protocol) {
         (EndpointKind::ChatCompletions, UpstreamProtocol::ChatCompletions) => upstream_json,
         (EndpointKind::ChatCompletions, UpstreamProtocol::Responses) => {
-            responses_response_to_chat_payload(&upstream_json).map_err(protocol_error_to_gateway)?
+            responses_response_to_chat_payload_with_tool_registry(
+                &upstream_json,
+                response_history_context
+                    .as_ref()
+                    .and_then(ResponseHistoryContext::tool_registry),
+            )
+            .map_err(protocol_error_to_gateway)?
         }
         (EndpointKind::Responses, UpstreamProtocol::Responses) => upstream_json,
         (EndpointKind::Responses, UpstreamProtocol::ChatCompletions) => {
