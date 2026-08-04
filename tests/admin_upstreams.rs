@@ -1052,6 +1052,56 @@ async fn concurrency_status_switch_round_trips_through_admin_create_and_update()
 }
 
 #[tokio::test]
+async fn upstream_priority_update_rejects_out_of_range_values_without_mutating_state() {
+    let state = create_test_state();
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let original_priority = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "upstream-1")
+        .unwrap()
+        .priority;
+
+    for invalid_priority in [
+        json!(-1),
+        json!(1.5),
+        json!("42"),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/admin/upstreams/upstream-1")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"priority": invalid_priority}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let final_priority = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "upstream-1")
+        .unwrap()
+        .priority;
+    assert_eq!(final_priority, original_priority);
+}
+
+#[tokio::test]
 async fn upstream_remark_round_trips_through_admin_create_and_update() {
     let state = create_test_state();
     let app = build_router(state.clone());

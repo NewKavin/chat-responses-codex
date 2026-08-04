@@ -655,8 +655,17 @@ impl AppState {
                             })
                             .collect();
                     }
-                    if let Some(priority) = updates.get("priority").and_then(|v| v.as_u64()) {
-                        upstream.priority = priority as u32;
+                    if let Some(priority_value) = updates.get("priority") {
+                        let priority = priority_value
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| {
+                                UpstreamMutationError::InvalidInput(
+                                    "priority must be a non-negative integer no greater than 4294967295"
+                                        .to_string(),
+                                )
+                            })?;
+                        upstream.priority = priority;
                     }
                     if let Some(premium_models) =
                         updates.get("premium_models").and_then(|v| v.as_array())
