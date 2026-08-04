@@ -69,6 +69,36 @@
           </template>
         </el-table-column>
 
+        <el-table-column label="优先级/权重" width="150" align="center">
+          <template #default="{ row }">
+            <el-input-number
+              v-model="row.priority"
+              :min="0"
+              :max="1000"
+              :step="1"
+              controls-position="right"
+              size="small"
+              :disabled="isInlineSaving(row.id, 'priority')"
+              @change="updateInlinePriority(row)"
+            />
+          </template>
+        </el-table-column>
+
+        <el-table-column label="私有并发状态接口" width="170" align="center">
+          <template #default="{ row }">
+            <el-tooltip
+              content="非 OpenAI 标准接口，默认关闭"
+              placement="top"
+            >
+              <el-switch
+                v-model="row.concurrency_status_enabled"
+                :disabled="isInlineSaving(row.id, 'concurrency_status_enabled')"
+                @change="updateInlineConcurrencyStatus(row)"
+              />
+            </el-tooltip>
+          </template>
+        </el-table-column>
+
         <el-table-column label="备注" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ row.remark || '-' }}</template>
         </el-table-column>
@@ -314,6 +344,8 @@ import type { ApiKeyModelConfig, KeyModelDiscoveryResult, UpstreamConfig } from 
 
 const loading = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
+const inlineSaving = ref<Record<string, boolean>>({})
+const inlineCommitted = ref<Record<string, { priority: number; concurrency_status_enabled: boolean }>>({})
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const submitting = ref(false)
@@ -436,10 +468,78 @@ const loadData = async () => {
     loading.value = true
     const { data } = await adminApi.getUpstreams()
     upstreams.value = data
+    inlineCommitted.value = Object.fromEntries(
+      data.map(row => [row.id, {
+        priority: Number(row.priority || 0),
+        concurrency_status_enabled: Boolean(row.concurrency_status_enabled)
+      }])
+    )
   } catch (error) {
     ElMessage.error('加载数据失败')
   } finally {
     loading.value = false
+  }
+}
+
+const inlineSaveKey = (id: string, field: 'priority' | 'concurrency_status_enabled') => `${id}:${field}`
+
+const isInlineSaving = (id: string, field: 'priority' | 'concurrency_status_enabled') => {
+  return Boolean(inlineSaving.value[inlineSaveKey(id, field)])
+}
+
+const updateInlinePriority = async (row: UpstreamConfig) => {
+  const field = 'priority' as const
+  const saveKey = inlineSaveKey(row.id, field)
+  if (inlineSaving.value[saveKey]) return
+
+  const previous = inlineCommitted.value[row.id]?.priority ?? 0
+  const priority = Math.max(0, Math.min(1000, Number(row.priority || 0)))
+  row.priority = priority
+  inlineSaving.value[saveKey] = true
+  try {
+    const { data } = await adminApi.updateUpstream(row.id, { priority })
+    row.priority = Number(data.priority || 0)
+    inlineCommitted.value[row.id] = {
+      ...(inlineCommitted.value[row.id] || {
+        priority: 0,
+        concurrency_status_enabled: Boolean(row.concurrency_status_enabled)
+      }),
+      priority: row.priority
+    }
+    ElMessage.success('优先级已更新')
+  } catch {
+    row.priority = previous
+    ElMessage.error('优先级更新失败')
+  } finally {
+    delete inlineSaving.value[saveKey]
+  }
+}
+
+const updateInlineConcurrencyStatus = async (row: UpstreamConfig) => {
+  const field = 'concurrency_status_enabled' as const
+  const saveKey = inlineSaveKey(row.id, field)
+  if (inlineSaving.value[saveKey]) return
+
+  const previous = inlineCommitted.value[row.id]?.concurrency_status_enabled ?? false
+  const enabled = Boolean(row.concurrency_status_enabled)
+  row.concurrency_status_enabled = enabled
+  inlineSaving.value[saveKey] = true
+  try {
+    const { data } = await adminApi.updateUpstream(row.id, { concurrency_status_enabled: enabled })
+    row.concurrency_status_enabled = Boolean(data.concurrency_status_enabled)
+    inlineCommitted.value[row.id] = {
+      ...(inlineCommitted.value[row.id] || {
+        priority: Number(row.priority || 0),
+        concurrency_status_enabled: false
+      }),
+      concurrency_status_enabled: row.concurrency_status_enabled
+    }
+    ElMessage.success('私有并发状态接口已更新')
+  } catch {
+    row.concurrency_status_enabled = previous
+    ElMessage.error('私有并发状态接口更新失败')
+  } finally {
+    delete inlineSaving.value[saveKey]
   }
 }
 

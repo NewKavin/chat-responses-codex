@@ -91,6 +91,17 @@ describe('admin ui structure', () => {
     expect(page).toContain('concurrency_status_enabled: Boolean(submitData.concurrency_status_enabled)')
   })
 
+  it('supports inline upstream priority and private status updates', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('label="优先级/权重"')
+    expect(page).toContain('@change="updateInlinePriority(row)"')
+    expect(page).toContain('label="私有并发状态接口"')
+    expect(page).toContain('@change="updateInlineConcurrencyStatus(row)"')
+    expect(page).toContain('adminApi.updateUpstream(row.id, { priority })')
+    expect(page).toContain('adminApi.updateUpstream(row.id, { concurrency_status_enabled: enabled })')
+  })
+
   it('labels indexed model discovery results without key prefixes', () => {
     const page = source('views/admin/Upstreams.vue')
 

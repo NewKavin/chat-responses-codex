@@ -986,6 +986,7 @@ async fn concurrency_status_switch_round_trips_through_admin_create_and_update()
                         "protocol": "Responses",
                         "supported_models": ["glm-5.2"],
                         "active": true,
+                        "priority": 42,
                         "concurrency_status_enabled": true
                     })
                     .to_string(),
@@ -999,6 +1000,7 @@ async fn concurrency_status_switch_round_trips_through_admin_create_and_update()
         .await
         .unwrap();
     let created: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["priority"], 42);
     assert_eq!(created["concurrency_status_enabled"], true);
 
     let response = app
@@ -1009,7 +1011,11 @@ async fn concurrency_status_switch_round_trips_through_admin_create_and_update()
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    json!({"concurrency_status_enabled": false}).to_string(),
+                    json!({
+                        "priority": 73,
+                        "concurrency_status_enabled": false
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1020,7 +1026,19 @@ async fn concurrency_status_switch_round_trips_through_admin_create_and_update()
         .await
         .unwrap();
     let updated: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated["priority"], 73);
     assert_eq!(updated["concurrency_status_enabled"], false);
+    assert_eq!(
+        state
+            .routing_snapshot()
+            .await
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == "private-status")
+            .unwrap()
+            .priority,
+        73
+    );
     assert!(
         !state
             .routing_snapshot()
