@@ -31,28 +31,29 @@
       </el-form-item>
     </el-form>
       
-    <div class="crc-table-shell">
-      <el-table :data="downstreams" v-loading="loading" stripe>
+    <div class="crc-table-shell downstreams-table-shell">
+      <el-table class="compact-downstreams-table" :data="downstreams" v-loading="loading" stripe>
         <el-table-column prop="id" label="ID" width="150" />
         <el-table-column prop="name" label="名称" width="200" />
         <el-table-column label="秘钥" width="220">
           <template #default="{ row }">
             <div class="key-cell">
-              <code v-if="hasUsablePlaintextKey(row.plaintext_key) && !expandedKeys.includes(row.id)">
+              <code v-if="hasUsablePlaintextKey(row.plaintext_key)">
                 {{ maskPlaintextKey(row.plaintext_key) }}
               </code>
-              <code v-else-if="hasUsablePlaintextKey(row.plaintext_key)" class="full-key">
-                {{ row.plaintext_key }}
-              </code>
               <span v-else class="legacy-key-hint">未存储真实秘钥，请先轮换</span>
-              <el-button-group>
-                <el-button size="small" @click="toggleKeyView(row.id)" :disabled="!hasUsablePlaintextKey(row.plaintext_key)">
-                  {{ expandedKeys.includes(row.id) ? '隐藏' : '查看' }}
+              <el-tooltip content="复制秘钥" placement="top">
+                <el-button
+                  class="copy-key-button"
+                  aria-label="复制秘钥"
+                  circle
+                  size="small"
+                  @click="copyKey(row.plaintext_key)"
+                  :disabled="!hasUsablePlaintextKey(row.plaintext_key)"
+                >
+                  <Copy :size="13" :stroke-width="1.8" />
                 </el-button>
-                <el-button size="small" @click="copyKey(row.plaintext_key)" :disabled="!hasUsablePlaintextKey(row.plaintext_key)">
-                  复制秘钥
-                </el-button>
-              </el-button-group>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>
@@ -64,7 +65,7 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="运行并发" width="220">
+        <el-table-column label="运行并发" width="400">
           <template #default="{ row }">
             <div class="runtime-cell" v-if="runtimeById[row.id]?.available">
               <span class="runtime-metric" v-if="runtimeById[row.id]?.running !== undefined">
@@ -98,14 +99,16 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="300" fixed="right">
+        <el-table-column label="操作" width="300">
           <template #default="{ row }">
-            <el-button size="small" @click="handleEdit(row)">编辑</el-button>
-            <el-button size="small" @click="handleToggle(row)">
-              {{ row.active ? '禁用' : '启用' }}
-            </el-button>
-            <el-button size="small" type="warning" @click="handleRotate(row)">轮换密钥</el-button>
-            <el-button size="small" type="danger" @click="handleDelete(row)">删除</el-button>
+            <div class="row-actions">
+              <el-button size="small" @click="handleEdit(row)">编辑</el-button>
+              <el-button size="small" @click="handleToggle(row)">
+                {{ row.active ? '禁用' : '启用' }}
+              </el-button>
+              <el-button size="small" type="warning" @click="handleRotate(row)">轮换密钥</el-button>
+              <el-button size="small" type="danger" @click="handleDelete(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -273,7 +276,6 @@ const dialogMode = ref<'create' | 'edit'>('create')
 const submitting = ref(false)
 const formRef = ref()
 const newPlaintextKey = ref('')
-const expandedKeys = ref<string[]>([])
 const runtimeById = ref<Record<string, DownstreamConcurrencySnapshot>>({})
 let runtimeTimer: number | null = null
 const requestQuotaHours = ref(5)
@@ -311,15 +313,6 @@ const rules = {
     { min: 1, message: 'ID不能为空', trigger: 'blur' }
   ],
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }]
-}
-
-const toggleKeyView = (id: string) => {
-  const index = expandedKeys.value.indexOf(id)
-  if (index > -1) {
-    expandedKeys.value.splice(index, 1)
-  } else {
-    expandedKeys.value.push(id)
-  }
 }
 
 const copyKey = async (key: unknown) => {
@@ -599,8 +592,10 @@ onUnmounted(() => {
 
 .runtime-cell {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 10px;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .runtime-metric {
@@ -614,13 +609,9 @@ onUnmounted(() => {
 .key-cell {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.full-key {
-  word-break: break-all;
-  flex: 1;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
 }
 
 code {
@@ -689,6 +680,8 @@ code {
 }
 
 .key-cell code {
+  min-width: 0;
+  overflow: hidden;
   padding: 3px 8px;
   border: 1px solid var(--crc-border);
   border-radius: var(--crc-radius-sm);
@@ -696,12 +689,8 @@ code {
   background: var(--crc-canvas);
   font-family: var(--crc-font-mono);
   font-size: 11.5px;
-}
-
-.key-cell .full-key {
-  color: var(--crc-accent);
-  border-color: var(--crc-accent);
-  background: var(--crc-accent-soft);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .legacy-key-hint {
@@ -718,5 +707,45 @@ code {
   font-family: var(--crc-font-mono);
   font-size: 11px;
   letter-spacing: 0.06em;
+}
+
+.compact-downstreams-table :deep(.el-table__cell) {
+  padding: 5px 0;
+}
+
+.compact-downstreams-table :deep(.cell) {
+  line-height: 1.25;
+}
+
+.downstreams-table-shell {
+  overflow: hidden;
+}
+
+.downstreams-table-shell > .compact-downstreams-table {
+  min-width: 0;
+}
+
+.copy-key-button {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.row-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.row-actions :deep(.el-button--small) {
+  min-height: 26px;
+  padding: 4px 8px;
 }
 </style>

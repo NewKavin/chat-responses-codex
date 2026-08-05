@@ -253,6 +253,26 @@ describe('admin downstream runtime display', () => {
     expect(page).toContain('上限')
   })
 
+  it('keeps downstream rows compact with icon-only key copy and one-line runtime metrics', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('class="compact-downstreams-table"')
+    expect(page).not.toContain('@click="toggleKeyView(row.id)"')
+    expect(page).not.toContain('expandedKeys')
+    expect(page).toContain('content="复制秘钥"')
+    expect(page).toContain('aria-label="复制秘钥"')
+    expect(page).toContain('<Copy :size="13"')
+    expect(page).toContain('class="row-actions"')
+    expect(page).not.toContain('fixed="right"')
+    expect(page).toContain('class="crc-table-shell downstreams-table-shell"')
+    expect(page).toContain('<el-table-column label="运行并发" width="400">')
+    expect(page).toMatch(/\.runtime-cell\s*\{[^}]*flex-wrap:\s*nowrap/s)
+    expect(page).toMatch(/\.runtime-cell\s*\{[^}]*white-space:\s*nowrap/s)
+    expect(page).toMatch(/\.compact-downstreams-table\s*:deep\(\.el-table__cell\)\s*\{[^}]*padding:\s*5px 0/s)
+    expect(page).toMatch(/\.downstreams-table-shell\s*\{[^}]*overflow:\s*hidden/s)
+    expect(page).toMatch(/\.downstreams-table-shell\s*>\s*\.compact-downstreams-table\s*\{[^}]*min-width:\s*0/s)
+  })
+
   it('marks runtime failures and missing ids unavailable without zero-filling counts', () => {
     const page = source('views/admin/Downstreams.vue')
 

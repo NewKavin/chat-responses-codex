@@ -16,8 +16,9 @@ describe('key utils', () => {
     expect(getCopyableKey('')).toBeNull()
   })
 
-  it('masks long keys and preserves short keys', () => {
+  it('never exposes plaintext keys while masking list values', () => {
     expect(maskPlaintextKey('key-1234567890abcdef')).toBe('key-12...cdef')
-    expect(maskPlaintextKey('key-short')).toBe('key-short')
+    expect(maskPlaintextKey('key-short')).toBe('********')
+    expect(maskPlaintextKey('   key-x   ')).toBe('********')
   })
 })
