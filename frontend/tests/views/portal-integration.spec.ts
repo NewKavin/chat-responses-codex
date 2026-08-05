@@ -48,6 +48,19 @@ describe('portal integration live catalog wiring', () => {
     expect(integrationView).toContain('不要启用')
   })
 
+  it('offers verified Codex reasoning strengths and resets them with the model', () => {
+    expect(integrationView).toContain('Codex 思考强度')
+    expect(integrationView).toContain('v-model="selectedCodexReasoningEffort"')
+    expect(integrationView).toContain('v-for="option in codexReasoningOptions"')
+    expect(integrationView).toContain(':disabled="option.disabled"')
+    expect(integrationView).toContain('暂无已验证档位')
+    expect(integrationView).toContain('resolveCodexReasoningSelection')
+    expect(integrationView).toContain('resetCodexReasoningEffort')
+    expect(integrationView).toContain('watch(selectedCodexModelSlug')
+    expect(integrationView).not.toContain('label="minimal"')
+    expect(integrationView).not.toContain('label="none"')
+  })
+
   it('exposes a default subagent role file generated from the selected model', () => {
     expect(integrationView).toContain('~/.codex/agents/default.toml')
     expect(integrationView).toContain('codexDefaultAgentToml')

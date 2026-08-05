@@ -12,6 +12,17 @@ export interface CodexCatalogResponse {
   models: Array<{ [key: string]: JsonValue }>
 }
 
+export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+export type CodexReasoningEffort = typeof CODEX_REASONING_EFFORTS[number]
+
+export type CodexReasoningSelection = {
+  options: Array<{ value: CodexReasoningEffort; disabled: boolean }>
+  defaultEffort: CodexReasoningEffort | 'none'
+  selectedEffort: CodexReasoningEffort | 'none'
+  configurable: boolean
+}
+
 export type IntegrationCatalogViewState = {
   allModelSlugs: string[]
   primaryModelSlug: string
@@ -212,6 +223,48 @@ const chooseCodexReasoningEffort = (
   const model = catalog.models.find(item => normalizeSlug(item.slug) === modelSlug)
   const effort = normalizeSlug(model?.default_reasoning_level)
   return effort || 'none'
+}
+
+const isCodexReasoningEffort = (value: string): value is CodexReasoningEffort =>
+  CODEX_REASONING_EFFORTS.some(effort => effort === value)
+
+export const resolveCodexReasoningSelection = (
+  catalog: CodexCatalogResponse | null,
+  modelSlug: string,
+  selectedEffort?: string
+): CodexReasoningSelection => {
+  const model = catalog?.models.find(item => normalizeSlug(item.slug) === modelSlug)
+  const supported = new Set<CodexReasoningEffort>()
+  const levels = model?.supported_reasoning_levels
+
+  if (Array.isArray(levels)) {
+    for (const level of levels) {
+      if (typeof level !== 'object' || level === null || Array.isArray(level)) continue
+      const effort = normalizeSlug(level.effort)
+      if (isCodexReasoningEffort(effort)) supported.add(effort)
+    }
+  }
+
+  const catalogDefault = normalizeSlug(model?.default_reasoning_level)
+  const defaultEffort = supported.has('medium')
+    ? 'medium'
+    : isCodexReasoningEffort(catalogDefault) && supported.has(catalogDefault)
+      ? catalogDefault
+      : 'none'
+  const preferred = normalizeSlug(selectedEffort)
+  const resolvedSelected = isCodexReasoningEffort(preferred) && supported.has(preferred)
+    ? preferred
+    : defaultEffort
+
+  return {
+    options: CODEX_REASONING_EFFORTS.map(value => ({
+      value,
+      disabled: !supported.has(value)
+    })),
+    defaultEffort,
+    selectedEffort: resolvedSelected,
+    configurable: supported.size > 0
+  }
 }
 
 export const buildGatewayBaseUrl = (origin: string) => origin.replace(/\/+$/, '')

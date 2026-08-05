@@ -15,8 +15,10 @@ import {
   buildModelUsageStats,
   buildHermesConfigYaml,
   buildOpenCodeConfig,
+  CODEX_REASONING_EFFORTS,
   extractGatewayModelSlugs,
   rankModelSlugsByUsage,
+  resolveCodexReasoningSelection,
   resolveCodexModelSelection,
   sortPortalModelStats
 } from '../../src/utils/integration'
@@ -299,6 +301,146 @@ describe('integration config generators', () => {
       modelSlug: 'most-used/model',
       modelReasoningEffort: 'medium'
     })
+  })
+
+  it('offers only the fixed five verified Codex reasoning strengths', () => {
+    const selection = resolveCodexReasoningSelection(
+      {
+        models: [{
+          slug: 'verified/model',
+          default_reasoning_level: 'high',
+          supported_reasoning_levels: [
+            { effort: 'none' },
+            { effort: 'minimal' },
+            { effort: 'low' },
+            { effort: 'medium' },
+            { effort: 'high' },
+            { effort: 'xhigh' },
+            { effort: 'max' },
+            { effort: 'experimental' }
+          ]
+        }]
+      },
+      'verified/model'
+    )
+
+    expect(CODEX_REASONING_EFFORTS).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(selection.options).toEqual([
+      { value: 'low', disabled: false },
+      { value: 'medium', disabled: false },
+      { value: 'high', disabled: false },
+      { value: 'xhigh', disabled: false },
+      { value: 'max', disabled: false }
+    ])
+    expect(selection.defaultEffort).toBe('medium')
+    expect(selection.selectedEffort).toBe('medium')
+    expect(selection.configurable).toBe(true)
+  })
+
+  it('disables unverified strengths and resets invalid selections to the model default', () => {
+    const catalog = {
+      models: [{
+        slug: 'bounded/model',
+        default_reasoning_level: 'high',
+        supported_reasoning_levels: [
+          { effort: 'low' },
+          { effort: 'high' }
+        ]
+      }]
+    }
+
+    const selected = resolveCodexReasoningSelection(catalog, 'bounded/model', 'low')
+    expect(selected.selectedEffort).toBe('low')
+    expect(selected.options.map(option => option.disabled)).toEqual([
+      false,
+      true,
+      false,
+      true,
+      true
+    ])
+
+    const reset = resolveCodexReasoningSelection(catalog, 'bounded/model', 'max')
+    expect(reset.defaultEffort).toBe('high')
+    expect(reset.selectedEffort).toBe('high')
+  })
+
+  it('keeps verified strengths configurable when the catalog default is missing', () => {
+    const selection = resolveCodexReasoningSelection(
+      {
+        models: [{
+          slug: 'missing-default/model',
+          supported_reasoning_levels: [{ effort: 'low' }]
+        }]
+      },
+      'missing-default/model'
+    )
+
+    expect(selection.options).toEqual([
+      { value: 'low', disabled: false },
+      { value: 'medium', disabled: true },
+      { value: 'high', disabled: true },
+      { value: 'xhigh', disabled: true },
+      { value: 'max', disabled: true }
+    ])
+    expect(selection.defaultEffort).toBe('none')
+    expect(selection.selectedEffort).toBe('none')
+    expect(selection.configurable).toBe(true)
+  })
+
+  it('keeps none internal when no configurable reasoning strength is verified', () => {
+    const selection = resolveCodexReasoningSelection(
+      {
+        models: [{
+          slug: 'conservative/model',
+          default_reasoning_level: 'none',
+          supported_reasoning_levels: [{ effort: 'none' }]
+        }]
+      },
+      'conservative/model',
+      'high'
+    )
+
+    expect(selection.options.every(option => option.disabled)).toBe(true)
+    expect(selection.defaultEffort).toBe('none')
+    expect(selection.selectedEffort).toBe('none')
+    expect(selection.configurable).toBe(false)
+
+    const input = {
+      modelSlug: 'conservative/model',
+      modelReasoningEffort: selection.selectedEffort
+    }
+    expect(
+      buildCodexConfigToml({ gatewayBaseUrl: 'https://gw.example', ...input })
+    ).toContain('model_reasoning_effort = "none"')
+    expect(buildCodexDefaultAgentToml(input)).toContain(
+      'model_reasoning_effort = "none"'
+    )
+  })
+
+  it('writes the same selected reasoning strength to parent and default agent profiles', () => {
+    const selection = resolveCodexReasoningSelection(
+      {
+        models: [{
+          slug: 'verified/model',
+          default_reasoning_level: 'medium',
+          supported_reasoning_levels: [
+            { effort: 'medium' },
+            { effort: 'xhigh' }
+          ]
+        }]
+      },
+      'verified/model',
+      'xhigh'
+    )
+    const input = {
+      modelSlug: 'verified/model',
+      modelReasoningEffort: selection.selectedEffort
+    }
+
+    const parent = buildCodexConfigToml({ gatewayBaseUrl: 'https://gw.example', ...input })
+    const child = buildCodexDefaultAgentToml(input)
+    expect(parent).toContain('model_reasoning_effort = "xhigh"')
+    expect(child).toContain('model_reasoning_effort = "xhigh"')
   })
 
   it('builds a codex config that keeps the key out of config.toml', () => {

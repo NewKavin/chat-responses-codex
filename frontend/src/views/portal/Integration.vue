@@ -223,6 +223,28 @@
               </el-select>
             </div>
 
+            <div class="codex-model-selector">
+              <div class="codex-model-selector__label">
+                <strong>Codex 思考强度</strong>
+                <span v-if="codexReasoningConfigurable">仅可选择 live catalog 已验证的档位</span>
+                <span v-else>暂无已验证档位，生成配置保持保守值 none</span>
+              </div>
+              <el-select
+                v-model="selectedCodexReasoningEffort"
+                aria-label="Codex 思考强度"
+                :disabled="!codexReasoningConfigurable"
+                placeholder="暂无已验证档位"
+              >
+                <el-option
+                  v-for="option in codexReasoningOptions"
+                  :key="option.value"
+                  :label="option.value"
+                  :value="option.value"
+                  :disabled="option.disabled"
+                />
+              </el-select>
+            </div>
+
             <div class="step-card">
               <div class="step-head">
                 <div>
@@ -548,7 +570,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Copy } from '@lucide/vue'
 import { portalApi } from '@/api/portal'
@@ -568,6 +590,7 @@ import {
   buildHermesConfigYaml,
   buildOpenAiCompatibleConfig,
   buildOpenCodeConfig,
+  resolveCodexReasoningSelection,
   resolveCodexModelSelection
 } from '@/utils/integration'
 
@@ -579,6 +602,7 @@ const portalModelStats = ref<PortalModelStat[]>([])
 const modelAllowlist = ref<string[]>([])
 const codexCatalog = ref<CodexCatalogResponse | null>(null)
 const selectedCodexModelSlug = ref('')
+const selectedCodexReasoningEffort = ref('none')
 const modelContexts = ref<Record<string, ModelContextEntry>>({})
 const loadWarnings = ref<string[]>([])
 const fatalError = ref('')
@@ -597,13 +621,35 @@ const catalogViewState = computed(() =>
 
 const allModelSlugs = computed(() => catalogViewState.value.allModelSlugs)
 const primaryModelSlug = computed(() => catalogViewState.value.primaryModelSlug)
-const codexModelSelection = computed(() =>
+const codexBaseModelSelection = computed(() =>
   resolveCodexModelSelection(
     codexCatalog.value,
     allModelSlugs.value,
     selectedCodexModelSlug.value
   )
 )
+const codexReasoningSelection = computed(() =>
+  resolveCodexReasoningSelection(
+    codexCatalog.value,
+    codexBaseModelSelection.value.modelSlug,
+    selectedCodexReasoningEffort.value
+  )
+)
+const codexReasoningOptions = computed(() => codexReasoningSelection.value.options)
+const codexReasoningConfigurable = computed(() => codexReasoningSelection.value.configurable)
+const codexModelSelection = computed(() => ({
+  ...codexBaseModelSelection.value,
+  modelReasoningEffort: codexReasoningSelection.value.selectedEffort
+}))
+
+const resetCodexReasoningEffort = () => {
+  selectedCodexReasoningEffort.value = resolveCodexReasoningSelection(
+    codexCatalog.value,
+    codexBaseModelSelection.value.modelSlug
+  ).defaultEffort
+}
+
+watch(selectedCodexModelSlug, resetCodexReasoningEffort)
 
 const hermesInstallNpm = computed(() => `# 在项目根目录
 bun install`)
@@ -741,6 +787,7 @@ const applyCodexCatalog = (catalog: CodexCatalogResponse) => {
     allModelSlugs.value,
     selectedCodexModelSlug.value
   ).modelSlug
+  resetCodexReasoningEffort()
 }
 
 const loadIntegrationData = async () => {
@@ -751,6 +798,7 @@ const loadIntegrationData = async () => {
   portalModelStats.value = []
   modelAllowlist.value = []
   codexCatalog.value = null
+  selectedCodexReasoningEffort.value = 'none'
   modelContexts.value = {}
 
   try {
