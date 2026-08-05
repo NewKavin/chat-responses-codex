@@ -186,8 +186,27 @@ sanitized_event_types() {
         ]
       | .[]
       | select(type == "string")
+      | . as $event_type
+      | select([
+          "thread.started",
+          "turn.started",
+          "turn.completed",
+          "turn.failed",
+          "item.started",
+          "item.updated",
+          "item.completed",
+          "agent_message",
+          "reasoning",
+          "command_execution",
+          "file_change",
+          "mcp_tool_call",
+          "collab_tool_call",
+          "web_search",
+          "todo_list",
+          "error"
+        ] | index($event_type))
     ' "$output_file" 2>/dev/null || true
-  } | grep -E '^[A-Za-z0-9_.:-]+$' | sort -u | paste -sd, -)"
+  } | sort -u | head -n 16 | paste -sd, -)"
   printf '%s' "${events:-final_output}"
 }
 
@@ -298,7 +317,9 @@ record_case() {
 
 record_codex_case() {
   local output_file="$4"
-  record_case "$@"
+  if ! record_case "$@"; then
+    return 1
+  fi
   if jq -Rne '[inputs | fromjson?] | any(.[]; .type == "turn.completed")' \
     "$output_file" >/dev/null 2>&1; then
     return 0
@@ -312,12 +333,39 @@ record_codex_case() {
 }
 
 record_codex_delegation_case() {
+  local expected_marker="$3"
   local output_file="$4"
-  record_codex_case "$@"
+  if ! record_codex_case "$1" "$2" "" "$4" "${@:5}" >/dev/null; then
+    return 1
+  fi
   local events
   events="$(sanitized_event_types "$output_file")"
-  if ! grep -Eq '(^|,)collab_tool_call(,|$)' <<<"$events"; then
-    printf 'client=codex task=delegation status=missing_collab_tool_call\n' >&2
+  if ! jq -Rne --arg expected_marker "$expected_marker" '
+    [inputs | fromjson?] as $events
+    | [range(0; $events | length) as $index
+        | select(
+            $events[$index].type == "item.completed"
+            and $events[$index].item.type == "collab_tool_call"
+            and $events[$index].item.status == "completed"
+          )
+        | $index
+      ] as $collab_indexes
+    | [range(0; $events | length) as $index
+        | select(
+            $events[$index].type == "item.completed"
+            and $events[$index].item.type == "agent_message"
+          )
+        | $index
+      ] as $message_indexes
+    | ($collab_indexes | length) == 1
+      and ($message_indexes | length) >= 1
+      and $collab_indexes[0] < $message_indexes[-1]
+      and $events[$message_indexes[-1]].item.text == $expected_marker
+      and ([range($message_indexes[-1] + 1; $events | length) as $index
+        | select($events[$index].type == "turn.completed")
+      ] | length) >= 1
+  ' "$output_file" >/dev/null 2>&1; then
+    printf 'client=codex task=delegation status=delegation_result_mismatch\n' >&2
     return 1
   fi
   printf 'client=codex task=delegation events=%s status=verified\n' "$events"
@@ -508,9 +556,8 @@ EOF
       --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
   fi
   if codex_task_enabled delegation; then
-    CODEX_DELEGATION_MARKER="CODEX_DELEGATION_MARKER"
-    CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to inspect the local probe file, then reply with exactly CODEX_DELEGATION_MARKER on its own line.'
-    record_codex_delegation_case codex delegation "$CODEX_DELEGATION_MARKER" "$WORKDIR/codex-delegation.jsonl" \
+    CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to read probe.txt and return its exact contents. Do not read probe.txt yourself. After the subagent finishes, reply with exactly the subagent result.'
+    record_codex_delegation_case codex delegation "$READ_MARKER" "$WORKDIR/codex-delegation.jsonl" \
       env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
       "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
       --cd "$TASKDIR" --model "$MODEL_SLUG" "$CODEX_DELEGATION_PROMPT"

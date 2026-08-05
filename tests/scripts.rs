@@ -116,9 +116,10 @@ printf '%s\n' "$client" >>"$MODEL_TASK_MARKER"
 args=" $* "
 if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
-elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
-  printf 'CODEX_DELEGATION_MARKER\n'
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
+  marker="$(<probe.txt)"
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
@@ -815,9 +816,10 @@ fi
 args=" $* "
 if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
-elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
-  printf 'CODEX_DELEGATION_MARKER\n'
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
+  marker="$(<probe.txt)"
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 elif [[ "$client" == "hermes" && "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
       printf 'CLIENT_TEXT_SMOKE_OK\n'
@@ -986,9 +988,10 @@ fn installed_client_smoke_uses_portal_codex_profile_and_checks_delegation() {
         assert!(script.contains(required), "smoke script missing {required}");
     }
     assert!(
-        script.contains("CODEX_DELEGATION_MARKER"),
-        "smoke script must include a bounded delegation marker"
+        !script.contains("CODEX_DELEGATION_MARKER"),
+        "the delegation prompt must not contain its expected runtime result"
     );
+    assert!(script.contains("delegation_result_mismatch"));
     assert!(
         script.contains("agent_profile") && script.contains("authentication"),
         "smoke script must classify profile and authentication failures"
@@ -1017,9 +1020,10 @@ if [[ "${1:-}" == "login" ]]; then
   exit 0
 fi
 args=" $* "
-if [[ "$args" == *CODEX_DELEGATION_MARKER* ]]; then
-  printf 'CODEX_DELEGATION_MARKER\n'
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+if [[ "$args" == *"Delegate exactly one"* ]]; then
+  marker="$(<probe.txt)"
+  jq -nc '{type:"item.completed",item:{type:"collab_tool_call",status:"completed"}}'
+  jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
 else
@@ -1082,9 +1086,10 @@ if [[ "${1:-}" == "login" ]]; then
 fi
 printf 'exec\n' >>"$CODEX_EXECUTION_MARKER"
 args=" $* "
-if [[ "$args" == *CODEX_DELEGATION_MARKER* ]]; then
-  printf 'CODEX_DELEGATION_MARKER\n'
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+if [[ "$args" == *"Delegate exactly one"* ]]; then
+  marker="$(<probe.txt)"
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
 else
@@ -1131,6 +1136,182 @@ printf '{"type":"turn.completed"}\n'
     assert!(stdout.contains("client=codex task=delegation"));
     assert!(!stdout.contains("client=codex task=text_task"));
     assert!(!stdout.contains("client=codex task=read_only_tool_task"));
+}
+
+#[test]
+fn installed_client_smoke_rejects_unproven_delegation() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let smoke_tmp = temp.path().join("tmp");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::create_dir(&smoke_tmp).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'codex-cli 0.146.0\n'
+  exit 0
+fi
+if [[ "${1:-}" == "login" ]]; then
+  exit 0
+fi
+marker="$(<probe.txt)"
+case "$FAKE_DELEGATION_MODE" in
+  fixed_marker)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+    printf '{"type":"item.completed","item":{"type":"agent_message","text":"CODEX_DELEGATION_MARKER"}}\n'
+    printf '{"type":"turn.completed"}\n'
+    ;;
+  wrong_final)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"item.completed","item":{"type":"agent_message","text":"wrong-final-result"}}\n'
+    printf '{"type":"turn.completed"}\n'
+    ;;
+  nonzero)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"turn.completed"}\n'
+    exit 7
+    ;;
+  no_collab)
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
+  duplicate_collab)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
+  failed_collab)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"failed"}}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
+  early_turn_completed)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+    printf '{"type":"turn.completed"}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    ;;
+esac
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let run = |mode: &str| {
+        Command::new("bash")
+            .arg("scripts/installed_client_smoke.sh")
+            .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+            .env("TMPDIR", &smoke_tmp)
+            .env("BASE_URL", "https://gateway.invalid")
+            .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+            .env("MODEL_SLUG", "opaque/exposed-slug")
+            .env("CLIENTS_JSON", r#"["codex"]"#)
+            .env("CODEX_TASKS", "delegation")
+            .env("FAKE_DELEGATION_MODE", mode)
+            .env("CLIENT_TIMEOUT_SECONDS", "5")
+            .output()
+            .unwrap()
+    };
+
+    let output = run("nonzero");
+    assert!(
+        !output.status.success(),
+        "a non-zero Codex exit must fail even when its JSONL looks complete"
+    );
+
+    for mode in [
+        "fixed_marker",
+        "wrong_final",
+        "no_collab",
+        "duplicate_collab",
+        "failed_collab",
+        "early_turn_completed",
+    ] {
+        let output = run(mode);
+        assert!(
+            !output.status.success(),
+            "unproven delegation mode {mode} must fail"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("client=codex task=delegation status=delegation_result_mismatch"),
+            "unexpected stderr for {mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn installed_client_smoke_never_prints_runtime_marker_as_an_event_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let smoke_tmp = temp.path().join("tmp");
+    let marker_capture = temp.path().join("runtime-marker");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::create_dir(&smoke_tmp).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then printf 'codex-cli 0.146.0\n'; exit 0; fi
+if [[ "${1:-}" == "login" ]]; then exit 0; fi
+marker="$(<probe.txt)"
+printf '%s' "$marker" >"$MARKER_CAPTURE_FILE"
+printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+jq -nc --arg marker "$marker" --arg secret 'SENSITIVE_PROMPT_SENTINEL' \
+  '{type:"item.completed",item:{type:$marker,prompt:$secret,arguments:{task:$secret}}}'
+for index in $(seq 1 32); do
+  jq -nc --arg event_type "untrusted.$index" '{type:$event_type}'
+done
+jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+printf '{"type":"turn.completed"}\n'
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    let output = Command::new("bash")
+        .arg("scripts/installed_client_smoke.sh")
+        .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+        .env("TMPDIR", &smoke_tmp)
+        .env("BASE_URL", "https://gateway.invalid")
+        .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+        .env("MODEL_SLUG", "opaque/exposed-slug")
+        .env("CLIENTS_JSON", r#"["codex"]"#)
+        .env("CODEX_TASKS", "delegation")
+        .env("MARKER_CAPTURE_FILE", &marker_capture)
+        .env("CLIENT_TIMEOUT_SECONDS", "5")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let marker = fs::read_to_string(marker_capture).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains(&marker));
+    assert!(!stderr.contains(&marker));
+    assert!(!stdout.contains("SENSITIVE_PROMPT_SENTINEL"));
+    assert!(!stderr.contains("SENSITIVE_PROMPT_SENTINEL"));
+    assert!(!stdout.contains("untrusted."));
+    let verified = stdout
+        .lines()
+        .find(|line| line.contains("task=delegation") && line.contains("status=verified"))
+        .unwrap();
+    let event_list = verified
+        .split_once(" events=")
+        .and_then(|(_, suffix)| suffix.split_once(" status=").map(|(events, _)| events))
+        .unwrap();
+    assert!(event_list.split(',').count() <= 16);
 }
 
 #[test]
@@ -1474,9 +1655,10 @@ fi
 args=" $* "
 if [[ "$args" == *" login "* ]]; then
   exit 0
-elif [[ "$args" == *CODEX_DELEGATION_MARKER* ]]; then
-  printf 'CODEX_DELEGATION_MARKER\n'
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+elif [[ "$args" == *"Delegate exactly one"* ]]; then
+  marker="$(<probe.txt)"
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
@@ -1725,9 +1907,10 @@ fi
 args=" $* "
 if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
-elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
-  printf 'CODEX_DELEGATION_MARKER\n'
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
+  marker="$(<probe.txt)"
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
@@ -1850,9 +2033,10 @@ printf '\n' >>"$CAPTURE_FILE"
 args=" $* "
 if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
-elif [[ "$client" == "codex" && "$args" == *CODEX_DELEGATION_MARKER* ]]; then
-  printf 'CODEX_DELEGATION_MARKER\n'
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call"}}\n'
+elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
+  marker="$(<probe.txt)"
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 fi
 if [[ "$args" == *' --dangerously-skip-permissions '* \
