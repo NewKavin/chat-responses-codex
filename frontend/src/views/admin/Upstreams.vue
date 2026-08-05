@@ -11,8 +11,36 @@
       </el-button>
     </header>
 
+    <el-form :inline="true" class="crc-toolbar upstream-filters">
+      <el-form-item>
+        <template #label><span class="filter-label"><Activity :size="12" :stroke-width="2" />状态</span></template>
+        <el-select v-model="filters.status" placeholder="全部">
+          <el-option label="全部" value="all" />
+          <el-option label="启用" value="active" />
+          <el-option label="禁用" value="inactive" />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
+        <template #label><span class="filter-label"><PlugZap :size="12" :stroke-width="2" />协议</span></template>
+        <el-select v-model="filters.protocol" placeholder="全部">
+          <el-option label="全部" value="all" />
+          <el-option
+            v-for="protocol in availableProtocols"
+            :key="protocol"
+            :label="protocol"
+            :value="protocol"
+          />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
+        <template #label><span class="filter-label"><Search :size="12" :stroke-width="2" />搜索</span></template>
+        <el-input v-model="filters.search" placeholder="名称 / ID / Base URL" clearable />
+      </el-form-item>
+    </el-form>
+
     <div class="crc-table-shell">
-      <el-table :data="upstreams" v-loading="loading" stripe style="width: 100%">
+      <el-table :data="filteredUpstreams" v-loading="loading" stripe style="width: 100%"
+        empty-text="当前筛选条件下暂无上游">
         <el-table-column label="ID" width="72" align="center">
           <template #default="{ $index }">{{ $index + 1 }}</template>
         </el-table-column>
@@ -331,7 +359,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { Plus } from '@lucide/vue'
+import { Activity, PlugZap, Plus, Search } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
@@ -344,6 +372,12 @@ import type { ApiKeyModelConfig, KeyModelDiscoveryResult, UpstreamConfig } from 
 
 const loading = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
+
+const filters = ref({
+  status: 'all',
+  protocol: 'all',
+  search: ''
+})
 const inlineSaving = ref<Record<string, boolean>>({})
 const inlineCommitted = ref<Record<string, { priority: number; concurrency_status_enabled: boolean }>>({})
 const dialogVisible = ref(false)
@@ -554,6 +588,32 @@ const resolveProtocols = (value: Partial<UpstreamConfig>): UpstreamConfig['proto
 }
 
 const displayProtocols = (value: UpstreamConfig) => resolveProtocols(value)
+
+const availableProtocols = computed(() => {
+  const set = new Set<string>()
+  upstreams.value.forEach(item => displayProtocols(item).forEach(p => set.add(p)))
+  return Array.from(set).sort()
+})
+
+const filteredUpstreams = computed(() => {
+  const keyword = filters.value.search.trim().toLowerCase()
+  return upstreams.value.filter(item => {
+    if (filters.value.status === 'active' && !item.active) return false
+    if (filters.value.status === 'inactive' && item.active) return false
+    if (filters.value.protocol !== 'all') {
+      const matched = displayProtocols(item).some(p => p === filters.value.protocol)
+      if (!matched) return false
+    }
+    if (keyword) {
+      const haystack = [item.id, item.name, item.base_url, item.remark]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      if (!haystack.includes(keyword)) return false
+    }
+    return true
+  })
+})
 
 const isOfficialOpenAIBaseUrl = (baseUrl?: string) => {
   const value = String(baseUrl || '').trim().toLowerCase()
@@ -1032,5 +1092,42 @@ onMounted(() => {
 .form-hint {
   font-family: var(--crc-font-mono);
   font-size: 11px;
+}
+
+.upstream-filters :deep(.el-form-item) {
+  margin-right: 18px;
+  margin-bottom: 8px;
+}
+
+.upstream-filters :deep(.el-form-item__label) {
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.upstream-filters :deep(.el-select) {
+  min-width: 150px;
+}
+
+.upstream-filters :deep(.el-input) {
+  min-width: 220px;
+}
+
+.filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-label :deep(svg) {
+  color: var(--crc-accent);
+}
+
+@media (max-width: 767px) {
+  .upstream-filters :deep(.el-select),
+  .upstream-filters :deep(.el-input) {
+    min-width: 0;
+    width: 100%;
+  }
 }
 </style>

@@ -12,21 +12,24 @@
     </header>
 
     <el-form :inline="true" class="crc-toolbar downstream-filters">
-      <el-form-item label="状态">
+      <el-form-item>
+        <template #label><span class="filter-label"><Activity :size="12" :stroke-width="2" />状态</span></template>
         <el-select v-model="filters.status" @change="loadData" placeholder="全部">
           <el-option label="全部" value="all" />
           <el-option label="启用" value="active" />
           <el-option label="禁用" value="inactive" />
         </el-select>
       </el-form-item>
-      <el-form-item label="生命周期">
+      <el-form-item>
+        <template #label><span class="filter-label"><Clock3 :size="12" :stroke-width="2" />生命周期</span></template>
         <el-select v-model="filters.lifecycle" @change="loadData" placeholder="全部">
           <el-option label="全部" value="all" />
           <el-option label="试用" value="trial" />
           <el-option label="永久" value="permanent" />
         </el-select>
       </el-form-item>
-      <el-form-item label="搜索">
+      <el-form-item>
+        <template #label><span class="filter-label"><Search :size="12" :stroke-width="2" />搜索</span></template>
         <el-input v-model="filters.search" @input="loadData" placeholder="名称或ID" clearable />
       </el-form-item>
     </el-form>
@@ -263,7 +266,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Activity, Clock3, Copy, Gauge, Plus, ShieldCheck } from '@lucide/vue'
+import { Activity, Clock3, Copy, Gauge, Plus, Search, ShieldCheck } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
@@ -709,12 +712,38 @@ code {
   letter-spacing: 0.06em;
 }
 
+.downstream-filters :deep(.el-select) {
+  min-width: 150px;
+}
+
+.downstream-filters :deep(.el-input) {
+  min-width: 220px;
+}
+
+.filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-label :deep(svg) {
+  color: var(--crc-accent);
+}
+
+@media (max-width: 767px) {
+  .downstream-filters :deep(.el-select),
+  .downstream-filters :deep(.el-input) {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
 .compact-downstreams-table :deep(.el-table__cell) {
-  padding: 5px 0;
+  padding: 12px 0;
 }
 
 .compact-downstreams-table :deep(.cell) {
-  line-height: 1.25;
+  line-height: 1.5;
 }
 
 .downstreams-table-shell {
@@ -744,8 +773,4 @@ code {
   margin-left: 0;
 }
 
-.row-actions :deep(.el-button--small) {
-  min-height: 26px;
-  padding: 4px 8px;
-}
 </style>
