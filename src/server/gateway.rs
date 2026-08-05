@@ -1963,8 +1963,7 @@ struct CodexReasoningMetadata {
     supports_summaries: bool,
 }
 
-const CODEX_REASONING_EFFORT_ORDER: [&str; 6] =
-    ["minimal", "low", "medium", "high", "xhigh", "max"];
+const CODEX_REASONING_EFFORT_ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 fn codex_reasoning_effort_rank(effort: &str) -> usize {
     CODEX_REASONING_EFFORT_ORDER
@@ -1996,7 +1995,7 @@ fn codex_reasoning_metadata(resolved: &ResolvedCapabilities) -> CodexReasoningMe
     let mut efforts = resolved
         .effort_map
         .keys()
-        .filter(|effort| !effort.is_empty())
+        .filter(|effort| CODEX_REASONING_EFFORT_ORDER.contains(&effort.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     efforts.sort_by(|left, right| {

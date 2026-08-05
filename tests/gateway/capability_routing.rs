@@ -743,9 +743,13 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
                 },
                 semantic: SemanticPolicy {
                     effort_map: std::collections::BTreeMap::from([
+                        ("minimal".into(), "upstream-minimal".into()),
                         ("high".into(), "upstream-high".into()),
                         ("low".into(), "upstream-low".into()),
                         ("medium".into(), "upstream-medium".into()),
+                        ("xhigh".into(), "upstream-xhigh".into()),
+                        ("max".into(), "upstream-max".into()),
+                        ("experimental".into(), "upstream-experimental".into()),
                     ]),
                     ..Default::default()
                 },
@@ -784,9 +788,13 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
     profile.reasoning_controls.insert(
         "reasoning_effort".into(),
         vec![
+            "upstream-minimal".into(),
             "upstream-high".into(),
             "upstream-low".into(),
             "upstream-medium".into(),
+            "upstream-xhigh".into(),
+            "upstream-max".into(),
+            "upstream-experimental".into(),
         ],
     );
     state.upsert_dialect_profile(profile).await.unwrap();
@@ -799,7 +807,9 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
         json!([
             {"effort": "low", "description": "Use low reasoning effort"},
             {"effort": "medium", "description": "Use medium reasoning effort"},
-            {"effort": "high", "description": "Use high reasoning effort"}
+            {"effort": "high", "description": "Use high reasoning effort"},
+            {"effort": "xhigh", "description": "Use xhigh reasoning effort"},
+            {"effort": "max", "description": "Use max reasoning effort"}
         ])
     );
     assert_eq!(model["default_reasoning_level"], "medium");

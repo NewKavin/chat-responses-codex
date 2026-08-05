@@ -1713,40 +1713,14 @@ pub(super) async fn send_to_upstream(
         }
     }
 
-    if upstream_protocol == UpstreamProtocol::ChatCompletions {
-        if let Some(object) = upstream_body.as_object_mut() {
-            if let Some(requested_reasoning_effort) =
-                object.get("reasoning_effort").and_then(Value::as_str)
-            {
-                if let Some(normalized_reasoning_effort) = normalize_reasoning_effort_for_model(
-                    &final_upstream_model,
-                    requested_reasoning_effort,
-                ) {
-                    if normalized_reasoning_effort != requested_reasoning_effort {
-                        tracing::warn!(
-                            request_id = %request_id,
-                            downstream_key_id = %downstream_key_id,
-                            path = %endpoint.path(),
-                            original_model = %model,
-                            normalized_model = %normalized_model,
-                            selected_upstream_id = %upstream.id,
-                            selected_upstream_name = %upstream.name,
-                            selected_upstream_protocol = ?upstream_protocol,
-                            upstream_model = %request_model,
-                            final_upstream_model = %final_upstream_model,
-                            requested_reasoning_effort = %requested_reasoning_effort,
-                            normalized_reasoning_effort = %normalized_reasoning_effort,
-                            "downgraded reasoning effort for upstream compatibility"
-                        );
-                        object.insert(
-                            "reasoning_effort".into(),
-                            Value::String(normalized_reasoning_effort.to_string()),
-                        );
-                    }
-                }
-            }
-        }
-    }
+    let requested_chat_reasoning_effort = (upstream_protocol == UpstreamProtocol::ChatCompletions)
+        .then(|| {
+            upstream_body
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .flatten();
 
     if upstream_protocol == UpstreamProtocol::ChatCompletions {
         normalize_chat_tool_required_arrays(&mut upstream_body);
@@ -1770,7 +1744,11 @@ pub(super) async fn send_to_upstream(
             "normalized chat payload for upstream compatibility"
         );
         if let Some(resolved) = resolved_capabilities.as_ref() {
-            normalize_chat_payload_for_capabilities(&mut upstream_body, resolved);
+            normalize_chat_payload_for_capabilities_with_requested_effort(
+                &mut upstream_body,
+                resolved,
+                requested_chat_reasoning_effort.as_deref(),
+            );
         }
     }
 

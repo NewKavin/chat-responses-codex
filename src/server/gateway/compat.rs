@@ -89,9 +89,10 @@ pub(super) fn normalize_chat_payload_for_upstream_compatibility(
     }
 }
 
-pub(super) fn normalize_chat_payload_for_capabilities(
+pub(super) fn normalize_chat_payload_for_capabilities_with_requested_effort(
     body: &mut Value,
     resolved: &ResolvedCapabilities,
+    requested_effort: Option<&str>,
 ) {
     let Some(object) = body.as_object_mut() else {
         return;
@@ -141,18 +142,17 @@ pub(super) fn normalize_chat_payload_for_capabilities(
         }
     }
 
-    let requested_effort = object
+    let normalized_effort = object
         .remove("reasoning_effort")
         .and_then(|value| value.as_str().map(str::to_owned));
+    let mapping_effort = requested_effort.or(normalized_effort.as_deref());
     if let (Some(field), Some(mapped)) = (
         resolved.reasoning_control_field.as_deref(),
-        requested_effort
-            .as_deref()
-            .and_then(|effort| resolved.effort_map.get(effort)),
+        mapping_effort.and_then(|effort| resolved.effort_map.get(effort)),
     ) {
         object.insert(field.into(), Value::String(mapped.clone()));
-    } else if let Some(requested_effort) = requested_effort {
-        object.insert("reasoning_effort".into(), Value::String(requested_effort));
+    } else if let Some(normalized_effort) = normalized_effort {
+        object.insert("reasoning_effort".into(), Value::String(normalized_effort));
     }
 
     for extension in &resolved.request_extensions {
@@ -327,7 +327,7 @@ mod tests {
         });
 
         let resolved = resolved_without_image_detail();
-        normalize_chat_payload_for_capabilities(&mut body, &resolved);
+        normalize_chat_payload_for_capabilities_with_requested_effort(&mut body, &resolved, None);
 
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"]["detail"],

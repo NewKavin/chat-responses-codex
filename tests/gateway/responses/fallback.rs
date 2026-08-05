@@ -1,7 +1,8 @@
 use super::*;
 use chat_responses_codex::capabilities::{
-    Capability, DialectProfileKey, DialectProfileState, EvidenceState, ReasoningCarrier,
-    UpstreamDialectProfile, WireProtocol,
+    Capability, CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, DialectProfileKey,
+    DialectProfileState, EvidenceState, ReasoningCarrier, SemanticPolicy, UpstreamDialectProfile,
+    WireProtocol,
 };
 use chat_responses_codex::protocol::tool_adapter::{ToolAdapterRegistry, ToolIdentity, ToolTarget};
 
@@ -1403,6 +1404,170 @@ async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high(
     let request_body = captured.request_body.unwrap();
     assert_eq!(request_body["max_tokens"], 512);
     assert_eq!(request_body["reasoning_effort"], "high");
+}
+
+#[tokio::test]
+async fn mapped_reasoning_effort_precedes_generic_normalization() {
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured_clone = captured.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let captured = captured_clone.clone();
+            async move {
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(&body).unwrap());
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-mapped-effort",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "synthetic/mapped-reasoning",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"
+                        }]
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let tempdir = tempdir().unwrap();
+    let downstream_key = generate_downstream_key("gw");
+    let model = "synthetic/mapped-reasoning";
+    let upstream_id = "mapped-reasoning-upstream";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: upstream_id.into(),
+                name: "mapped-reasoning".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-mapped-reasoning".into(),
+                name: "mapped-reasoning".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        },
+        tempdir.path().join("state.json"),
+        AppConfig {
+            upstream_route_exhaustion_retry_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            policies: vec![CapabilityPolicy {
+                id: "mapped-reasoning-efforts".into(),
+                priority: 10,
+                selector: CapabilitySelector {
+                    exposed_model: Some(model.into()),
+                    runtime_model: Some(model.into()),
+                    upstream_id: Some(upstream_id.into()),
+                    protocol: Some(WireProtocol::ChatCompletions),
+                    ..Default::default()
+                },
+                semantic: SemanticPolicy {
+                    effort_map: std::collections::BTreeMap::from([
+                        ("xhigh".into(), "upstream-xhigh".into()),
+                        ("max".into(), "upstream-max".into()),
+                    ]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: String::new(),
+        upstream_id: upstream_id.into(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [
+        Capability::TextInput,
+        Capability::NonStreamingResponse,
+        Capability::ReasoningOutput,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    profile.reasoning_controls.insert(
+        "reasoning_effort".into(),
+        vec!["upstream-xhigh".into(), "upstream-max".into()],
+    );
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    let app = build_router(state);
+    for effort in ["xhigh", "max"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": model,
+                            "input": "hello",
+                            "reasoning": {"effort": effort}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0]["reasoning_effort"], "upstream-xhigh");
+    assert_eq!(captured[1]["reasoning_effort"], "upstream-max");
 }
 
 #[tokio::test]
