@@ -575,6 +575,9 @@ async fn codex_catalog_uses_the_complete_nonempty_downstream_allowlist() {
         .iter()
         .find(|model| model["slug"] == allowlist_only_model)
         .expect("allowlist-only model");
+    for model in models {
+        assert_eq!(model["multi_agent_version"], "v1");
+    }
     assert_eq!(conservative["default_reasoning_level"], "none");
     assert_eq!(conservative["supports_parallel_tool_calls"], false);
     assert_eq!(conservative["input_modalities"], json!(["text"]));
@@ -1482,6 +1485,8 @@ async fn codex_catalog_deserializes_with_the_pinned_0_144_model_info_contract() 
         parsed.models[0].web_search_tool_type,
         PinnedWebSearchToolType::Text
     );
+    assert_eq!(parsed.models[0].multi_agent_version.as_deref(), Some("v1"));
+    assert_eq!(catalog["models"][0]["multi_agent_version"], "v1");
 
     let mut missing_shell = catalog["models"][0].clone();
     missing_shell.as_object_mut().unwrap().remove("shell_type");

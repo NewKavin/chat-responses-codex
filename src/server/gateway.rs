@@ -2140,6 +2140,7 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                 "description": null,
                 "supported_reasoning_levels": reasoning.supported_levels,
                 "default_reasoning_level": reasoning.default_level,
+                "multi_agent_version": "v1",
                 "shell_type": "shell_command",
                 "visibility": "list",
                 "supported_in_api": true,
