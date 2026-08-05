@@ -19,15 +19,19 @@ else
 fi
 
 readonly DEFAULT_CODEX_VERSION="0.146.0"
+readonly DEFAULT_CLINE_VERSION="0.0.13"
 readonly DEFAULT_OPENCODE_VERSION="1.17.18"
 readonly DEFAULT_CLAUDE_CODE_VERSION="2.1.195"
+readonly DEFAULT_KILO_VERSION="7.4.20"
 readonly DEFAULT_HERMES_VERSION="0.14.0"
 CLIENTS="${CLIENTS:-}"
 CODEX_VERSION="${EXPECTED_CODEX_VERSION:-$DEFAULT_CODEX_VERSION}"
+CLINE_VERSION="${EXPECTED_CLINE_VERSION:-$DEFAULT_CLINE_VERSION}"
 OPENCODE_VERSION="${EXPECTED_OPENCODE_VERSION:-$DEFAULT_OPENCODE_VERSION}"
 CLAUDE_CODE_VERSION="${EXPECTED_CLAUDE_CODE_VERSION:-$DEFAULT_CLAUDE_CODE_VERSION}"
+KILO_VERSION="${EXPECTED_KILO_VERSION:-$DEFAULT_KILO_VERSION}"
 HERMES_VERSION="${EXPECTED_HERMES_VERSION:-$DEFAULT_HERMES_VERSION}"
-readonly CODEX_VERSION OPENCODE_VERSION CLAUDE_CODE_VERSION HERMES_VERSION
+readonly CODEX_VERSION CLINE_VERSION OPENCODE_VERSION CLAUDE_CODE_VERSION KILO_VERSION HERMES_VERSION
 CLIENT_TIMEOUT_SECONDS="${CLIENT_TIMEOUT_SECONDS:-240}"
 readonly CLIENT_KILL_AFTER_SECONDS="2"
 
@@ -59,7 +63,7 @@ if ! jq -e '
   type == "array" and length > 0
   and all(.[]; . as $client
     | type == "string"
-    and (["codex", "opencode", "claude_code", "hermes"] | index($client) != null))
+    and (["codex", "cline", "opencode", "claude_code", "kilo", "hermes"] | index($client) != null))
 ' <<<"$CLIENTS_JSON" >/dev/null; then
   printf 'status=invalid_clients message=%s\n' 'unknown client in CLIENTS_JSON' >&2
   exit 1
@@ -109,11 +113,16 @@ resolve_client_executable() {
 }
 
 CODEX_BIN=""
+CLINE_BIN=""
 OPENCODE_BIN=""
 CLAUDE_CODE_BIN=""
+KILO_BIN=""
 HERMES_BIN=""
 if client_enabled codex; then
   CODEX_BIN="$(resolve_client_executable codex codex)" || exit 1
+fi
+if client_enabled cline; then
+  CLINE_BIN="$(resolve_client_executable cline clite)" || exit 1
 fi
 if client_enabled opencode; then
   OPENCODE_BIN="$(resolve_client_executable opencode opencode)" || exit 1
@@ -121,10 +130,13 @@ fi
 if client_enabled claude_code; then
   CLAUDE_CODE_BIN="$(resolve_client_executable claude_code claude)" || exit 1
 fi
+if client_enabled kilo; then
+  KILO_BIN="$(resolve_client_executable kilo kilo)" || exit 1
+fi
 if client_enabled hermes; then
   HERMES_BIN="$(resolve_client_executable hermes hermes)" || exit 1
 fi
-readonly CODEX_BIN OPENCODE_BIN CLAUDE_CODE_BIN HERMES_BIN
+readonly CODEX_BIN CLINE_BIN OPENCODE_BIN CLAUDE_CODE_BIN KILO_BIN HERMES_BIN
 
 version_token() {
   grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1
@@ -203,6 +215,9 @@ sanitized_event_types() {
           "collab_tool_call",
           "web_search",
           "todo_list",
+          "step_start",
+          "text",
+          "step_finish",
           "error"
         ] | index($event_type))
     ' "$output_file" 2>/dev/null || true
@@ -421,11 +436,17 @@ verify_codex_namespace_case() {
 if client_enabled codex; then
   verify_version codex "$CODEX_VERSION" "$CODEX_BIN" --version
 fi
+if client_enabled cline; then
+  verify_version cline "$CLINE_VERSION" "$CLINE_BIN" --version
+fi
 if client_enabled opencode; then
   verify_version opencode "$OPENCODE_VERSION" "$OPENCODE_BIN" --version
 fi
 if client_enabled claude_code; then
   verify_version claude_code "$CLAUDE_CODE_VERSION" "$CLAUDE_CODE_BIN" --version
+fi
+if client_enabled kilo; then
+  verify_version kilo "$KILO_VERSION" "$KILO_BIN" --version
 fi
 if client_enabled hermes; then
   verify_version hermes "$HERMES_VERSION" "$HERMES_BIN" --version
@@ -564,6 +585,50 @@ EOF
   fi
 fi
 
+if client_enabled cline; then
+  CLINE_HOME_DIR="$WORKDIR/cline-home"
+  CLINE_DATA_DIR="$WORKDIR/cline-data"
+  CLINE_CONFIG_DIR="$CLINE_DATA_DIR/settings"
+  mkdir -p "$CLINE_HOME_DIR" "$CLINE_CONFIG_DIR"
+  CLINE_UPDATED_AT="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  jq -nc \
+    --arg api_key "$DOWNSTREAM_KEY" \
+    --arg base_url "$API_BASE_URL" \
+    --arg model "$MODEL_SLUG" \
+    --arg updated_at "$CLINE_UPDATED_AT" \
+    '{
+      version: 1,
+      lastUsedProvider: "openai-native",
+      providers: {
+        "openai-native": {
+          settings: {
+            provider: "openai-native",
+            apiKey: $api_key,
+            model: $model,
+            baseUrl: $base_url
+          },
+          updatedAt: $updated_at,
+          tokenSource: "manual"
+        }
+      }
+    }' >"$CLINE_CONFIG_DIR/providers.json"
+  CLINE_ENV=(
+    HOME="$CLINE_HOME_DIR"
+    CLINE_DATA_DIR="$CLINE_DATA_DIR"
+  )
+
+  record_case cline text_task "$TEXT_MARKER" "$WORKDIR/cline-text.jsonl" \
+    env "${CLINE_ENV[@]}" \
+    "$CLINE_BIN" --json --plan --auto-approve true --thinking none \
+    --cwd "$TASKDIR" --data-dir "$CLINE_DATA_DIR" --config "$CLINE_CONFIG_DIR" \
+    --provider openai-native --model "$MODEL_SLUG" "$TEXT_PROMPT"
+  record_case cline read_only_tool_task "$READ_MARKER" "$WORKDIR/cline-tool.jsonl" \
+    env "${CLINE_ENV[@]}" \
+    "$CLINE_BIN" --json --plan --auto-approve true --thinking none \
+    --cwd "$TASKDIR" --data-dir "$CLINE_DATA_DIR" --config "$CLINE_CONFIG_DIR" \
+    --provider openai-native --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
+fi
+
 if client_enabled opencode; then
   OPENCODE_CONFIG_CONTENT="$(jq -nc \
     --arg base_url "$API_BASE_URL" \
@@ -602,6 +667,48 @@ if client_enabled opencode; then
   record_case opencode read_only_tool_task "$READ_MARKER" "$WORKDIR/opencode-tool.jsonl" \
     env "${OPENCODE_ENV[@]}" \
     "$OPENCODE_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
+    "$READ_FILE_PROMPT"
+fi
+
+if client_enabled kilo; then
+  KILO_CONFIG_CONTENT="$(jq -nc \
+    --arg base_url "$API_BASE_URL" \
+    --arg model "$MODEL_SLUG" \
+    '{
+      "$schema": "https://app.kilo.ai/config.json",
+      model: ("gateway/" + $model),
+      provider: {
+        gateway: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Chat Responses Gateway",
+          options: {baseURL: $base_url, apiKey: "{env:CHAT2RESPONSES_KEY}"},
+          models: {($model): {name: $model}}
+        }
+      },
+      permission: {"*": "deny", read: "allow"}
+  }')"
+  KILO_HOME_DIR="$WORKDIR/kilo-home"
+  KILO_XDG="$WORKDIR/kilo-xdg"
+  mkdir -p "$KILO_HOME_DIR" "$KILO_XDG"/{data,config,state,cache}
+  KILO_ENV=(
+    HOME="$KILO_HOME_DIR"
+    KILO_CONFIG_CONTENT="$KILO_CONFIG_CONTENT"
+    KILO_DISABLE_PROJECT_CONFIG=1
+    KILO_DISABLE_AUTOUPDATE=1
+    XDG_DATA_HOME="$KILO_XDG/data"
+    XDG_CONFIG_HOME="$KILO_XDG/config"
+    XDG_STATE_HOME="$KILO_XDG/state"
+    XDG_CACHE_HOME="$KILO_XDG/cache"
+    CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY"
+  )
+
+  record_case kilo text_task "$TEXT_MARKER" "$WORKDIR/kilo-text.jsonl" \
+    env "${KILO_ENV[@]}" \
+    "$KILO_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
+    "$TEXT_PROMPT"
+  record_case kilo read_only_tool_task "$READ_MARKER" "$WORKDIR/kilo-tool.jsonl" \
+    env "${KILO_ENV[@]}" \
+    "$KILO_BIN" run --pure --format json --dir "$TASKDIR" --model "gateway/$MODEL_SLUG" \
     "$READ_FILE_PROMPT"
 fi
 
@@ -840,14 +947,20 @@ if [[ -n "${ATTACHMENT_FILE:-}" ]]; then
       printf 'client=opencode task=attachment status=protocol_matrix_covered\n'
     fi
   fi
+  if client_enabled cline; then
+    printf 'client=cline task=attachment status=protocol_matrix_covered\n'
+  fi
   if client_enabled claude_code; then
     printf 'client=claude_code task=attachment status=protocol_matrix_covered\n'
+  fi
+  if client_enabled kilo; then
+    printf 'client=kilo task=attachment status=protocol_matrix_covered\n'
   fi
   if client_enabled hermes; then
     printf 'client=hermes task=attachment status=protocol_matrix_covered\n'
   fi
 else
-  for client in codex opencode claude_code hermes; do
+  for client in codex cline opencode claude_code kilo hermes; do
     if client_enabled "$client"; then
       printf 'client=%s task=attachment status=protocol_matrix_covered\n' "$client"
     fi

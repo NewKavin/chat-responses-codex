@@ -913,8 +913,10 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
 
     for fixed_pin in [
         "readonly DEFAULT_CODEX_VERSION=\"0.146.0\"",
+        "readonly DEFAULT_CLINE_VERSION=\"0.0.13\"",
         "readonly DEFAULT_OPENCODE_VERSION=\"1.17.18\"",
         "readonly DEFAULT_CLAUDE_CODE_VERSION=\"2.1.195\"",
+        "readonly DEFAULT_KILO_VERSION=\"7.4.20\"",
         "readonly DEFAULT_HERMES_VERSION=\"0.14.0\"",
     ] {
         assert!(
@@ -924,8 +926,10 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
     }
     for explicit_override in [
         "EXPECTED_CODEX_VERSION:-$DEFAULT_CODEX_VERSION",
+        "EXPECTED_CLINE_VERSION:-$DEFAULT_CLINE_VERSION",
         "EXPECTED_OPENCODE_VERSION:-$DEFAULT_OPENCODE_VERSION",
         "EXPECTED_CLAUDE_CODE_VERSION:-$DEFAULT_CLAUDE_CODE_VERSION",
+        "EXPECTED_KILO_VERSION:-$DEFAULT_KILO_VERSION",
         "EXPECTED_HERMES_VERSION:-$DEFAULT_HERMES_VERSION",
     ] {
         assert!(
@@ -935,8 +939,10 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
     }
     for command in [
         "\"$CODEX_BIN\" exec",
+        "\"$CLINE_BIN\" --json",
         "\"$OPENCODE_BIN\" run",
         "\"$CLAUDE_CODE_BIN\" -p",
+        "\"$KILO_BIN\" run",
         "\"$HERMES_BIN\" chat",
     ] {
         assert!(
@@ -958,7 +964,14 @@ fn installed_client_smoke_script_pins_defaults_and_allows_explicit_expected_vers
     assert!(script.contains("web_search = \"disabled\""));
     assert!(script.contains("stream_max_retries = 2"));
     assert!(!script.contains("disable_response_storage"));
-    for client in ["codex", "opencode", "claude_code", "hermes"] {
+    for client in [
+        "codex",
+        "cline",
+        "opencode",
+        "claude_code",
+        "kilo",
+        "hermes",
+    ] {
         assert!(
             script.contains(&format!(
                 "client={client} task=attachment status=protocol_matrix_covered"
@@ -1460,6 +1473,149 @@ fn installed_client_smoke_accepts_a_validated_client_subset() {
     assert!(script.contains("client_enabled()"));
     assert!(script.contains("jq -e --arg client"));
     assert!(script.contains("unknown client in CLIENTS_JSON"));
+    assert!(script
+        .contains("[\"codex\", \"cline\", \"opencode\", \"claude_code\", \"kilo\", \"hermes\"]"));
+}
+
+#[test]
+fn installed_client_smoke_executes_isolated_cline_and_kilo_clients() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let smoke_tmp = temp.path().join("tmp");
+    let unexpected_curl = temp.path().join("unexpected-curl");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::create_dir(&smoke_tmp).unwrap();
+
+    let fake_client = r#"#!/usr/bin/env bash
+set -euo pipefail
+client="$(basename "$0")"
+if [[ "${1:-}" == "--version" ]]; then
+  case "$client" in
+    clite) printf '0.0.13\n' ;;
+    kilo) printf '7.4.20\n' ;;
+  esac
+  exit 0
+fi
+args=" $* "
+if [[ "$client" == "clite" ]]; then
+  [[ "$args" == *' --json '* ]]
+  [[ "$args" == *' --plan '* ]]
+  [[ "$args" == *' --provider openai-native '* ]]
+  [[ "$args" == *' --model opaque/exposed-slug '* ]]
+  [[ "$args" == *" --cwd $PWD "* ]]
+  jq -e '
+    .lastUsedProvider == "openai-native"
+    and .providers["openai-native"].settings.model == "opaque/exposed-slug"
+    and .providers["openai-native"].settings.baseUrl == "https://gateway.invalid/v1"
+    and (.providers["openai-native"].updatedAt | type == "string" and length > 0)
+  ' "$CLINE_DATA_DIR/settings/providers.json" >/dev/null
+elif [[ "$client" == "kilo" ]]; then
+  [[ "$args" == *' run '* ]]
+  [[ "$args" == *' --pure '* ]]
+  [[ "$args" == *' --format json '* ]]
+  [[ "$args" == *' --model gateway/opaque/exposed-slug '* ]]
+  [[ "$args" == *" --dir $PWD "* ]]
+  [[ "$HOME" == "$TMPDIR/"* ]]
+  jq -e '
+    .model == "gateway/opaque/exposed-slug"
+    and .permission["*"] == "deny"
+    and .permission.read == "allow"
+  ' <<<"$KILO_CONFIG_CONTENT" >/dev/null
+fi
+if [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
+  result='CLIENT_TEXT_SMOKE_OK'
+else
+  result="$(cat probe.txt)"
+fi
+if [[ "$client" == "kilo" ]]; then
+  jq -nc '{type: "step_start", authorization: "Bearer sentinel-downstream-key"}'
+  jq -nc --arg text "$result" '{
+    type: "text",
+    text: $text,
+    response_body: "sentinel-upstream-response-body",
+    prompt: "sentinel-task-payload",
+    tool_arguments: "sentinel-tool-arguments"
+  }'
+  jq -nc '{type: "step_finish"}'
+else
+  printf '%s\n' "$result"
+fi
+"#;
+    for client in ["clite", "kilo"] {
+        write_executable(&fake_bin.join(client), fake_client);
+    }
+    write_executable(
+        &fake_bin.join("curl"),
+        "#!/usr/bin/env bash\nprintf called >\"$UNEXPECTED_CURL\"\nexit 97\n",
+    );
+
+    let output = Command::new("bash")
+        .arg("scripts/installed_client_smoke.sh")
+        .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+        .env("TMPDIR", &smoke_tmp)
+        .env("BASE_URL", "https://gateway.invalid")
+        .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+        .env("MODEL_SLUG", "opaque/exposed-slug")
+        .env("CLIENTS_JSON", r#"["cline","kilo"]"#)
+        .env("UNEXPECTED_CURL", &unexpected_curl)
+        .env("CLIENT_TIMEOUT_SECONDS", "5")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "Cline/Kilo smoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !unexpected_curl.exists(),
+        "Cline/Kilo-only smoke entered the Codex catalog block"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for client in ["cline", "kilo"] {
+        assert!(stdout.contains(&format!("client={client} task=text_task")));
+        assert!(stdout.contains(&format!("client={client} task=read_only_tool_task")));
+    }
+    for task in ["text_task", "read_only_tool_task"] {
+        let evidence = stdout
+            .lines()
+            .find(|line| line.contains(&format!("client=kilo task={task} ")))
+            .unwrap_or_else(|| panic!("missing Kilo {task} evidence:\n{stdout}"));
+        assert!(
+            evidence.contains("events=step_finish,step_start,text"),
+            "Kilo {task} evidence did not preserve safe event types: {evidence}"
+        );
+    }
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for sensitive in [
+        "sentinel-downstream-key",
+        "sentinel-upstream-response-body",
+        "sentinel-task-payload",
+        "sentinel-tool-arguments",
+        "CLIENT_TEXT_SMOKE_OK",
+        "read-only-",
+    ] {
+        assert!(
+            !combined.contains(sensitive),
+            "Cline/Kilo evidence leaked sensitive marker {sensitive}"
+        );
+    }
+    for skipped in [
+        "client=codex",
+        "client=opencode",
+        "client=claude_code",
+        "client=hermes",
+    ] {
+        assert!(
+            !stdout.contains(skipped),
+            "disabled client produced evidence: {skipped}"
+        );
+    }
 }
 
 #[test]
