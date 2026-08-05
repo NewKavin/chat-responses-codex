@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   buildClaudeCodeSettingsJson,
+  buildClineProviderConfig,
   buildCodexAuthLoginCommand,
   buildCodexDefaultAgentToml,
   buildCodexDoctorCommand,
@@ -14,6 +15,7 @@ import {
   buildIntegrationCatalogViewState,
   buildModelUsageStats,
   buildHermesConfigYaml,
+  buildKiloCodeConfig,
   buildOpenCodeConfig,
   CODEX_REASONING_EFFORTS,
   extractGatewayModelSlugs,
@@ -712,6 +714,56 @@ describe('integration config generators', () => {
     expect(config.apiKey).toBe('sk-downstream-123')
     expect(config.model).toBe('MiniMax/MiniMax-M2.7')
     expect(config.modelsEndpoint).toBe('https://portal.example.com/v1/models')
+  })
+
+  it('builds the native Cline CLI provider store with a stable update time', () => {
+    const config = JSON.parse(
+      buildClineProviderConfig({
+        gatewayBaseUrl: 'https://portal.example.com',
+        portalKey: 'sk-downstream-123',
+        modelSlugs: ['MiniMax/MiniMax-M2.7', 'DeepSeek/DeepSeek-V3'],
+        selectedModelSlug: 'MiniMax/MiniMax-M2.7',
+        updatedAt: '2026-08-05T07:30:00.000Z'
+      })
+    )
+
+    expect(config.version).toBe(1)
+    expect(config.lastUsedProvider).toBe('openai-native')
+    expect(config.providers['openai-native'].settings).toEqual({
+      provider: 'openai-native',
+      apiKey: 'sk-downstream-123',
+      model: 'MiniMax/MiniMax-M2.7',
+      baseUrl: 'https://portal.example.com/v1'
+    })
+    expect(config.providers['openai-native'].updatedAt).toBe('2026-08-05T07:30:00.000Z')
+    expect(config.providers['openai-native'].tokenSource).toBe('manual')
+    expect(config).not.toHaveProperty('baseURL')
+  })
+
+  it('builds a Kilo Code config with an environment key and live model table', () => {
+    const config = JSON.parse(
+      buildKiloCodeConfig({
+        gatewayBaseUrl: 'https://portal.example.com',
+        portalKey: 'sk-downstream-123',
+        modelSlugs: ['MiniMax/MiniMax-M2.7', 'DeepSeek/DeepSeek-V3'],
+        selectedModelSlug: 'MiniMax/MiniMax-M2.7'
+      })
+    )
+
+    expect(config.$schema).toBe('https://app.kilo.ai/config.json')
+    expect(config.model).toBe('gateway/MiniMax/MiniMax-M2.7')
+    expect(config.provider.gateway.npm).toBe('@ai-sdk/openai-compatible')
+    expect(config.provider.gateway.options.baseURL).toBe('https://portal.example.com/v1')
+    expect(config.provider.gateway.options.apiKey).toBe('{env:CHAT2RESPONSES_KEY}')
+    expect(config.provider.gateway.models['MiniMax/MiniMax-M2.7']).toEqual({
+      name: 'MiniMax/MiniMax-M2.7'
+    })
+    expect(config.provider.gateway.models['DeepSeek/DeepSeek-V3']).toEqual({
+      name: 'DeepSeek/DeepSeek-V3'
+    })
+    expect(config.permission).toEqual({ '*': 'deny', read: 'allow' })
+    expect(config).not.toHaveProperty('small_model')
+    expect(JSON.stringify(config)).not.toContain('sk-downstream-123')
   })
 
 

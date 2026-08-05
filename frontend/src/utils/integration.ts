@@ -69,6 +69,10 @@ type IntegrationConfigInput = {
   selectedModelSlug?: string
 }
 
+type ClineProviderConfigInput = IntegrationConfigInput & {
+  updatedAt: string
+}
+
 const gatewayProviderId = 'gateway'
 const jsonStringify = (value: unknown) => JSON.stringify(value, null, 2)
 const internalCodexCatalogFields = new Set([
@@ -564,6 +568,51 @@ export const buildOpenAiCompatibleConfig = (input: IntegrationConfigInput) => {
     modelsEndpoint: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1/models`
   })}
 `
+}
+
+export const buildClineProviderConfig = (input: ClineProviderConfigInput) => {
+  const primaryModelSlug = choosePrimaryModelSlug(input.modelSlugs, input.selectedModelSlug)
+
+  return `${jsonStringify({
+    version: 1,
+    lastUsedProvider: 'openai-native',
+    providers: {
+      'openai-native': {
+        settings: {
+          provider: 'openai-native',
+          apiKey: input.portalKey,
+          model: primaryModelSlug,
+          baseUrl: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`
+        },
+        updatedAt: input.updatedAt,
+        tokenSource: 'manual'
+      }
+    }
+  })}\n`
+}
+
+export const buildKiloCodeConfig = (input: IntegrationConfigInput) => {
+  const primaryModelSlug = choosePrimaryModelSlug(input.modelSlugs, input.selectedModelSlug)
+  const modelEntries = Object.fromEntries(
+    input.modelSlugs.map(slug => [slug, { name: slug }])
+  )
+
+  return `${jsonStringify({
+    $schema: 'https://app.kilo.ai/config.json',
+    model: primaryModelSlug ? `${gatewayProviderId}/${primaryModelSlug}` : '',
+    provider: {
+      [gatewayProviderId]: {
+        npm: '@ai-sdk/openai-compatible',
+        name: 'Chat Responses Gateway',
+        options: {
+          baseURL: `${buildGatewayBaseUrl(input.gatewayBaseUrl)}/v1`,
+          apiKey: '{env:CHAT2RESPONSES_KEY}'
+        },
+        models: modelEntries
+      }
+    },
+    permission: { '*': 'deny', read: 'allow' }
+  })}\n`
 }
 
 export const buildAnthropicCompatibleConfig = (input: IntegrationConfigInput) => {

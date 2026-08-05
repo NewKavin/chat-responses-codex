@@ -91,6 +91,7 @@
           <span class="compat-models">/v1/models</span>
           <div class="compat-clients">
             <el-tag size="small" effect="plain">Cline</el-tag>
+            <el-tag size="small" effect="plain">Kilo Code</el-tag>
             <el-tag size="small" effect="plain">OpenCode</el-tag>
             <el-tag size="small" effect="plain">其他兼容工具</el-tag>
           </div>
@@ -413,13 +414,31 @@
               type="info"
               :closable="false"
               show-icon
-              title="Cline 和其他 OpenAI 兼容客户端共用同一个配置格式：只需要 `baseURL`、`apiKey` 和默认模型。模型列表来自网关 `/v1/models`，不需要手工维护。"
+              title="Cline CLI 0.0.13 需要原生 `providers.json`；其他 OpenAI 兼容客户端继续使用通用 preset。两种配置都来自同一个实时模型目录。"
             />
 
             <div class="step-card">
               <div class="step-head">
                 <div>
-                  <h4>步骤 1: 配置 Cline 或其他 OpenAI 兼容客户端</h4>
+                  <h4>步骤 1: 写入 `~/.cline/data/settings/providers.json`</h4>
+                  <p>
+                    Cline CLI 会读取 <code>openai-native</code> provider；<code>updatedAt</code>
+                    是加载该 provider 所需的更新时间。
+                  </p>
+                </div>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(clineProviderConfig)">
+                    <Copy :size="14" :stroke-width="1.8" />
+                  </el-button>
+                </el-tooltip>
+              </div>
+              <pre class="code-block">{{ clineProviderConfig }}</pre>
+            </div>
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 2: 配置其他 OpenAI 兼容客户端</h4>
                   <p>
                     复制下面的 JSON，在客户端里填入 <code>Base URL</code>、<code>API Key</code>
                     和 <code>Model</code> 即可。模型列表可以从网关的
@@ -445,6 +464,42 @@
           </div>
         </el-tab-pane>
 
+        <el-tab-pane label="Kilo Code" name="kilo">
+          <div class="tab-body">
+            <el-alert
+              class="section-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              title="Kilo Code 7.4.20 使用 OpenAI-compatible provider。配置保留只读权限，并从当前下游白名单生成完整模型表。"
+            />
+
+            <div class="step-card">
+              <div class="step-head">
+                <div>
+                  <h4>步骤 1: 写入 `~/.config/kilo/kilo.jsonc`</h4>
+                  <p>
+                    配置通过 <code>CHAT2RESPONSES_KEY</code> 读取当前下游 Key；启动 Kilo 前在同一环境中设置该变量。
+                  </p>
+                </div>
+                <el-tooltip content="复制代码" placement="top">
+                  <el-button aria-label="复制代码" circle size="small" @click="copyCode(kiloCodeConfig)">
+                    <Copy :size="14" :stroke-width="1.8" />
+                  </el-button>
+                </el-tooltip>
+              </div>
+              <pre class="code-block">{{ kiloCodeConfig }}</pre>
+            </div>
+
+            <el-alert
+              class="section-alert"
+              type="success"
+              :closable="false"
+              show-icon
+              title="设置 CHAT2RESPONSES_KEY 后重新启动 Kilo Code；默认模型和可选模型已按当前门户目录写入。"
+            />
+          </div>
+        </el-tab-pane>
 
         <el-tab-pane label="Anthropic / Messages 兼容" name="anthropic">
           <div class="tab-body">
@@ -577,6 +632,7 @@ import { portalApi } from '@/api/portal'
 import type { ModelContextEntry, PortalModelStat } from '@/types'
 import {
   buildClaudeCodeSettingsJson,
+  buildClineProviderConfig,
   type CodexCatalogResponse,
   buildCodexAuthLoginCommand,
   buildCodexDefaultAgentToml,
@@ -588,6 +644,7 @@ import {
   buildGatewayModelsEndpoint,
   buildAnthropicCompatibleConfig,
   buildHermesConfigYaml,
+  buildKiloCodeConfig,
   buildOpenAiCompatibleConfig,
   buildOpenCodeConfig,
   resolveCodexReasoningSelection,
@@ -606,6 +663,7 @@ const selectedCodexReasoningEffort = ref('none')
 const modelContexts = ref<Record<string, ModelContextEntry>>({})
 const loadWarnings = ref<string[]>([])
 const fatalError = ref('')
+const clineProviderUpdatedAt = new Date().toISOString()
 
 const gatewayApiBaseUrl = computed(() =>
   gatewayBaseUrl.value ? `${gatewayBaseUrl.value}/v1` : ''
@@ -751,6 +809,29 @@ const anthropicCompatibleConfig = computed(() =>
 const openAiCompatibleConfig = computed(() =>
   canGenerateConfigContent.value
     ? buildOpenAiCompatibleConfig({
+      gatewayBaseUrl: gatewayBaseUrl.value,
+      portalKey: portalKey.value,
+      modelSlugs: allModelSlugs.value,
+      selectedModelSlug: primaryModelSlug.value
+    })
+    : ''
+)
+
+const clineProviderConfig = computed(() =>
+  canGenerateConfigContent.value
+    ? buildClineProviderConfig({
+      gatewayBaseUrl: gatewayBaseUrl.value,
+      portalKey: portalKey.value,
+      modelSlugs: allModelSlugs.value,
+      selectedModelSlug: primaryModelSlug.value,
+      updatedAt: clineProviderUpdatedAt
+    })
+    : ''
+)
+
+const kiloCodeConfig = computed(() =>
+  canGenerateConfigContent.value
+    ? buildKiloCodeConfig({
       gatewayBaseUrl: gatewayBaseUrl.value,
       portalKey: portalKey.value,
       modelSlugs: allModelSlugs.value,

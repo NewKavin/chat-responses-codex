@@ -67,4 +67,18 @@ describe('portal integration live catalog wiring', () => {
     expect(integrationView).toContain('buildCodexDefaultAgentToml')
     expect(integrationView).toContain('子代理')
   })
+
+  it('exposes native Cline CLI and Kilo Code configurations without replacing the generic preset', () => {
+    expect(integrationView).toContain('buildClineProviderConfig')
+    expect(integrationView).toContain('clineProviderConfig')
+    expect(integrationView).toContain('providers.json')
+    expect(integrationView).toContain('openai-native')
+    expect(integrationView).toContain('openAiCompatibleConfig')
+
+    expect(integrationView).toContain('label="Kilo Code" name="kilo"')
+    expect(integrationView).toContain('buildKiloCodeConfig')
+    expect(integrationView).toContain('kiloCodeConfig')
+    expect(integrationView).toContain('~/.config/kilo/kilo.jsonc')
+    expect(integrationView).toContain('CHAT2RESPONSES_KEY')
+  })
 })

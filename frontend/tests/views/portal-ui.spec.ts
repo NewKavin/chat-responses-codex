@@ -62,6 +62,7 @@ describe('portal ui structure', () => {
       'name="opencode"',
       'name="claude"',
       'name="cline"',
+      'name="kilo"',
       'name="anthropic"',
       'name="hermes"'
     ]
