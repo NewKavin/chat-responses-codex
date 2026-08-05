@@ -129,6 +129,15 @@ describe('portal runtime concurrency display', () => {
     expect(overview).toContain('上限')
   })
 
+  it('renders concurrency as a status grid instead of a bare text strip', () => {
+    const overview = source('Overview')
+
+    expect(overview).toContain('overview-runtime-grid')
+    expect(overview).toContain('overview-runtime-card')
+    expect(overview).toContain('下游并发状态')
+    expect(overview).toContain('overview-runtime-card__value')
+  })
+
   it('reuses the existing overview poll instead of adding a timer', () => {
     const overview = source('Overview')
 

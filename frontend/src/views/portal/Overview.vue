@@ -131,26 +131,62 @@
       </article>
     </section>
 
-    <section class="overview-runtime-strip syscall-stagger" aria-label="下游运行并发">
+    <section class="overview-runtime-panel syscall-stagger" aria-label="下游并发状态">
+      <div class="overview-runtime-head">
+        <div>
+          <p class="crc-eyebrow">RUNTIME // CONCURRENCY</p>
+          <h2>下游并发状态</h2>
+        </div>
+        <span
+          class="overview-runtime-status"
+          :class="data.concurrency.available ? 'is-live' : 'is-unavailable'"
+        >
+          <span class="overview-runtime-status__dot" aria-hidden="true"></span>
+          {{ data.concurrency.available ? '实时' : '协调不可用' }}
+        </span>
+      </div>
+
       <template v-if="data.concurrency.available">
-        <span class="overview-runtime-metric" v-if="data.concurrency.running !== undefined">
-          <Activity :size="14" :stroke-width="1.8" />运行中 {{ data.concurrency.running }}
-        </span>
-        <span class="overview-runtime-metric" v-if="data.concurrency.waiting_upstream !== undefined">
-          <Clock3 :size="14" :stroke-width="1.8" />等待上游 {{ data.concurrency.waiting_upstream }}
-        </span>
-        <span class="overview-runtime-metric" v-if="data.concurrency.admitted !== undefined">
-          <Gauge :size="14" :stroke-width="1.8" />已占用 {{ data.concurrency.admitted }}
-        </span>
-        <span class="overview-runtime-metric">
-          <ShieldCheck :size="14" :stroke-width="1.8" />上限 {{ data.concurrency.limit }}
-        </span>
+        <div class="overview-runtime-grid">
+          <article class="overview-runtime-card overview-runtime-card--running">
+            <span class="overview-runtime-card__icon"><Activity :size="18" :stroke-width="1.8" /></span>
+            <span class="overview-runtime-card__label">运行中</span>
+            <strong class="overview-runtime-card__value">{{ data.concurrency.running ?? 0 }}</strong>
+          </article>
+          <article class="overview-runtime-card overview-runtime-card--waiting">
+            <span class="overview-runtime-card__icon"><Clock3 :size="18" :stroke-width="1.8" /></span>
+            <span class="overview-runtime-card__label">等待上游</span>
+            <strong class="overview-runtime-card__value">{{ data.concurrency.waiting_upstream ?? 0 }}</strong>
+          </article>
+          <article class="overview-runtime-card overview-runtime-card--admitted">
+            <span class="overview-runtime-card__icon"><Gauge :size="18" :stroke-width="1.8" /></span>
+            <span class="overview-runtime-card__label">已占用</span>
+            <strong class="overview-runtime-card__value">{{ data.concurrency.admitted ?? 0 }}</strong>
+          </article>
+          <article class="overview-runtime-card overview-runtime-card--limit">
+            <span class="overview-runtime-card__icon"><ShieldCheck :size="18" :stroke-width="1.8" /></span>
+            <span class="overview-runtime-card__label">上限</span>
+            <strong class="overview-runtime-card__value">{{ data.concurrency.limit }}</strong>
+          </article>
+        </div>
+        <div class="overview-runtime-capacity">
+          <div class="overview-runtime-capacity__label">
+            <span>容量使用</span>
+            <strong>{{ concurrencyUsagePct }}%</strong>
+          </div>
+          <el-progress
+            :percentage="concurrencyUsagePct"
+            :show-text="false"
+            :stroke-width="6"
+            color="var(--crc-accent)"
+          />
+        </div>
       </template>
-      <template v-else>
-        <span class="overview-runtime-unavailable">
-          <ShieldCheck :size="14" :stroke-width="1.8" />协调不可用 · 上限 {{ data.concurrency.limit }}
-        </span>
-      </template>
+      <div v-else class="overview-runtime-unavailable">
+        <ShieldCheck :size="20" :stroke-width="1.8" />
+        <span>协调状态暂不可用</span>
+        <strong>上限 {{ data.concurrency.limit }}</strong>
+      </div>
     </section>
 
     <section class="quota-details-shell" v-loading="quotaLoading">
@@ -341,6 +377,13 @@ const hasQuotaSummary = computed(() =>
 )
 
 const showSummarySkeleton = computed(() => !hasQuotaSummary.value && !overviewLoaded.value)
+
+const concurrencyUsagePct = computed(() => {
+  const limit = Math.max(0, Number(data.value.concurrency.limit) || 0)
+  const admitted = Math.max(0, Number(data.value.concurrency.admitted) || 0)
+  if (limit === 0) return 0
+  return Math.min(100, Math.round((admitted / limit) * 1000) / 10)
+})
 
 const heroGauges = computed(() => {
   const gauges: Array<{ label: string; sub: string; pct: number }> = []
@@ -830,6 +873,168 @@ onUnmounted(() => {
   line-height: 1.1;
 }
 
+/* -- Runtime concurrency ---------------------------------------------------------- */
+
+.overview-runtime-panel {
+  padding: 20px;
+  border-top: 1px solid var(--crc-border);
+  border-bottom: 1px solid var(--crc-border);
+  background: var(--crc-surface);
+}
+
+.overview-runtime-head,
+.overview-runtime-capacity__label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.overview-runtime-head {
+  margin-bottom: 16px;
+}
+
+.overview-runtime-head h2 {
+  margin: 5px 0 0;
+  color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.overview-runtime-status {
+  display: inline-flex;
+  min-height: 28px;
+  padding: 5px 10px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--crc-border);
+  border-radius: 999px;
+  color: var(--crc-text-muted);
+  font-family: var(--crc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+.overview-runtime-status__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.overview-runtime-status.is-live {
+  border-color: var(--crc-success);
+  color: var(--crc-success);
+  background: var(--crc-success-soft);
+}
+
+.overview-runtime-status.is-unavailable {
+  color: var(--crc-text-muted);
+  background: var(--crc-surface-muted);
+}
+
+.overview-runtime-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.overview-runtime-card {
+  display: grid;
+  min-height: 92px;
+  padding: 14px 16px;
+  align-items: center;
+  gap: 5px 10px;
+  border: 1px solid var(--crc-border);
+  border-radius: var(--crc-radius-sm);
+  background: var(--crc-canvas);
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.overview-runtime-card__icon {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  grid-row: 1 / span 2;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--crc-radius-sm);
+}
+
+.overview-runtime-card__label {
+  align-self: end;
+  color: var(--crc-text-muted);
+  font-size: 11px;
+}
+
+.overview-runtime-card__value {
+  align-self: start;
+  color: var(--crc-text-strong);
+  font-family: var(--crc-font-display);
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.overview-runtime-card--running .overview-runtime-card__icon {
+  color: var(--crc-success);
+  background: var(--crc-success-soft);
+}
+
+.overview-runtime-card--waiting .overview-runtime-card__icon {
+  color: var(--crc-warning);
+  background: var(--crc-warning-soft);
+}
+
+.overview-runtime-card--admitted .overview-runtime-card__icon {
+  color: var(--crc-info);
+  background: var(--crc-info-soft);
+}
+
+.overview-runtime-card--limit .overview-runtime-card__icon {
+  color: var(--crc-accent);
+  background: var(--crc-accent-soft);
+}
+
+.overview-runtime-capacity {
+  margin-top: 15px;
+}
+
+.overview-runtime-capacity__label {
+  margin-bottom: 7px;
+  color: var(--crc-text-muted);
+  font-size: 11px;
+}
+
+.overview-runtime-capacity__label strong {
+  color: var(--crc-text-strong);
+  font-family: var(--crc-font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.overview-runtime-unavailable {
+  display: flex;
+  min-height: 72px;
+  padding: 16px;
+  align-items: center;
+  gap: 10px;
+  border: 1px dashed var(--crc-border-strong);
+  border-radius: var(--crc-radius-sm);
+  color: var(--crc-text-muted);
+  background: var(--crc-surface-muted);
+}
+
+.overview-runtime-unavailable strong {
+  margin-left: auto;
+  color: var(--crc-text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
 /* -- Quota details ------------------------------------------------------------------ */
 
 .quota-details-shell {
@@ -925,6 +1130,10 @@ onUnmounted(() => {
   .overview-meta-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .overview-runtime-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 767px) {
@@ -942,8 +1151,17 @@ onUnmounted(() => {
   }
 
   .overview-meta-grid,
+  .overview-runtime-grid,
   .quota-detail-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .overview-runtime-head {
+    align-items: flex-start;
+  }
+
+  .overview-runtime-panel {
+    padding: 16px 0;
   }
 }
 </style>
