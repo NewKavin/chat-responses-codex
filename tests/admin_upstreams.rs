@@ -3220,6 +3220,61 @@ async fn test_admin_discover_upstream_models_uses_custom_ca_client() {
 }
 
 #[tokio::test]
+async fn test_admin_discover_upstream_models_accepts_common_catalog_shapes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/models",
+        get(|| async {
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "data": null,
+                    "models": [{ "name": "glm-5.2" }, "glm-5.1"]
+                })),
+            )
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let state = create_test_state_with_upstreams(vec![]);
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let payload = json!({
+        "base_url": format!("http://{}", address),
+        "keys": ["key-a"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/discover-models")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["failed"], 0);
+    assert_eq!(result["models"], json!(["glm-5.1", "glm-5.2"]));
+    assert_eq!(
+        result["results"][0]["model_list"],
+        json!(["glm-5.1", "glm-5.2"])
+    );
+}
+
+#[tokio::test]
 async fn test_freekey_sync_then_list_shows_upstream() {
     let state = create_test_state_with_upstreams(vec![]);
     let app = chat_responses_codex::server::build_router(state.clone());

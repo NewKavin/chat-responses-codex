@@ -114,12 +114,19 @@ pub async fn fetch_models_from_upstream(
 
     let data = payload
         .get("data")
-        .and_then(|value| value.as_array())
+        .and_then(Value::as_array)
+        .or_else(|| payload.get("models").and_then(Value::as_array))
         .ok_or(ModelDiscoveryError::MissingData)?;
 
     let mut models: Vec<String> = data
         .iter()
-        .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+        .filter_map(|item| {
+            item.as_str().or_else(|| {
+                ["id", "model", "model_name", "name"]
+                    .into_iter()
+                    .find_map(|field| item.get(field).and_then(Value::as_str))
+            })
+        })
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
         .collect();
