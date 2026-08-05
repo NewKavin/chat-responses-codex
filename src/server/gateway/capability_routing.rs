@@ -258,7 +258,12 @@ pub(super) fn requested_features_for_request(
             scan_chat_images(body, &mut required);
             scan_chat_tools(body, &mut required);
             scan_chat_files(body, &mut required);
-            scan_chat_reasoning(body, &mut required, &mut optional);
+            scan_chat_reasoning(
+                body,
+                &mut required,
+                &mut optional,
+                &mut allow_reasoning_history_downgrade,
+            );
         }
     }
     if body
@@ -995,30 +1000,37 @@ fn scan_chat_reasoning(
     body: &Value,
     required: &mut BTreeSet<Capability>,
     optional: &mut BTreeSet<Capability>,
+    allow_reasoning_history_downgrade: &mut bool,
 ) {
     let adaptive_claude_thinking = body
         .pointer("/_gateway_claude/thinking/type")
         .and_then(Value::as_str)
         == Some("adaptive");
-    let explicit_reasoning =
-        body.get("messages")
-            .and_then(Value::as_array)
-            .is_some_and(|messages| {
-                messages.iter().any(|message| {
-                    message
-                        .get("reasoning_content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|thinking| !thinking.is_empty())
-                        || message
-                            .get("_gateway_claude_thinking")
-                            .and_then(Value::as_array)
-                            .is_some_and(|blocks| !blocks.is_empty())
-                })
-            });
+    let messages = body.get("messages").and_then(Value::as_array);
+    let signed_claude_thinking = messages.is_some_and(|messages| {
+        messages.iter().any(|message| {
+            message
+                .get("_gateway_claude_thinking")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| !blocks.is_empty())
+        })
+    });
+    let plain_reasoning_history = messages.is_some_and(|messages| {
+        messages.iter().any(|message| {
+            message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_some_and(|thinking| !thinking.is_empty())
+        })
+    });
 
-    if explicit_reasoning {
+    if signed_claude_thinking {
         required.insert(Capability::ReasoningOutput);
         required.insert(Capability::ReasoningReplay);
+    } else if plain_reasoning_history {
+        required.insert(Capability::ReasoningOutput);
+        required.insert(Capability::ReasoningReplay);
+        *allow_reasoning_history_downgrade = true;
     } else if adaptive_claude_thinking {
         optional.insert(Capability::ReasoningOutput);
         optional.insert(Capability::ReasoningReplay);
@@ -1126,6 +1138,31 @@ mod tests {
             requested.required,
             BTreeSet::from([Capability::FunctionTools])
         );
+    }
+
+    #[test]
+    fn unpinned_chat_reasoning_history_can_downgrade_on_chat_routes() {
+        let requested = requested_features_for_request(
+            EndpointKind::ChatCompletions,
+            &json!({
+                "messages": [{
+                    "role": "assistant",
+                    "reasoning_content": "hidden reasoning",
+                    "tool_calls": [{"id": "call_1", "type": "function"}]
+                }]
+            }),
+        );
+
+        assert!(requested.required.contains(&Capability::ReasoningOutput));
+        assert!(requested.required.contains(&Capability::ReasoningReplay));
+        assert!(requested.allow_reasoning_history_downgrade);
+
+        let adapted =
+            adapt_requested_features_for_protocol(&requested, UpstreamProtocol::ChatCompletions);
+        assert!(!adapted.required.contains(&Capability::ReasoningOutput));
+        assert!(!adapted.required.contains(&Capability::ReasoningReplay));
+        assert!(adapted.optional.contains(&Capability::ReasoningOutput));
+        assert!(adapted.optional.contains(&Capability::ReasoningReplay));
     }
 
     #[test]
@@ -1282,5 +1319,6 @@ mod tests {
 
         assert!(requested.required.contains(&Capability::ReasoningOutput));
         assert!(requested.required.contains(&Capability::ReasoningReplay));
+        assert!(!requested.allow_reasoning_history_downgrade);
     }
 }

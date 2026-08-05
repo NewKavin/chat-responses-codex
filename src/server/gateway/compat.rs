@@ -162,6 +162,29 @@ pub(super) fn normalize_chat_payload_for_capabilities_with_requested_effort(
     }
 }
 
+pub(super) fn strip_unsupported_chat_reasoning_history(
+    body: &mut Value,
+    resolved: &ResolvedCapabilities,
+) -> bool {
+    if resolved.supports(Capability::ReasoningOutput)
+        && resolved.supports(Capability::ReasoningReplay)
+    {
+        return false;
+    }
+
+    body.get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .map(|messages| {
+            messages.iter_mut().fold(false, |removed, message| {
+                let removed_here = message
+                    .as_object_mut()
+                    .is_some_and(|message| message.remove("reasoning_content").is_some());
+                removed || removed_here
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub(super) fn normalize_image_payload_for_capabilities(
     object: &mut Map<String, Value>,
     dialect: &ImageDialect,
@@ -333,5 +356,37 @@ mod tests {
             body["messages"][0]["content"][0]["image_url"]["detail"],
             "high"
         );
+    }
+
+    #[test]
+    fn unsupported_chat_reasoning_replay_drops_only_hidden_history() {
+        let mut body = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "hidden reasoning",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "tool result"
+                }
+            ]
+        });
+
+        let resolved = resolved_without_image_detail();
+        assert!(strip_unsupported_chat_reasoning_history(
+            &mut body, &resolved
+        ));
+
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+        assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(body["messages"][1]["content"], "tool result");
     }
 }

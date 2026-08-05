@@ -349,6 +349,52 @@ async fn non_strict_chat_compatibility_keeps_metadata_and_user() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn chat_tool_continuation_drops_only_unverified_plain_reasoning_history() {
+    with_proxy_env_cleared(|| async move {
+        let captured = capture_single_chat_request(
+            "opaque/tool-continuation-model",
+            false,
+            json!({
+                "model": "opaque/tool-continuation-model",
+                "messages": [
+                    {"role": "user", "content": "use the tool"},
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "reasoning_content": "hidden reasoning",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"}
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_1",
+                        "content": "tool result"
+                    }
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }],
+                "stream": false
+            }),
+        )
+        .await;
+
+        assert!(captured["messages"][1].get("reasoning_content").is_none());
+        assert_eq!(captured["messages"][1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(captured["messages"][2]["tool_call_id"], "call_1");
+        assert_eq!(captured["messages"][2]["content"], "tool result");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn chat_compatibility_preserves_explicit_max_tokens_over_max_output_tokens() {
     with_proxy_env_cleared(|| async move {
         let captured = capture_single_chat_request(

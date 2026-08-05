@@ -1744,6 +1744,9 @@ pub(super) async fn send_to_upstream(
             "normalized chat payload for upstream compatibility"
         );
         if let Some(resolved) = resolved_capabilities.as_ref() {
+            if strip_unsupported_chat_reasoning_history(&mut upstream_body, resolved) {
+                downgrade_codes.insert("optional_reasoning_history".into());
+            }
             normalize_chat_payload_for_capabilities_with_requested_effort(
                 &mut upstream_body,
                 resolved,
