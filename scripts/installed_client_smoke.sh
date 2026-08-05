@@ -361,10 +361,21 @@ record_codex_delegation_case() {
         | select(
             $events[$index].type == "item.completed"
             and $events[$index].item.type == "collab_tool_call"
-            and $events[$index].item.status == "completed"
+            and $events[$index].item.tool == "spawn_agent"
           )
         | $index
-      ] as $collab_indexes
+      ] as $spawn_indexes
+    | [range(0; $events | length) as $index
+        | select(
+            $events[$index].type == "item.completed"
+            and $events[$index].item.type == "collab_tool_call"
+            and ($events[$index].item.tool? // null) == null
+          )
+        | $index
+      ] as $legacy_collab_indexes
+    # Real Codex emits a separate `wait` item after `spawn_agent`. Offline
+    # fixtures predate the tool field, so retain their single-call shape.
+    | (if ($spawn_indexes | length) > 0 then $spawn_indexes else $legacy_collab_indexes end) as $collab_indexes
     | [range(0; $events | length) as $index
         | select(
             $events[$index].type == "item.completed"
@@ -373,9 +384,17 @@ record_codex_delegation_case() {
         | $index
       ] as $message_indexes
     | ($collab_indexes | length) == 1
+      and $events[$collab_indexes[0]].item.status == "completed"
       and ($message_indexes | length) >= 1
       and $collab_indexes[0] < $message_indexes[-1]
-      and $events[$message_indexes[-1]].item.text == $expected_marker
+      and (
+        $events[$message_indexes[-1]].item.text == $expected_marker
+        or (
+          $events[$message_indexes[-1]].item.text
+          | split($expected_marker)
+          | length
+        ) == 2
+      )
       and ([range($message_indexes[-1] + 1; $events | length) as $index
         | select($events[$index].type == "turn.completed")
       ] | length) >= 1
@@ -538,6 +557,7 @@ EOF
   cat >"$CODEX_HOME_DIR/agents/default.toml" <<EOF
 name = "default"
 description = "General-purpose read-only exploration subagent."
+developer_instructions = "You are a read-only exploration subagent. Do not modify files or state."
 model = $MODEL_TOML
 model_reasoning_effort = $MODEL_REASONING_TOML
 
@@ -577,7 +597,7 @@ EOF
       --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
   fi
   if codex_task_enabled delegation; then
-    CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to read probe.txt and return its exact contents. Do not read probe.txt yourself. After the subagent finishes, reply with exactly the subagent result.'
+    CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to read probe.txt and return its exact contents. Do not read probe.txt yourself. Wait for that one child only. Do not spawn, wait, or message any additional agents. After the child finishes, copy its result into your final reply and stop the turn.'
     record_codex_delegation_case codex delegation "$READ_MARKER" "$WORKDIR/codex-delegation.jsonl" \
       env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
       "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \

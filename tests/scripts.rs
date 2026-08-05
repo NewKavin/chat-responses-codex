@@ -995,7 +995,10 @@ fn installed_client_smoke_uses_portal_codex_profile_and_checks_delegation() {
         "login --with-api-key",
         "$CODEX_HOME_DIR/agents/default.toml",
         "model_reasoning_effort",
+        "developer_instructions",
         "collab_tool_call",
+        "spawn_agent",
+        "wait",
         "turn.completed",
     ] {
         assert!(script.contains(required), "smoke script missing {required}");
@@ -1005,6 +1008,7 @@ fn installed_client_smoke_uses_portal_codex_profile_and_checks_delegation() {
         "the delegation prompt must not contain its expected runtime result"
     );
     assert!(script.contains("delegation_result_mismatch"));
+    assert!(script.contains("Do not spawn, wait, or message any additional agents"));
     assert!(
         script.contains("agent_profile") && script.contains("authentication"),
         "smoke script must classify profile and authentication failures"
@@ -1035,7 +1039,8 @@ fi
 args=" $* "
 if [[ "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
-  jq -nc '{type:"item.completed",item:{type:"collab_tool_call",status:"completed"}}'
+  jq -nc '{type:"item.completed",item:{type:"collab_tool_call",tool:"spawn_agent",status:"completed"}}'
+  jq -nc '{type:"item.completed",item:{type:"collab_tool_call",tool:"wait",status:"completed"}}'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
@@ -1101,7 +1106,8 @@ printf 'exec\n' >>"$CODEX_EXECUTION_MARKER"
 args=" $* "
 if [[ "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
@@ -1208,6 +1214,12 @@ case "$FAKE_DELEGATION_MODE" in
     printf '{"type":"turn.completed"}\n'
     jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
     ;;
+  wrapped_final)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:("Child result:\n" + $marker + "\nDone.")}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
 esac
 "#,
     );
@@ -1259,6 +1271,14 @@ esac
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    let output = run("wrapped_final");
+    assert!(
+        output.status.success(),
+        "a final agent message containing the exact child result line must pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -38,6 +38,8 @@ describe('integration config generators', () => {
     expect(role).toContain('name = "default"')
     expect(role).toContain('model = "glm-5.2"')
     expect(role).toContain('model_reasoning_effort = "none"')
+    expect(role).toContain('developer_instructions =')
+    expect(role).not.toContain('file and line references')
     expect(role).not.toContain('gpt-5.6-sol')
     expect(role).not.toContain('model_reasoning_effort = "low"')
   })

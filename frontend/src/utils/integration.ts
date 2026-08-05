@@ -465,6 +465,7 @@ export const buildCodexDefaultAgentToml = (input: CodexAgentRoleInput) => {
 
   return `name = "default"
 description = "General-purpose read-only exploration subagent."
+developer_instructions = "You are a read-only exploration subagent. Do not modify files or state."
 model = ${tomlString(modelSlug)}
 model_reasoning_effort = ${tomlString(modelReasoningEffort)}
 

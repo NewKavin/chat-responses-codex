@@ -130,6 +130,8 @@ Chat 兼容上游没有解密密钥。更新目录或改变模型后必须新建
 模型 slug 和 `default_reasoning_level`。它是 Codex 委托启动子代理时读取的独立
 profile；如果门户切换模型，请同时替换这两个文件后再新建 Codex 会话。不要从
 开发机全局配置复制旧的 agent role，也不要把 key 写进这个 TOML 文件。
+Codex 0.146.0 还要求角色文件包含 `developer_instructions`；门户和模板会生成只读
+探索指令，不能省略该字段，否则委托会在发出上游请求前被客户端拒绝。
 
 遇到子代理 profile 不匹配时，只比较这两个非敏感字段，不要打印完整配置或凭据：
 

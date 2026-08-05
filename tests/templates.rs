@@ -55,6 +55,8 @@ fn codex_default_agent_example_uses_live_selection_placeholders() {
 
     assert!(role.contains(r#"model = "<model_slug>""#));
     assert!(role.contains(r#"model_reasoning_effort = "<reasoning_effort_from_live_catalog>""#));
+    assert!(role.contains("developer_instructions ="));
+    assert!(!role.contains("file and line references"));
     assert!(!role.contains("gpt-5.6-sol"));
     assert!(!role.contains("model_reasoning_effort = \"low\""));
 }
