@@ -7,7 +7,7 @@
 model_provider = "gateway"
 model = "<model_slug>"
 review_model = "<model_slug>"
-model_reasoning_effort = "none"
+model_reasoning_effort = "<reasoning_effort_from_live_catalog>"
 model_catalog_json = "model-catalog.json"
 cli_auth_credentials_store = "file"
 web_search = "disabled"

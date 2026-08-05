@@ -195,6 +195,13 @@
             <p class="codex-agent-limits">
               <code>max_threads</code> 表示并发代理线程，<code>max_depth</code> 表示嵌套委派深度；这些本地限制不覆盖网关 quota。
             </p>
+            <el-alert
+              class="section-alert"
+              type="warning"
+              :closable="false"
+              show-icon
+              title="子代理协议由 model-catalog.json 的 multi_agent_version 决定。当前网关为 Chat 兼容路由发布 V1 明文任务；不要启用 multi_agent_v2。替换目录或切换模型后必须新建 Codex 会话。"
+            />
 
             <div class="codex-model-selector">
               <div class="codex-model-selector__label">

@@ -42,6 +42,10 @@ describe('portal integration live catalog wiring', () => {
     expect(integrationView).toContain('不要复制其他模型条目')
     expect(integrationView).toContain('不需要配置 upstream_id 或指纹')
     expect(integrationView).toContain('新建 Codex 会话')
+    expect(integrationView).toContain('multi_agent_version')
+    expect(integrationView).toContain('V1')
+    expect(integrationView).toContain('multi_agent_v2')
+    expect(integrationView).toContain('不要启用')
   })
 
   it('exposes a default subagent role file generated from the selected model', () => {

@@ -352,6 +352,7 @@ describe('integration config generators', () => {
       models: [
         {
           slug: 'opaque',
+          multi_agent_version: 'v1',
           input_modalities: ['text', 'image'],
           supports_parallel_tool_calls: false,
           apply_patch_tool_type: null,
@@ -375,6 +376,7 @@ describe('integration config generators', () => {
       models: [
         {
           slug: 'opaque',
+          multi_agent_version: 'v1',
           input_modalities: ['text', 'image'],
           supports_parallel_tool_calls: false,
           apply_patch_tool_type: null,

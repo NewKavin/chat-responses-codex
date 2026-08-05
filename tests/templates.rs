@@ -385,6 +385,7 @@ fn codex_docs_mention_the_copy_ready_relative_catalog_path() {
 #[test]
 fn codex_integration_examples_document_multi_agent_validation() {
     let codex = fs::read_to_string("templates/codex/config.toml.example").unwrap();
+    let default_agent = fs::read_to_string("templates/codex/agents/default.toml.example").unwrap();
     let readme = fs::read_to_string("README.md").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
     let guide = fs::read_to_string("docs/codex-integration-guide.md").unwrap();
@@ -413,6 +414,13 @@ fn codex_integration_examples_document_multi_agent_validation() {
     assert!(!guide.contains("client_version=0.144.6"));
     assert!(guide.contains("read -rsp 'Gateway downstream key: '"));
     assert!(guide.contains("client_version"));
+    assert!(guide.contains("multi_agent_version"));
+    assert!(guide.contains("multi_agent_v2"));
+    assert!(guide.contains("V1"));
+    assert!(codex.contains("model_reasoning_effort = \"<reasoning_effort_from_live_catalog>\""));
+    assert!(
+        default_agent.contains("model_reasoning_effort = \"<reasoning_effort_from_live_catalog>\"")
+    );
 
     for documentation in [readme, deployment, guide] {
         assert!(documentation.contains("codex --strict-config doctor --summary"));

@@ -120,6 +120,12 @@ stream_max_retries = 2
 
 完成配置后可运行 `codex --strict-config doctor --summary` 检查配置是否符合当前 Codex 版本。
 
+子代理协议版本由 live `model-catalog.json` 中每个模型的 `multi_agent_version` 决定。
+当前网关为可降级到 Chat Completions 的模型发布 `V1`，让 spawn task 与后续通信使用
+明文协议项。不要启用 `multi_agent_v2`：V2 会把任务正文放进 `encrypted_content`，
+Chat 兼容上游没有解密密钥。更新目录或改变模型后必须新建 Codex 会话；已有会话会保留
+原先的 multi-agent 版本。
+
 `~/.codex/agents/default.toml` 必须使用与 `config.toml` 相同的 live catalog
 模型 slug 和 `default_reasoning_level`。它是 Codex 委托启动子代理时读取的独立
 profile；如果门户切换模型，请同时替换这两个文件后再新建 Codex 会话。不要从
@@ -414,6 +420,8 @@ stream_max_retries = 2
 - `base_url`：网关根地址加 `/v1`
 - `wire_api = "responses"`：让 Codex 按 Responses 协议跟网关通信
 - `requires_openai_auth = true`：使用 OpenAI 风格的 Bearer 鉴权头
+- `multi_agent_version`：由 live 模型目录提供。当前 Chat fallback 使用 `V1`；不要在
+  `config.toml` 启用 `multi_agent_v2` 或手工覆盖该版本
 
 ### 4.4 你现在最容易配错的地方
 
@@ -422,6 +430,7 @@ stream_max_retries = 2
 3. `model_catalog_json` 不在 `~/.codex/config.toml` 同目录
 4. `model` 和 `model_slug` 不一致
 5. 模型名被手动转成小写，或者改成了别名
+6. 手工启用了 `multi_agent_v2`，导致 Chat fallback 收到无法解密的任务 payload
 
 如果模型已经在当前 `model-catalog.json` 中，只需把原始 slug 选为新会话模型；只有想改变
 Codex 启动时的默认模型时，才需要同步修改 `model` 和 `review_model`。不要复制其他模型条目
@@ -449,6 +458,7 @@ upstream、Key、runtime model、协议和 capability 配置自动计算、校�
 - 模型怎么显示
 - 默认推理等级是什么
 - 是否支持工具调用、搜索、流式等
+- 子代理使用 `V1` 还是 `V2` 协议
 
 这些字段来自网关内部选择的持久能力证据，但内部 witness、upstream ID、profile key 和指纹
 不会进入文件。尚未形成可用证据时，网关仍会保留已授权模型，但只生成
