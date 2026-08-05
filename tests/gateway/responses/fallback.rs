@@ -1160,6 +1160,120 @@ async fn chat_only_responses_optional_hosted_tool_reports_downgrade() {
 }
 
 #[tokio::test]
+async fn encrypted_agent_message_fails_before_chat_fallback_hits_upstream() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let tempdir = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits_for_route = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let hits = hits_for_route.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-encrypted-agent",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "synthetic/encrypted-agent",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "unexpected"},
+                            "finish_reason": "stop"
+                        }]
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let model = "synthetic/encrypted-agent";
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "encrypted-agent-chat".into(),
+                name: "encrypted-agent-chat".into(),
+                base_url: format!("http://{address}"),
+                api_key: "upstream-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec![model.into()],
+                active: true,
+                ..Default::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-encrypted-agent".into(),
+                name: "team-encrypted-agent".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "input": [{
+                            "type": "agent_message",
+                            "content": [
+                                {"type": "input_text", "text": "Payload:"},
+                                {"type": "encrypted_content", "encrypted_content": "opaque-ciphertext"}
+                            ]
+                        }],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"]["code"],
+        "encrypted_agent_message_requires_responses_upstream"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("opaque-ciphertext"));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn chat_only_responses_fallback_caps_deepseek_v4_reasoning_effort_at_high() {
     let capture = Arc::new(Mutex::new(RequestCapture::default()));
     let tempdir = tempdir().unwrap();
@@ -1551,7 +1665,13 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
         .body(Body::from(
             json!({
                 "model": "gpt-4.1-mini",
-                "input": "Hello",
+                "input": [{
+                    "type": "agent_message",
+                    "content": [
+                        {"type": "input_text", "text": "Payload:"},
+                        {"type": "encrypted_content", "encrypted_content": "opaque-native-ciphertext"}
+                    ]
+                }],
                 "usage": {
                     "prompt_tokens": 10,
                     "completion_tokens": 2
@@ -1580,6 +1700,10 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
     );
     let request_body = captured.request_body.unwrap();
     assert_eq!(request_body["model"], "gpt-4.1-mini");
+    assert_eq!(
+        request_body["input"][0]["content"][1]["encrypted_content"],
+        "opaque-native-ciphertext"
+    );
     for key in [
         "usage",
         "input_tokens",
@@ -1589,7 +1713,7 @@ async fn downstream_responses_request_prefers_native_protocol_for_multi_protocol
     ] {
         assert!(
             request_body.get(key).is_none(),
-            "{key} should not be sent to a native Responses upstream: {request_body}"
+            "{key} should not be sent to a native Responses upstream"
         );
     }
 }

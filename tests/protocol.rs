@@ -1,4 +1,5 @@
 use chat_responses_codex::protocol::tool_adapter::{ToolAdapterRegistry, ToolIdentity, ToolTarget};
+use chat_responses_codex::protocol::ProtocolError;
 use chat_responses_codex::protocol::{
     chat_request_to_responses_payload, chat_response_to_responses_payload,
     chat_response_to_responses_payload_with_context,
@@ -452,7 +453,7 @@ fn responses_request_drops_opaque_reasoning_history_for_chat_payload() {
 }
 
 #[test]
-fn responses_agent_message_preserves_input_text_and_replaces_encrypted_content() {
+fn responses_agent_message_rejects_encrypted_input_content() {
     let responses = json!({
         "model": "gpt-4.1-mini",
         "input": [{
@@ -465,14 +466,10 @@ fn responses_agent_message_preserves_input_text_and_replaces_encrypted_content()
         }]
     });
 
-    let converted = responses_request_to_chat_payload(&responses)
-        .expect("agent_message input should be accepted");
-    let content = converted["messages"][0]["content"]
-        .as_str()
-        .expect("agent message should become text content");
-    assert!(content.contains("Visible delegated result."));
-    assert!(content.contains("[encrypted content omitted]"));
-    assert!(!content.contains("opaque-secret"));
+    assert_eq!(
+        responses_request_to_chat_payload(&responses),
+        Err(ProtocolError::EncryptedAgentMessageUnsupported)
+    );
 
     let top_level = json!({
         "model": "gpt-4.1-mini",
@@ -482,16 +479,32 @@ fn responses_agent_message_preserves_input_text_and_replaces_encrypted_content()
             "encrypted_content": "opaque-top-level"
         }]
     });
-    let converted = responses_request_to_chat_payload(&top_level)
-        .expect("top-level agent_message content should be accepted");
-    let content = converted["messages"][0]["content"].as_str().unwrap();
-    assert!(content.contains("Top-level delegated result."));
-    assert!(content.contains("[encrypted content omitted]"));
-    assert!(!content.contains("opaque-top-level"));
+    assert_eq!(
+        responses_request_to_chat_payload(&top_level),
+        Err(ProtocolError::EncryptedAgentMessageUnsupported)
+    );
+
+    for encrypted_part in [
+        json!({"type": "encrypted_content"}),
+        json!({"type": "encrypted_content", "encrypted_content": null}),
+        json!({"type": "output_text", "content": [{"type": "encrypted_content"}]}),
+    ] {
+        let nested = json!({
+            "model": "gpt-4.1-mini",
+            "input": [{
+                "type": "agent_message",
+                "content": [encrypted_part]
+            }]
+        });
+        assert_eq!(
+            responses_request_to_chat_payload(&nested),
+            Err(ProtocolError::EncryptedAgentMessageUnsupported)
+        );
+    }
 }
 
 #[test]
-fn responses_output_agent_message_preserves_text_without_forwarding_encrypted_content() {
+fn responses_output_agent_message_rejects_encrypted_content() {
     let response = json!({
         "id": "resp-agent-message",
         "model": "gpt-4.1-mini",
@@ -504,14 +517,10 @@ fn responses_output_agent_message_preserves_text_without_forwarding_encrypted_co
         }]
     });
 
-    let converted = responses_response_to_chat_payload(&response)
-        .expect("agent_message output should be accepted");
-    let content = converted["choices"][0]["message"]["content"]
-        .as_str()
-        .expect("agent_message output should become text");
-    assert!(content.contains("Visible output."));
-    assert!(content.contains("[encrypted content omitted]"));
-    assert!(!content.contains("opaque-output"));
+    assert_eq!(
+        responses_response_to_chat_payload(&response),
+        Err(ProtocolError::EncryptedAgentMessageUnsupported)
+    );
 }
 
 #[test]
@@ -575,7 +584,7 @@ fn responses_stream_accepts_agent_message_output_items() {
 }
 
 #[test]
-fn agent_message_role_is_assistant_and_visible_text_survives_encrypted_parts() {
+fn agent_message_rejects_top_level_and_nested_encrypted_parts() {
     let responses = json!({
         "model": "gpt-4.1-mini",
         "input": [{
@@ -594,19 +603,14 @@ fn agent_message_role_is_assistant_and_visible_text_survives_encrypted_parts() {
         }]
     });
 
-    let converted = responses_request_to_chat_payload(&responses)
-        .expect("agent_message variants should be accepted");
-    assert_eq!(converted["messages"][0]["role"], "assistant");
-    let content = converted["messages"][0]["content"].as_str().unwrap();
-    assert!(content.contains("Visible text with a null content field."));
-    assert!(content.contains("Visible output_text."));
-    assert!(content.contains("[encrypted content omitted]"));
-    assert!(!content.contains("opaque-role"));
-    assert!(!content.contains("opaque-part"));
+    assert_eq!(
+        responses_request_to_chat_payload(&responses),
+        Err(ProtocolError::EncryptedAgentMessageUnsupported)
+    );
 }
 
 #[test]
-fn agent_message_keeps_top_level_and_encrypted_part_text() {
+fn agent_message_rejects_encrypted_part_even_with_visible_text() {
     let request = json!({
         "model": "gpt-4.1-mini",
         "input": [{
@@ -619,12 +623,10 @@ fn agent_message_keeps_top_level_and_encrypted_part_text() {
             }]
         }]
     });
-    let converted = responses_request_to_chat_payload(&request).unwrap();
-    let content = converted["messages"][0]["content"].as_str().unwrap();
-    assert!(content.contains("Top-level visible text."));
-    assert!(content.contains("Visible text beside the encrypted part."));
-    assert!(content.contains("[encrypted content omitted]"));
-    assert!(!content.contains("opaque-secret"));
+    assert_eq!(
+        responses_request_to_chat_payload(&request),
+        Err(ProtocolError::EncryptedAgentMessageUnsupported)
+    );
 
     let response = json!({
         "id": "resp-agent-visible",
@@ -639,14 +641,10 @@ fn agent_message_keeps_top_level_and_encrypted_part_text() {
             }]
         }]
     });
-    let converted = responses_response_to_chat_payload(&response).unwrap();
-    let content = converted["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap();
-    assert!(content.contains("Top-level visible text."));
-    assert!(content.contains("Visible text beside the encrypted part."));
-    assert!(content.contains("[encrypted content omitted]"));
-    assert!(!content.contains("opaque-secret"));
+    assert_eq!(
+        responses_response_to_chat_payload(&response),
+        Err(ProtocolError::EncryptedAgentMessageUnsupported)
+    );
 }
 
 #[test]

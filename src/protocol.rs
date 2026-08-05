@@ -30,6 +30,7 @@ pub enum UpstreamStreamErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
     CapabilityUnsupported,
+    EncryptedAgentMessageUnsupported,
     InvalidPayload(String),
     InvalidUpstreamStream {
         kind: UpstreamStreamErrorKind,
@@ -43,6 +44,9 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CapabilityUnsupported => write!(f, "required protocol capability is unsupported"),
+            Self::EncryptedAgentMessageUnsupported => {
+                write!(f, "encrypted agent messages cannot be translated to Chat")
+            }
             Self::InvalidPayload(message) => write!(f, "{message}"),
             Self::InvalidUpstreamStream { message, .. } => {
                 write!(f, "invalid upstream SSE stream: {message}")
@@ -1210,12 +1214,14 @@ fn translate_responses_input_item(
     }
 }
 
-const ENCRYPTED_CONTENT_PLACEHOLDER: &str = "[encrypted content omitted]";
-
 fn agent_message_object_to_chat_message(
     object: &Map<String, Value>,
     dialect: image_adapter::ImageDialect,
 ) -> Result<Value, ProtocolError> {
+    if agent_message_contains_encrypted_content(&Value::Object(object.clone())) {
+        return Err(ProtocolError::EncryptedAgentMessageUnsupported);
+    }
+
     let mut content_parts = Vec::new();
 
     match object.get("content") {
@@ -1241,16 +1247,6 @@ fn agent_message_object_to_chat_message(
         }));
     }
 
-    if object
-        .get("encrypted_content")
-        .is_some_and(|value| !value.is_null())
-    {
-        content_parts.push(json!({
-            "type": "input_text",
-            "text": ENCRYPTED_CONTENT_PLACEHOLDER,
-        }));
-    }
-
     Ok(json!({
         "role": "assistant",
         "content": responses_content_to_chat_content_with_dialect(
@@ -1258,6 +1254,24 @@ fn agent_message_object_to_chat_message(
             dialect,
         )?,
     }))
+}
+
+fn agent_message_contains_encrypted_content(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(agent_message_contains_encrypted_content),
+        Value::Object(object) => {
+            object.get("type").and_then(Value::as_str) == Some("encrypted_content")
+                || object
+                    .get("encrypted_content")
+                    .is_some_and(|value| !value.is_null())
+                || object
+                    .get("content")
+                    .is_some_and(agent_message_contains_encrypted_content)
+        }
+        _ => false,
+    }
 }
 
 fn append_agent_message_content_part(parts: &mut Vec<Value>, part: &Value) {
@@ -1271,22 +1285,7 @@ fn append_agent_message_content_part(parts: &mut Vec<Value>, part: &Value) {
         return;
     };
 
-    let kind = object.get("type").and_then(Value::as_str);
-    let has_encrypted_content = object
-        .get("encrypted_content")
-        .is_some_and(|value| !value.is_null());
-    if kind == Some("encrypted_content") || has_encrypted_content {
-        if let Some(text) = object.get("text").and_then(Value::as_str) {
-            parts.push(json!({
-                "type": "input_text",
-                "text": text,
-            }));
-        }
-        parts.push(json!({
-            "type": "input_text",
-            "text": ENCRYPTED_CONTENT_PLACEHOLDER,
-        }));
-    } else if let Some(text) = object.get("text").and_then(Value::as_str) {
+    if let Some(text) = object.get("text").and_then(Value::as_str) {
         parts.push(json!({
             "type": "input_text",
             "text": text,

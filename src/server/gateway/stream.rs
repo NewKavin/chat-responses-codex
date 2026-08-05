@@ -2154,6 +2154,15 @@ pub(super) fn protocol_error_to_gateway(error: ProtocolError) -> GatewayError {
         ProtocolError::MissingField(field) => {
             GatewayError::BadRequest(format!("protocol conversion failed: missing field {field}"))
         }
+        ProtocolError::EncryptedAgentMessageUnsupported => GatewayError::classified(
+            StatusCode::BAD_REQUEST,
+            "encrypted subagent messages require a native Responses route; use the V1 catalog profile and start a new Codex session",
+            "invalid_request_error",
+            "encrypted_agent_message_requires_responses_upstream",
+            "encrypted_agent_message_requires_responses_upstream",
+            None,
+            Some(json!({ "scope": "gateway" })),
+        ),
         ProtocolError::InvalidPayload(_) => {
             GatewayError::BadRequest("protocol conversion failed: invalid payload shape".into())
         }
