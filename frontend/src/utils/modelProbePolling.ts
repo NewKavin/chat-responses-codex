@@ -1,4 +1,4 @@
-export const DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS = 15
+export const DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS = 300
 
 export const normalizeModelProbeRefreshIntervalSeconds = (
   intervalSeconds?: number | null

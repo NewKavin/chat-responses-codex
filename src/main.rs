@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             1.5,
         )
         .max(1.0),
-        model_probe_refresh_interval_seconds: env_u64("MODEL_PROBE_REFRESH_INTERVAL_SECONDS", 15)
+        model_probe_refresh_interval_seconds: env_u64("MODEL_PROBE_REFRESH_INTERVAL_SECONDS", 300)
             .max(1),
         upstream_model_auto_discovery_enabled: env_bool(
             "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED",

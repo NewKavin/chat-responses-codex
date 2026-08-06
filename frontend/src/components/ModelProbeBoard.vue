@@ -295,9 +295,11 @@ const refreshedLabel = computed(() => {
   })
 })
 
-const refreshIntervalLabel = computed(
-  () => `${normalizeModelProbeRefreshIntervalSeconds(props.data.refresh_interval_seconds)}s`
-)
+const refreshIntervalLabel = computed(() => {
+  const seconds = normalizeModelProbeRefreshIntervalSeconds(props.data.refresh_interval_seconds)
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}分钟`
+  return `${seconds}秒`
+})
 
 const formatTime = (timestamp: number) => {
   if (!timestamp) return '-'
