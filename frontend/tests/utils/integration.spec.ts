@@ -336,8 +336,8 @@ describe('integration config generators', () => {
       { value: 'xhigh', disabled: false },
       { value: 'max', disabled: false }
     ])
-    expect(selection.defaultEffort).toBe('medium')
-    expect(selection.selectedEffort).toBe('medium')
+    expect(selection.defaultEffort).toBe('high')
+    expect(selection.selectedEffort).toBe('high')
     expect(selection.configurable).toBe(true)
   })
 
@@ -445,6 +445,37 @@ describe('integration config generators', () => {
     const child = buildCodexDefaultAgentToml(input)
     expect(parent).toContain('model_reasoning_effort = "xhigh"')
     expect(child).toContain('model_reasoning_effort = "xhigh"')
+  })
+
+  it('defaults generated configs to high when the model supports it', () => {
+    const selection = resolveCodexReasoningSelection(
+      {
+        models: [{
+          slug: 'verified/model',
+          default_reasoning_level: 'medium',
+          supported_reasoning_levels: [
+            { effort: 'low' },
+            { effort: 'medium' },
+            { effort: 'high' },
+            { effort: 'xhigh' }
+          ]
+        }]
+      },
+      'verified/model'
+    )
+    expect(selection.defaultEffort).toBe('high')
+    expect(selection.selectedEffort).toBe('high')
+
+    const input = {
+      modelSlug: 'verified/model',
+      modelReasoningEffort: selection.selectedEffort
+    }
+    expect(
+      buildCodexConfigToml({ gatewayBaseUrl: 'https://gw.example', ...input })
+    ).toContain('model_reasoning_effort = "high"')
+    expect(buildCodexDefaultAgentToml(input)).toContain(
+      'model_reasoning_effort = "high"'
+    )
   })
 
   it('builds a codex config that keeps the key out of config.toml', () => {

@@ -2017,7 +2017,7 @@ fn codex_reasoning_metadata(resolved: &ResolvedCapabilities) -> CodexReasoningMe
 
     let default_effort = efforts
         .iter()
-        .find(|effort| effort.as_str() == "medium")
+        .find(|effort| effort.as_str() == "high")
         .cloned()
         .unwrap_or_else(|| efforts[0].clone());
     let supported_levels = efforts

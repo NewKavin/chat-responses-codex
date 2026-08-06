@@ -537,9 +537,6 @@ fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_o
         .clone()
         .compile()
         .expect("deployment capability template must compile");
-    let expected_efforts =
-        BTreeSet::from(["low".to_owned(), "medium".to_owned(), "high".to_owned()]);
-
     for policy_id in [
         "domestic-glm-5-family",
         "domestic-deepseek-family",
@@ -558,14 +555,32 @@ fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_o
         );
     }
 
-    for runtime_model_slug in [
+    // Real-world probe results: the self-hosted GLM-5 and DeepSeek families
+    // accept all five Codex effort levels, while Kimi / Qwen / MiniMax accept
+    // only low/medium/high. The catalog must reflect each family's actual
+    // supported set so Codex never offers an unselectable level.
+    let five_level_models = [
         "glm-5.2",
         "deepseek-v4-flash",
         "deepseek-ai/DeepSeek-R1-0528",
-        "kimi-k2.6",
-        "qwen3.7-plus",
-        "MiniMax-M2.7",
-    ] {
+    ];
+    let three_level_models = ["kimi-k2.6", "qwen3.7-plus", "MiniMax-M2.7"];
+    let expected_efforts = BTreeSet::from([
+        "low".to_owned(),
+        "medium".to_owned(),
+        "high".to_owned(),
+        "xhigh".to_owned(),
+        "max".to_owned(),
+    ]);
+    let expected_controls = vec![
+        "low".to_owned(),
+        "medium".to_owned(),
+        "high".to_owned(),
+        "xhigh".to_owned(),
+        "max".to_owned(),
+    ];
+
+    for runtime_model_slug in five_level_models.into_iter().chain(three_level_models) {
         let route = RouteIdentity {
             key_fingerprint: String::new(),
             upstream_id: "deployment-upstream".to_owned(),
@@ -576,6 +591,7 @@ fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_o
         };
         let semantic = compiled.semantic_for(&route);
         let candidates = compiled.probe_candidates_for(&route);
+        let is_five_level = five_level_models.contains(&runtime_model_slug);
 
         assert_eq!(
             semantic.reasoning_replay_required,
@@ -584,18 +600,20 @@ fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_o
         );
         assert_eq!(
             semantic.effort_map.keys().cloned().collect::<BTreeSet<_>>(),
-            expected_efforts,
+            if is_five_level {
+                expected_efforts.clone()
+            } else {
+                BTreeSet::from(["low".to_owned(), "medium".to_owned(), "high".to_owned()])
+            },
             "{runtime_model_slug} must publish only directly probed effort names"
         );
-        assert!(!semantic.effort_map.contains_key("xhigh"));
-        assert!(!semantic.effort_map.contains_key("max"));
         assert_eq!(
             candidates.reasoning_controls.get("reasoning_effort"),
-            Some(&vec![
-                "low".to_owned(),
-                "medium".to_owned(),
-                "high".to_owned()
-            ]),
+            Some(&if is_five_level {
+                expected_controls.clone()
+            } else {
+                vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()]
+            }),
             "{runtime_model_slug} must probe only upstream wire values"
         );
     }

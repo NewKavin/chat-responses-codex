@@ -15,6 +15,35 @@ pub(super) fn normalize_reasoning_effort_for_model(
     }
 }
 
+/// Ordered Codex reasoning-effort vocabulary, from lowest to highest.
+const CODEX_REASONING_EFFORT_ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+fn codex_reasoning_effort_rank(effort: &str) -> usize {
+    CODEX_REASONING_EFFORT_ORDER
+        .iter()
+        .position(|candidate| *candidate == effort)
+        .unwrap_or(CODEX_REASONING_EFFORT_ORDER.len())
+}
+
+/// Cap an unsupported requested effort to the highest supported effort key in
+/// the resolved effort_map, so a model that only supports `low/medium/high`
+/// never receives an `xhigh`/`max` it would reject. Returns `None` when no
+/// supported effort exists (the field should be dropped).
+fn cap_effort_to_supported<'a>(
+    resolved: &'a ResolvedCapabilities,
+    requested: &'a str,
+) -> Option<&'a str> {
+    if resolved.effort_map.contains_key(requested) {
+        return Some(requested);
+    }
+    resolved
+        .effort_map
+        .keys()
+        .filter(|key| codex_reasoning_effort_rank(key) <= codex_reasoning_effort_rank(requested))
+        .max_by_key(|key| codex_reasoning_effort_rank(key))
+        .map(|key| key.as_str())
+}
+
 pub(super) fn normalize_chat_tool_required_arrays(body: &mut Value) {
     let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
@@ -146,12 +175,26 @@ pub(super) fn normalize_chat_payload_for_capabilities_with_requested_effort(
         .remove("reasoning_effort")
         .and_then(|value| value.as_str().map(str::to_owned));
     let mapping_effort = requested_effort.or(normalized_effort.as_deref());
-    if let (Some(field), Some(mapped)) = (
-        resolved.reasoning_control_field.as_deref(),
-        mapping_effort.and_then(|effort| resolved.effort_map.get(effort)),
-    ) {
-        object.insert(field.into(), Value::String(mapped.clone()));
+    if let Some(field) = resolved.reasoning_control_field.as_deref() {
+        // A verified reasoning-control field is present: map the requested
+        // effort exactly when supported, otherwise cap it to the highest
+        // supported level so an `xhigh`/`max` is never sent to a model that
+        // only accepts `low`/`medium`/`high`.
+        if let Some(mapped) = mapping_effort
+            .and_then(|effort| resolved.effort_map.get(effort))
+            .or_else(|| {
+                mapping_effort.and_then(|effort| {
+                    cap_effort_to_supported(resolved, effort)
+                        .and_then(|capped| resolved.effort_map.get(capped))
+                })
+            })
+        {
+            object.insert(field.into(), Value::String(mapped.clone()));
+        }
     } else if let Some(normalized_effort) = normalized_effort {
+        // No verified control field: the generic normalization already
+        // sanitized the effort (e.g. capping `xhigh`/`max` to `high`), so
+        // preserve it on the model's native `reasoning_effort` field.
         object.insert("reasoning_effort".into(), Value::String(normalized_effort));
     }
 
@@ -388,5 +431,70 @@ mod tests {
         assert!(body["messages"][0].get("reasoning_content").is_none());
         assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_1");
         assert_eq!(body["messages"][1]["content"], "tool result");
+    }
+
+    fn resolved_with_effort_control(field: &str, effort_map: &[&str]) -> ResolvedCapabilities {
+        let mut map = BTreeMap::new();
+        for key in effort_map {
+            map.insert((*key).to_string(), (*key).to_string());
+        }
+        ResolvedCapabilities {
+            values: BTreeMap::new(),
+            token_limit_field: TokenLimitField::Omit,
+            reasoning_mode: ReasoningMode::Optional,
+            reasoning_carrier: ReasoningCarrier::ReasoningContent,
+            correction_rules: Vec::new(),
+            reasoning_control_field: Some(field.to_string()),
+            effort_map: map,
+            omit_sampling_fields: BTreeSet::new(),
+            context_window: None,
+            max_output_tokens: None,
+            omit_optional_extensions: false,
+            profile_state: DialectProfileState::Verified,
+            provisional: false,
+            native_preferred: false,
+            adapters: BTreeSet::new(),
+            request_extensions: vec![],
+            field_sources: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn full_effort_model_preserves_xhigh_and_max() {
+        let resolved = resolved_with_effort_control(
+            "reasoning_effort",
+            &["low", "medium", "high", "xhigh", "max"],
+        );
+        for effort in ["xhigh", "max"] {
+            let mut body = json!({});
+            normalize_chat_payload_for_capabilities_with_requested_effort(
+                &mut body,
+                &resolved,
+                Some(effort),
+            );
+            assert_eq!(body["reasoning_effort"], effort);
+        }
+    }
+
+    #[test]
+    fn three_level_model_caps_xhigh_to_high() {
+        let resolved = resolved_with_effort_control("reasoning_effort", &["low", "medium", "high"]);
+        for effort in ["xhigh", "max"] {
+            let mut body = json!({});
+            normalize_chat_payload_for_capabilities_with_requested_effort(
+                &mut body,
+                &resolved,
+                Some(effort),
+            );
+            assert_eq!(body["reasoning_effort"], "high");
+        }
+    }
+
+    #[test]
+    fn no_verified_control_preserves_normalized_effort() {
+        let resolved = resolved_without_image_detail();
+        let mut body = json!({ "reasoning_effort": "high" });
+        normalize_chat_payload_for_capabilities_with_requested_effort(&mut body, &resolved, None);
+        assert_eq!(body["reasoning_effort"], "high");
     }
 }

@@ -40,11 +40,11 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" }
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" }
       },
       "probe_candidates": {
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       }
@@ -56,11 +56,11 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" }
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" }
       },
       "probe_candidates": {
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       }
@@ -120,14 +120,14 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" },
         "context_window": 131072,
         "max_output_tokens": 8192
       },
       "probe_candidates": {
         "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       },
@@ -155,7 +155,7 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" },
         "context_window": 131072,
         "max_output_tokens": 8192,
         "omit_sampling_fields": [
@@ -170,7 +170,7 @@
       "probe_candidates": {
         "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       },
@@ -198,14 +198,14 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" },
         "context_window": 204800,
         "max_output_tokens": 65536
       },
       "probe_candidates": {
         "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       },
@@ -233,14 +233,14 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" },
         "context_window": 204800,
         "max_output_tokens": 65536
       },
       "probe_candidates": {
         "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       },
@@ -268,14 +268,14 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" },
         "context_window": 262144,
         "max_output_tokens": 32768
       },
       "probe_candidates": {
         "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       },
@@ -303,14 +303,14 @@
       "semantic": {
         "reasoning_mode": "optional",
         "reasoning_replay_required": false,
-        "effort_map": { "low": "low", "medium": "medium", "high": "high" },
+        "effort_map": { "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max" },
         "context_window": 262144,
         "max_output_tokens": 32768
       },
       "probe_candidates": {
         "token_limit_fields": ["max_tokens", "max_completion_tokens", "max_output_tokens", "omit"],
         "reasoning_controls": {
-          "reasoning_effort": ["low", "medium", "high"]
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
         },
         "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
       },

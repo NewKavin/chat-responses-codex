@@ -250,8 +250,8 @@ export const resolveCodexReasoningSelection = (
   }
 
   const catalogDefault = normalizeSlug(model?.default_reasoning_level)
-  const defaultEffort = supported.has('medium')
-    ? 'medium'
+  const defaultEffort = supported.has('high')
+    ? 'high'
     : isCodexReasoningEffort(catalogDefault) && supported.has(catalogDefault)
       ? catalogDefault
       : 'none'
