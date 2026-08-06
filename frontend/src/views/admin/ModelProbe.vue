@@ -15,6 +15,16 @@
         <BadgeCheck :size="15" :stroke-width="1.8" style="margin-right: 6px" />
         真实验证并应用
       </el-button>
+      <el-button
+        type="primary"
+        plain
+        :loading="probingCapabilities"
+        :disabled="loading || capabilityProbeCandidateCount === 0"
+        @click="runCapabilityProbe"
+      >
+        <Radar :size="15" :stroke-width="1.8" style="margin-right: 6px" />
+        {{ capabilityProbeCandidateCount > 0 ? `一键探测思考档位 (${capabilityProbeCandidateCount})` : '一键探测思考档位' }}
+      </el-button>
     </div>
 
     <ModelProbeBoard
@@ -84,7 +94,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { BadgeCheck } from '@lucide/vue'
+import { BadgeCheck, Radar } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
@@ -101,6 +111,7 @@ import {
 
 const loading = ref(false)
 const qualifying = ref(false)
+const probingCapabilities = ref(false)
 const loadError = ref('')
 const qualificationResult = ref<QualifyModelsResponse | null>(null)
 const probeData = ref<ModelProbeResponse>({
@@ -117,6 +128,38 @@ const probeData = ref<ModelProbeResponse>({
   channels: [],
   models: []
 })
+
+const capabilityProbeCandidates = computed(() =>
+  (probeData.value.channels ?? []).flatMap(channel =>
+    (channel.models ?? []).map(model => ({
+      upstream_id: channel.upstream_id,
+      route_id: channel.route_id,
+      runtime_model_slug: model,
+      protocol: 'chat_completions' as const
+    }))
+  )
+)
+const capabilityProbeCandidateCount = computed(() => capabilityProbeCandidates.value.length)
+
+const runCapabilityProbe = async () => {
+  if (capabilityProbeCandidates.value.length === 0) {
+    ElMessage.warning('没有可探测的模型通道')
+    return
+  }
+  probingCapabilities.value = true
+  try {
+    const candidates = capabilityProbeCandidates.value
+    await Promise.allSettled(
+      candidates.map(candidate => adminApi.queueDialectProbe(candidate))
+    )
+    ElMessage.success(`已排队 ${candidates.length} 个能力探测请求，稍后刷新即可看到各模型的思考档位`)
+  } catch (error: any) {
+    const errorMsg = error?.response?.data?.error?.message || '能力探测排队失败'
+    ElMessage.error(errorMsg)
+  } finally {
+    probingCapabilities.value = false
+  }
+}
 
 let refreshTimer: number | null = null
 let isUnmounted = false

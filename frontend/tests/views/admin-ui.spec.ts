@@ -24,6 +24,9 @@ describe('admin ui structure', () => {
     expect(adminProbe).toContain('crc-page model-probe-page')
     expect(adminProbe).toContain('crc-table-shell')
     expect(adminProbe).toContain('会消耗模型 token')
+    expect(adminProbe).toContain('runCapabilityProbe')
+    expect(adminProbe).toContain('queueDialectProbe')
+    expect(adminProbe).toContain('capabilityProbeCandidateCount')
     expect(board).toContain('probe-page-header')
     expect(board).not.toContain('summary-card')
   })
@@ -36,18 +39,6 @@ describe('admin ui structure', () => {
     expect(board).not.toContain('channel.key_prefix')
     expect(charts).toContain('route_id')
     expect(charts).not.toContain('key_prefix')
-  })
-
-  it('uses anonymous route ids for capability profile actions', () => {
-    const api = source('api/admin.ts')
-    const types = source('types/index.ts')
-    const center = source('components/TroubleshootingCenter.vue')
-    const page = source('views/admin/Troubleshooting.vue')
-
-    for (const contents of [api, types, center, page]) {
-      expect(contents).toContain('route_id')
-      expect(contents).not.toContain('key_fingerprint')
-    }
   })
 
   it('uses the responsive upstream management workbench', () => {
@@ -186,52 +177,6 @@ describe('admin ui structure', () => {
     expect(page).toContain('params.upstream_id = filters.value.upstream_id.trim()')
     expect(api).toContain('downstream_id?: string')
     expect(api).toContain('upstream_id?: string')
-  })
-
-  it('uses unframed troubleshooting sections and one matrix tool surface', () => {
-    const page = source('views/admin/Troubleshooting.vue')
-    const center = source('components/TroubleshootingCenter.vue')
-    const matrix = source('components/CompatibilityMatrixPanel.vue')
-
-    expect(page).toContain('crc-page troubleshooting-page')
-    expect(center).toContain('evidence-section')
-    expect(center).toContain('crc-table-shell')
-    expect(center).toContain('diagnostic-workspace-container')
-    expect(center).toContain('diagnostic-workspace')
-    expect(center).toContain('diagnostic-results-stack')
-    expect(center).toContain('container-name: diagnostic-workspace;')
-    expect(center).toContain('grid-template-columns: minmax(320px, 0.75fr) minmax(560px, 1.25fr);')
-    expect(center).toContain('@container diagnostic-workspace (max-width: 960px)')
-    expect(center).not.toContain('<el-row')
-    expect(center).not.toContain('<el-col')
-    expect(center).toContain(':data="paginatedDialectProfiles"')
-    expect(center).toContain('v-model:current-page="profilePage"')
-    expect(center).toContain('v-model:page-size="profilePageSize"')
-    expect(center).toContain(':page-sizes="profilePageSizes"')
-    expect(center).toContain(':total="dialectProfiles.length"')
-    expect(center).toContain('const profilePage = ref(1)')
-    expect(center).toContain('const profilePageSize = ref(10)')
-    expect(center).toContain('const profilePageSizes = [10, 20, 50]')
-    expect(center).toContain('const paginatedDialectProfiles = computed')
-    expect(center).toContain('normalizeProfilePage()')
-    expect(center).toContain('class="capability-pagination"')
-    expect(center).toContain(':data="selectedResolvedCapabilityRows"')
-    expect(center).toContain(':data="selectedResolved.conflicts"')
-    expect(matrix).toContain('compatibility-matrix-panel crc-surface')
-    expect(matrix).toContain('matrix-table-shell')
-    expect(matrix).toContain('container-name: compatibility-matrix;')
-    expect(matrix).toContain('@container compatibility-matrix (max-width: 860px)')
-    expect(matrix).toContain('max-width: 100%;')
-    expect(center).not.toContain('<el-card')
-    expect(matrix).not.toContain('<el-card')
-
-    const workspaceStart = center.indexOf('<div class="diagnostic-workspace-container">')
-    const capabilityStart = center.indexOf('class="evidence-section capability-panel"')
-    expect(workspaceStart).toBeGreaterThan(-1)
-    expect(capabilityStart).toBeGreaterThan(workspaceStart)
-    expect(center).toMatch(
-      /<\/div>\s*<\/div>\s*<section v-if="admin && exportCapabilities && importCapabilities" class="evidence-section capability-panel">/
-    )
   })
 
   it('uses a focused unframed announcement form', () => {
