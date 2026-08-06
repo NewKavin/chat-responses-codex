@@ -636,6 +636,11 @@ export interface ResolvedCapabilityValue {
   source: CapabilitySource
 }
 
+export interface DialectProfileReasoningSummary {
+  controls: { [field: string]: string[] }
+  carrier: string | null
+}
+
 export interface DialectProfileSummary {
   key: DialectProfileKey
   upstream_id: string
@@ -647,6 +652,7 @@ export interface DialectProfileSummary {
   profile_age_seconds: number | null
   probe_version: number | null
   fingerprint: string | null
+  reasoning?: DialectProfileReasoningSummary
   sources: DialectProfileSources
   evidence: DialectProfileEvidence
   event_summary: DialectProfileEventSummary

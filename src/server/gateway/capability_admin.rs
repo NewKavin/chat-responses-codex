@@ -618,6 +618,23 @@ fn capability_profile_summary(
         &profile.key.runtime_model_slug,
         profile.key.protocol,
     );
+    let reasoning_controls = if is_current {
+        profile
+            .reasoning_controls
+            .iter()
+            .map(|(field, values)| {
+                (
+                    sanitize_identifier(field),
+                    values.iter().map(|value| sanitize_identifier(value)).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let reasoning_carrier = is_current
+        .then(|| profile.reasoning_carrier.map(enum_string))
+        .flatten();
     json!({
         "key": {
             "upstream_id": profile.key.upstream_id,
@@ -634,6 +651,10 @@ fn capability_profile_summary(
         "profile_age_seconds": age_seconds,
         "probe_version": probe_version,
         "fingerprint": fingerprint,
+        "reasoning": {
+            "controls": reasoning_controls,
+            "carrier": reasoning_carrier,
+        },
         "sources": {
             "capabilities": capability_sources,
             "extensions": extension_sources,

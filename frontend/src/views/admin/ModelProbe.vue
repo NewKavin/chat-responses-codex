@@ -46,6 +46,59 @@
       <span>能力探测进行中…</span>
     </div>
 
+    <section v-if="probeResults.length > 0" class="capability-probe-results" aria-live="polite">
+      <div class="capability-probe-results__header">
+        <h3>探测结果 / Probe Results</h3>
+        <el-tag type="success" effect="plain">
+          {{ probeResults.filter(r => r.levels.length > 0).length }} 个探测出思考档位
+        </el-tag>
+        <el-tag v-if="probeResults.some(r => r.state === 'unknown' || r.operational_code)" type="danger" effect="plain">
+          {{ probeResults.filter(r => r.state === 'unknown' || r.operational_code).length }} 个失败
+        </el-tag>
+      </div>
+      <div class="crc-table-shell">
+        <el-table :data="probeResults" size="small" empty-text="无探测结果">
+          <el-table-column prop="runtime_model_slug" label="模型" min-width="200" show-overflow-tooltip />
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">
+              <el-tag :type="probeStateMeta(row.state).type" effect="plain" size="small">
+                {{ probeStateMeta(row.state).label }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="HTTP" width="80" align="center">
+            <template #default="{ row }">
+              <span v-if="row.http_status">{{ row.http_status }}</span>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="思考档位" min-width="220">
+            <template #default="{ row }">
+              <template v-if="row.levels.length > 0">
+                <el-tag
+                  v-for="level in row.levels"
+                  :key="level"
+                  size="small"
+                  effect="plain"
+                  class="capability-probe-results__level"
+                >
+                  {{ level }}
+                </el-tag>
+              </template>
+              <span v-else class="capability-probe-results__none">无</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="160">
+            <template #default="{ row }">
+              <span v-if="row.operational_code" class="capability-probe-results__err">{{ row.operational_code }}</span>
+              <span v-else-if="row.http_status === 200">探测成功</span>
+              <span v-else>待确认</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </section>
+
     <ModelProbeBoard
       tone="admin"
       scope-label="管理员视图"
@@ -119,6 +172,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
 import type {
+  DialectProfileSummary,
   ModelProbeResponse,
   ModelQualificationCategory,
   ModelQualificationLevel,
@@ -183,9 +237,28 @@ const runWithConcurrency = async <T>(
   await Promise.allSettled(results)
 }
 
-const waitForProbesToSettle = async (candidates: typeof capabilityProbeCandidates.value) => {
+interface CapabilityProbeCandidate {
+  upstream_id: string
+  route_id: string
+  runtime_model_slug: string
+  protocol: 'chat_completions' | 'responses'
+}
+
+interface CapabilityProbeResult {
+  upstream_id: string
+  runtime_model_slug: string
+  state: string
+  http_status: number | null
+  operational_code: string | null
+  levels: string[]
+  probed: boolean
+}
+
+const probeResults = ref<CapabilityProbeResult[]>([])
+
+const waitForProbesToSettle = async (candidates: CapabilityProbeCandidate[]) => {
   // Poll the profiles endpoint until every candidate has a fresh probe result,
-  // or a hard timeout is reached.
+  // or a hard timeout is reached. Returns the latest profiles snapshot.
   const deadline = Date.now() + 90_000
   const keyed = new Map(
     candidates.map(candidate => [
@@ -194,8 +267,10 @@ const waitForProbesToSettle = async (candidates: typeof capabilityProbeCandidate
     ])
   )
   const seen = new Map<string, number>()
+  let latest: DialectProfileSummary[] = []
   while (Date.now() < deadline) {
     const { data } = await adminApi.getDialectProfiles()
+    latest = data.profiles
     for (const profile of data.profiles) {
       const key = `${profile.upstream_id}/${profile.runtime_model_slug}/${profile.protocol}`
       if (keyed.has(key) && profile.age_seconds !== null && profile.age_seconds < 5) {
@@ -204,10 +279,59 @@ const waitForProbesToSettle = async (candidates: typeof capabilityProbeCandidate
     }
     // All candidates have a fresh profile (age < 5s means recently probed).
     if (Array.from(keyed.keys()).every(key => seen.has(key))) {
-      return
+      return latest
     }
     await new Promise(resolve => setTimeout(resolve, 2500))
   }
+  return latest
+}
+
+const buildProbeResults = (
+  candidates: CapabilityProbeCandidate[],
+  profiles: DialectProfileSummary[]
+): CapabilityProbeResult[] => {
+  const byKey = new Map(
+    profiles.map(profile => [
+      `${profile.upstream_id}/${profile.runtime_model_slug}/${profile.protocol}`,
+      profile
+    ])
+  )
+  return candidates.map(candidate => {
+    const key = `${candidate.upstream_id}/${candidate.runtime_model_slug}/${candidate.protocol}`
+    const profile = byKey.get(key)
+    if (!profile) {
+      return {
+        upstream_id: candidate.upstream_id,
+        runtime_model_slug: candidate.runtime_model_slug,
+        state: 'unknown',
+        http_status: null,
+        operational_code: '未探测到结果',
+        levels: [],
+        probed: false
+      }
+    }
+    const effortField = Object.keys(profile.reasoning?.controls ?? {}).find(field =>
+      field.includes('effort')
+    )
+    const levels = effortField ? (profile.reasoning?.controls?.[effortField] ?? []) : []
+    return {
+      upstream_id: candidate.upstream_id,
+      runtime_model_slug: candidate.runtime_model_slug,
+      state: profile.state,
+      http_status: profile.status_summary?.http_status ?? null,
+      operational_code: profile.status_summary?.operational_code ?? null,
+      levels,
+      probed: true
+    }
+  })
+}
+
+const probeStateMeta = (state: string) => {
+  if (state === 'verified') return { label: '已验证', type: 'success' as const }
+  if (state === 'partial') return { label: '部分支持', type: 'warning' as const }
+  if (state === 'unknown') return { label: '未确认', type: 'info' as const }
+  if (state === 'unsupported') return { label: '不支持', type: 'danger' as const }
+  return { label: state, type: 'info' as const }
 }
 
 const runCapabilityProbe = async () => {
@@ -217,8 +341,9 @@ const runCapabilityProbe = async () => {
   }
   probingCapabilities.value = true
   capabilityProbeProgress.value = 0
+  probeResults.value = []
   try {
-    const candidates = capabilityProbeCandidates.value
+    const candidates: CapabilityProbeCandidate[] = capabilityProbeCandidates.value
     let queued = 0
     let failed = 0
     await runWithConcurrency(
@@ -241,10 +366,17 @@ const runCapabilityProbe = async () => {
       return
     }
     ElMessage.success(`已排队 ${queued} 个能力探测请求${failed > 0 ? `，${failed} 个失败` : ''}，正在等待探测完成…`)
-    await waitForProbesToSettle(candidates)
+    const profiles = await waitForProbesToSettle(candidates)
+    probeResults.value = buildProbeResults(candidates, profiles)
     capabilityProbeProgress.value = 100
     await loadData()
-    ElMessage.success(`能力探测完成（${queued} 个成功${failed > 0 ? `，${failed} 个失败` : ''}），已刷新思考档位`)
+    const withLevels = probeResults.value.filter(result => result.levels.length > 0).length
+    const failedProbes = probeResults.value.filter(
+      result => result.state === 'unknown' || result.operational_code
+    ).length
+    ElMessage.success(
+      `能力探测完成：${probeResults.value.length} 个通道，${withLevels} 个探测出思考档位${failedProbes > 0 ? `，${failedProbes} 个失败` : ''}，已刷新`
+    )
   } catch (error: any) {
     const errorMsg = error?.response?.data?.error?.message || '能力探测排队失败'
     ElMessage.error(errorMsg)
@@ -507,5 +639,40 @@ onUnmounted(() => {
 
 .capability-probe-progress .el-progress {
   flex: 1;
+}
+
+.capability-probe-results {
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--crc-border-color, #e4e7ed);
+  border-radius: 8px;
+  background: var(--crc-bg-subtle, #fafafa);
+}
+
+.capability-probe-results__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.capability-probe-results__header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.capability-probe-results__level {
+  margin-right: 4px;
+}
+
+.capability-probe-results__none {
+  color: var(--crc-text-muted, #909399);
+  font-size: 12px;
+}
+
+.capability-probe-results__err {
+  color: var(--crc-danger, #f56c6c);
+  font-size: 12px;
 }
 </style>
