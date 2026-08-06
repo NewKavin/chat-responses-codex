@@ -70,12 +70,6 @@ const router = createRouter({
       meta: { requiresAuth: true, title: '运行日志' }
     },
     {
-      path: '/admin/troubleshooting',
-      name: 'AdminTroubleshooting',
-      component: () => import('@/views/admin/Troubleshooting.vue'),
-      meta: { requiresAuth: true, title: '排障中心' }
-    },
-    {
       path: '/admin/announcement',
       name: 'AdminAnnouncement',
       component: () => import('@/views/admin/Announcement.vue'),
