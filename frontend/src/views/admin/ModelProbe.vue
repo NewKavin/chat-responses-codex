@@ -3,28 +3,47 @@
     <div class="crc-toolbar qualification-command-bar">
       <div>
         <p class="crc-eyebrow">QUALIFY // REAL REQUESTS</p>
-        <span class="qualification-command-title">模型资格验证</span>
-        <p>向活动上游发起真实请求，会消耗模型 token，并按结果更新 test 下游模型列表。</p>
+        <span class="qualification-command-title">模型探测 / Model Probe</span>
+        <p>模型探测页会实时探测所有上游模型，测试结果会实时刷新。</p>
       </div>
-      <el-button
-        type="primary"
-        :loading="qualifying"
-        :disabled="loading"
-        @click="runQualification"
+      <el-tooltip
+        content="向活动上游发起真实请求验证模型可用性，并按结果更新 test 下游模型列表。会消耗模型 token。"
+        placement="top"
       >
-        <BadgeCheck :size="15" :stroke-width="1.8" style="margin-right: 6px" />
-        真实验证并应用
-      </el-button>
-      <el-button
-        type="primary"
-        plain
-        :loading="probingCapabilities"
-        :disabled="loading || capabilityProbeCandidateCount === 0"
-        @click="runCapabilityProbe"
+        <el-button
+          type="primary"
+          :loading="qualifying"
+          :disabled="loading"
+          @click="runQualification"
+        >
+          <BadgeCheck :size="15" :stroke-width="1.8" style="margin-right: 6px" />
+          真实验证并应用
+        </el-button>
+      </el-tooltip>
+      <el-tooltip
+        content="对每个模型通道发起真实请求，探测其支持的思考档位（low/medium/high/xhigh/max）。会消耗模型 token。"
+        placement="top"
       >
-        <Radar :size="15" :stroke-width="1.8" style="margin-right: 6px" />
-        {{ capabilityProbeCandidateCount > 0 ? `一键探测思考档位 (${capabilityProbeCandidateCount})` : '一键探测思考档位' }}
-      </el-button>
+        <el-button
+          type="primary"
+          plain
+          :loading="probingCapabilities"
+          :disabled="loading || capabilityProbeCandidateCount === 0"
+          @click="runCapabilityProbe"
+        >
+          <Radar :size="15" :stroke-width="1.8" style="margin-right: 6px" />
+          {{ capabilityProbeCandidateCount > 0 ? `一键探测思考档位 (${capabilityProbeCandidateCount})` : '一键探测思考档位' }}
+        </el-button>
+      </el-tooltip>
+    </div>
+
+    <div v-if="probingCapabilities" class="capability-probe-progress">
+      <el-progress
+        :percentage="capabilityProbeProgress"
+        :stroke-width="4"
+        :show-text="false"
+      />
+      <span>能力探测进行中…</span>
     </div>
 
     <ModelProbeBoard
@@ -35,6 +54,7 @@
       :data="probeData"
       :loading="loading"
       :error-message="loadError"
+      :on-retry="loadData"
     />
 
     <section v-if="qualificationResult" class="qualification-result" aria-live="polite">
@@ -140,6 +160,55 @@ const capabilityProbeCandidates = computed(() =>
   )
 )
 const capabilityProbeCandidateCount = computed(() => capabilityProbeCandidates.value.length)
+const capabilityProbeProgress = ref(0)
+
+const runWithConcurrency = async <T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+  onProgress?: (done: number, total: number) => void
+) => {
+  let cursor = 0
+  const results: Promise<void>[] = []
+  const runNext = async () => {
+    while (cursor < items.length) {
+      const index = cursor++
+      await worker(items[index])
+      onProgress?.(index + 1, items.length)
+    }
+  }
+  for (let i = 0; i < Math.min(limit, items.length); i++) {
+    results.push(runNext())
+  }
+  await Promise.allSettled(results)
+}
+
+const waitForProbesToSettle = async (candidates: typeof capabilityProbeCandidates.value) => {
+  // Poll the profiles endpoint until every candidate has a fresh probe result,
+  // or a hard timeout is reached.
+  const deadline = Date.now() + 90_000
+  const keyed = new Map(
+    candidates.map(candidate => [
+      `${candidate.upstream_id}/${candidate.runtime_model_slug}/${candidate.protocol}`,
+      candidate
+    ])
+  )
+  const seen = new Map<string, number>()
+  while (Date.now() < deadline) {
+    const { data } = await adminApi.getDialectProfiles()
+    for (const profile of data.profiles) {
+      const key = `${profile.upstream_id}/${profile.runtime_model_slug}/${profile.protocol}`
+      if (keyed.has(key) && profile.age_seconds !== null && profile.age_seconds < 5) {
+        seen.set(key, Math.max(seen.get(key) ?? 0, 1))
+      }
+    }
+    // All candidates have a fresh profile (age < 5s means recently probed).
+    if (Array.from(keyed.keys()).every(key => seen.has(key))) {
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 2500))
+  }
+}
 
 const runCapabilityProbe = async () => {
   if (capabilityProbeCandidates.value.length === 0) {
@@ -147,17 +216,41 @@ const runCapabilityProbe = async () => {
     return
   }
   probingCapabilities.value = true
+  capabilityProbeProgress.value = 0
   try {
     const candidates = capabilityProbeCandidates.value
-    await Promise.allSettled(
-      candidates.map(candidate => adminApi.queueDialectProbe(candidate))
+    let queued = 0
+    let failed = 0
+    await runWithConcurrency(
+      candidates,
+      4,
+      async candidate => {
+        try {
+          await adminApi.queueDialectProbe(candidate)
+          queued++
+        } catch {
+          failed++
+        }
+      },
+      (done, total) => {
+        capabilityProbeProgress.value = Math.round((done / total) * 100)
+      }
     )
-    ElMessage.success(`已排队 ${candidates.length} 个能力探测请求，稍后刷新即可看到各模型的思考档位`)
+    if (queued === 0) {
+      ElMessage.error('能力探测排队失败，请检查上游通道状态')
+      return
+    }
+    ElMessage.success(`已排队 ${queued} 个能力探测请求${failed > 0 ? `，${failed} 个失败` : ''}，正在等待探测完成…`)
+    await waitForProbesToSettle(candidates)
+    capabilityProbeProgress.value = 100
+    await loadData()
+    ElMessage.success(`能力探测完成（${queued} 个成功${failed > 0 ? `，${failed} 个失败` : ''}），已刷新思考档位`)
   } catch (error: any) {
     const errorMsg = error?.response?.data?.error?.message || '能力探测排队失败'
     ElMessage.error(errorMsg)
   } finally {
     probingCapabilities.value = false
+    capabilityProbeProgress.value = 0
   }
 }
 
@@ -401,5 +494,18 @@ onUnmounted(() => {
   .qualification-metric + .qualification-metric {
     border-left: 0;
   }
+}
+
+.capability-probe-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
+.capability-probe-progress .el-progress {
+  flex: 1;
 }
 </style>

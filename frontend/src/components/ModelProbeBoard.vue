@@ -25,10 +25,15 @@
       v-if="hasError"
       :title="errorMessage"
       type="error"
-      :closable="false"
       show-icon
       class="probe-error-alert"
-    />
+    >
+      <template v-if="onRetry" #default>
+        <el-button size="small" type="primary" plain @click="onRetry">
+          重试
+        </el-button>
+      </template>
+    </el-alert>
 
     <!-- 空数据提示 -->
     <el-alert
@@ -233,6 +238,7 @@ const props = defineProps<{
   data: ModelProbeResponse
   loading?: boolean
   errorMessage?: string
+  onRetry?: () => void
 }>()
 
 const { resolvedTheme } = useTheme()
