@@ -293,7 +293,8 @@ export const adminApi = {
         data: splitDashboardResponse(response.data)
       })),
 
-  getModelProbe: () => adminHttp.get<ModelProbeResponse>('/admin/model-probe'),
+  getModelProbe: () =>
+    adminHttp.get<ModelProbeResponse>('/admin/model-probe', { timeout: 60000 }),
 
   // Upstreams
   getUpstreams: () => adminHttp.get<UpstreamConfig[]>('/admin/upstreams'),

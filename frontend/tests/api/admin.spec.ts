@@ -100,7 +100,10 @@ describe('admin api auth behavior', () => {
 
     await adminApi.getModelProbe()
 
-    expect(spy).toHaveBeenCalledWith('/admin/model-probe')
+    expect(spy).toHaveBeenCalledWith(
+      '/admin/model-probe',
+      expect.objectContaining({ timeout: 60000 })
+    )
   })
 
   it('addresses model discovery results by stable key index', async () => {
