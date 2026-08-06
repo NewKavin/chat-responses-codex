@@ -207,7 +207,6 @@ const capabilityProbeCandidates = computed(() =>
   (probeData.value.channels ?? []).flatMap(channel =>
     (channel.models ?? []).map(model => ({
       upstream_id: channel.upstream_id,
-      route_id: channel.route_id,
       runtime_model_slug: model,
       protocol: 'chat_completions' as const
     }))
@@ -239,7 +238,7 @@ const runWithConcurrency = async <T>(
 
 interface CapabilityProbeCandidate {
   upstream_id: string
-  route_id: string
+  route_id?: string
   runtime_model_slug: string
   protocol: 'chat_completions' | 'responses'
 }

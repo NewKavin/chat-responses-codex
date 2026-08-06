@@ -220,7 +220,7 @@ export interface ResolvedCapabilitiesParams {
 
 export interface QueueDialectProbeRequest {
   upstream_id: string
-  route_id: string
+  route_id?: string
   runtime_model_slug: string
   protocol: 'chat_completions' | 'responses'
 }
