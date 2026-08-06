@@ -28,6 +28,21 @@ use crate::state::{
     UpstreamRequestLease,
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReasoningTrigger {
+    pub field: String,
+    pub value: String,
+}
+
+impl ReasoningTrigger {
+    pub fn new(field: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            value: value.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum CoreProbeCase {
     MinimalText {
@@ -44,6 +59,7 @@ pub enum CoreProbeCase {
     FunctionSelection,
     ToolContinuation {
         reasoning_carrier: Option<ReasoningCarrier>,
+        reasoning_trigger: Option<ReasoningTrigger>,
     },
     ParallelTools,
     IndexedToolArguments,
@@ -55,6 +71,15 @@ pub enum CoreProbeCase {
     },
     RestrictedResponses,
     Declarative(DeclarativeProbeCase),
+}
+
+impl CoreProbeCase {
+    pub fn tool_continuation(reasoning_carrier: Option<ReasoningCarrier>) -> Self {
+        CoreProbeCase::ToolContinuation {
+            reasoning_carrier,
+            reasoning_trigger: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,9 +114,7 @@ impl ProbePlan {
                 CoreProbeCase::MinimalText { stream: true },
                 CoreProbeCase::FunctionTools,
                 CoreProbeCase::FunctionSelection,
-                CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: None,
-                },
+                CoreProbeCase::tool_continuation(None),
                 CoreProbeCase::IndexedToolArguments,
                 CoreProbeCase::UsageStream,
             ],
@@ -100,9 +123,9 @@ impl ProbePlan {
 
     pub fn reasoning_agent() -> Self {
         let mut plan = Self::agent_core();
-        plan.cases.push(CoreProbeCase::ToolContinuation {
-            reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
-        });
+        plan.cases.push(CoreProbeCase::tool_continuation(Some(
+            ReasoningCarrier::ReasoningContent,
+        )));
         plan
     }
 
@@ -146,35 +169,58 @@ pub fn probe_plan_for_route(
             plan.cases.push(CoreProbeCase::TokenLimit { field });
         }
     }
-    for (field, values) in candidates.reasoning_controls {
+    for (field, values) in &candidates.reasoning_controls {
         for value in values {
             if !plan.cases.iter().any(|case| {
                 matches!(case, CoreProbeCase::ReasoningControl { field: existing_field, value: existing_value }
-                    if existing_field == &field && existing_value == &value)
+                    if existing_field == field && existing_value == value)
             }) {
                 plan.cases.push(CoreProbeCase::ReasoningControl {
                     field: field.clone(),
-                    value,
+                    value: value.clone(),
                 });
             }
         }
     }
+    let reasoning_trigger =
+        candidates
+            .reasoning_controls
+            .iter()
+            .next()
+            .and_then(|(field, values)| {
+                values
+                    .last()
+                    .map(|value| ReasoningTrigger::new(field.clone(), value.clone()))
+            });
     for reasoning_carrier in candidates
         .reasoning_carriers
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|carrier| match route.protocol {
             WireProtocol::ChatCompletions => *carrier == ReasoningCarrier::ReasoningContent,
             WireProtocol::Responses => *carrier == ReasoningCarrier::ResponsesReasoningItem,
             WireProtocol::Messages => false,
         })
     {
-        if !plan.cases.iter().any(|case| {
-            matches!(case, CoreProbeCase::ToolContinuation { reasoning_carrier: Some(existing) }
+        match plan.cases.iter_mut().find(|case| {
+            matches!(case, CoreProbeCase::ToolContinuation { reasoning_carrier: Some(existing), .. }
                 if *existing == reasoning_carrier)
         }) {
-            plan.cases.push(CoreProbeCase::ToolContinuation {
-                reasoning_carrier: Some(reasoning_carrier),
-            });
+            Some(CoreProbeCase::ToolContinuation {
+                reasoning_trigger: slot,
+                ..
+            }) => {
+                if reasoning_trigger.is_some() {
+                    *slot = reasoning_trigger.clone();
+                }
+            }
+            Some(_) => {}
+            None => {
+                plan.cases.push(CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: Some(reasoning_carrier),
+                    reasoning_trigger: reasoning_trigger.clone(),
+                });
+            }
         }
     }
     plan.cases.extend(
@@ -979,7 +1025,10 @@ impl ProbeExecutor {
                     })
                 }
             }
-            CoreProbeCase::ToolContinuation { reasoning_carrier } => {
+            CoreProbeCase::ToolContinuation {
+                reasoning_carrier,
+                reasoning_trigger,
+            } => {
                 // Arithmetic-gated probe: the model must compute the nonce
                 // (94 * 7 = 658) before calling the tool. Reasoning-capable
                 // models emit a reasoning channel while computing, which is
@@ -1000,13 +1049,19 @@ with the exact result as the nonce string.";
                             "required": ["nonce"]
                         }
                     }]);
-                    let first = self
-                        .post_responses(json!({
-                            "model": &self.runtime_model_slug,
-                            "input": prompt,
-                            "tools": tools.clone(),
-                        }))
-                        .await?;
+                    let mut first_body = json!({
+                        "model": &self.runtime_model_slug,
+                        "input": prompt,
+                        "tools": tools.clone(),
+                    });
+                    if let Some(trigger) = reasoning_trigger {
+                        if trigger.field == "reasoning_effort" {
+                            first_body["reasoning"] = json!({"effort": trigger.value});
+                        } else {
+                            first_body[&trigger.field] = Value::String(trigger.value.clone());
+                        }
+                    }
+                    let first = self.post_responses(first_body).await?;
                     if first.status != StatusCode::OK {
                         return Ok(ProbeCaseVerdict::Unobserved {
                             operational_code: "tool_continuation_failed".into(),
@@ -1093,27 +1148,29 @@ with the exact result as the nonce string.";
                         })
                     };
                 }
-                let first = self
-                    .post_chat(json!({
-                        "model": &self.runtime_model_slug,
-                        "messages": [{
-                            "role": "user",
-                            "content": prompt
-                        }],
-                        "tools": [{
-                            "type": "function",
-                            "function": {
-                                "name": "gateway_compat_probe",
-                                "description": "compat probe",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {"nonce": {"type": "string"}},
-                                    "required": ["nonce"]
-                                }
+                let mut first_body = json!({
+                    "model": &self.runtime_model_slug,
+                    "messages": [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "gateway_compat_probe",
+                            "description": "compat probe",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"nonce": {"type": "string"}},
+                                "required": ["nonce"]
                             }
-                        }],
-                    }))
-                    .await?;
+                        }
+                    }],
+                });
+                if let Some(trigger) = reasoning_trigger {
+                    first_body[&trigger.field] = Value::String(trigger.value.clone());
+                }
+                let first = self.post_chat(first_body).await?;
                 if first.status != StatusCode::OK {
                     return Ok(ProbeCaseVerdict::Unobserved {
                         operational_code: "tool_continuation_failed".into(),
@@ -2149,7 +2206,9 @@ impl ProbeEvidence {
                         .insert(Capability::FunctionTools, EvidenceState::Supported);
                 }
             }
-            CoreProbeCase::ToolContinuation { reasoning_carrier } => {
+            CoreProbeCase::ToolContinuation {
+                reasoning_carrier, ..
+            } => {
                 let state = supported_or_rejected(&verdict);
                 if reasoning_carrier.is_none() {
                     self.capabilities

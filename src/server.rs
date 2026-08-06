@@ -11,7 +11,7 @@ pub use gateway::thinking_signature::{sign_thinking, verify_thinking, ThinkingSi
 pub use gateway::{
     build_router, probe_plan_for_job, probe_plan_for_route, run_probe_plan_for_model_for_test,
     run_probe_plan_for_test, CapabilityProbeMockReply, CapabilityProbePlan, CapabilityProbeService,
-    CoreProbeCase,
+    CoreProbeCase, ReasoningTrigger,
 };
 pub use upstream_concurrency_status::{
     poll_concurrency_status_once, spawn_concurrency_status_poller,

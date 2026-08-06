@@ -19,6 +19,7 @@ use chat_responses_codex::protocol::stream_aggregate::MAX_STREAM_AGGREGATE_TOTAL
 use chat_responses_codex::server::{
     probe_plan_for_job, probe_plan_for_route, run_probe_plan_for_model_for_test,
     run_probe_plan_for_test, CapabilityProbeMockReply, CapabilityProbePlan, CapabilityProbeService,
+    ReasoningTrigger,
 };
 
 #[test]
@@ -167,8 +168,10 @@ fn matching_policy_adds_declared_candidates_and_extensions_to_probe_plan() {
     assert!(plan.cases.iter().any(|case| matches!(
         case,
         chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-            reasoning_carrier: Some(ReasoningCarrier::ReasoningContent)
-        }
+            reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
+            reasoning_trigger: Some(ReasoningTrigger { field, value }),
+            ..
+        } if field == "reasoning_effort" && value == "high"
     )));
     assert!(plan.cases.iter().any(|case| matches!(
         case,
@@ -227,6 +230,7 @@ fn probe_plan_keeps_only_reasoning_carriers_representable_by_the_wire_protocol()
             .filter_map(|case| match case {
                 chat_responses_codex::server::CoreProbeCase::ToolContinuation {
                     reasoning_carrier: Some(carrier),
+                    ..
                 } => Some(*carrier),
                 _ => None,
             })
@@ -341,7 +345,8 @@ fn agent_core_plan_probes_basic_tool_continuation() {
     assert!(plan.cases.iter().any(|case| matches!(
         case,
         chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-            reasoning_carrier: None
+            reasoning_carrier: None,
+            ..
         }
     )));
 }
@@ -1157,11 +1162,7 @@ async fn run_responses_tool_continuation_probe(response_body: Value) -> ProbeOut
         "opaque/responses-model",
         CapabilityProbePlan {
             protocol: WireProtocol::Responses,
-            cases: vec![
-                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: None,
-                },
-            ],
+            cases: vec![chat_responses_codex::server::CoreProbeCase::tool_continuation(None)],
             output_token_cap: 16,
         },
         5,
@@ -2046,11 +2047,7 @@ async fn missing_auto_tool_call_does_not_reject_tool_continuation() {
         &mock,
         CapabilityProbePlan {
             protocol: WireProtocol::ChatCompletions,
-            cases: vec![
-                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: None,
-                },
-            ],
+            cases: vec![chat_responses_codex::server::CoreProbeCase::tool_continuation(None)],
             output_token_cap: 16,
         },
     )
@@ -2086,11 +2083,7 @@ async fn chat_tool_call_without_id_rejects_tool_continuation() {
         &mock,
         CapabilityProbePlan {
             protocol: WireProtocol::ChatCompletions,
-            cases: vec![
-                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: None,
-                },
-            ],
+            cases: vec![chat_responses_codex::server::CoreProbeCase::tool_continuation(None)],
             output_token_cap: 16,
         },
     )
@@ -2103,6 +2096,58 @@ async fn chat_tool_call_without_id_rejects_tool_continuation() {
     assert!(outcome
         .evidence_codes()
         .contains("tool_continuation_invalid_call"));
+}
+
+#[tokio::test]
+async fn reasoning_trigger_sent_in_first_round_yields_reasoning_output() {
+    let mock = ProbeMock::chat(move |request| {
+        if request["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"))
+        {
+            return text_response("continuation ok");
+        }
+        if request.get("reasoning_effort").and_then(Value::as_str) != Some("high") {
+            return text_response("missing reasoning trigger");
+        }
+        tool_call_response(
+            "call_probe",
+            "gateway_compat_probe",
+            r#"{"nonce":"658"}"#,
+            Some("think-exactly-once"),
+        )
+    })
+    .await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
+                    reasoning_trigger: Some(ReasoningTrigger::new("reasoning_effort", "high")),
+                },
+            ],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::ReasoningOutput),
+        EvidenceState::Supported
+    );
+    assert_eq!(
+        outcome.capability(Capability::ReasoningReplay),
+        EvidenceState::Supported
+    );
+    assert_eq!(mock.request_count(), 2);
+    let first = &mock.requests()[0];
+    assert_eq!(first["reasoning_effort"].as_str(), Some("high"));
+    assert!(first["messages"][0]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("94 * 7")));
 }
 
 #[tokio::test]
@@ -2294,9 +2339,9 @@ async fn continuation_probe_rejects_wrong_tool_arguments_before_replay() {
         CapabilityProbePlan {
             protocol: WireProtocol::ChatCompletions,
             cases: vec![
-                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
-                },
+                chat_responses_codex::server::CoreProbeCase::tool_continuation(Some(
+                    ReasoningCarrier::ReasoningContent,
+                )),
             ],
             output_token_cap: 16,
         },
@@ -2336,12 +2381,10 @@ async fn missing_reasoning_replay_does_not_erase_basic_tool_continuation() {
         CapabilityProbePlan {
             protocol: WireProtocol::ChatCompletions,
             cases: vec![
-                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: None,
-                },
-                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
-                },
+                chat_responses_codex::server::CoreProbeCase::tool_continuation(None),
+                chat_responses_codex::server::CoreProbeCase::tool_continuation(Some(
+                    ReasoningCarrier::ReasoningContent,
+                )),
             ],
             output_token_cap: 16,
         },
@@ -2388,11 +2431,7 @@ async fn basic_continuation_does_not_require_forced_tool_choice() {
         &mock,
         CapabilityProbePlan {
             protocol: WireProtocol::ChatCompletions,
-            cases: vec![
-                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
-                    reasoning_carrier: None,
-                },
-            ],
+            cases: vec![chat_responses_codex::server::CoreProbeCase::tool_continuation(None)],
             output_token_cap: 16,
         },
     )
