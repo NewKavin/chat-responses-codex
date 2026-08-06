@@ -52,6 +52,15 @@ pub fn sign_thinking(secret: &[u8], input: &ThinkingSignatureInput<'_>) -> Strin
     )
 }
 
+/// Whether a Claude thinking block signature was issued by this gateway over
+/// its own Chat reasoning carrier. Gateway signatures carry the `gw1.` prefix
+/// and can be cryptographically verified (and safely stripped) by this process,
+/// unlike genuine Anthropic signatures that must be preserved through a
+/// reasoning-replay-capable route.
+pub fn is_gateway_issued_thinking_signature(signature: &str) -> bool {
+    signature.starts_with("gw1.")
+}
+
 pub fn verify_thinking(secret: &[u8], input: &ThinkingSignatureInput<'_>, signature: &str) -> bool {
     let Some(encoded) = signature.strip_prefix("gw1.") else {
         return false;

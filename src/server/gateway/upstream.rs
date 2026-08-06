@@ -234,7 +234,11 @@ fn apply_claude_thinking_controls_and_replay(
         .and_then(|value| value.pointer("/thinking/type"))
         .and_then(Value::as_str)
         == Some("adaptive");
-    let has_reasoning_history = object
+    // Gateway-issued `gw1.` signatures are our own opaque marker over Chat
+    // reasoning and can be stripped on routes that cannot replay it, exactly
+    // like plain `reasoning_content`. Only a genuine Anthropic signature (or an
+    // unsigned block) is a hard reasoning-replay requirement.
+    let has_foreign_reasoning_history = object
         .get("messages")
         .and_then(Value::as_array)
         .is_some_and(|messages| {
@@ -246,12 +250,18 @@ fn apply_claude_thinking_controls_and_replay(
                     || message
                         .get(GATEWAY_CLAUDE_THINKING_KEY)
                         .and_then(Value::as_array)
-                        .is_some_and(|blocks| !blocks.is_empty())
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                !block.get("signature").and_then(Value::as_str).is_some_and(
+                                    super::thinking_signature::is_gateway_issued_thinking_signature,
+                                )
+                            })
+                        })
             })
         });
     if adaptive {
         let Some(resolved) = resolved else {
-            if has_reasoning_history {
+            if has_foreign_reasoning_history {
                 return Err(unsupported_reasoning_replay_error());
             }
             downgrades.insert("optional_adaptive_thinking".into());
@@ -260,7 +270,7 @@ fn apply_claude_thinking_controls_and_replay(
         if !resolved.supports(Capability::ReasoningOutput)
             || !resolved.supports(Capability::ReasoningReplay)
         {
-            if has_reasoning_history {
+            if has_foreign_reasoning_history {
                 return Err(unsupported_reasoning_replay_error());
             }
             downgrades.insert("optional_adaptive_thinking".into());
@@ -298,6 +308,12 @@ fn apply_claude_thinking_controls_and_replay(
     let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
         return Ok(());
     };
+    let can_replay_reasoning = resolved
+        .map(|resolved| {
+            resolved.supports(Capability::ReasoningOutput)
+                && resolved.supports(Capability::ReasoningReplay)
+        })
+        .unwrap_or(false);
     for message in messages {
         let Some(message_object) = message.as_object_mut() else {
             continue;
@@ -338,6 +354,15 @@ fn apply_claude_thinking_controls_and_replay(
                 .get("signature")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            // A gateway-issued thinking block on a route that cannot replay it
+            // is safely dropped (the `_gateway_claude_thinking` carrier is
+            // already removed above), matching the plain `reasoning_content`
+            // downgrade. Genuine Anthropic signatures are always merged.
+            if !can_replay_reasoning
+                && super::thinking_signature::is_gateway_issued_thinking_signature(signature)
+            {
+                continue;
+            }
             let associated_ids = block
                 .get("tool_use_ids")
                 .and_then(Value::as_array)

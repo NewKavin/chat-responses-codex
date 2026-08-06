@@ -1007,14 +1007,31 @@ fn scan_chat_reasoning(
         .and_then(Value::as_str)
         == Some("adaptive");
     let messages = body.get("messages").and_then(Value::as_array);
-    let signed_claude_thinking = messages.is_some_and(|messages| {
-        messages.iter().any(|message| {
-            message
+    // A thinking block carrying a genuine Anthropic signature must be preserved
+    // through a reasoning-replay-capable route. A gateway-issued `gw1.`
+    // signature is our own opaque marker over Chat reasoning: it can be
+    // cryptographically verified and stripped on Chat-only routes, exactly like
+    // plain `reasoning_content`, so it remains downgradable.
+    let mut foreign_signed_claude_thinking = false;
+    let mut gateway_signed_claude_thinking = false;
+    if let Some(messages) = messages {
+        for message in messages {
+            if let Some(blocks) = message
                 .get("_gateway_claude_thinking")
                 .and_then(Value::as_array)
-                .is_some_and(|blocks| !blocks.is_empty())
-        })
-    });
+            {
+                for block in blocks {
+                    if block.get("signature").and_then(Value::as_str).is_some_and(
+                        super::thinking_signature::is_gateway_issued_thinking_signature,
+                    ) {
+                        gateway_signed_claude_thinking = true;
+                    } else {
+                        foreign_signed_claude_thinking = true;
+                    }
+                }
+            }
+        }
+    }
     let plain_reasoning_history = messages.is_some_and(|messages| {
         messages.iter().any(|message| {
             message
@@ -1024,10 +1041,10 @@ fn scan_chat_reasoning(
         })
     });
 
-    if signed_claude_thinking {
+    if foreign_signed_claude_thinking {
         required.insert(Capability::ReasoningOutput);
         required.insert(Capability::ReasoningReplay);
-    } else if plain_reasoning_history {
+    } else if gateway_signed_claude_thinking || plain_reasoning_history {
         required.insert(Capability::ReasoningOutput);
         required.insert(Capability::ReasoningReplay);
         *allow_reasoning_history_downgrade = true;
@@ -1299,7 +1316,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_thinking_history_requires_output_and_replay_capabilities() {
+    fn foreign_claude_thinking_history_requires_output_and_replay_capabilities() {
         let requested = requested_features_for_request(
             EndpointKind::ChatCompletions,
             &json!({
@@ -1309,7 +1326,7 @@ mod tests {
                     "content": null,
                     "_gateway_claude_thinking": [{
                         "thinking": "preserve exactly",
-                        "signature": "gw1.signature",
+                        "signature": "anthropic:real-signature-signing-key",
                         "tool_use_ids": ["toolu_1"]
                     }],
                     "tool_calls": [{"id": "toolu_1", "type": "function"}]
@@ -1320,5 +1337,36 @@ mod tests {
         assert!(requested.required.contains(&Capability::ReasoningOutput));
         assert!(requested.required.contains(&Capability::ReasoningReplay));
         assert!(!requested.allow_reasoning_history_downgrade);
+    }
+
+    #[test]
+    fn gateway_own_thinking_signature_is_downgradable_on_chat_routes() {
+        let requested = requested_features_for_request(
+            EndpointKind::ChatCompletions,
+            &json!({
+                "_gateway_claude": {"thinking": {"type": "adaptive"}},
+                "messages": [{
+                    "role": "assistant",
+                    "content": null,
+                    "_gateway_claude_thinking": [{
+                        "thinking": "gateway-signed reasoning",
+                        "signature": "gw1.abc.def",
+                        "tool_use_ids": ["toolu_1"]
+                    }],
+                    "tool_calls": [{"id": "toolu_1", "type": "function"}]
+                }]
+            }),
+        );
+
+        assert!(requested.required.contains(&Capability::ReasoningOutput));
+        assert!(requested.required.contains(&Capability::ReasoningReplay));
+        assert!(requested.allow_reasoning_history_downgrade);
+
+        let adapted =
+            adapt_requested_features_for_protocol(&requested, UpstreamProtocol::ChatCompletions);
+        assert!(!adapted.required.contains(&Capability::ReasoningOutput));
+        assert!(!adapted.required.contains(&Capability::ReasoningReplay));
+        assert!(adapted.optional.contains(&Capability::ReasoningOutput));
+        assert!(adapted.optional.contains(&Capability::ReasoningReplay));
     }
 }

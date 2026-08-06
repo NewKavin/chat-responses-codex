@@ -812,7 +812,7 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
             {"effort": "max", "description": "Use max reasoning effort"}
         ])
     );
-    assert_eq!(model["default_reasoning_level"], "medium");
+    assert_eq!(model["default_reasoning_level"], "high");
 }
 
 #[tokio::test]

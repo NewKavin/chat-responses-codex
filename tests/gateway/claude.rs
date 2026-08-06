@@ -90,6 +90,7 @@ struct ClaudeThinkingRoute {
     id: &'static str,
     api_key: &'static str,
     reasoning_supported: bool,
+    emits_reasoning: bool,
     priority: u32,
 }
 
@@ -603,6 +604,7 @@ impl ClaudeThinkingFixture {
             id: "up-claude",
             api_key: "upstream-secret",
             reasoning_supported,
+            emits_reasoning: reasoning_supported,
             priority: 0,
         }])
         .await
@@ -617,9 +619,9 @@ impl ClaudeThinkingFixture {
         let address = listener.local_addr().unwrap();
         let capture_clone = capture.clone();
         let upstream_hits_clone = upstream_hits.clone();
-        let reasoning_api_keys = routes
+        let emit_reasoning_api_keys = routes
             .iter()
-            .filter(|route| route.reasoning_supported)
+            .filter(|route| route.emits_reasoning)
             .map(|route| format!("Bearer {}", route.api_key))
             .collect::<BTreeSet<_>>();
 
@@ -640,9 +642,9 @@ impl ClaudeThinkingFixture {
                                 .get(header::AUTHORIZATION)
                                 .and_then(|value| value.to_str().ok())
                                 .map(str::to_string);
-                            let reasoning_supported = authorization
+                            let emit_reasoning = authorization
                                 .as_ref()
-                                .is_some_and(|value| reasoning_api_keys.contains(value));
+                                .is_some_and(|value| emit_reasoning_api_keys.contains(value));
                             capture.lock().unwrap().push(RequestCapture {
                                 path: parts.uri.path().to_string(),
                                 authorization,
@@ -663,7 +665,7 @@ impl ClaudeThinkingFixture {
                                         }
                                     }]
                                 });
-                                if reasoning_supported {
+                                if emit_reasoning {
                                     delta["reasoning_content"] =
                                         Value::String("Need the Read tool first.".into());
                                 }
@@ -3027,12 +3029,14 @@ async fn initial_adaptive_thinking_prefers_complete_reasoning_route_before_prior
             id: "up-weak",
             api_key: "weak-secret",
             reasoning_supported: false,
+            emits_reasoning: false,
             priority: 100,
         },
         ClaudeThinkingRoute {
             id: "up-reasoning",
             api_key: "reasoning-secret",
             reasoning_supported: true,
+            emits_reasoning: true,
             priority: 0,
         },
     ])
@@ -3066,18 +3070,53 @@ async fn valid_signed_thinking_and_tool_result_restore_exact_chat_replay() {
 }
 
 #[tokio::test]
+async fn chat_only_route_strips_gateway_signed_thinking_on_tool_result_replay() {
+    // A Chat-only route (no ReasoningReplay capability) still emits
+    // reasoning_content. The gateway signs it as a `gw1.` block so Claude Code
+    // accepts it, but on the tool-result round trip that gateway-signed
+    // thinking must be downgradable (stripped) instead of hard-failing the
+    // route, exactly like plain `reasoning_content`.
+    let fixture = ClaudeThinkingFixture::with_routes(vec![ClaudeThinkingRoute {
+        id: "up-chat",
+        api_key: "chat-secret",
+        reasoning_supported: false,
+        emits_reasoning: true,
+        priority: 0,
+    }])
+    .await;
+    let first = fixture.first_tool_response().await;
+
+    let second = fixture
+        .replay_with_tool_result(&first.thinking, &first.signature, &first.tool_id)
+        .await;
+
+    assert_eq!(second.status(), StatusCode::OK);
+    let upstream = fixture.last_upstream_request();
+    // The tool call and result survive; the un-replayable reasoning history is
+    // stripped for the Chat-only route.
+    assert!(upstream["messages"][1].get("reasoning_content").is_none());
+    assert_eq!(
+        upstream["messages"][1]["tool_calls"][0]["id"],
+        first.tool_id
+    );
+    assert_eq!(upstream["messages"][2]["tool_call_id"], first.tool_id);
+}
+
+#[tokio::test]
 async fn signed_thinking_replay_stays_on_the_route_that_issued_the_signature() {
     let fixture = ClaudeThinkingFixture::with_routes(vec![
         ClaudeThinkingRoute {
             id: "up-a",
             api_key: "route-a-secret",
             reasoning_supported: true,
+            emits_reasoning: true,
             priority: 0,
         },
         ClaudeThinkingRoute {
             id: "up-b",
             api_key: "route-b-secret",
             reasoning_supported: true,
+            emits_reasoning: true,
             priority: 0,
         },
     ])
@@ -3105,12 +3144,14 @@ async fn legacy_signed_thinking_replay_is_locally_verified_and_uniquely_pinned()
             id: "up-a",
             api_key: "route-a-secret",
             reasoning_supported: true,
+            emits_reasoning: true,
             priority: 0,
         },
         ClaudeThinkingRoute {
             id: "up-b",
             api_key: "route-b-secret",
             reasoning_supported: true,
+            emits_reasoning: true,
             priority: 0,
         },
     ])
@@ -3136,12 +3177,14 @@ async fn signed_thinking_replay_with_unavailable_origin_fails_before_backup_admi
             id: "up-a",
             api_key: "route-a-secret",
             reasoning_supported: true,
+            emits_reasoning: true,
             priority: 0,
         },
         ClaudeThinkingRoute {
             id: "up-b",
             api_key: "route-b-secret",
             reasoning_supported: true,
+            emits_reasoning: true,
             priority: 0,
         },
     ])
