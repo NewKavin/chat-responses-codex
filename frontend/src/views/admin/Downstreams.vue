@@ -738,14 +738,6 @@ code {
   }
 }
 
-.compact-downstreams-table :deep(.el-table__cell) {
-  padding: 5px 0;
-}
-
-.compact-downstreams-table :deep(.cell) {
-  line-height: 1.5;
-}
-
 .downstreams-table-shell {
   overflow: hidden;
 }

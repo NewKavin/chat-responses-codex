@@ -121,6 +121,15 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('form.value.supported_models = mappedModels')
   })
 
+  it('keeps the upstream model discovery action visible before prerequisites are entered', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain(':disabled="!form.base_url || !form.api_key"')
+    expect(page).toContain(':icon="RefreshCw"')
+    expect(page).toContain('获取模型列表')
+    expect(page).not.toContain('v-if="form.base_url && form.api_key"')
+  })
+
   it('uses the responsive downstream management workbench', () => {
     const page = source('views/admin/Downstreams.vue')
 
@@ -253,7 +262,7 @@ describe('admin downstream runtime display', () => {
     expect(page).toContain('上限')
   })
 
-  it('keeps downstream rows compact with icon-only key copy and one-line runtime metrics', () => {
+  it('keeps downstream row height consistent with upstreams with icon-only key copy', () => {
     const page = source('views/admin/Downstreams.vue')
 
     expect(page).toContain('class="compact-downstreams-table"')
@@ -268,7 +277,7 @@ describe('admin downstream runtime display', () => {
     expect(page).toContain('<el-table-column label="运行并发" width="400">')
     expect(page).toMatch(/\.runtime-cell\s*\{[^}]*flex-wrap:\s*nowrap/s)
     expect(page).toMatch(/\.runtime-cell\s*\{[^}]*white-space:\s*nowrap/s)
-    expect(page).toMatch(/\.compact-downstreams-table\s*:deep\(\.el-table__cell\)\s*\{[^}]*padding:\s*5px 0/s)
+    expect(page).not.toMatch(/\.compact-downstreams-table\s*:deep\(\.el-table__cell\)/)
     expect(page).toMatch(/\.downstreams-table-shell\s*\{[^}]*overflow:\s*hidden/s)
     expect(page).toMatch(/\.downstreams-table-shell\s*>\s*\.compact-downstreams-table\s*\{[^}]*min-width:\s*0/s)
   })
