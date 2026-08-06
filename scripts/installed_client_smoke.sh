@@ -355,7 +355,9 @@ record_codex_delegation_case() {
   fi
   local events
   events="$(sanitized_event_types "$output_file")"
-  if ! jq -Rne --arg expected_marker "$expected_marker" '
+  if ! jq -Rne \
+    --arg expected_marker "$expected_marker" \
+    --arg leak_sentinel "$CODEX_DELEGATION_LEAK_SENTINEL" '
     [inputs | fromjson?] as $events
     | [range(0; $events | length) as $index
         | select(
@@ -369,13 +371,26 @@ record_codex_delegation_case() {
         | select(
             $events[$index].type == "item.completed"
             and $events[$index].item.type == "collab_tool_call"
-            and ($events[$index].item.tool? // null) == null
+            and $events[$index].item.tool == "wait"
           )
         | $index
-      ] as $legacy_collab_indexes
-    # Real Codex emits a separate `wait` item after `spawn_agent`. Offline
-    # fixtures predate the tool field, so retain their single-call shape.
-    | (if ($spawn_indexes | length) > 0 then $spawn_indexes else $legacy_collab_indexes end) as $collab_indexes
+      ] as $wait_indexes
+    | [range(0; $events | length) as $index
+        | select(
+            $events[$index].type == "item.completed"
+            and $events[$index].item.type == "collab_tool_call"
+            and ($events[$index].item.tool? // null) != null
+          )
+        | $index
+      ] as $modern_collab_indexes
+    | [range(0; $events | length) as $index
+        | select($events[$index].type == "turn.started")
+        | $index
+      ] as $turn_started_indexes
+    | [range(0; $events | length) as $index
+        | select($events[$index].type == "turn.completed")
+        | $index
+      ] as $turn_completed_indexes
     | [range(0; $events | length) as $index
         | select(
             $events[$index].type == "item.completed"
@@ -383,18 +398,55 @@ record_codex_delegation_case() {
           )
         | $index
       ] as $message_indexes
-    | ($collab_indexes | length) == 1
-      and $events[$collab_indexes[0]].item.status == "completed"
-      and ($message_indexes | length) >= 1
-      and $collab_indexes[0] < $message_indexes[-1]
+    | (($message_indexes | length) >= 1) as $has_final_message
+    | ($turn_started_indexes | length) == 1
+      and ($turn_completed_indexes | length) == 1
+      and ($modern_collab_indexes | length) == 2
+      and ($spawn_indexes | length) == 1
+      and ($wait_indexes | length) == 1
+      and $events[$spawn_indexes[0]].item.status == "completed"
+      and $events[$wait_indexes[0]].item.status == "completed"
+      and $has_final_message
+      and $turn_started_indexes[0] < $spawn_indexes[0]
+      and $spawn_indexes[0] < $wait_indexes[0]
+      and $wait_indexes[0] < $message_indexes[-1]
+      and $message_indexes[-1] < $turn_completed_indexes[0]
       and (
-        $events[$message_indexes[-1]].item.text == $expected_marker
+        $events[$message_indexes[-1]].item.text as $final_text
+        | ($final_text | split($expected_marker) | length) == 2
+        and ($final_text | length) <= (($expected_marker | length) + 192)
+        and ($final_text | contains($leak_sentinel) | not)
       )
-      and ([range($message_indexes[-1] + 1; $events | length) as $index
-        | select($events[$index].type == "turn.completed")
-      ] | length) >= 1
   ' "$output_file" >/dev/null 2>&1; then
-    printf 'client=codex task=delegation status=delegation_result_mismatch\n' >&2
+    local reasons
+    reasons="$(jq -Rrne \
+      --arg expected_marker "$expected_marker" \
+      --arg leak_sentinel "$CODEX_DELEGATION_LEAK_SENTINEL" '
+      [inputs | fromjson?] as $events
+      | [$events[] | select(.type == "item.completed" and .item.type == "collab_tool_call")] as $collab
+      | [$collab[] | select(.item.tool == "spawn_agent")] as $spawns
+      | [$collab[] | select(.item.tool == "wait")] as $waits
+      | [$events[] | select(.type == "item.completed" and .item.type == "agent_message") | .item.text] as $messages
+      | [$events[] | select(.type == "turn.started")] as $turn_started
+      | [$events[] | select(.type == "turn.completed")] as $turn_completed
+      | ($messages[-1] // "") as $final_text
+      | [
+          if ($turn_started | length) != 1 then "turn_started" else empty end,
+          if ($turn_completed | length) != 1 then "turn_completed" else empty end,
+          if ($spawns | length) != 1 then "spawn_count" else empty end,
+          if ($waits | length) != 1 then "wait_count" else empty end,
+          if any($spawns[]?; .item.status != "completed") then "spawn_status" else empty end,
+          if any($waits[]?; .item.status != "completed") then "wait_status" else empty end,
+          if ($messages | length) < 1 then "message_count" else empty end,
+          if ($final_text | split($expected_marker) | length) != 2 then "marker_count" else empty end,
+          if ($final_text | length) > (($expected_marker | length) + 192) then "wrapper_too_long" else empty end,
+          if ($final_text | contains($leak_sentinel)) then "prompt_sentinel" else empty end
+        ]
+      | if length == 0 then ["event_order"] else . end
+      | join(",")
+    ' "$output_file" 2>/dev/null || printf 'unclassified')"
+    printf 'client=codex task=delegation status=delegation_result_mismatch reasons=%s\n' \
+      "$reasons" >&2
     return 1
   fi
   printf 'client=codex task=delegation events=%s status=verified\n' "$events"
@@ -484,6 +536,8 @@ readonly HERMES_PYTHON_BIN HERMES_MCP_PYTHONPATH
 
 TEXT_MARKER="CLIENT_TEXT_SMOKE_OK"
 READ_MARKER="read-only-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+CODEX_DELEGATION_LEAK_SENTINEL="prompt-private-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+readonly CODEX_DELEGATION_LEAK_SENTINEL
 printf '%s\n' "$READ_MARKER" >"$TASKDIR/probe.txt"
 TEXT_PROMPT="Analyze a protocol converter that must preserve unknown JSON fields across request and response translation. In two concise sentences, explain one compatibility risk and one mitigation. End with exactly ${TEXT_MARKER} on its own line."
 READ_FILE_PROMPT='Read probe.txt using one available read-only filesystem tool. Reply with exactly the file contents.'
@@ -520,6 +574,14 @@ if client_enabled codex; then
   ' "$CODEX_HOME_DIR/model-catalog.json" 2>/dev/null)" \
     || [[ ! "$MODEL_REASONING_EFFORT" =~ ^[A-Za-z0-9_-]+$ ]]; then
     printf 'client=codex task=agent_profile category=agent_profile status=failed\n' >&2
+    exit 1
+  fi
+  if ! jq -e --arg model "$MODEL_SLUG" '
+    [ .models[]? | select((.slug // .id // "") == $model) ] as $matches
+    | ($matches | length) == 1
+      and $matches[0].multi_agent_version == "v1"
+  ' "$CODEX_HOME_DIR/model-catalog.json" >/dev/null 2>&1; then
+    printf 'client=codex task=agent_transport category=agent_transport status=failed\n' >&2
     exit 1
   fi
   MODEL_REASONING_TOML="$(jq -Rn --arg value "$MODEL_REASONING_EFFORT" '$value')"
@@ -593,9 +655,10 @@ EOF
       --cd "$TASKDIR" --model "$MODEL_SLUG" "$READ_FILE_PROMPT"
   fi
   if codex_task_enabled delegation; then
-    CODEX_DELEGATION_PROMPT='Delegate exactly one read-only subagent to read probe.txt and return its exact contents. Do not read probe.txt yourself. Wait for that one child only. Do not spawn, wait, or message any additional agents. After the child finishes, copy its result into your final reply and stop the turn.'
+    CODEX_DELEGATION_PROMPT="Delegate exactly one read-only subagent to read probe.txt and return its exact contents. Call spawn_agent exactly once for that task. Do not read probe.txt yourself or use a filesystem tool in the parent. Call wait exactly once for that child, even if it has already finished. Do not call send_message, followup_task, or any other collaboration tool. The private task tag ${CODEX_DELEGATION_LEAK_SENTINEL} must never appear in your reply. Your final reply must contain only the child result returned by wait, with no analysis or explanation."
     record_codex_delegation_case codex delegation "$READ_MARKER" "$WORKDIR/codex-delegation.jsonl" \
       env CODEX_HOME="$CODEX_HOME_DIR" CHAT2RESPONSES_KEY="$DOWNSTREAM_KEY" \
+      CODEX_DELEGATION_LEAK_SENTINEL="$CODEX_DELEGATION_LEAK_SENTINEL" \
       "$CODEX_BIN" exec --json --ephemeral --skip-git-repo-check --sandbox read-only \
       --cd "$TASKDIR" --model "$MODEL_SLUG" "$CODEX_DELEGATION_PROMPT"
   fi

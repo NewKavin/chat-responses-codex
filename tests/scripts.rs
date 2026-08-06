@@ -118,9 +118,10 @@ if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
 elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  printf '{"type":"turn.started"}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
-  printf '{"type":"turn.completed"}\n'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
   printf 'CLIENT_TEXT_SMOKE_OK\n'
 elif [[ "$client" == "hermes" ]]; then
@@ -137,7 +138,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
     write_hermes_python_launcher(fake_bin);
 }
@@ -818,9 +819,10 @@ if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
 elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  printf '{"type":"turn.started"}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
-  printf '{"type":"turn.completed"}\n'
 elif [[ "$client" == "hermes" && "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
       printf 'CLIENT_TEXT_SMOKE_OK\n'
 elif [[ "$client" == "hermes" ]]; then
@@ -853,7 +855,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1009,7 +1011,20 @@ fn installed_client_smoke_uses_portal_codex_profile_and_checks_delegation() {
         "the delegation prompt must not contain its expected runtime result"
     );
     assert!(script.contains("delegation_result_mismatch"));
-    assert!(script.contains("Do not spawn, wait, or message any additional agents"));
+    for instruction in [
+        "Call spawn_agent exactly once",
+        "Call wait exactly once for that child, even if it has already finished",
+        "Your final reply must contain only the child result returned by wait",
+    ] {
+        assert!(
+            script.contains(instruction),
+            "delegation prompt is missing unambiguous instruction: {instruction}"
+        );
+    }
+    assert!(
+        !script.contains("Do not spawn, wait, or message any additional agents"),
+        "the delegation prompt must not ambiguously discourage the required wait"
+    );
     assert!(
         script.contains("agent_profile") && script.contains("authentication"),
         "smoke script must classify profile and authentication failures"
@@ -1040,6 +1055,7 @@ fi
 args=" $* "
 if [[ "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
+  jq -nc '{type:"turn.started"}'
   jq -nc '{type:"item.completed",item:{type:"collab_tool_call",tool:"spawn_agent",status:"completed"}}'
   jq -nc '{type:"item.completed",item:{type:"collab_tool_call",tool:"wait",status:"completed"}}'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
@@ -1053,7 +1069,7 @@ printf '{"type":"turn.completed"}\n'
     );
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1107,6 +1123,7 @@ printf 'exec\n' >>"$CODEX_EXECUTION_MARKER"
 args=" $* "
 if [[ "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
+  printf '{"type":"turn.started"}\n'
   printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
   printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
@@ -1120,7 +1137,7 @@ printf '{"type":"turn.completed"}\n'
     );
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1199,6 +1216,11 @@ case "$FAKE_DELEGATION_MODE" in
     jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
     printf '{"type":"turn.completed"}\n'
     ;;
+  unknown_legacy_collab)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
   duplicate_collab)
     printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
     printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
@@ -1215,10 +1237,33 @@ case "$FAKE_DELEGATION_MODE" in
     printf '{"type":"turn.completed"}\n'
     jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
     ;;
+  extra_turn)
+    printf '{"type":"turn.started"}\n'
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
+    printf '{"type":"item.completed","item":{"type":"agent_message","text":"delegated-turn-finished"}}\n'
+    printf '{"type":"turn.completed"}\n'
+    printf '{"type":"turn.started"}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
   wrapped_final)
+    printf '{"type":"turn.started"}\n'
     printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
     printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
     jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:("Child result:\n" + $marker + "\nDone.")}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
+  missing_wait)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+    jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+    printf '{"type":"turn.completed"}\n'
+    ;;
+  leaked_prompt)
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+    printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
+    jq -nc --arg marker "$marker" --arg sentinel "${CODEX_DELEGATION_LEAK_SENTINEL:-missing-sentinel}" \
+      '{type:"item.completed",item:{type:"agent_message",text:($marker + "\n" + $sentinel)}}'
     printf '{"type":"turn.completed"}\n'
     ;;
 esac
@@ -1226,7 +1271,7 @@ esac
     );
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1256,9 +1301,13 @@ esac
         "fixed_marker",
         "wrong_final",
         "no_collab",
+        "unknown_legacy_collab",
         "duplicate_collab",
         "failed_collab",
         "early_turn_completed",
+        "extra_turn",
+        "missing_wait",
+        "leaked_prompt",
     ] {
         let output = run(mode);
         assert!(
@@ -1275,13 +1324,9 @@ esac
 
     let output = run("wrapped_final");
     assert!(
-        !output.status.success(),
-        "a final agent message with extra text around the child result must fail"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("client=codex task=delegation status=delegation_result_mismatch"),
-        "unexpected stderr for wrapped_final: {}",
+        output.status.success(),
+        "a bounded final wrapper around the exact child result must pass\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -1302,7 +1347,9 @@ if [[ "${1:-}" == "--version" ]]; then printf 'codex-cli 0.146.0\n'; exit 0; fi
 if [[ "${1:-}" == "login" ]]; then exit 0; fi
 marker="$(<probe.txt)"
 printf '%s' "$marker" >"$MARKER_CAPTURE_FILE"
-printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+printf '{"type":"turn.started"}\n'
+printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
 jq -nc --arg marker "$marker" --arg secret 'SENSITIVE_PROMPT_SENTINEL' \
   '{type:"item.completed",item:{type:$marker,prompt:$secret,arguments:{task:$secret}}}'
 for index in $(seq 1 32); do
@@ -1314,7 +1361,7 @@ printf '{"type":"turn.completed"}\n'
     );
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1350,6 +1397,85 @@ printf '{"type":"turn.completed"}\n'
         .and_then(|(_, suffix)| suffix.split_once(" status=").map(|(events, _)| events))
         .unwrap();
     assert!(event_list.split(',').count() <= 16);
+}
+
+#[test]
+fn installed_client_smoke_rejects_non_v1_selected_model_before_codex_exec() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_bin = temp.path().join("bin");
+    let smoke_tmp = temp.path().join("tmp");
+    let execution_marker = temp.path().join("codex-executed");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::create_dir(&smoke_tmp).unwrap();
+    write_executable(
+        &fake_bin.join("codex"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then printf 'codex-cli 0.146.0\n'; exit 0; fi
+if [[ "${1:-}" == "login" ]]; then exit 0; fi
+printf 'executed\n' >"$CODEX_EXECUTION_MARKER"
+marker="$(<probe.txt)"
+printf '{"type":"turn.started"}\n'
+printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
+jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
+printf '{"type":"turn.completed"}\n'
+"#,
+    );
+    write_executable(
+        &fake_bin.join("curl"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FAKE_MULTI_AGENT_VERSION:-}" ]]; then
+  jq -nc --arg version "$FAKE_MULTI_AGENT_VERSION" \
+    '{models:[{slug:"opaque/exposed-slug",default_reasoning_level:"none",multi_agent_version:$version}]}'
+else
+  printf '{"models":[{"slug":"opaque/exposed-slug","default_reasoning_level":"none"}]}\n'
+fi
+"#,
+    );
+
+    let inherited_path = std::env::var("PATH").unwrap();
+    for version in [None, Some("v2")] {
+        let _ = fs::remove_file(&execution_marker);
+        let mut command = Command::new("bash");
+        command
+            .arg("scripts/installed_client_smoke.sh")
+            .env("PATH", format!("{}:{inherited_path}", fake_bin.display()))
+            .env("TMPDIR", &smoke_tmp)
+            .env("BASE_URL", "https://gateway.invalid")
+            .env("DOWNSTREAM_KEY", "sentinel-downstream-key")
+            .env("MODEL_SLUG", "opaque/exposed-slug")
+            .env("CLIENTS_JSON", r#"["codex"]"#)
+            .env("CODEX_TASKS", "delegation")
+            .env("CLIENT_TIMEOUT_SECONDS", "5")
+            .env("CODEX_EXECUTION_MARKER", &execution_marker);
+        if let Some(version) = version {
+            command.env("FAKE_MULTI_AGENT_VERSION", version);
+        } else {
+            command.env_remove("FAKE_MULTI_AGENT_VERSION");
+        }
+        let output = command.output().unwrap();
+
+        assert!(
+            !output.status.success(),
+            "selected model transport {:?} must be rejected",
+            version
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(
+                "client=codex task=agent_transport category=agent_transport status=failed"
+            ),
+            "unexpected stderr for transport {:?}: {}",
+            version,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !execution_marker.exists(),
+            "Codex exec must not start for transport {:?}",
+            version
+        );
+    }
 }
 
 #[test]
@@ -1451,7 +1577,7 @@ exit 1
     );
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1839,7 +1965,9 @@ if [[ "$args" == *" login "* ]]; then
   exit 0
 elif [[ "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  printf '{"type":"turn.started"}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
@@ -1882,7 +2010,7 @@ fi
     );
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -1994,7 +2122,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -2091,7 +2219,9 @@ if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
 elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  printf '{"type":"turn.started"}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 elif [[ "$args" == *CLIENT_TEXT_SMOKE_OK* ]]; then
@@ -2107,7 +2237,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
@@ -2217,7 +2347,9 @@ if [[ "$client" == "codex" && "$args" == *" login "* ]]; then
   exit 0
 elif [[ "$client" == "codex" && "$args" == *"Delegate exactly one"* ]]; then
   marker="$(<probe.txt)"
-  printf '{"type":"item.completed","item":{"type":"collab_tool_call","status":"completed"}}\n'
+  printf '{"type":"turn.started"}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}\n'
+  printf '{"type":"item.completed","item":{"type":"collab_tool_call","tool":"wait","status":"completed"}}\n'
   jq -nc --arg marker "$marker" '{type:"item.completed",item:{type:"agent_message",text:$marker}}'
   printf '{"type":"turn.completed"}\n'
 fi
@@ -2243,7 +2375,7 @@ fi
     }
     write_executable(
         &fake_bin.join("curl"),
-        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\"}]}\\n'\n",
+        "#!/usr/bin/env bash\nprintf '{\"models\":[{\"slug\":\"opaque/exposed-slug\",\"default_reasoning_level\":\"none\",\"multi_agent_version\":\"v1\"}]}\\n'\n",
     );
 
     let inherited_path = std::env::var("PATH").unwrap();
