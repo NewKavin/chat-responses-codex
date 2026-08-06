@@ -204,12 +204,13 @@
               />
             </el-select>
             <el-button
-              v-if="form.base_url && form.api_key"
+              :disabled="!form.base_url || !form.api_key"
               @click="fetchModels"
               :loading="fetchingModels"
+              :icon="RefreshCw"
               class="fetch-btn"
             >
-              获取模型
+              获取模型列表
             </el-button>
           </div>
         </el-form-item>
@@ -359,7 +360,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { Activity, PlugZap, Plus, Search } from '@lucide/vue'
+import { Activity, PlugZap, Plus, RefreshCw, Search } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
