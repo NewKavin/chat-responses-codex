@@ -980,7 +980,15 @@ impl ProbeExecutor {
                 }
             }
             CoreProbeCase::ToolContinuation { reasoning_carrier } => {
-                let nonce = "n-17";
+                // Arithmetic-gated probe: the model must compute the nonce
+                // (94 * 7 = 658) before calling the tool. Reasoning-capable
+                // models emit a reasoning channel while computing, which is
+                // exactly what the reasoning-carrier gate below checks for;
+                // models without a reasoning channel may still compute and
+                // call the tool directly and are rejected by that gate.
+                let nonce = "658";
+                let prompt = "First compute 94 * 7 exactly, then call gateway_compat_probe \
+with the exact result as the nonce string.";
                 if self.protocol() == WireProtocol::Responses {
                     let tools = json!([{
                         "type": "function",
@@ -995,7 +1003,7 @@ impl ProbeExecutor {
                     let first = self
                         .post_responses(json!({
                             "model": &self.runtime_model_slug,
-                            "input": format!("Call gateway_compat_probe with nonce exactly {nonce}."),
+                            "input": prompt,
                             "tools": tools.clone(),
                         }))
                         .await?;
@@ -1090,7 +1098,7 @@ impl ProbeExecutor {
                         "model": &self.runtime_model_slug,
                         "messages": [{
                             "role": "user",
-                            "content": format!("Call gateway_compat_probe with nonce exactly {nonce}.")
+                            "content": prompt
                         }],
                         "tools": [{
                             "type": "function",

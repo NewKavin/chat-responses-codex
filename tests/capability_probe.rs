@@ -2320,7 +2320,7 @@ async fn missing_reasoning_replay_does_not_erase_basic_tool_continuation() {
         CapabilityProbeMockReply::ChatJson(tool_call_response(
             "call_probe",
             "gateway_compat_probe",
-            r#"{"nonce":"n-17"}"#,
+            r#"{"nonce":"658"}"#,
             None,
         ))
     };
@@ -2377,7 +2377,7 @@ async fn basic_continuation_does_not_require_forced_tool_choice() {
             tool_call_response(
                 "call_probe",
                 "gateway_compat_probe",
-                r#"{"nonce":"n-17"}"#,
+                r#"{"nonce":"658"}"#,
                 None,
             )
         }
@@ -2460,6 +2460,14 @@ async fn responses_probe_uses_native_payloads_and_official_stream_events() {
                             .into_response();
                         }
                         if payload["tools"].is_array() {
+                            let nonce = if payload["input"]
+                                .as_str()
+                                .is_some_and(|input| input.contains("94 * 7"))
+                            {
+                                "658"
+                            } else {
+                                "n-17"
+                            };
                             return axum::Json(json!({
                                 "id": "resp-probe",
                                 "object": "response",
@@ -2469,7 +2477,7 @@ async fn responses_probe_uses_native_payloads_and_official_stream_events() {
                                     "id": "fc-probe",
                                     "call_id": "call-probe",
                                     "name": "gateway_compat_probe",
-                                    "arguments": "{\"nonce\":\"n-17\"}",
+                                    "arguments": format!(r#"{{"nonce":"{nonce}"}}"#),
                                     "status": "completed"
                                 }]
                             }))
@@ -2612,7 +2620,7 @@ async fn tool_and_reasoning_pass_requires_linked_continuation() {
         CapabilityProbeMockReply::ChatJson(tool_call_response(
             "call_probe",
             "gateway_compat_probe",
-            r#"{"nonce":"n-17"}"#,
+            r#"{"nonce":"658"}"#,
             Some("think-exactly-once"),
         )),
         CapabilityProbeMockReply::ChatJson(text_response("continuation-ok")),
