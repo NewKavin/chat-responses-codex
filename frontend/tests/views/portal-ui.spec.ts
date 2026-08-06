@@ -50,10 +50,9 @@ describe('portal ui structure', () => {
     expect(page).toContain('integration-section')
     expect(page).toContain('code-surface')
     expect(page).toContain('aria-label="复制代码"')
-    expect(page).toContain('class="model-ranking"')
-    expect(page).toContain('class="model-ranking__item"')
-    expect(page).toContain('class="model-ranking__position"')
-    expect(page).toContain('v-if="stat.model === primaryModelSlug"')
+    expect(page).not.toContain('model-ranking')
+    expect(page).not.toContain('sortedModelStats')
+    expect(page).not.toContain('模型排序')
     expect(page).toContain('class="section-head config-section-head"')
     expect(page).not.toContain('integration-hero')
 

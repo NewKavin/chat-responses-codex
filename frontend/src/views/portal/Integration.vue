@@ -119,43 +119,6 @@
         title="网关同时暴露 `/v1/chat/completions`、`/v1/responses`、`/v1/models`、`/v1/messages` 和 `/v1/messages/count_tokens`。上游只支持 Chat Completions 和 Responses 两种协议；`/v1/messages` 是网关的适配层，收到 Anthropic 格式请求后内部转成 Chat Completions 再发给上游。客户端只需要根据自己支持的协议族选对应的 endpoint 和 preset。"
       />
     </section>
-
-    <section v-if="sortedModelStats.length" class="integration-section">
-      <div class="section-head">
-        <div>
-          <p class="crc-eyebrow">RANK // MODELS</p>
-          <h2>模型排序</h2>
-          <p>按月使用量优先，月使用量相同再看今日使用量。</p>
-        </div>
-        <el-tag effect="plain">{{ sortedModelStats.length }} 个统计项</el-tag>
-      </div>
-
-      <div class="model-ranking">
-        <div
-          v-for="(stat, index) in sortedModelStats"
-          :key="stat.model"
-          class="model-ranking__item"
-        >
-          <span class="model-ranking__position">{{ index + 1 }}</span>
-          <div class="model-ranking__identity">
-            <strong>{{ stat.model }}</strong>
-            <el-tag
-              v-if="stat.model === primaryModelSlug"
-              size="small"
-              type="success"
-              effect="plain"
-            >
-              历史最常用
-            </el-tag>
-          </div>
-          <span class="model-ranking__metrics">
-            月 {{ stat.month_count }} · 今 {{ stat.today_count }} · 成功率
-            {{ Math.round(stat.success_rate * 100) }}%
-          </span>
-        </div>
-      </div>
-    </section>
-
     <el-empty
       v-if="!hasConfigContent"
       data-testid="integration-empty"
@@ -735,7 +698,6 @@ const hermesLaunch = computed(() => {
 # 指定模型
 ./scripts/hermes.sh -m ${model} chat`
 })
-const sortedModelStats = computed(() => catalogViewState.value.sortedModelStats)
 
 const canGenerateConfigContent = computed(
   () =>
@@ -1022,57 +984,7 @@ p {
   font-size: 13px;
 }
 
-.model-ranking {
-  margin-top: 12px;
-  overflow: hidden;
-  border: 1px solid var(--crc-border);
-  border-radius: var(--crc-radius);
-  background: var(--crc-surface);
-  box-shadow: var(--crc-shadow-xs);
-}
 
-.model-ranking__item {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--crc-border);
-  transition: background-color var(--crc-duration-fast) var(--crc-ease);
-}
-
-.model-ranking__item:hover {
-  background: var(--crc-surface-hover);
-}
-
-.model-ranking__item:last-child {
-  border-bottom: 0;
-}
-
-.model-ranking__position,
-.model-ranking__metrics {
-  color: var(--crc-text-muted);
-  font-size: 12px;
-}
-
-.model-ranking__identity {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.model-ranking__identity strong {
-  min-width: 0;
-  color: var(--crc-text-strong);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.model-ranking__metrics {
-  white-space: nowrap;
-}
 
 .integration-empty {
   margin-top: 0;
@@ -1283,14 +1195,7 @@ p {
     grid-template-columns: 1fr;
   }
 
-  .model-ranking__item {
-    grid-template-columns: 24px minmax(0, 1fr);
-  }
-
-  .model-ranking__metrics {
-    grid-column: 2;
-    white-space: normal;
-  }
+   
 }
 
 .section-head h2 {
@@ -1342,24 +1247,6 @@ p {
 .compat-family code {
   font-family: var(--crc-font-mono);
   font-size: 11.5px;
-}
-
-.model-ranking__position {
-  color: var(--crc-text-subtle);
-  font-family: var(--crc-font-display);
-  font-size: 16px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.model-ranking__item:first-child .model-ranking__position {
-  color: var(--crc-accent);
-  text-shadow: 0 0 12px var(--crc-accent);
-}
-
-.model-ranking__metrics {
-  font-family: var(--crc-font-mono);
-  font-size: 11px;
 }
 
 .integration-tabs :deep(.el-tabs__item) {
