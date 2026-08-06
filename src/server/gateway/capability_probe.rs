@@ -12,10 +12,10 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::capabilities::{
-    apply_probe_outcome, Capability, CompiledCapabilityConfiguration, DeclarativeProbeCase,
-    DialectProfileKey, EvidenceState, PredicateOperator, ProbeJob, ProbeJobBatch, ProbeOutcome,
-    ProbeQueueState, ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField,
-    UpstreamDialectProfile, WireProtocol,
+    apply_probe_outcome, apply_probe_outcome_partial, Capability, CompiledCapabilityConfiguration,
+    DeclarativeProbeCase, DialectProfileKey, EvidenceState, PredicateOperator, ProbeJob,
+    ProbeJobBatch, ProbeOutcome, ProbeQueueState, ReasoningCarrier, ResponsePredicate,
+    RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::upstream_key_fingerprint;
 use crate::protocol::stream_aggregate::{SseEvent, MAX_STREAM_AGGREGATE_TOTAL_BYTES};
@@ -103,6 +103,12 @@ pub struct ProbePlan {
 }
 
 pub type CapabilityProbePlan = ProbePlan;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbePlanCompleteness {
+    Full,
+    CapacitySkipped,
+}
 
 impl ProbePlan {
     pub fn agent_core() -> Self {
@@ -345,6 +351,32 @@ pub async fn run_probe_plan_for_model_for_test(
     plan: CapabilityProbePlan,
     timeout_seconds: u64,
 ) -> io::Result<ProbeOutcome> {
+    let (outcome, _completeness) = run_probe_plan_with_coordination_for_test(
+        base_url,
+        api_key,
+        runtime_model_slug,
+        plan,
+        timeout_seconds,
+        None,
+        None,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Test-only: runs a probe plan against an optional coordinated AppState, so
+/// tests can exercise the upstream capacity reservation guard (Redis or
+/// in-memory coordination). Returns the plan completeness so tests can assert
+/// that a capacity-skipped probe still finishes without aborting.
+pub async fn run_probe_plan_with_coordination_for_test(
+    base_url: &str,
+    api_key: &str,
+    runtime_model_slug: &str,
+    plan: CapabilityProbePlan,
+    timeout_seconds: u64,
+    probe_state: Option<AppState>,
+    upstream: Option<UpstreamConfig>,
+) -> io::Result<(ProbeOutcome, ProbePlanCompleteness)> {
     if plan.protocol == WireProtocol::Messages {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -363,8 +395,8 @@ pub async fn run_probe_plan_for_model_for_test(
         base_url: base_url.to_owned(),
         api_key: api_key.to_owned(),
         protocol: key.protocol,
-        probe_state: None,
-        upstream: None,
+        probe_state,
+        upstream,
         runtime_model_slug: key.runtime_model_slug.clone(),
         request_timeout: Duration::from_secs(timeout_seconds.max(1)),
     }
@@ -580,6 +612,7 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
     }
     .run_plan(&job.key, plan)
     .await?;
+    let (outcome, completeness) = outcome;
 
     let mut profile = state
         .capability_snapshot()
@@ -618,21 +651,43 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
             attempted_at,
         } => {
             conclusive_capabilities = Some(capabilities.keys().copied().collect::<BTreeSet<_>>());
-            apply_probe_outcome(
-                &mut profile,
-                ProbeOutcome::Conclusive {
-                    capabilities,
-                    token_limit_field,
-                    reasoning_carrier,
-                    reasoning_controls,
-                    correction_rules,
-                    extension_evidence,
-                    evidence_codes,
-                    event_types,
-                    http_status,
-                    attempted_at,
-                },
-            );
+            if completeness == ProbePlanCompleteness::Full {
+                apply_probe_outcome(
+                    &mut profile,
+                    ProbeOutcome::Conclusive {
+                        capabilities,
+                        token_limit_field,
+                        reasoning_carrier,
+                        reasoning_controls,
+                        correction_rules,
+                        extension_evidence,
+                        evidence_codes,
+                        event_types,
+                        http_status,
+                        attempted_at,
+                    },
+                );
+            } else {
+                // A capacity-skipped probe is partial: merge instead of
+                // replace so previously-known evidence (reasoning levels,
+                // carriers, supported capabilities) is never erased by the
+                // cases that could not run.
+                apply_probe_outcome_partial(
+                    &mut profile,
+                    ProbeOutcome::Conclusive {
+                        capabilities,
+                        token_limit_field,
+                        reasoning_carrier,
+                        reasoning_controls,
+                        correction_rules,
+                        extension_evidence,
+                        evidence_codes,
+                        event_types,
+                        http_status,
+                        attempted_at,
+                    },
+                );
+            }
         }
     }
     let applied = state
@@ -662,8 +717,13 @@ struct ProbeExecutor {
 }
 
 impl ProbeExecutor {
-    async fn run_plan(&self, key: &DialectProfileKey, plan: ProbePlan) -> io::Result<ProbeOutcome> {
+    async fn run_plan(
+        &self,
+        key: &DialectProfileKey,
+        plan: ProbePlan,
+    ) -> io::Result<(ProbeOutcome, ProbePlanCompleteness)> {
         let mut evidence = ProbeEvidence::new(plan.protocol);
+        let mut completeness = ProbePlanCompleteness::Full;
         for case in plan.cases {
             let verdict = match tokio::time::timeout(
                 self.request_timeout,
@@ -671,13 +731,26 @@ impl ProbeExecutor {
             )
             .await
             {
-                Ok(result) => result?,
+                Ok(result) => match result {
+                    Ok(verdict) => verdict,
+                    // A transient upstream capacity rejection (see
+                    // reserve_upstream_request) skips only this case; the
+                    // rest of the plan still runs and records.
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        completeness = ProbePlanCompleteness::CapacitySkipped;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                },
                 Err(_) => {
-                    return Ok(ProbeOutcome::OperationalFailure {
-                        code: "probe_timeout".into(),
-                        http_status: None,
-                        attempted_at: unix_seconds(),
-                    });
+                    return Ok((
+                        ProbeOutcome::OperationalFailure {
+                            code: "probe_timeout".into(),
+                            http_status: None,
+                            attempted_at: unix_seconds(),
+                        },
+                        completeness,
+                    ));
                 }
             };
             match verdict {
@@ -685,16 +758,22 @@ impl ProbeExecutor {
                     operational_code,
                     http_status,
                 } if matches!(http_status, Some(401 | 403 | 429 | 500..=599) | None) => {
-                    return Ok(ProbeOutcome::OperationalFailure {
-                        code: operational_code,
-                        http_status,
-                        attempted_at: unix_seconds(),
-                    });
+                    return Ok((
+                        ProbeOutcome::OperationalFailure {
+                            code: operational_code,
+                            http_status,
+                            attempted_at: unix_seconds(),
+                        },
+                        completeness,
+                    ));
                 }
                 other => evidence.apply(&case, other),
             }
         }
-        Ok(evidence.into_conclusive_outcome(unix_seconds()))
+        Ok((
+            evidence.into_conclusive_outcome(unix_seconds()),
+            completeness,
+        ))
     }
 
     async fn run_case(
@@ -1657,7 +1736,7 @@ with the exact result as the nonce string.";
     }
 
     async fn post_chat(&self, body: Value) -> io::Result<ProbeHttpResponse> {
-        let _reservation = self.reserve_upstream_request().await?;
+        let _held = self.reserve_upstream_request().await?;
         let url = join_upstream_url(&self.base_url, "/v1/chat/completions");
         let response = self
             .client
@@ -1755,7 +1834,7 @@ with the exact result as the nonce string.";
     }
 
     async fn post_responses(&self, body: Value) -> io::Result<ProbeHttpResponse> {
-        let _reservation = self.reserve_upstream_request().await?;
+        let _held = self.reserve_upstream_request().await?;
         let url = join_upstream_url(&self.base_url, "/v1/responses");
         let response = self
             .client
@@ -1794,7 +1873,7 @@ with the exact result as the nonce string.";
         path: &str,
         protocol: UpstreamProtocol,
     ) -> io::Result<ProbeSseResponse> {
-        let _reservation = self.reserve_upstream_request().await?;
+        let _held = self.reserve_upstream_request().await?;
         let url = join_upstream_url(&self.base_url, path);
         let response = self
             .client
@@ -1871,24 +1950,56 @@ with the exact result as the nonce string.";
         Ok(ProbeSseResponse::complete(status, protocol, summary))
     }
 
-    async fn reserve_upstream_request(&self) -> io::Result<Option<ProbeUpstreamRequestGuard>> {
+    async fn reserve_upstream_request(&self) -> io::Result<Option<Box<ProbeUpstreamRequestGuard>>> {
         let (Some(state), Some(upstream)) = (&self.probe_state, &self.upstream) else {
+            // No probe coordination configured (e.g. the offline test
+            // harness): nothing to reserve, proceed without a guard.
             return Ok(None);
         };
-        let lease = state
-            .try_reserve_upstream_request(upstream, &self.runtime_model_slug)
-            .await
-            .map_err(|error| {
-                if error.is_runtime_coordination_unavailable() {
-                    io::Error::other(RuntimeCoordinationError)
-                } else {
-                    io::Error::other(error.message)
+        // A transient capacity/quota rejection (e.g. the upstream is
+        // momentarily saturated) must not abort the whole probe: retry up
+        // to 3 attempts (2 retries with 100ms/200ms backoff), then signal
+        // the caller to skip just that one case (io::ErrorKind::WouldBlock)
+        // so the rest of the plan still runs and records. Only coordination
+        // failures are fatal.
+        let mut delay = Duration::from_millis(100);
+        for attempt in 0..3 {
+            match state
+                .try_reserve_upstream_request(upstream, &self.runtime_model_slug)
+                .await
+            {
+                Ok(lease) => {
+                    return Ok(Some(Box::new(ProbeUpstreamRequestGuard {
+                        state: state.clone(),
+                        lease,
+                    })));
                 }
-            })?;
-        Ok(Some(ProbeUpstreamRequestGuard {
-            state: state.clone(),
-            lease,
-        }))
+                Err(error) if error.is_runtime_coordination_unavailable() => {
+                    return Err(io::Error::other(RuntimeCoordinationError));
+                }
+                Err(error) if attempt < 2 => {
+                    tracing::warn!(
+                        upstream_id = %upstream.id,
+                        error = %error.message,
+                        "capability probe request reservation rejected, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        upstream_id = %upstream.id,
+                        error = %error.message,
+                        "capability probe request reservation still rejected, skipping case"
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "upstream capacity reservation rejected",
+                    ));
+                }
+            }
+        }
+        unreachable!("reservation retry loop always returns")
     }
 }
 

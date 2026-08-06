@@ -625,7 +625,10 @@ fn capability_profile_summary(
             .map(|(field, values)| {
                 (
                     sanitize_identifier(field),
-                    values.iter().map(|value| sanitize_identifier(value)).collect::<Vec<_>>(),
+                    values
+                        .iter()
+                        .map(|value| sanitize_identifier(value))
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect::<BTreeMap<_, _>>()

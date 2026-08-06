@@ -10,8 +10,9 @@ pub use gateway::compatibility_semantics::{
 pub use gateway::thinking_signature::{sign_thinking, verify_thinking, ThinkingSignatureInput};
 pub use gateway::{
     build_router, probe_plan_for_job, probe_plan_for_route, run_probe_plan_for_model_for_test,
-    run_probe_plan_for_test, CapabilityProbeMockReply, CapabilityProbePlan, CapabilityProbeService,
-    CoreProbeCase, ReasoningTrigger,
+    run_probe_plan_for_test, run_probe_plan_with_coordination_for_test, CapabilityProbeMockReply,
+    CapabilityProbePlan, CapabilityProbeService, CoreProbeCase, ProbePlanCompleteness,
+    ReasoningTrigger,
 };
 pub use upstream_concurrency_status::{
     poll_concurrency_status_once, spawn_concurrency_status_poller,

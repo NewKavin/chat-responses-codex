@@ -136,6 +136,80 @@ pub fn apply_probe_outcome(profile: &mut UpstreamDialectProfile, outcome: ProbeO
     }
 }
 
+/// Applies a partial probe outcome (some cases capacity-skipped) by merging
+/// instead of replacing: previously-known evidence — reasoning levels,
+/// reasoning carrier, supported capabilities — is never erased by the cases
+/// that could not run. Unobserved entries carry no information and never
+/// overwrite prior observations; non-empty collections replace empty ones so
+/// fresh partial evidence still lands.
+pub fn apply_probe_outcome_partial(profile: &mut UpstreamDialectProfile, outcome: ProbeOutcome) {
+    let ProbeOutcome::Conclusive {
+        capabilities,
+        token_limit_field,
+        reasoning_carrier,
+        reasoning_controls,
+        correction_rules,
+        extension_evidence,
+        evidence_codes,
+        event_types,
+        http_status,
+        attempted_at,
+    } = outcome
+    else {
+        return;
+    };
+    let mut merged = profile.capabilities.clone();
+    for (&capability, &state) in &capabilities {
+        if state != EvidenceState::Unobserved {
+            merged.insert(capability, state);
+        }
+    }
+    profile.capabilities = merged;
+    for (field, values) in &reasoning_controls {
+        let slot = profile.reasoning_controls.entry(field.clone()).or_default();
+        for value in values {
+            if !slot.contains(value) {
+                slot.push(value.clone());
+            }
+        }
+    }
+    if profile.reasoning_carrier.is_none() {
+        profile.reasoning_carrier = reasoning_carrier;
+    }
+    if profile.token_limit_field.is_none() {
+        profile.token_limit_field = token_limit_field;
+    }
+    if !correction_rules.is_empty() {
+        profile.correction_rules = correction_rules;
+    }
+    if !extension_evidence.is_empty() {
+        profile.extension_evidence = extension_evidence;
+    }
+    profile.evidence_codes.extend(evidence_codes);
+    profile.event_types.extend(event_types);
+    profile.http_status = Some(http_status);
+    profile.last_attempt_at = Some(attempted_at);
+    profile.last_success_at = Some(attempted_at);
+    profile.last_operational_failure = None;
+    let supported = profile
+        .capabilities
+        .values()
+        .filter(|value| **value == EvidenceState::Supported)
+        .count();
+    let rejected = profile
+        .capabilities
+        .values()
+        .filter(|value| **value == EvidenceState::Rejected)
+        .count();
+    profile.state = if supported == 0 && rejected > 0 {
+        DialectProfileState::Unsupported
+    } else if rejected == 0 {
+        DialectProfileState::Verified
+    } else {
+        DialectProfileState::Partial
+    };
+}
+
 pub fn profile_is_current(
     profile: &UpstreamDialectProfile,
     fingerprint: &str,

@@ -13,8 +13,8 @@ pub use probe_queue::{
     ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeQueueState, ProbeReason,
 };
 pub use profile::{
-    apply_probe_outcome, normalize_route_base_url, profile_is_current, route_fingerprint,
-    ProbeOutcome, RouteFingerprintInput,
+    apply_probe_outcome, apply_probe_outcome_partial, normalize_route_base_url, profile_is_current,
+    route_fingerprint, ProbeOutcome, RouteFingerprintInput,
 };
 pub use resolver::{CapabilityResolutionError, CapabilityResolver, ResolutionInput};
 pub use runtime_hints::{

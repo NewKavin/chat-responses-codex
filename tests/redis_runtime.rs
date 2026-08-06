@@ -1,7 +1,7 @@
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chat_responses_codex::capabilities::WireProtocol;
 use chat_responses_codex::keys::{generate_downstream_key, upstream_key_fingerprint};
@@ -3169,4 +3169,94 @@ async fn redis_targeted_model_sync_retains_pending_cleanup_until_coordination_re
 
     worker.abort();
     discovery_server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_coordinated_probe_plan_reserves_and_releases_upstream_capacity() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = hits.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |request: Request<Body>| {
+            let hits = hits_clone.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let _payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                hits.fetch_add(1, Ordering::SeqCst);
+                Json(json!({
+                    "id": "chatcmpl-probe",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "probe-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("redis-coordinated-probe");
+    state.insert_upstream(upstream.clone()).await.unwrap();
+
+    let plan = chat_responses_codex::server::CapabilityProbePlan {
+        protocol: WireProtocol::ChatCompletions,
+        cases: vec![
+            chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false },
+            chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                field: "reasoning_effort".into(),
+                value: "high".into(),
+            },
+        ],
+        output_token_cap: 16,
+    };
+
+    let (outcome, completeness) =
+        chat_responses_codex::server::run_probe_plan_with_coordination_for_test(
+            &format!("http://{address}"),
+            "probe-secret",
+            "model-a",
+            plan,
+            5,
+            Some(state.clone()),
+            Some(upstream.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completeness,
+        chat_responses_codex::server::ProbePlanCompleteness::Full
+    );
+    assert!(matches!(
+        outcome,
+        chat_responses_codex::capabilities::ProbeOutcome::Conclusive { .. }
+    ));
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "both cases must reach the upstream under coordination"
+    );
+
+    // Every probe case reserves a Redis lease for its request and releases it
+    // when the request finishes; nothing may leak in-flight capacity.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let snapshot = state
+        .upstream_runtime_snapshots()
+        .await
+        .unwrap()
+        .remove("redis-coordinated-probe")
+        .expect("upstream snapshot must exist");
+    assert_eq!(snapshot.in_flight, 0, "probe leases must all be released");
 }

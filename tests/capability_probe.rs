@@ -9,11 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 use chat_responses_codex::capabilities::{
-    apply_probe_outcome, AgentClientProfile, Capability, CapabilityConfiguration, CapabilityPolicy,
-    CapabilitySelector, CompatibilityExpectation, DeclarativeProbeCase, DialectProfileKey,
-    EvidenceState, HttpsImageFixture, PredicateOperator, ProbeCandidates, ProbeJob, ProbeOutcome,
-    ProbeQueueState, ProbeReason, ReasoningCarrier, ResponsePredicate, RouteIdentity,
-    TokenLimitField, UpstreamDialectProfile, WireProtocol,
+    apply_probe_outcome, apply_probe_outcome_partial, AgentClientProfile, Capability,
+    CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, CompatibilityExpectation,
+    DeclarativeProbeCase, DialectProfileKey, EvidenceState, HttpsImageFixture, PredicateOperator,
+    ProbeCandidates, ProbeJob, ProbeOutcome, ProbeQueueState, ProbeReason, ReasoningCarrier,
+    ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 use chat_responses_codex::protocol::stream_aggregate::MAX_STREAM_AGGREGATE_TOTAL_BYTES;
 use chat_responses_codex::server::{
@@ -3332,5 +3332,136 @@ async fn parallel_tools_probe_requires_multiple_tool_calls_in_one_turn() {
     assert_eq!(
         outcome.capability(Capability::ParallelToolCalls),
         EvidenceState::Supported
+    );
+}
+
+#[test]
+fn partial_probe_outcome_merges_without_erasing_prior_reasoning_evidence() {
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: "kf".into(),
+        upstream_id: "probe-upstream".into(),
+        runtime_model_slug: "glm-model".into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile
+        .capabilities
+        .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::ReasoningReplay, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::FunctionTools, EvidenceState::Supported);
+    profile
+        .capabilities
+        .insert(Capability::TextInput, EvidenceState::Supported);
+    profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
+    profile.reasoning_controls.insert(
+        "reasoning_effort".into(),
+        vec!["low".into(), "medium".into(), "high".into()],
+    );
+    profile.state = chat_responses_codex::capabilities::DialectProfileState::Partial;
+
+    // A capacity-skipped probe: most cases never ran (Unobserved), only the
+    // function-tool case observed Supported, and two new reasoning levels were
+    // accepted. The reasoning-carrier case was skipped (carrier None).
+    let partial = ProbeOutcome::Conclusive {
+        capabilities: vec![
+            (Capability::ReasoningOutput, EvidenceState::Unobserved),
+            (Capability::ReasoningReplay, EvidenceState::Unobserved),
+            (Capability::FunctionTools, EvidenceState::Supported),
+            (Capability::TextInput, EvidenceState::Unobserved),
+        ]
+        .into_iter()
+        .collect(),
+        token_limit_field: None,
+        reasoning_carrier: None,
+        reasoning_controls: [(
+            "reasoning_effort".to_string(),
+            vec!["xhigh".into(), "max".into()],
+        )]
+        .into_iter()
+        .collect(),
+        correction_rules: Vec::new(),
+        extension_evidence: Default::default(),
+        evidence_codes: ["function_tools".into()].into_iter().collect(),
+        event_types: Default::default(),
+        http_status: 200,
+        attempted_at: 42,
+    };
+
+    apply_probe_outcome_partial(&mut profile, partial);
+
+    // Prior reasoning evidence must survive the partial probe.
+    assert_eq!(
+        profile.capabilities.get(&Capability::ReasoningOutput),
+        Some(&EvidenceState::Supported),
+        "Unobserved from a skipped case must not erase prior Supported evidence"
+    );
+    assert_eq!(
+        profile.capabilities.get(&Capability::ReasoningReplay),
+        Some(&EvidenceState::Supported)
+    );
+    // Fresh observations still land.
+    assert_eq!(
+        profile.capabilities.get(&Capability::FunctionTools),
+        Some(&EvidenceState::Supported)
+    );
+    // Reasoning levels are unioned, never replaced by the partial probe.
+    assert_eq!(
+        profile.reasoning_controls.get("reasoning_effort"),
+        Some(&vec![
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "xhigh".into(),
+            "max".into()
+        ])
+    );
+    assert_eq!(
+        profile.reasoning_carrier,
+        Some(ReasoningCarrier::ReasoningContent)
+    );
+    assert_eq!(profile.last_success_at, Some(42));
+    assert_eq!(profile.last_operational_failure, None);
+}
+
+#[test]
+fn partial_probe_outcome_without_reasoning_keeps_prior_levels() {
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: "kf".into(),
+        upstream_id: "probe-upstream".into(),
+        runtime_model_slug: "deepseek-model".into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile
+        .reasoning_controls
+        .insert("reasoning_effort".into(), vec!["low".into(), "high".into()]);
+    profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
+
+    let partial = ProbeOutcome::Conclusive {
+        capabilities: vec![(Capability::TextStream, EvidenceState::Supported)]
+            .into_iter()
+            .collect(),
+        token_limit_field: None,
+        reasoning_carrier: None,
+        reasoning_controls: Default::default(),
+        correction_rules: Vec::new(),
+        extension_evidence: Default::default(),
+        evidence_codes: ["minimal_text_stream".into()].into_iter().collect(),
+        event_types: Default::default(),
+        http_status: 200,
+        attempted_at: 7,
+    };
+
+    apply_probe_outcome_partial(&mut profile, partial);
+
+    assert_eq!(
+        profile.reasoning_controls.get("reasoning_effort"),
+        Some(&vec!["low".into(), "high".into()])
+    );
+    assert_eq!(
+        profile.capabilities.get(&Capability::TextStream),
+        Some(&EvidenceState::Supported)
     );
 }
