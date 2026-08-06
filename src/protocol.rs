@@ -1258,9 +1258,7 @@ fn agent_message_object_to_chat_message(
 
 fn agent_message_contains_encrypted_content(value: &Value) -> bool {
     match value {
-        Value::Array(values) => values
-            .iter()
-            .any(agent_message_contains_encrypted_content),
+        Value::Array(values) => values.iter().any(agent_message_contains_encrypted_content),
         Value::Object(object) => {
             object.get("type").and_then(Value::as_str) == Some("encrypted_content")
                 || object

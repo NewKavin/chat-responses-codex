@@ -990,6 +990,7 @@ fn installed_client_smoke_uses_portal_codex_profile_and_checks_delegation() {
     for required in [
         "[features]",
         "multi_agent = true",
+        "multi_agent_v2 = false",
         "[agents]",
         "requires_openai_auth = true",
         "login --with-api-key",
@@ -1274,9 +1275,13 @@ esac
 
     let output = run("wrapped_final");
     assert!(
-        output.status.success(),
-        "a final agent message containing the exact child result line must pass\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        !output.status.success(),
+        "a final agent message with extra text around the child result must fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("client=codex task=delegation status=delegation_result_mismatch"),
+        "unexpected stderr for wrapped_final: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -1751,6 +1756,7 @@ fn long_running_smoke_scripts_require_bounded_runtime_and_safe_observability() {
         "mktemp -d",
         "trap cleanup EXIT",
         "stream_idle_timeout_ms = 3600000",
+        "multi_agent_v2 = false",
         "turn.completed",
         "status_code == 499",
         "status_code == 502",

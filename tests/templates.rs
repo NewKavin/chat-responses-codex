@@ -1,6 +1,7 @@
 use chat_responses_codex::capabilities::{CapabilityConfiguration, ReasoningMode};
 use chat_responses_codex::state::AppConfig;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -396,6 +397,7 @@ fn codex_integration_examples_document_multi_agent_validation() {
         "format=codex",
         "cli_auth_credentials_store = \"file\"",
         "multi_agent = true",
+        "multi_agent_v2 = false",
         "[agents]",
         "max_threads = 4",
         "max_depth = 2",
@@ -522,6 +524,79 @@ fn deployment_policies_externalize_semantics_and_probe_candidates() {
         assert!(
             deepseek.semantic.omit_sampling_fields.contains(field),
             "deepseek policy must externalize omission of {field}"
+        );
+    }
+}
+
+#[test]
+fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_only() {
+    use chat_responses_codex::capabilities::{RouteIdentity, WireProtocol};
+
+    let configuration = deployment_capabilities();
+    let compiled = configuration
+        .clone()
+        .compile()
+        .expect("deployment capability template must compile");
+    let expected_efforts =
+        BTreeSet::from(["low".to_owned(), "medium".to_owned(), "high".to_owned()]);
+
+    for policy_id in [
+        "domestic-glm-5-family",
+        "domestic-deepseek-family",
+        "domestic-kimi-family",
+        "domestic-qwen-family",
+        "domestic-minimax-family",
+    ] {
+        let policy = configuration
+            .policies
+            .iter()
+            .find(|policy| policy.id == policy_id)
+            .unwrap_or_else(|| panic!("missing policy {policy_id}"));
+        assert_eq!(
+            policy.priority, 1,
+            "domestic family policies must share a rank so future conflicts fail compilation"
+        );
+    }
+
+    for runtime_model_slug in [
+        "glm-5.2",
+        "deepseek-v4-flash",
+        "deepseek-ai/DeepSeek-R1-0528",
+        "kimi-k2.6",
+        "qwen3.7-plus",
+        "MiniMax-M2.7",
+    ] {
+        let route = RouteIdentity {
+            key_fingerprint: String::new(),
+            upstream_id: "deployment-upstream".to_owned(),
+            exposed_model_slug: runtime_model_slug.to_owned(),
+            runtime_model_slug: runtime_model_slug.to_owned(),
+            protocol: WireProtocol::ChatCompletions,
+            tags: BTreeSet::new(),
+        };
+        let semantic = compiled.semantic_for(&route);
+        let candidates = compiled.probe_candidates_for(&route);
+
+        assert_eq!(
+            semantic.reasoning_replay_required,
+            Some(false),
+            "{runtime_model_slug} must not require a protocol-specific replay carrier"
+        );
+        assert_eq!(
+            semantic.effort_map.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_efforts,
+            "{runtime_model_slug} must publish only directly probed effort names"
+        );
+        assert!(!semantic.effort_map.contains_key("xhigh"));
+        assert!(!semantic.effort_map.contains_key("max"));
+        assert_eq!(
+            candidates.reasoning_controls.get("reasoning_effort"),
+            Some(&vec![
+                "low".to_owned(),
+                "medium".to_owned(),
+                "high".to_owned()
+            ]),
+            "{runtime_model_slug} must probe only upstream wire values"
         );
     }
 }

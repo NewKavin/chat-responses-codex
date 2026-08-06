@@ -178,6 +178,164 @@ fn matching_policy_adds_declared_candidates_and_extensions_to_probe_plan() {
 }
 
 #[test]
+fn probe_plan_keeps_only_reasoning_carriers_representable_by_the_wire_protocol() {
+    let configuration = CapabilityConfiguration {
+        policies: vec![CapabilityPolicy {
+            id: "reasoning-carriers".into(),
+            selector: CapabilitySelector {
+                runtime_model_glob: Some("lab/*".into()),
+                ..Default::default()
+            },
+            probe_candidates: ProbeCandidates {
+                reasoning_carriers: vec![
+                    ReasoningCarrier::ReasoningContent,
+                    ReasoningCarrier::ResponsesReasoningItem,
+                    ReasoningCarrier::MessagesThinking,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .compile()
+    .unwrap();
+
+    for (protocol, expected) in [
+        (
+            WireProtocol::ChatCompletions,
+            Some(ReasoningCarrier::ReasoningContent),
+        ),
+        (
+            WireProtocol::Responses,
+            Some(ReasoningCarrier::ResponsesReasoningItem),
+        ),
+        (WireProtocol::Messages, None),
+    ] {
+        let route = RouteIdentity {
+            key_fingerprint: String::new(),
+            upstream_id: "up-1".into(),
+            exposed_model_slug: "public".into(),
+            runtime_model_slug: "lab/opaque".into(),
+            protocol,
+            tags: Default::default(),
+        };
+        let plan = probe_plan_for_route(&configuration, &route);
+        let carriers = plan
+            .cases
+            .iter()
+            .filter_map(|case| match case {
+                chat_responses_codex::server::CoreProbeCase::ToolContinuation {
+                    reasoning_carrier: Some(carrier),
+                } => Some(*carrier),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            carriers,
+            expected.into_iter().collect::<Vec<_>>(),
+            "{protocol:?}"
+        );
+    }
+
+    let messages_route = RouteIdentity {
+        key_fingerprint: String::new(),
+        upstream_id: "up-1".into(),
+        exposed_model_slug: "public".into(),
+        runtime_model_slug: "lab/opaque".into(),
+        protocol: WireProtocol::Messages,
+        tags: Default::default(),
+    };
+    let messages_plan = probe_plan_for_route(&configuration, &messages_route);
+    assert!(
+        messages_plan.cases.is_empty(),
+        "Messages is a downstream protocol only; capability probes must not send its cases to Chat"
+    );
+}
+
+#[tokio::test]
+async fn responses_reasoning_control_probe_uses_nested_reasoning_effort() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_clone = requests.clone();
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let requests = requests_clone.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                let nested =
+                    payload.pointer("/reasoning/effort").and_then(Value::as_str) == Some("high");
+                requests.lock().unwrap().push(payload);
+                if nested {
+                    (StatusCode::OK, axum::Json(json!({"id": "response-probe"})))
+                } else {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({"error": {"message": "reasoning must be nested"}})),
+                    )
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Responses,
+            cases: vec![
+                chat_responses_codex::server::CoreProbeCase::ReasoningControl {
+                    field: "reasoning_effort".into(),
+                    value: "high".into(),
+                },
+            ],
+            output_token_cap: 16,
+        },
+        1,
+    )
+    .await
+    .unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("reasoning_effort").is_none());
+    assert!(matches!(
+        outcome,
+        ProbeOutcome::Conclusive {
+            reasoning_controls,
+            ..
+        } if reasoning_controls.get("reasoning_effort") == Some(&vec!["high".into()])
+    ));
+}
+
+#[tokio::test]
+async fn messages_upstream_capability_probe_is_explicitly_unsupported() {
+    let error = run_probe_plan_for_model_for_test(
+        "http://127.0.0.1:9",
+        "probe-secret",
+        "messages-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Messages,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false }],
+            output_token_cap: 16,
+        },
+        1,
+    )
+    .await
+    .expect_err("Messages is not an upstream routing protocol");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
 fn agent_core_plan_probes_basic_tool_continuation() {
     let plan = CapabilityProbePlan::agent_core();
     assert!(plan.cases.iter().any(|case| matches!(

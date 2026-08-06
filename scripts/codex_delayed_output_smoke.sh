@@ -74,6 +74,9 @@ review_model = $MODEL_TOML
 model_catalog_json = "model-catalog.json"
 web_search = "disabled"
 
+[features]
+multi_agent_v2 = false
+
 [model_providers.gateway]
 name = "chat-responses-gateway"
 base_url = $API_BASE_TOML

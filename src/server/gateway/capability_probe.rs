@@ -121,12 +121,22 @@ pub fn probe_plan_for_route(
     configuration: &CompiledCapabilityConfiguration,
     route: &RouteIdentity,
 ) -> ProbePlan {
+    let output_token_cap = configuration.source().probe.output_token_cap.min(64);
+    if route.protocol == WireProtocol::Messages {
+        return ProbePlan {
+            protocol: WireProtocol::Messages,
+            cases: Vec::new(),
+            output_token_cap,
+        };
+    }
+
     let mut plan = match route.protocol {
         WireProtocol::ChatCompletions => ProbePlan::full(),
-        WireProtocol::Responses | WireProtocol::Messages => ProbePlan::agent_core(),
+        WireProtocol::Responses => ProbePlan::agent_core(),
+        WireProtocol::Messages => unreachable!("Messages returned before probe plan selection"),
     };
     plan.protocol = route.protocol;
-    plan.output_token_cap = configuration.source().probe.output_token_cap.min(64);
+    plan.output_token_cap = output_token_cap;
 
     let candidates = configuration.probe_candidates_for(route);
     for field in candidates.token_limit_fields {
@@ -149,7 +159,15 @@ pub fn probe_plan_for_route(
             }
         }
     }
-    for reasoning_carrier in candidates.reasoning_carriers {
+    for reasoning_carrier in candidates
+        .reasoning_carriers
+        .into_iter()
+        .filter(|carrier| match route.protocol {
+            WireProtocol::ChatCompletions => *carrier == ReasoningCarrier::ReasoningContent,
+            WireProtocol::Responses => *carrier == ReasoningCarrier::ResponsesReasoningItem,
+            WireProtocol::Messages => false,
+        })
+    {
         if !plan.cases.iter().any(|case| {
             matches!(case, CoreProbeCase::ToolContinuation { reasoning_carrier: Some(existing) }
                 if *existing == reasoning_carrier)
@@ -281,6 +299,12 @@ pub async fn run_probe_plan_for_model_for_test(
     plan: CapabilityProbePlan,
     timeout_seconds: u64,
 ) -> io::Result<ProbeOutcome> {
+    if plan.protocol == WireProtocol::Messages {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Messages is a downstream compatibility protocol, not an upstream probe protocol",
+        ));
+    }
     let key = DialectProfileKey::for_key(
         "probe-upstream",
         upstream_key_fingerprint("probe-upstream", api_key),
@@ -1508,7 +1532,11 @@ impl ProbeExecutor {
                         "stream": false,
                     })
                 };
-                body[field] = Value::String(value.clone());
+                if self.protocol() == WireProtocol::Responses && field == "reasoning_effort" {
+                    body["reasoning"] = json!({"effort": value});
+                } else {
+                    body[field] = Value::String(value.clone());
+                }
                 let response = if self.protocol() == WireProtocol::Responses {
                     self.post_responses(body).await?
                 } else {

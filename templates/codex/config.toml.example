@@ -16,6 +16,7 @@ web_search = "disabled"
 skill_mcp_dependency_install = true
 tool_suggest = true
 multi_agent = true
+multi_agent_v2 = false
 
 [agents]
 max_threads = 4

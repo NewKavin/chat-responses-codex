@@ -389,11 +389,6 @@ record_codex_delegation_case() {
       and $collab_indexes[0] < $message_indexes[-1]
       and (
         $events[$message_indexes[-1]].item.text == $expected_marker
-        or (
-          $events[$message_indexes[-1]].item.text
-          | split($expected_marker)
-          | length
-        ) == 2
       )
       and ([range($message_indexes[-1] + 1; $events | length) as $index
         | select($events[$index].type == "turn.completed")
@@ -541,6 +536,7 @@ web_search = "disabled"
 skill_mcp_dependency_install = true
 tool_suggest = true
 multi_agent = true
+multi_agent_v2 = false
 
 [agents]
 max_threads = 4

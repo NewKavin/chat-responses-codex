@@ -739,7 +739,7 @@ code {
 }
 
 .compact-downstreams-table :deep(.el-table__cell) {
-  padding: 12px 0;
+  padding: 5px 0;
 }
 
 .compact-downstreams-table :deep(.cell) {

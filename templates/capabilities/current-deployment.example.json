@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "revision": 2,
+  "revision": 3,
   "route_overrides": [],
   "bundles": [
     {
@@ -34,12 +34,92 @@
   ],
   "policies": [
     {
+      "id": "domestic-glm-5-family",
+      "priority": 1,
+      "selector": { "runtime_model_glob": "*[gG][lL][mM]-5*" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": false,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" }
+      },
+      "probe_candidates": {
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      }
+    },
+    {
+      "id": "domestic-deepseek-family",
+      "priority": 1,
+      "selector": { "runtime_model_glob": "*[dD]eep[sS]eek-*" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": false,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" }
+      },
+      "probe_candidates": {
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      }
+    },
+    {
+      "id": "domestic-kimi-family",
+      "priority": 1,
+      "selector": { "runtime_model_glob": "*[kK]imi-[kK]*" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": false,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" }
+      },
+      "probe_candidates": {
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      }
+    },
+    {
+      "id": "domestic-qwen-family",
+      "priority": 1,
+      "selector": { "runtime_model_glob": "*[qQ]wen3*" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": false,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" }
+      },
+      "probe_candidates": {
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      }
+    },
+    {
+      "id": "domestic-minimax-family",
+      "priority": 1,
+      "selector": { "runtime_model_glob": "*[mM]ini[mM]ax-[mM]*" },
+      "semantic": {
+        "reasoning_mode": "optional",
+        "reasoning_replay_required": false,
+        "effort_map": { "low": "low", "medium": "medium", "high": "high" }
+      },
+      "probe_candidates": {
+        "reasoning_controls": {
+          "reasoning_effort": ["low", "medium", "high"]
+        },
+        "reasoning_carriers": ["reasoning_content", "responses_reasoning_item", "messages_thinking"]
+      }
+    },
+    {
       "id": "glm-5.2",
       "priority": 10,
       "selector": { "runtime_model": "glm-5.2" },
       "semantic": {
         "reasoning_mode": "optional",
-        "reasoning_replay_required": true,
+        "reasoning_replay_required": false,
         "effort_map": { "low": "low", "medium": "medium", "high": "high" },
         "context_window": 131072,
         "max_output_tokens": 8192
@@ -74,7 +154,7 @@
       "selector": { "runtime_model": "deepseek-v4-flash" },
       "semantic": {
         "reasoning_mode": "optional",
-        "reasoning_replay_required": true,
+        "reasoning_replay_required": false,
         "effort_map": { "low": "low", "medium": "medium", "high": "high" },
         "context_window": 131072,
         "max_output_tokens": 8192,
@@ -187,7 +267,7 @@
       "selector": { "runtime_model": "moonshotai/Kimi-K2.5" },
       "semantic": {
         "reasoning_mode": "optional",
-        "reasoning_replay_required": true,
+        "reasoning_replay_required": false,
         "effort_map": { "low": "low", "medium": "medium", "high": "high" },
         "context_window": 262144,
         "max_output_tokens": 32768
@@ -222,7 +302,7 @@
       "selector": { "runtime_model": "moonshotai/kimi-k2.6" },
       "semantic": {
         "reasoning_mode": "optional",
-        "reasoning_replay_required": true,
+        "reasoning_replay_required": false,
         "effort_map": { "low": "low", "medium": "medium", "high": "high" },
         "context_window": 262144,
         "max_output_tokens": 32768
@@ -256,14 +336,14 @@
     {
       "id": "glm-5.2-core",
       "selector": { "exposed_model": "glm-5.2" },
-      "bundles": ["agent_core", "reasoning_agent"],
+      "bundles": ["agent_core"],
       "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
       "permitted_optional_downgrades": []
     },
     {
       "id": "deepseek-v4-flash-core",
       "selector": { "exposed_model": "deepseek-v4-flash" },
-      "bundles": ["agent_core", "reasoning_agent"],
+      "bundles": ["agent_core"],
       "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
       "permitted_optional_downgrades": []
     },
@@ -284,14 +364,14 @@
     {
       "id": "kimi-k2.5-core",
       "selector": { "exposed_model": "moonshotai/Kimi-K2.5" },
-      "bundles": ["agent_core", "reasoning_agent"],
+      "bundles": ["agent_core"],
       "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
       "permitted_optional_downgrades": []
     },
     {
       "id": "kimi-k2.6-core",
       "selector": { "exposed_model": "moonshotai/kimi-k2.6" },
-      "bundles": ["agent_core", "reasoning_agent"],
+      "bundles": ["agent_core"],
       "client_profiles": ["codex", "opencode", "claude_code", "hermes"],
       "permitted_optional_downgrades": []
     }

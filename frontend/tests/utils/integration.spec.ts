@@ -463,6 +463,7 @@ describe('integration config generators', () => {
     expect(toml).toContain('model_catalog_json = "model-catalog.json"')
     expect(toml).toContain('cli_auth_credentials_store = "file"')
     expect(toml).toContain('multi_agent = true')
+    expect(toml).toContain('multi_agent_v2 = false')
     expect(toml).toContain('max_threads = 4')
     expect(toml).toContain('max_depth = 2')
     expect(toml).toContain('base_url = "https://portal.example.com/v1"')

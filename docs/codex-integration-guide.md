@@ -103,6 +103,7 @@ web_search = "disabled"
 skill_mcp_dependency_install = true
 tool_suggest = true
 multi_agent = true
+multi_agent_v2 = false
 
 [agents]
 max_threads = 4
@@ -394,6 +395,7 @@ web_search = "disabled"
 
 [features]
 multi_agent = true
+multi_agent_v2 = false
 
 [agents]
 max_threads = 4
@@ -417,7 +419,7 @@ stream_max_retries = 2
 - `model`：日常对话主模型
 - `review_model`：审查/评审模型
 - `stream_max_retries = 2`：Codex 对 SSE 流中断最多额外重试 2 次（当前官方默认值为 5）。它不替代网关首轮的 Key/upstream fallback；网关仍负责在请求交付可用输出前切换候选路由。
-- `model_reasoning_effort`：推理强度。门户会使用所选模型目录项的 `default_reasoning_level`；没有验证到可配置推理控制时使用 `none`
+- `model_reasoning_effort`：推理强度。门户在模型已验证支持时默认选择 `medium`，否则回退到目录项的 `default_reasoning_level`；没有验证到可配置推理控制时使用 `none`
 - `model_catalog_json`：Codex 模型目录文件路径，按相对路径解析
 - `base_url`：网关根地址加 `/v1`
 - `wire_api = "responses"`：让 Codex 按 Responses 协议跟网关通信
