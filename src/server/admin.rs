@@ -2205,6 +2205,81 @@ pub(super) struct BatchBillingModeRequest {
     request_quota_requests: Option<Option<u32>>,
 }
 
+/// Batch enable/disable upstreams.
+#[derive(serde::Deserialize)]
+pub(super) struct BatchUpstreamToggleRequest {
+    ids: Vec<String>,
+    active: bool,
+}
+
+/// Batch delete upstreams.
+#[derive(serde::Deserialize)]
+pub(super) struct BatchUpstreamDeleteRequest {
+    ids: Vec<String>,
+}
+
+pub(super) async fn admin_batch_toggle_upstreams(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchUpstreamToggleRequest>,
+) -> impl IntoResponse {
+    if payload.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "message": "ids must not be empty" }
+            })),
+        )
+            .into_response();
+    }
+
+    let snapshot = state.snapshot().await;
+    let mut updated = 0usize;
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+
+    for id in &payload.ids {
+        let Some(mut upstream) = snapshot.upstreams.iter().find(|u| u.id == *id).cloned() else {
+            failed.push(json!({ "id": id, "error": "not found" }));
+            continue;
+        };
+        upstream.active = payload.active;
+        match state.update_upstream(id, upstream).await {
+            Ok(true) => updated += 1,
+            Ok(false) => failed.push(json!({ "id": id, "error": "not found" })),
+            Err(error) => failed.push(json!({ "id": id, "error": error.to_string() })),
+        }
+    }
+
+    Json(json!({ "updated": updated, "failed": failed })).into_response()
+}
+
+pub(super) async fn admin_batch_delete_upstreams(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchUpstreamDeleteRequest>,
+) -> impl IntoResponse {
+    if payload.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "message": "ids must not be empty" }
+            })),
+        )
+            .into_response();
+    }
+
+    let mut deleted = 0usize;
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+
+    for id in &payload.ids {
+        match state.remove_upstream(id).await {
+            Ok(true) => deleted += 1,
+            Ok(false) => failed.push(json!({ "id": id, "error": "not found" })),
+            Err(error) => failed.push(json!({ "id": id, "error": error.to_string() })),
+        }
+    }
+
+    Json(json!({ "deleted": deleted, "failed": failed })).into_response()
+}
+
 pub(super) async fn admin_batch_set_downstream_mode(
     State(state): State<AppState>,
     Json(payload): Json<BatchBillingModeRequest>,

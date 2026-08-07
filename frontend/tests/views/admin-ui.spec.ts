@@ -81,6 +81,21 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('onUnmounted')
   })
 
+  it('supports batch enable disable and delete for upstreams', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('type="selection"')
+    expect(page).toContain('@selection-change="handleSelectionChange"')
+    expect(page).toContain('批量启用')
+    expect(page).toContain('批量禁用')
+    expect(page).toContain('批量删除')
+    expect(page).toContain('handleBatchToggle')
+    expect(page).toContain('handleBatchDelete')
+    expect(page).toContain('batchToggleUpstreams')
+    expect(page).toContain('batchDeleteUpstreams')
+    expect(page).toContain('selectedUpstreams.length')
+  })
+
   it('supports inline upstream priority updates', () => {
     const page = source('views/admin/Upstreams.vue')
 
@@ -295,7 +310,8 @@ describe('admin downstream cost billing', () => {
     const page = source('views/admin/Downstreams.vue')
 
     expect(page).toContain('金额计费')
-    expect(page).toContain('余额 ¥')
+    expect(page).toContain('余额 {{ formatMoney')
+    expect(page).not.toContain('余额 ¥¥')
     expect(page).not.toContain('已用')
     expect(page).not.toContain('已消耗')
     expect(page).not.toContain('IN ¥')

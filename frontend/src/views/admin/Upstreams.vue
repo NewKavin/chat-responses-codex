@@ -6,9 +6,33 @@
         <h1 class="crc-page-title">上游管理</h1>
         <p class="crc-page-description">配置模型供应方、协议、密钥、上下文限制和智能路由策略。</p>
       </div>
-      <el-button type="primary" @click="handleCreate">
-        <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建上游
-      </el-button>
+      <div class="upstream-batch-actions">
+        <el-button
+          :disabled="selectedUpstreams.length === 0"
+          @click="handleBatchToggle(true)"
+        >
+          <CircleCheck :size="15" :stroke-width="2" style="margin-right: 5px" />
+          批量启用<template v-if="selectedUpstreams.length">（{{ selectedUpstreams.length }}）</template>
+        </el-button>
+        <el-button
+          :disabled="selectedUpstreams.length === 0"
+          @click="handleBatchToggle(false)"
+        >
+          <CircleSlash :size="15" :stroke-width="2" style="margin-right: 5px" />
+          批量禁用<template v-if="selectedUpstreams.length">（{{ selectedUpstreams.length }}）</template>
+        </el-button>
+        <el-button
+          type="danger"
+          :disabled="selectedUpstreams.length === 0"
+          @click="handleBatchDelete"
+        >
+          <Trash2 :size="15" :stroke-width="2" style="margin-right: 5px" />
+          批量删除<template v-if="selectedUpstreams.length">（{{ selectedUpstreams.length }}）</template>
+        </el-button>
+        <el-button type="primary" @click="handleCreate">
+          <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建上游
+        </el-button>
+      </div>
     </header>
 
     <el-form :inline="true" class="crc-toolbar upstream-filters">
@@ -40,7 +64,8 @@
 
     <div class="crc-table-shell">
       <el-table :data="filteredUpstreams" v-loading="loading" stripe style="width: 100%"
-        empty-text="当前筛选条件下暂无上游">
+        empty-text="当前筛选条件下暂无上游" @selection-change="handleSelectionChange">
+        <el-table-column type="selection" width="48" />
         <el-table-column label="ID" width="72" align="center">
           <template #default="{ $index }">{{ $index + 1 }}</template>
         </el-table-column>
@@ -318,7 +343,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { Activity, PlugZap, Plus, RefreshCw, Search } from '@lucide/vue'
+import { Activity, CircleCheck, CircleSlash, PlugZap, Plus, RefreshCw, Search, Trash2 } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
@@ -331,6 +356,7 @@ import type { ApiKeyModelConfig, KeyModelDiscoveryResult, UpstreamConfig } from 
 
 const loading = ref(false)
 const upstreams = ref<UpstreamConfig[]>([])
+const selectedUpstreams = ref<UpstreamConfig[]>([])
 
 const filters = ref({
   status: 'all',
@@ -822,6 +848,57 @@ const handleDelete = async (row: UpstreamConfig) => {
   }
 }
 
+const handleSelectionChange = (rows: UpstreamConfig[]) => {
+  selectedUpstreams.value = rows
+}
+
+const handleBatchToggle = async (active: boolean) => {
+  const ids = selectedUpstreams.value.map(row => row.id)
+  if (ids.length === 0) return
+  const action = active ? '启用' : '禁用'
+  try {
+    await ElMessageBox.confirm(`确定要批量${action}选中的 ${ids.length} 个上游吗？`, `批量${action}`, {
+      type: 'warning'
+    })
+    const { data } = await adminApi.batchToggleUpstreams(ids, active)
+    const failedCount = data.failed.length
+    if (data.updated > 0) {
+      ElMessage.success(`已${action} ${data.updated} 个上游${failedCount ? `，${failedCount} 个失败` : ''}`)
+    } else {
+      ElMessage.error(`批量${action}失败：${data.failed.map(f => f.error).join('；') || '未知错误'}`)
+    }
+    loadData()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(`批量${action}失败`)
+    }
+  }
+}
+
+const handleBatchDelete = async () => {
+  const ids = selectedUpstreams.value.map(row => row.id)
+  if (ids.length === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${ids.length} 个上游吗？该操作不可恢复。`,
+      '批量删除',
+      { type: 'warning' }
+    )
+    const { data } = await adminApi.batchDeleteUpstreams(ids)
+    const failedCount = data.failed.length
+    if (data.deleted > 0) {
+      ElMessage.success(`已删除 ${data.deleted} 个上游${failedCount ? `，${failedCount} 个失败` : ''}`)
+    } else {
+      ElMessage.error(`批量删除失败：${data.failed.map(f => f.error).join('；') || '未知错误'}`)
+    }
+    loadData()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('批量删除失败')
+    }
+  }
+}
+
 const fetchModels = async () => {
   if (!form.value.base_url || !form.value.api_key) {
     ElMessage.warning('请先填写 Base URL 和 API Key')
@@ -891,6 +968,13 @@ onMounted(() => {
 </script>
 
 <style scoped>
+
+.upstream-batch-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 
 .upstreams-page {
   min-height: 100%;

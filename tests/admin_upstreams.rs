@@ -4166,3 +4166,208 @@ async fn batch_explicit_model_mapping_skips_discovery_when_auto_discovery_is_ena
     assert_eq!(upstream.supported_models, vec!["manual-model"]);
     assert_eq!(upstream.api_key_models.len(), 2);
 }
+
+// ============================================================================
+// Batch upstream operations tests
+// ============================================================================
+
+fn create_batch_test_state() -> AppState {
+    let config = AppConfig {
+        admin_username: "admin".to_string(),
+        admin_password: "admin".to_string(),
+        jwt_secret: "test_secret".to_string(),
+        ..Default::default()
+    };
+    let state = PersistedState {
+        upstreams: std::sync::Arc::new(vec![
+            UpstreamConfig {
+                id: "upstream-b1".to_string(),
+                name: "Batch Upstream 1".to_string(),
+                base_url: "https://api.b1.example.com".to_string(),
+                api_key: "sk-b1".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["gpt-4".to_string()],
+                active: true,
+                ..Default::default()
+            },
+            UpstreamConfig {
+                id: "upstream-b2".to_string(),
+                name: "Batch Upstream 2".to_string(),
+                base_url: "https://api.b2.example.com".to_string(),
+                api_key: "sk-b2".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["gpt-4".to_string()],
+                active: true,
+                ..Default::default()
+            },
+            UpstreamConfig {
+                id: "upstream-b3".to_string(),
+                name: "Batch Upstream 3".to_string(),
+                base_url: "https://api.b3.example.com".to_string(),
+                api_key: "sk-b3".to_string(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                supported_models: vec!["gpt-4".to_string()],
+                active: true,
+                ..Default::default()
+            },
+        ]),
+        ..Default::default()
+    };
+    AppState::new(state, unique_state_path(), config)
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_toggle_enables_and_disables_selected() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    // Disable upstream-b1 and upstream-b2
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-toggle")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ids": ["upstream-b1", "upstream-b2"], "active": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["updated"], 2);
+    assert_eq!(result["failed"].as_array().unwrap().len(), 0);
+
+    let snapshot = state.snapshot().await;
+    let by_id = |id: &str| snapshot.upstreams.iter().find(|u| u.id == id).unwrap();
+    assert!(!by_id("upstream-b1").active);
+    assert!(!by_id("upstream-b2").active);
+    assert!(by_id("upstream-b3").active);
+
+    // Re-enable upstream-b2 only
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-toggle")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ids": ["upstream-b2"], "active": true }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["updated"], 1);
+
+    let snapshot = state.snapshot().await;
+    let by_id = |id: &str| snapshot.upstreams.iter().find(|u| u.id == id).unwrap();
+    assert!(!by_id("upstream-b1").active);
+    assert!(by_id("upstream-b2").active);
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_toggle_reports_missing_ids() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-toggle")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ids": ["upstream-b1", "missing-1"], "active": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["updated"], 1);
+    assert_eq!(result["failed"].as_array().unwrap().len(), 1);
+    assert_eq!(result["failed"][0]["id"], "missing-1");
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_delete_removes_selected() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch-delete")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ids": ["upstream-b1", "upstream-b3"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["deleted"], 2);
+    assert_eq!(result["failed"].as_array().unwrap().len(), 0);
+
+    let snapshot = state.snapshot().await;
+    assert!(!snapshot.upstreams.iter().any(|u| u.id == "upstream-b1"));
+    assert!(snapshot.upstreams.iter().any(|u| u.id == "upstream-b2"));
+    assert!(!snapshot.upstreams.iter().any(|u| u.id == "upstream-b3"));
+}
+
+#[tokio::test]
+async fn test_upstreams_batch_requires_jwt_token() {
+    let state = create_batch_test_state();
+    let app = chat_responses_codex::server::build_router(state);
+
+    for uri in [
+        "/api/admin/upstreams/batch-toggle",
+        "/api/admin/upstreams/batch-delete",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "ids": ["upstream-b1"] }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}

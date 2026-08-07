@@ -1763,6 +1763,20 @@ pub fn build_router(state: AppState) -> Router {
                 admin_auth_middleware,
             )),
         )
+        .route(
+            "/api/admin/upstreams/batch-toggle",
+            post(admin_batch_toggle_upstreams).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
+            "/api/admin/upstreams/batch-delete",
+            post(admin_batch_delete_upstreams).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
         // Admin API - Downstreams
         .route(
             "/api/admin/downstreams",

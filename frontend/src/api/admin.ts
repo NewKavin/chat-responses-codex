@@ -312,6 +312,16 @@ export const adminApi = {
     adminHttp.put<UpstreamConfig>(`/admin/upstreams/${id}`, data),
   deleteUpstream: (id: string) => adminHttp.delete(`/admin/upstreams/${id}`),
   toggleUpstream: (id: string) => adminHttp.post<{ active: boolean }>(`/admin/upstreams/${id}/toggle`),
+  batchToggleUpstreams: (ids: string[], active: boolean) =>
+    adminHttp.post<{ updated: number; failed: Array<{ id: string; error: string }> }>(
+      '/admin/upstreams/batch-toggle',
+      { ids, active }
+    ),
+  batchDeleteUpstreams: (ids: string[]) =>
+    adminHttp.post<{ deleted: number; failed: Array<{ id: string; error: string }> }>(
+      '/admin/upstreams/batch-delete',
+      { ids }
+    ),
 
   // Downstreams
   getDownstreams: (params?: { status?: string; lifecycle?: string; search?: string }) =>
