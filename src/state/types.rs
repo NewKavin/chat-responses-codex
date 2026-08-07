@@ -156,7 +156,6 @@ pub struct AppConfig {
     pub upstream_concurrency_recovery_max_wait_ms: u64,
     pub upstream_concurrency_recovery_max_rounds: u32,
     pub upstream_concurrency_probe_delays_ms: Vec<u64>,
-    pub upstream_concurrency_status_refresh_seconds: u64,
     pub upstream_first_semantic_output_timeout_seconds: u64,
     pub codex_stream_idle_timeout_ms: u64,
 }
@@ -243,7 +242,6 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
             upstream_concurrency_probe_delays_ms: DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS
                 .to_vec(),
-            upstream_concurrency_status_refresh_seconds: 5,
             upstream_first_semantic_output_timeout_seconds: 3_300,
             codex_stream_idle_timeout_ms: 3_600_000,
         }
@@ -307,8 +305,6 @@ pub struct UpstreamConfig {
     /// when they encounter unrecognized fields.
     #[serde(default)]
     pub strip_nonstandard_chat_fields: bool,
-    #[serde(default)]
-    pub concurrency_status_enabled: bool,
 }
 
 impl UpstreamConfig {
@@ -354,7 +350,6 @@ impl Default for UpstreamConfig {
             managed_source: None,
             last_synced_at: 0,
             strip_nonstandard_chat_fields: false,
-            concurrency_status_enabled: false,
         }
     }
 }

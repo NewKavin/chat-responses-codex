@@ -1,7 +1,6 @@
 mod admin;
 mod gateway;
 mod portal;
-mod upstream_concurrency_status;
 
 pub use gateway::compatibility_semantics::{
     validate_client_json, validate_client_stream, SemanticCheckResult, SemanticExpectation,
@@ -13,7 +12,4 @@ pub use gateway::{
     run_probe_plan_for_test, run_probe_plan_with_coordination_for_test, CapabilityProbeMockReply,
     CapabilityProbePlan, CapabilityProbeService, CoreProbeCase, ProbePlanCompleteness,
     ReasoningTrigger,
-};
-pub use upstream_concurrency_status::{
-    poll_concurrency_status_once, spawn_concurrency_status_poller,
 };

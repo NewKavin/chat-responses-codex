@@ -551,68 +551,6 @@ fn classify_user_agent(user_agent: Option<&str>) -> Option<String> {
 // Admin API - Upstream Management
 // ============================================================================
 
-/// List all upstreams
-#[derive(serde::Serialize)]
-struct AccountConcurrencyStatusDto {
-    key_fingerprint: String,
-    concurrency: u32,
-    concurrency_limit: u32,
-    observed_at: u64,
-    fresh_until: u64,
-}
-
-#[derive(serde::Serialize)]
-struct UpstreamConcurrencyStatusDto {
-    accounts: Vec<AccountConcurrencyStatusDto>,
-    last_observed_at: Option<u64>,
-    data_accounts: usize,
-    total_accounts: usize,
-}
-
-/// Read stored concurrency observations for every account key of an upstream.
-/// Best-effort: coordination failures yield `None` for the whole upstream.
-async fn read_upstream_concurrency_status(
-    state: &AppState,
-    upstream: &UpstreamConfig,
-) -> Option<UpstreamConcurrencyStatusDto> {
-    let keys = upstream.account_api_keys();
-    let mut accounts = Vec::new();
-    let mut last_observed_at: Option<u64> = None;
-    for key in keys {
-        let fingerprint = upstream_key_fingerprint(&upstream.id, &key);
-        let account = AccountConcurrencyKey {
-            upstream_id: upstream.id.clone(),
-            key_fingerprint: fingerprint.clone(),
-        };
-        match state.provider_concurrency_observation(&account).await {
-            Ok(Some(observation)) => {
-                last_observed_at =
-                    Some(last_observed_at.map_or(observation.observed_at, |current| {
-                        current.max(observation.observed_at)
-                    }));
-                accounts.push(AccountConcurrencyStatusDto {
-                    key_fingerprint: fingerprint,
-                    concurrency: observation.concurrency,
-                    concurrency_limit: observation.concurrency_limit,
-                    observed_at: observation.observed_at,
-                    fresh_until: observation.fresh_until,
-                });
-            }
-            Ok(None) => {}
-            Err(_) => return None,
-        }
-    }
-    Some(UpstreamConcurrencyStatusDto {
-        data_accounts: accounts.len(),
-        total_accounts: {
-            // account_api_keys() already dedups; recompute count from the same set
-            upstream.account_api_keys().len()
-        },
-        accounts,
-        last_observed_at,
-    })
-}
-
 pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
     let runtime_snapshots = match state.upstream_runtime_snapshots().await {
@@ -634,7 +572,6 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         config: UpstreamConfig,
         runtime_state: Option<UpstreamRuntimeStateResponse>,
         route_health: RouteHealthSnapshotDto,
-        concurrency_status: Option<UpstreamConcurrencyStatusDto>,
     }
 
     #[derive(serde::Serialize)]
@@ -678,12 +615,6 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
             }
         });
 
-        let concurrency_status = if config.concurrency_status_enabled {
-            read_upstream_concurrency_status(&state, &config).await
-        } else {
-            None
-        };
-
         upstreams_with_runtime.push(UpstreamWithRuntime {
             route_health: route_health_snapshots
                 .get(&config.id)
@@ -691,7 +622,6 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
                 .unwrap_or_default(),
             config,
             runtime_state,
-            concurrency_status,
         });
     }
 
@@ -1027,8 +957,6 @@ pub(super) struct BatchCreateUpstreamPayload {
     active: bool,
     #[serde(default)]
     strip_nonstandard_chat_fields: bool,
-    #[serde(default)]
-    concurrency_status_enabled: bool,
 }
 
 fn default_batch_requests_per_minute() -> u32 {
@@ -1487,7 +1415,6 @@ pub(super) async fn admin_create_upstreams_batch(
         managed_source: automatic_discovery.then(|| "batch".to_string()),
         last_synced_at: if automatic_discovery { now } else { 0 },
         strip_nonstandard_chat_fields: payload.strip_nonstandard_chat_fields,
-        concurrency_status_enabled: payload.concurrency_status_enabled,
         default_model_context: Some(DefaultModelContextConfig {
             context_limit: 200_000,
             output_reserve: 4096,
@@ -1881,6 +1808,13 @@ pub(super) async fn admin_toggle_upstream(
 use crate::keys::generate_downstream_key;
 
 /// List all downstreams with optional filtering
+#[derive(Serialize)]
+struct DownstreamListItem {
+    #[serde(flatten)]
+    config: DownstreamConfig,
+    usage: Option<DownstreamUsageSummary>,
+}
+
 pub(super) async fn admin_list_downstreams(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,

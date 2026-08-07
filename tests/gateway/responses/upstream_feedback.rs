@@ -1591,7 +1591,6 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 active: true,
                 failure_count: 0,
                 strip_nonstandard_chat_fields: false,
-                concurrency_status_enabled: false,
                 api_keys: vec![],
                 api_key_models: vec![],
                 auto_managed: false,

@@ -208,11 +208,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .ok()
             .map(|value| normalize_concurrency_probe_delays_ms(&value))
             .unwrap_or_else(|| DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS.to_vec()),
-        upstream_concurrency_status_refresh_seconds: env_u64(
-            "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS",
-            5,
-        )
-        .max(1),
         upstream_first_semantic_output_timeout_seconds: env_u64(
             "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS",
             3_300,
@@ -296,7 +291,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     chat_responses_codex::server::CapabilityProbeService::spawn(state.clone());
     ModelKeySyncService::spawn(state.clone());
     spawn_usage_log_retention_task(state.clone());
-    chat_responses_codex::server::spawn_concurrency_status_poller(state.clone());
     let app = build_router(state);
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => listener,

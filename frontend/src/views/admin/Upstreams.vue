@@ -112,69 +112,6 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="私有并发状态接口" width="240" align="center">
-          <template #default="{ row }">
-            <div class="concurrency-status-cell">
-              <el-tooltip
-                content="非 OpenAI 标准接口，默认关闭"
-                placement="top"
-              >
-                <el-switch
-                  v-model="row.concurrency_status_enabled"
-                  :disabled="isInlineSaving(row.id, 'concurrency_status_enabled')"
-                  @change="updateInlineConcurrencyStatus(row)"
-                />
-              </el-tooltip>
-              <el-tooltip
-                v-if="concurrencyStatusView(row)"
-                :content="concurrencyStatusView(row)!.tooltip"
-                placement="top"
-              >
-                <el-tag :type="concurrencyStatusView(row)!.type" size="small">
-                  {{ concurrencyStatusView(row)!.text }}
-                </el-tag>
-              </el-tooltip>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="并发状态" min-width="260">
-          <template #default="{ row }">
-            <div class="concurrency-data-cell">
-              <template v-if="!row.concurrency_status_enabled">
-                <span class="concurrency-muted"><CircleOff :size="13" :stroke-width="1.8" />未开启</span>
-              </template>
-              <template v-else-if="!row.concurrency_status">
-                <span class="concurrency-muted"><RefreshCw :size="13" :stroke-width="1.8" class="spin" />探测中…</span>
-              </template>
-              <template v-else-if="row.concurrency_status.data_accounts === 0">
-                <span class="concurrency-muted"><DatabaseZap :size="13" :stroke-width="1.8" />暂无探测数据</span>
-              </template>
-              <template v-else>
-                <div v-for="account in concurrencyAccountRows(row)" :key="account.key_fingerprint" class="concurrency-account-row">
-                  <code class="concurrency-fingerprint">{{ account.key_fingerprint.slice(0, 8) }}…</code>
-                  <div class="concurrency-gauge">
-                    <div
-                      class="concurrency-gauge-fill"
-                      :class="{ high: account.percent >= 80, stale: account.stale }"
-                      :style="{ width: account.percent + '%' }"
-                    />
-                  </div>
-                  <span class="concurrency-number">{{ account.concurrency }}/{{ account.concurrency_limit }}</span>
-                  <span class="concurrency-fresh" :class="{ stale: account.stale }">
-                    <Clock3 v-if="account.stale" :size="12" :stroke-width="1.8" />
-                    {{ account.stale ? '已过期' : formatRelativeTime(account.observed_at) }}
-                  </span>
-                </div>
-                <div class="concurrency-summary">
-                  <Activity :size="12" :stroke-width="1.8" />
-                  {{ row.concurrency_status.data_accounts }}/{{ row.concurrency_status.total_accounts }} 个 Key · 更新于 {{ formatRelativeTime(row.concurrency_status.last_observed_at || 0) }}
-                </div>
-              </template>
-            </div>
-          </template>
-        </el-table-column>
-
         <el-table-column label="备注" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ row.remark || '-' }}</template>
         </el-table-column>
@@ -364,11 +301,6 @@
           </el-alert>
         </el-form-item>
 
-        <el-form-item label="私有并发状态接口">
-          <el-switch v-model="form.concurrency_status_enabled" />
-          <span class="form-hint">非 OpenAI 标准接口，默认关闭；仅为支持该固定路径的内部上游开启。</span>
-        </el-form-item>
-
         <el-form-item label="启用">
           <el-switch v-model="form.active" />
         </el-form-item>
@@ -386,7 +318,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { Activity, CircleOff, Clock3, DatabaseZap, PlugZap, Plus, RefreshCw, Search } from '@lucide/vue'
+import { Activity, PlugZap, Plus, RefreshCw, Search } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
@@ -406,7 +338,7 @@ const filters = ref({
   search: ''
 })
 const inlineSaving = ref<Record<string, boolean>>({})
-const inlineCommitted = ref<Record<string, { priority: number; concurrency_status_enabled: boolean }>>({})
+const inlineCommitted = ref<Record<string, { priority: number }>>({})
 const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const submitting = ref(false)
@@ -439,7 +371,6 @@ const form = ref<Partial<UpstreamConfig>>({
   premium_models: [],
   protect_premium_quota: false,
   strip_nonstandard_chat_fields: false,
-  concurrency_status_enabled: false,
   failure_count: 0
 })
 
@@ -509,61 +440,6 @@ const rules = {
   protocols: [{ required: true, message: '请选择协议', trigger: 'change' }]
 }
 
-const formatRelativeTime = (unixSeconds: number) => {
-  const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds)
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
-  return `${Math.floor(diff / 86400)} 天前`
-}
-
-const concurrencyStatusView = (row: UpstreamConfig) => {
-  const status = row.concurrency_status
-  if (!row.concurrency_status_enabled || !status) return null
-  const updated = status.last_observed_at ? formatRelativeTime(status.last_observed_at) : ''
-  if (status.data_accounts === 0) {
-    return {
-      type: 'info' as const,
-      text: '暂无探测数据',
-      tooltip: '接口未响应或未到探测周期（约 5 秒一轮）'
-    }
-  }
-  const lines = status.accounts.map(
-    (account) =>
-      `${account.key_fingerprint.slice(0, 8)}… 并发 ${account.concurrency}/${account.concurrency_limit}（${formatRelativeTime(account.observed_at)}）`
-  )
-  const detail = lines.join('\n') + (updated ? ` · ${updated}更新` : '')
-  if (status.data_accounts === status.total_accounts && status.total_accounts === 1) {
-    const first = status.accounts[0]
-    return {
-      type: 'success' as const,
-      text: `并发 ${first.concurrency}/${first.concurrency_limit}`,
-      tooltip: detail
-    }
-  }
-  return {
-    type: 'warning' as const,
-    text: `${status.data_accounts}/${status.total_accounts} 账号有数据`,
-    tooltip: detail
-  }
-}
-
-const concurrencyAccountRows = (row: UpstreamConfig) => {
-  const status = row.concurrency_status
-  if (!status) return []
-  const now = Math.floor(Date.now() / 1000)
-  return status.accounts.map(account => {
-    const percent = account.concurrency_limit > 0
-      ? Math.min(100, Math.round((account.concurrency / account.concurrency_limit) * 100))
-      : (account.concurrency > 0 ? 100 : 0)
-    return {
-      ...account,
-      percent,
-      stale: now > account.fresh_until
-    }
-  })
-}
-
 const loadData = async () => {
   try {
     loading.value = true
@@ -571,8 +447,7 @@ const loadData = async () => {
     upstreams.value = data
     inlineCommitted.value = Object.fromEntries(
       data.map(row => [row.id, {
-        priority: Number(row.priority || 0),
-        concurrency_status_enabled: Boolean(row.concurrency_status_enabled)
+        priority: Number(row.priority || 0)
       }])
     )
   } catch (error) {
@@ -582,9 +457,9 @@ const loadData = async () => {
   }
 }
 
-const inlineSaveKey = (id: string, field: 'priority' | 'concurrency_status_enabled') => `${id}:${field}`
+const inlineSaveKey = (id: string, field: 'priority') => `${id}:${field}`
 
-const isInlineSaving = (id: string, field: 'priority' | 'concurrency_status_enabled') => {
+const isInlineSaving = (id: string, field: 'priority') => {
   return Boolean(inlineSaving.value[inlineSaveKey(id, field)])
 }
 
@@ -601,44 +476,13 @@ const updateInlinePriority = async (row: UpstreamConfig) => {
     const { data } = await adminApi.updateUpstream(row.id, { priority })
     row.priority = Number(data.priority || 0)
     inlineCommitted.value[row.id] = {
-      ...(inlineCommitted.value[row.id] || {
-        priority: 0,
-        concurrency_status_enabled: Boolean(row.concurrency_status_enabled)
-      }),
+      ...(inlineCommitted.value[row.id] || { priority: 0 }),
       priority: row.priority
     }
     ElMessage.success('优先级已更新')
   } catch {
     row.priority = previous
     ElMessage.error('优先级更新失败')
-  } finally {
-    delete inlineSaving.value[saveKey]
-  }
-}
-
-const updateInlineConcurrencyStatus = async (row: UpstreamConfig) => {
-  const field = 'concurrency_status_enabled' as const
-  const saveKey = inlineSaveKey(row.id, field)
-  if (inlineSaving.value[saveKey]) return
-
-  const previous = inlineCommitted.value[row.id]?.concurrency_status_enabled ?? false
-  const enabled = Boolean(row.concurrency_status_enabled)
-  row.concurrency_status_enabled = enabled
-  inlineSaving.value[saveKey] = true
-  try {
-    const { data } = await adminApi.updateUpstream(row.id, { concurrency_status_enabled: enabled })
-    row.concurrency_status_enabled = Boolean(data.concurrency_status_enabled)
-    inlineCommitted.value[row.id] = {
-      ...(inlineCommitted.value[row.id] || {
-        priority: Number(row.priority || 0),
-        concurrency_status_enabled: false
-      }),
-      concurrency_status_enabled: row.concurrency_status_enabled
-    }
-    ElMessage.success('私有并发状态接口已更新')
-  } catch {
-    row.concurrency_status_enabled = previous
-    ElMessage.error('私有并发状态接口更新失败')
   } finally {
     delete inlineSaving.value[saveKey]
   }
@@ -729,7 +573,6 @@ const handleCreate = () => {
     premium_models: [],
     protect_premium_quota: false,
     strip_nonstandard_chat_fields: false,
-    concurrency_status_enabled: false,
     failure_count: 0
   }
   dialogVisible.value = true
@@ -760,7 +603,6 @@ const handleCopy = (row: UpstreamConfig) => {
     premium_models: [...(row.premium_models || [])],
     protect_premium_quota: row.protect_premium_quota,
     strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
-    concurrency_status_enabled: false,
     failure_count: 0
   }
   dialogVisible.value = true
@@ -789,7 +631,6 @@ const handleEdit = (row: UpstreamConfig) => {
     protocol: protocols[0] as UpstreamConfig['protocol'],
     protocols,
     strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
-    concurrency_status_enabled: Boolean(row.concurrency_status_enabled),
     default_model_context: row.default_model_context
       ? {
           ...row.default_model_context
@@ -856,7 +697,6 @@ const handleSubmit = async () => {
     submitData.protocols = protocols
     submitData.protocol = protocols[0] as UpstreamConfig['protocol']
     submitData.strip_nonstandard_chat_fields = Boolean(submitData.strip_nonstandard_chat_fields)
-    submitData.concurrency_status_enabled = Boolean(submitData.concurrency_status_enabled)
 
     const submittedKeys = (form.value.api_key || '')
       .split('\n')
@@ -904,8 +744,7 @@ const handleSubmit = async () => {
           protocol: protocols[0] ? String(protocols[0]) : 'ChatCompletions',
           protocols: protocols.map(p => String(p)),
           active: submitData.active,
-          strip_nonstandard_chat_fields: Boolean(submitData.strip_nonstandard_chat_fields),
-          concurrency_status_enabled: Boolean(submitData.concurrency_status_enabled)
+          strip_nonstandard_chat_fields: Boolean(submitData.strip_nonstandard_chat_fields)
         }
 
         const response = await adminApi.createUpstreamsBatch(batchPayload)
@@ -1053,99 +892,6 @@ onMounted(() => {
 
 <style scoped>
 
-.concurrency-data-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.concurrency-muted {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--crc-text-muted);
-}
-
-.concurrency-account-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.concurrency-fingerprint {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-  color: var(--crc-text-strong);
-  min-width: 58px;
-}
-
-.concurrency-gauge {
-  flex: 1;
-  min-width: 60px;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--crc-border);
-  overflow: hidden;
-}
-
-.concurrency-gauge-fill {
-  height: 100%;
-  border-radius: 3px;
-  background: var(--crc-success, #67c23a);
-  transition: width 0.3s ease;
-}
-
-.concurrency-gauge-fill.high {
-  background: var(--crc-warning, #e6a23c);
-}
-
-.concurrency-gauge-fill.stale {
-  background: var(--crc-danger, #f56c6c);
-}
-
-.concurrency-number {
-  font-variant-numeric: tabular-nums;
-  color: var(--crc-text-strong);
-  min-width: 44px;
-  text-align: right;
-}
-
-.concurrency-fresh {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  color: var(--crc-text-muted);
-  white-space: nowrap;
-}
-
-.concurrency-fresh.stale {
-  color: var(--crc-danger, #f56c6c);
-}
-
-.concurrency-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--crc-text-muted);
-  border-top: 1px dashed var(--crc-border);
-  padding-top: 4px;
-}
-
-.spin {
-  animation: concurrency-spin 1.2s linear infinite;
-}
-
-@keyframes concurrency-spin {
-  to { transform: rotate(360deg); }
-}
-.concurrency-status-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
 .upstreams-page {
   min-height: 100%;
 }

@@ -679,12 +679,6 @@ impl AppState {
                     {
                         upstream.strip_nonstandard_chat_fields = strip_nonstandard_chat_fields;
                     }
-                    if let Some(concurrency_status_enabled) = updates
-                        .get("concurrency_status_enabled")
-                        .and_then(|v| v.as_bool())
-                    {
-                        upstream.concurrency_status_enabled = concurrency_status_enabled;
-                    }
 
                     upstream.normalize_for_storage();
                     if let Err(error) = upstream.validate_configuration() {

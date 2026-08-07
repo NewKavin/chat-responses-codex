@@ -81,8 +81,7 @@ pub(crate) fn codex_subagent_base_model(model: &str) -> Option<&str> {
 pub use account_concurrency::{
     AccountConcurrencyKey, AccountConcurrencyRegistry, AccountConcurrencySnapshot,
     AccountConcurrencyTuning, AccountLeaseError, AccountProbeLease, AccountProbeOutcome,
-    AccountWaitTicket, ObservationError, ProbeDecision, ProviderConcurrencyObservation,
-    ProviderConcurrencyObservationSource,
+    AccountWaitTicket, ProbeDecision,
 };
 pub use calendar::{
     CalendarDay, CalendarError, CalendarRange, DeploymentCalendar, LogWindowMode,
@@ -1154,83 +1153,6 @@ impl AppState {
         self.account_concurrency
             .finish_probe(lease.clone(), outcome, tokio::time::Instant::now())
             .map_err(|_| RuntimeCoordinationError)
-    }
-
-    pub async fn acquire_account_status_poller(
-        &self,
-        account: &AccountConcurrencyKey,
-        owner_token: &str,
-    ) -> Result<bool, RuntimeCoordinationError> {
-        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-            return coordinator
-                .acquire_account_status_poller(account, owner_token)
-                .await;
-        }
-        let ttl = Duration::from_secs(
-            self.config
-                .upstream_concurrency_status_refresh_seconds
-                .saturating_add(3),
-        );
-        Ok(self.account_concurrency.acquire_status_poller(
-            account,
-            owner_token,
-            ttl,
-            tokio::time::Instant::now(),
-        ))
-    }
-
-    pub async fn store_account_concurrency_observation(
-        &self,
-        account: &AccountConcurrencyKey,
-        current: u32,
-        limit: u32,
-    ) -> Result<ProviderConcurrencyObservation, RuntimeCoordinationError> {
-        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-            return coordinator
-                .store_account_observation(account, current, limit)
-                .await;
-        }
-        let now = tokio::time::Instant::now();
-        self.account_concurrency
-            .observe_provider_status(account, current, limit, now)
-            .map_err(|_| RuntimeCoordinationError)?;
-        self.account_concurrency
-            .snapshot(account, now)
-            .observation
-            .ok_or(RuntimeCoordinationError)
-    }
-
-    pub async fn account_concurrency_observation(
-        &self,
-        account: &AccountConcurrencyKey,
-    ) -> Result<Option<ProviderConcurrencyObservation>, RuntimeCoordinationError> {
-        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-            return coordinator.account_observation(account).await;
-        }
-        Ok(self
-            .account_concurrency
-            .snapshot(account, tokio::time::Instant::now())
-            .observation)
-    }
-
-    /// Compatibility wrapper for storing a provider concurrency observation.
-    pub async fn store_provider_concurrency_observation(
-        &self,
-        account: &AccountConcurrencyKey,
-        current: u32,
-        limit: u32,
-    ) -> Result<(), RuntimeCoordinationError> {
-        self.store_account_concurrency_observation(account, current, limit)
-            .await
-            .map(|_| ())
-    }
-
-    /// Compatibility wrapper for reading a provider concurrency observation.
-    pub async fn provider_concurrency_observation(
-        &self,
-        account: &AccountConcurrencyKey,
-    ) -> Result<Option<ProviderConcurrencyObservation>, RuntimeCoordinationError> {
-        self.account_concurrency_observation(account).await
     }
 
     pub fn client(&self) -> Client {

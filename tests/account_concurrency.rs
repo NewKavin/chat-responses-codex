@@ -15,22 +15,8 @@ fn test_tuning() -> AccountConcurrencyTuning {
         waiter_ttl: Duration::from_secs(660),
         probe_ttl: Duration::from_secs(660),
         renewal_interval: Duration::from_secs(30),
-        observation_freshness: Duration::from_secs(5),
         idle_retention: Duration::from_secs(600),
     }
-}
-
-#[test]
-fn provider_observation_freshness_is_not_extended_by_the_poll_interval() {
-    let config = AppConfig {
-        upstream_concurrency_status_refresh_seconds: 30,
-        ..AppConfig::default()
-    };
-
-    assert_eq!(
-        AccountConcurrencyTuning::from_config(&config).observation_freshness,
-        Duration::from_secs(30)
-    );
 }
 
 #[test]
@@ -241,9 +227,6 @@ async fn different_keys_are_independent_and_retry_after_is_not_shortened() {
     let second = AccountConcurrencyKey::new("up-a", "fingerprint-b");
     coordinator.reject(&first, Some(Duration::from_secs(60)), Instant::now());
     coordinator.reject(&second, None, Instant::now());
-    coordinator
-        .observe_provider_status(&first, 0, 4, Instant::now())
-        .unwrap();
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(
         coordinator.snapshot(&first, Instant::now()).retry_after,
@@ -492,18 +475,6 @@ async fn probe_renewal_keeps_the_same_owner_valid_past_the_initial_ttl() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn local_status_poller_election_expires_and_fences_other_owners() {
-    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
-    let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");
-    let ttl = Duration::from_secs(8);
-
-    assert!(coordinator.acquire_status_poller(&account, "owner-one", ttl, Instant::now()));
-    assert!(!coordinator.acquire_status_poller(&account, "owner-two", ttl, Instant::now()));
-    tokio::time::advance(Duration::from_secs(9)).await;
-    assert!(coordinator.acquire_status_poller(&account, "owner-two", ttl, Instant::now()));
-}
-
-#[tokio::test(start_paused = true)]
 async fn stale_local_ticket_cannot_cancel_same_generation_re_registration() {
     let coordinator = AccountConcurrencyRegistry::new(test_tuning());
     let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");
@@ -560,25 +531,4 @@ async fn stale_local_ticket_is_fenced_when_re_registered_in_the_same_millisecond
         coordinator.try_probe(&current, Instant::now()),
         ProbeDecision::Granted(_)
     ));
-}
-
-#[tokio::test(start_paused = true)]
-async fn provider_observation_shortens_only_local_cooldown() {
-    let mut tuning = test_tuning();
-    tuning.probe_delays = vec![Duration::from_secs(5)];
-    let coordinator = AccountConcurrencyRegistry::new(tuning);
-    let account = AccountConcurrencyKey::new("up-observation", "fingerprint-a");
-    coordinator.reject(&account, Some(Duration::from_secs(2)), Instant::now());
-
-    assert_eq!(
-        coordinator.snapshot(&account, Instant::now()).retry_after,
-        Duration::from_secs(5)
-    );
-    coordinator
-        .observe_provider_status(&account, 0, 4, Instant::now())
-        .unwrap();
-    assert_eq!(
-        coordinator.snapshot(&account, Instant::now()).retry_after,
-        Duration::from_secs(2)
-    );
 }

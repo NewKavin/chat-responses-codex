@@ -102,25 +102,8 @@ export interface UpstreamConfig {
   managed_source?: string | null
   last_synced_at?: number
   strip_nonstandard_chat_fields: boolean
-  concurrency_status_enabled: boolean
-  concurrency_status?: UpstreamConcurrencyStatus | null
   runtime_state?: UpstreamRuntimeState
   _replace_api_keys?: boolean
-}
-
-export interface UpstreamConcurrencyStatusAccount {
-  key_fingerprint: string
-  concurrency: number
-  concurrency_limit: number
-  observed_at: number
-  fresh_until: number
-}
-
-export interface UpstreamConcurrencyStatus {
-  accounts: UpstreamConcurrencyStatusAccount[]
-  last_observed_at: number | null
-  data_accounts: number
-  total_accounts: number
 }
 
 export interface UpstreamRuntimeState {

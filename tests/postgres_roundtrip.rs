@@ -64,8 +64,7 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
                 "auto_managed": false,
                 "managed_source": null,
                 "last_synced_at": 0,
-                "strip_nonstandard_chat_fields": true,
-                "concurrency_status_enabled": false
+                "strip_nonstandard_chat_fields": true
             }
         ],
         "downstreams": [],
@@ -76,20 +75,6 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
 
     let state: PersistedState = serde_json::from_value(state_json.clone()).unwrap();
     assert_eq!(serde_json::to_value(&state).unwrap(), state_json);
-}
-
-#[test]
-fn old_upstream_json_defaults_private_concurrency_status_off() {
-    let upstream: UpstreamConfig = serde_json::from_value(json!({
-        "name": "legacy",
-        "base_url": "https://upstream.example",
-        "api_key": "legacy-secret",
-        "protocol": "Responses",
-        "supported_models": ["glm-5.2"]
-    }))
-    .unwrap();
-
-    assert!(!upstream.concurrency_status_enabled);
 }
 
 #[test]
@@ -104,48 +89,6 @@ fn old_upstream_json_defaults_remark_to_empty() {
     .unwrap();
 
     assert_eq!(upstream.remark, "");
-}
-
-#[tokio::test]
-async fn upstream_private_concurrency_switch_round_trips_and_defaults_off() {
-    let _guard = env_lock().lock().await;
-    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
-        eprintln!("skipping postgres roundtrip test: PG_TEST_DATABASE_URL is not set");
-        return;
-    };
-    reset_test_database_async(&database_url).await;
-
-    let state = AppState::load_from_database_url(&database_url, AppConfig::default())
-        .await
-        .expect("should connect to the PostgreSQL test database");
-    attach_capability_probe_sink(&state);
-    let mut upstream = UpstreamConfig {
-        id: "private-status".into(),
-        name: "Private Status".into(),
-        base_url: "https://upstream.example".into(),
-        api_key: "upstream-secret".into(),
-        protocol: UpstreamProtocol::Responses,
-        protocols: vec![UpstreamProtocol::Responses],
-        supported_models: vec!["glm-5.2".into()],
-        active: true,
-        ..Default::default()
-    };
-    assert!(!upstream.concurrency_status_enabled);
-    upstream.concurrency_status_enabled = true;
-    state.insert_upstream(upstream.clone()).await.unwrap();
-
-    let reloaded = AppState::load_from_database_url(&database_url, AppConfig::default())
-        .await
-        .unwrap();
-    let persisted = reloaded
-        .routing_snapshot()
-        .await
-        .upstreams
-        .iter()
-        .find(|item| item.id == upstream.id)
-        .cloned()
-        .unwrap();
-    assert!(persisted.concurrency_status_enabled);
 }
 
 #[tokio::test]

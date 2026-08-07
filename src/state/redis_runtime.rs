@@ -7,8 +7,7 @@ use super::route_health::{
 use super::{
     AccountConcurrencyKey, AccountProbeLease, AccountProbeOutcome, AccountWaitTicket, AppConfig,
     DownstreamAdmissionRejection, DownstreamConfig, DownstreamRuntimeCounts, HealthStateSnapshot,
-    KeyHealthKey, ProbeDecision, ProviderConcurrencyObservation,
-    ProviderConcurrencyObservationSource, RouteAvailability, RouteFailureClass, RouteHealthKey,
+    KeyHealthKey, ProbeDecision, RouteAvailability, RouteFailureClass, RouteHealthKey,
     RouteHealthSnapshotDto, RouteOutcome, RouteRecovery, RouteSetAggregateKey,
     UpstreamAdmissionError, UpstreamConfig, UpstreamRuntimeSnapshot,
     UpstreamRuntimeSnapshotWithFeedback, ROUTE_HEALTH_GLOBAL_CAPACITY,
@@ -171,14 +170,6 @@ impl RuntimeCoordinationBackend {
                     .upstream_response_header_timeout_seconds
                     .saturating_add(60)
                     .saturating_mul(1_000),
-                account_poller_ttl_ms: config
-                    .upstream_concurrency_status_refresh_seconds
-                    .saturating_mul(1_000)
-                    .saturating_add(3_000),
-                account_observation_freshness_ms: config
-                    .upstream_concurrency_status_refresh_seconds
-                    .saturating_mul(1_000)
-                    .max(1_000),
                 route_health_ttl_seconds: route_health_retention_ttl_seconds(Duration::from_secs(
                     config.upstream_transient_route_cooldown_max_seconds,
                 )),
@@ -224,8 +215,6 @@ pub struct RedisRuntimeCoordinator {
     account_waiter_budget_ms: u64,
     account_waiter_ttl_ms: u64,
     account_probe_ttl_ms: u64,
-    account_poller_ttl_ms: u64,
-    account_observation_freshness_ms: u64,
     route_health_ttl_seconds: u64,
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
@@ -1001,94 +990,6 @@ impl RedisRuntimeCoordinator {
             })
             .await?;
         parse_account_ok(&result)
-    }
-
-    pub(super) async fn acquire_account_status_poller(
-        &self,
-        account: &AccountConcurrencyKey,
-        owner_token: &str,
-    ) -> Result<bool, RuntimeCoordinationError> {
-        let result = self
-            .run_account_status(
-                account,
-                &[
-                    "acquire_poller",
-                    owner_token,
-                    &self.account_poller_ttl_ms.to_string(),
-                ],
-            )
-            .await?;
-        if result.first().map(String::as_str) != Some("0") || result.len() != 2 {
-            return Err(RuntimeCoordinationError);
-        }
-        match result[1].as_str() {
-            "0" => Ok(false),
-            "1" => Ok(true),
-            _ => Err(RuntimeCoordinationError),
-        }
-    }
-
-    pub(super) async fn store_account_observation(
-        &self,
-        account: &AccountConcurrencyKey,
-        current: u32,
-        limit: u32,
-    ) -> Result<ProviderConcurrencyObservation, RuntimeCoordinationError> {
-        let current = current.to_string();
-        let limit = limit.to_string();
-        let result = self
-            .run_account_status(
-                account,
-                &[
-                    "store",
-                    &current,
-                    &limit,
-                    &self.account_observation_freshness_ms.to_string(),
-                ],
-            )
-            .await?;
-        parse_provider_observation(&result)
-    }
-
-    pub(super) async fn account_observation(
-        &self,
-        account: &AccountConcurrencyKey,
-    ) -> Result<Option<ProviderConcurrencyObservation>, RuntimeCoordinationError> {
-        let result = self.run_account_status(account, &["read"]).await?;
-        if result.first().map(String::as_str) == Some("1") && result.len() == 1 {
-            return Ok(None);
-        }
-        parse_provider_observation(&result).map(Some)
-    }
-
-    async fn run_account_status(
-        &self,
-        account: &AccountConcurrencyKey,
-        arguments: &[&str],
-    ) -> Result<Vec<String>, RuntimeCoordinationError> {
-        let identity = account_identity(account);
-        let poller_key = self.account_key(&identity, "poller");
-        let observation_key = self.account_key(&identity, "observation");
-        let state_key = self.account_key(&identity, "state");
-        self.retry_coordination_once(|| {
-            let mut connection = self.connection();
-            let poller_key = poller_key.clone();
-            let observation_key = observation_key.clone();
-            let state_key = state_key.clone();
-            async move {
-                let script = redis::Script::new(include_str!("redis_runtime/account_status.lua"));
-                let mut invocation = script.prepare_invoke();
-                invocation
-                    .key(poller_key)
-                    .key(observation_key)
-                    .key(state_key);
-                for argument in arguments {
-                    invocation.arg(*argument);
-                }
-                timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await
-            }
-        })
-        .await
     }
 
     pub(super) async fn clear_downstream(
@@ -2028,23 +1929,6 @@ fn parse_account_ok(result: &[String]) -> Result<(), RuntimeCoordinationError> {
     } else {
         Err(RuntimeCoordinationError)
     }
-}
-
-fn parse_provider_observation(
-    result: &[String],
-) -> Result<ProviderConcurrencyObservation, RuntimeCoordinationError> {
-    if result.first().map(String::as_str) != Some("0") || result.len() != 5 {
-        return Err(RuntimeCoordinationError);
-    }
-    Ok(ProviderConcurrencyObservation {
-        source: ProviderConcurrencyObservationSource::PrivateRequestStatus,
-        concurrency: u32::try_from(parse_u64(result.get(1))?)
-            .map_err(|_| RuntimeCoordinationError)?,
-        concurrency_limit: u32::try_from(parse_u64(result.get(2))?)
-            .map_err(|_| RuntimeCoordinationError)?,
-        observed_at: parse_u64(result.get(3))? / 1_000,
-        fresh_until: parse_u64(result.get(4))? / 1_000,
-    })
 }
 
 fn parse_route_health_reservation(

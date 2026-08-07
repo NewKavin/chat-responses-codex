@@ -1,12 +1,11 @@
 use axum::body::{to_bytes, Body};
-use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chat_responses_codex::capabilities::WireProtocol;
 use chat_responses_codex::keys::{generate_downstream_key, upstream_key_fingerprint};
 use chat_responses_codex::routing::UpstreamProtocol;
-use chat_responses_codex::server::{build_router, poll_concurrency_status_once};
+use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     AccountConcurrencyKey, AccountProbeOutcome, ApiKeyModelConfig, AppConfig, AppState,
     CoordinationTestFault, DownstreamAdmissionRejection, DownstreamConfig, KeyHealthKey,
@@ -1179,96 +1178,6 @@ async fn redis_account_keys_include_upstream_identity() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
-async fn redis_account_status_poller_and_observation_are_shared() {
-    let config = redis_test_config();
-    let (first, second, _directory) = redis_test_states(&config).await;
-    let account = AccountConcurrencyKey::new("up-status", "fingerprint-a");
-
-    assert!(first
-        .acquire_account_status_poller(&account, "owner-one")
-        .await
-        .unwrap());
-    assert!(!second
-        .acquire_account_status_poller(&account, "owner-two")
-        .await
-        .unwrap());
-    first
-        .store_account_concurrency_observation(&account, 3, 4)
-        .await
-        .unwrap();
-    let observation = second
-        .account_concurrency_observation(&account)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        (observation.concurrency, observation.concurrency_limit),
-        (3, 4)
-    );
-    tokio::time::sleep(Duration::from_millis(5_100)).await;
-    assert!(second
-        .account_concurrency_observation(&account)
-        .await
-        .unwrap()
-        .is_none());
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_REDIS_URL"]
-async fn redis_status_poller_deduplicates_provider_hits_across_replicas() {
-    async fn provider_status(State(hits): State<Arc<AtomicUsize>>) -> Json<Value> {
-        hits.fetch_add(1, Ordering::SeqCst);
-        Json(json!({"concurrency": 3, "concurrency_limit": 4}))
-    }
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let app = Router::new()
-        .route("/dashboard/api/user/request-status", get(provider_status))
-        .with_state(hits.clone());
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let mut config = redis_test_config();
-    config.upstream_concurrency_status_refresh_seconds = 30;
-    let (first, second, _directory) = redis_test_states(&config).await;
-    let upstream = UpstreamConfig {
-        id: "redis-status-upstream".into(),
-        name: "Redis status upstream".into(),
-        base_url: format!("http://{address}/v1"),
-        api_key: "redis-status-secret".into(),
-        protocol: UpstreamProtocol::Responses,
-        protocols: vec![UpstreamProtocol::Responses],
-        supported_models: vec!["glm-5.2".into()],
-        active: true,
-        concurrency_status_enabled: true,
-        ..Default::default()
-    };
-    first.insert_upstream(upstream.clone()).await.unwrap();
-    second.insert_upstream(upstream).await.unwrap();
-
-    tokio::join!(
-        poll_concurrency_status_once(&first),
-        poll_concurrency_status_once(&second)
-    );
-
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-    let account = AccountConcurrencyKey::new(
-        "redis-status-upstream",
-        upstream_key_fingerprint("redis-status-upstream", "redis-status-secret"),
-    );
-    assert!(first
-        .account_concurrency_observation(&account)
-        .await
-        .unwrap()
-        .is_some());
-    task.abort();
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_downstream_release_removes_wait_state_atomically() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
@@ -1527,34 +1436,6 @@ async fn redis_account_concurrency_rejection_requeues_at_the_tail() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
-async fn redis_account_observation_never_shortens_explicit_retry_after() {
-    let config = redis_test_config();
-    let (first, second, _directory) = redis_test_states(&config).await;
-    let account = AccountConcurrencyKey::new("up-explicit", "fingerprint-a");
-    first
-        .observe_account_concurrency(&account, Some(Duration::from_secs(2)))
-        .await
-        .unwrap();
-    let ticket = first
-        .register_account_waiter(&account, "req-explicit", "down-a", "lease-explicit")
-        .await
-        .unwrap();
-    second
-        .store_account_concurrency_observation(&account, 0, 4)
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    match second.try_acquire_account_probe(&ticket).await.unwrap() {
-        ProbeDecision::Wait { retry_after } => {
-            assert!(retry_after >= Duration::from_millis(1_500));
-        }
-        other => panic!("explicit retry-after was shortened: {other:?}"),
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_account_recovery_retry_after_is_queryable_across_instances() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
@@ -1568,35 +1449,6 @@ async fn redis_account_recovery_retry_after_is_queryable_across_instances() {
 
     assert!(retry_after <= Duration::from_secs(30));
     assert!(retry_after >= Duration::from_secs(29));
-}
-
-#[tokio::test]
-#[ignore = "requires TEST_REDIS_URL"]
-async fn redis_account_observation_clears_local_cooldown_but_preserves_retry_after() {
-    let mut config = redis_test_config();
-    config.upstream_concurrency_probe_delays_ms = vec![5_000];
-    let (first, second, _directory) = redis_test_states(&config).await;
-    let account = AccountConcurrencyKey::new("up-observation-shortens", "fingerprint-a");
-    first
-        .observe_account_concurrency(&account, Some(Duration::from_secs(2)))
-        .await
-        .unwrap();
-    let ticket = first
-        .register_account_waiter(&account, "req-observation", "down-a", "lease-observation")
-        .await
-        .unwrap();
-    second
-        .store_account_concurrency_observation(&account, 0, 4)
-        .await
-        .unwrap();
-
-    match second.try_acquire_account_probe(&ticket).await.unwrap() {
-        ProbeDecision::Wait { retry_after } => {
-            assert!(retry_after <= Duration::from_secs(2));
-            assert!(retry_after >= Duration::from_millis(1_500));
-        }
-        other => panic!("explicit retry-after was not preserved: {other:?}"),
-    }
 }
 
 #[tokio::test]

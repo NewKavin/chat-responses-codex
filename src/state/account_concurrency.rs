@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -60,21 +60,6 @@ pub enum ProbeDecision {
     Wait { retry_after: Duration },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ProviderConcurrencyObservation {
-    pub source: ProviderConcurrencyObservationSource,
-    pub concurrency: u32,
-    pub concurrency_limit: u32,
-    pub observed_at: u64,
-    pub fresh_until: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderConcurrencyObservationSource {
-    PrivateRequestStatus,
-}
-
 #[derive(Clone, Debug)]
 pub struct AccountConcurrencyTuning {
     pub probe_delays: Vec<Duration>,
@@ -83,7 +68,6 @@ pub struct AccountConcurrencyTuning {
     pub waiter_ttl: Duration,
     pub probe_ttl: Duration,
     pub renewal_interval: Duration,
-    pub observation_freshness: Duration,
     pub idle_retention: Duration,
 }
 
@@ -106,9 +90,6 @@ impl AccountConcurrencyTuning {
                     .saturating_add(60),
             ),
             renewal_interval: Duration::from_secs(30),
-            observation_freshness: Duration::from_secs(
-                config.upstream_concurrency_status_refresh_seconds.max(1),
-            ),
             idle_retention: Duration::from_secs(600),
         }
     }
@@ -121,7 +102,6 @@ pub struct AccountConcurrencySnapshot {
     pub probe_in_flight: bool,
     pub saturated: bool,
     pub retry_after: Duration,
-    pub observation: Option<ProviderConcurrencyObservation>,
 }
 
 impl Default for AccountConcurrencySnapshot {
@@ -132,7 +112,6 @@ impl Default for AccountConcurrencySnapshot {
             probe_in_flight: false,
             saturated: false,
             retry_after: Duration::ZERO,
-            observation: None,
         }
     }
 }
@@ -149,25 +128,15 @@ pub enum AccountLeaseError {
     Expired,
 }
 
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum ObservationError {
-    #[error("provider concurrency limit must be positive")]
-    InvalidLimit,
-    #[error("provider concurrency exceeds its reported limit")]
-    ConcurrencyExceedsLimit,
-}
-
 pub struct AccountConcurrencyRegistry {
     tuning: AccountConcurrencyTuning,
     origin: Instant,
-    origin_unix_seconds: u64,
     inner: Mutex<RegistryState>,
 }
 
 #[derive(Default)]
 struct RegistryState {
     accounts: HashMap<AccountConcurrencyKey, AccountState>,
-    pollers: HashMap<AccountConcurrencyKey, PollerRecord>,
 }
 
 struct AccountState {
@@ -177,7 +146,6 @@ struct AccountState {
     explicit_retry_after_until: Option<Instant>,
     tickets: VecDeque<TicketRecord>,
     probe: Option<ProbeRecord>,
-    observation: Option<ObservationRecord>,
     saturated: bool,
     last_access: Instant,
 }
@@ -193,16 +161,6 @@ struct ProbeRecord {
     expires_at: Instant,
 }
 
-struct ObservationRecord {
-    value: ProviderConcurrencyObservation,
-    fresh_until: Instant,
-}
-
-struct PollerRecord {
-    owner_token: String,
-    expires_at: Instant,
-}
-
 impl AccountState {
     fn new(now: Instant) -> Self {
         Self {
@@ -212,7 +170,6 @@ impl AccountState {
             explicit_retry_after_until: None,
             tickets: VecDeque::new(),
             probe: None,
-            observation: None,
             saturated: false,
             last_access: now,
         }
@@ -224,14 +181,9 @@ impl AccountConcurrencyRegistry {
         if tuning.probe_delays.is_empty() {
             tuning.probe_delays = vec![Duration::from_millis(100)];
         }
-        let origin_unix_seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         Self {
             tuning,
             origin: Instant::now(),
-            origin_unix_seconds,
             inner: Mutex::new(RegistryState::default()),
         }
     }
@@ -470,44 +422,6 @@ impl AccountConcurrencyRegistry {
         Ok(())
     }
 
-    pub fn observe_provider_status(
-        &self,
-        key: &AccountConcurrencyKey,
-        current: u32,
-        limit: u32,
-        now: Instant,
-    ) -> Result<(), ObservationError> {
-        if limit == 0 {
-            return Err(ObservationError::InvalidLimit);
-        }
-        if current > limit {
-            return Err(ObservationError::ConcurrencyExceedsLimit);
-        }
-
-        let mut registry = self.inner.lock().expect("account registry lock poisoned");
-        let state = registry
-            .accounts
-            .entry(key.clone())
-            .or_insert_with(|| AccountState::new(now));
-        self.prune_account(state, now);
-        let fresh_until = now + self.tuning.observation_freshness;
-        state.observation = Some(ObservationRecord {
-            value: ProviderConcurrencyObservation {
-                source: ProviderConcurrencyObservationSource::PrivateRequestStatus,
-                concurrency: current,
-                concurrency_limit: limit,
-                observed_at: self.instant_unix_seconds(now),
-                fresh_until: self.instant_unix_seconds(fresh_until),
-            },
-            fresh_until,
-        });
-        if current < limit {
-            state.cooldown_until = None;
-        }
-        state.last_access = now;
-        Ok(())
-    }
-
     pub fn snapshot(
         &self,
         key: &AccountConcurrencyKey,
@@ -524,44 +438,11 @@ impl AccountConcurrencyRegistry {
             probe_in_flight: state.probe.is_some(),
             saturated: state.saturated,
             retry_after: self.retry_after(state, now),
-            observation: state
-                .observation
-                .as_ref()
-                .map(|record| record.value.clone()),
-        }
-    }
-
-    pub fn acquire_status_poller(
-        &self,
-        key: &AccountConcurrencyKey,
-        owner_token: &str,
-        ttl: Duration,
-        now: Instant,
-    ) -> bool {
-        let mut registry = self.inner.lock().expect("account registry lock poisoned");
-        registry.pollers.retain(|_, poller| poller.expires_at > now);
-        match registry.pollers.get_mut(key) {
-            Some(poller) if poller.owner_token == owner_token => {
-                poller.expires_at = now + ttl;
-                true
-            }
-            Some(_) => false,
-            None => {
-                registry.pollers.insert(
-                    key.clone(),
-                    PollerRecord {
-                        owner_token: owner_token.to_string(),
-                        expires_at: now + ttl,
-                    },
-                );
-                true
-            }
         }
     }
 
     pub fn prune_idle(&self, now: Instant) -> usize {
         let mut registry = self.inner.lock().expect("account registry lock poisoned");
-        registry.pollers.retain(|_, poller| poller.expires_at > now);
         for state in registry.accounts.values_mut() {
             self.prune_account(state, now);
         }
@@ -571,7 +452,6 @@ impl AccountConcurrencyRegistry {
             live_cooldown
                 || !state.tickets.is_empty()
                 || state.probe.is_some()
-                || state.observation.is_some()
                 || now.saturating_duration_since(state.last_access) <= self.tuning.idle_retention
         });
         before.saturating_sub(registry.accounts.len())
@@ -635,13 +515,6 @@ impl AccountConcurrencyRegistry {
             state.last_access = now;
         }
         if state
-            .observation
-            .as_ref()
-            .is_some_and(|observation| now >= observation.fresh_until)
-        {
-            state.observation = None;
-        }
-        if state
             .explicit_retry_after_until
             .is_some_and(|deadline| now >= deadline)
         {
@@ -686,10 +559,6 @@ impl AccountConcurrencyRegistry {
             .unwrap_or(u64::MAX)
     }
 
-    fn instant_unix_seconds(&self, instant: Instant) -> u64 {
-        self.origin_unix_seconds
-            .saturating_add(instant.saturating_duration_since(self.origin).as_secs())
-    }
 }
 
 fn ticket_identity_matches(left: &AccountWaitTicket, right: &AccountWaitTicket) -> bool {
