@@ -138,6 +138,43 @@
           </template>
         </el-table-column>
 
+        <el-table-column label="并发状态" min-width="260">
+          <template #default="{ row }">
+            <div class="concurrency-data-cell">
+              <template v-if="!row.concurrency_status_enabled">
+                <span class="concurrency-muted"><CircleOff :size="13" :stroke-width="1.8" />未开启</span>
+              </template>
+              <template v-else-if="!row.concurrency_status">
+                <span class="concurrency-muted"><RefreshCw :size="13" :stroke-width="1.8" class="spin" />探测中…</span>
+              </template>
+              <template v-else-if="row.concurrency_status.data_accounts === 0">
+                <span class="concurrency-muted"><DatabaseZap :size="13" :stroke-width="1.8" />暂无探测数据</span>
+              </template>
+              <template v-else>
+                <div v-for="account in concurrencyAccountRows(row)" :key="account.key_fingerprint" class="concurrency-account-row">
+                  <code class="concurrency-fingerprint">{{ account.key_fingerprint.slice(0, 8) }}…</code>
+                  <div class="concurrency-gauge">
+                    <div
+                      class="concurrency-gauge-fill"
+                      :class="{ high: account.percent >= 80, stale: account.stale }"
+                      :style="{ width: account.percent + '%' }"
+                    />
+                  </div>
+                  <span class="concurrency-number">{{ account.concurrency }}/{{ account.concurrency_limit }}</span>
+                  <span class="concurrency-fresh" :class="{ stale: account.stale }">
+                    <Clock3 v-if="account.stale" :size="12" :stroke-width="1.8" />
+                    {{ account.stale ? '已过期' : formatRelativeTime(account.observed_at) }}
+                  </span>
+                </div>
+                <div class="concurrency-summary">
+                  <Activity :size="12" :stroke-width="1.8" />
+                  {{ row.concurrency_status.data_accounts }}/{{ row.concurrency_status.total_accounts }} 个 Key · 更新于 {{ formatRelativeTime(row.concurrency_status.last_observed_at || 0) }}
+                </div>
+              </template>
+            </div>
+          </template>
+        </el-table-column>
+
         <el-table-column label="备注" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">{{ row.remark || '-' }}</template>
         </el-table-column>
@@ -349,7 +386,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { Activity, PlugZap, Plus, RefreshCw, Search } from '@lucide/vue'
+import { Activity, CircleOff, Clock3, DatabaseZap, PlugZap, Plus, RefreshCw, Search } from '@lucide/vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   adminApi,
@@ -509,6 +546,22 @@ const concurrencyStatusView = (row: UpstreamConfig) => {
     text: `${status.data_accounts}/${status.total_accounts} 账号有数据`,
     tooltip: detail
   }
+}
+
+const concurrencyAccountRows = (row: UpstreamConfig) => {
+  const status = row.concurrency_status
+  if (!status) return []
+  const now = Math.floor(Date.now() / 1000)
+  return status.accounts.map(account => {
+    const percent = account.concurrency_limit > 0
+      ? Math.min(100, Math.round((account.concurrency / account.concurrency_limit) * 100))
+      : (account.concurrency > 0 ? 100 : 0)
+    return {
+      ...account,
+      percent,
+      stale: now > account.fresh_until
+    }
+  })
 }
 
 const loadData = async () => {
@@ -999,6 +1052,94 @@ onMounted(() => {
 </script>
 
 <style scoped>
+
+.concurrency-data-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.concurrency-muted {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--crc-text-muted);
+}
+
+.concurrency-account-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.concurrency-fingerprint {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: var(--crc-text-strong);
+  min-width: 58px;
+}
+
+.concurrency-gauge {
+  flex: 1;
+  min-width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--crc-border);
+  overflow: hidden;
+}
+
+.concurrency-gauge-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--crc-success, #67c23a);
+  transition: width 0.3s ease;
+}
+
+.concurrency-gauge-fill.high {
+  background: var(--crc-warning, #e6a23c);
+}
+
+.concurrency-gauge-fill.stale {
+  background: var(--crc-danger, #f56c6c);
+}
+
+.concurrency-number {
+  font-variant-numeric: tabular-nums;
+  color: var(--crc-text-strong);
+  min-width: 44px;
+  text-align: right;
+}
+
+.concurrency-fresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--crc-text-muted);
+  white-space: nowrap;
+}
+
+.concurrency-fresh.stale {
+  color: var(--crc-danger, #f56c6c);
+}
+
+.concurrency-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--crc-text-muted);
+  border-top: 1px dashed var(--crc-border);
+  padding-top: 4px;
+}
+
+.spin {
+  animation: concurrency-spin 1.2s linear infinite;
+}
+
+@keyframes concurrency-spin {
+  to { transform: rotate(360deg); }
+}
 .concurrency-status-cell {
   display: flex;
   flex-direction: column;

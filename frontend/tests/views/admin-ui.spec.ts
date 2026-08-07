@@ -101,6 +101,16 @@ describe('admin ui structure', () => {
     expect(page).toContain('adminApi.updateUpstream(row.id, { concurrency_status_enabled: enabled })')
   })
 
+  it('shows a dedicated concurrency status column with per-account data', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('label="并发状态"')
+    expect(page).toContain('concurrencyAccountRows')
+    expect(page).toContain('account.concurrency_limit')
+    expect(page).toContain('account.fresh_until')
+    expect(page).toContain('last_observed_at')
+  })
+
   it('labels indexed model discovery results without key prefixes', () => {
     const page = source('views/admin/Upstreams.vue')
 
