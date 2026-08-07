@@ -72,6 +72,8 @@
             <span v-else-if="isCostRow(row)">
               <el-tag type="danger" size="small">金额计费</el-tag>
               每日 ¥{{ (row.daily_cost_limit_cents ?? 0) / 100 }}
+              · 已消耗 ¥{{ formatMoney(row.usage?.today_cost_cents ?? 0) }}
+              · 剩余 ¥{{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.today_cost_cents ?? 0))) }}
               · 输入 ¥{{ (row.input_token_price_per_million_cents ?? 0) / 100 }}
               · 输出 ¥{{ (row.output_token_price_per_million_cents ?? 0) / 100 }}/百万
             </span>
@@ -699,6 +701,8 @@ const handleDelete = async (row: DownstreamConfig) => {
     }
   }
 }
+
+const formatMoney = (cents: number) => `¥${(cents / 100).toFixed(2)}`
 
 const formatTokenLimit = (limit?: number) => {
   if (!limit) return '未设置'

@@ -584,28 +584,15 @@ impl PostgresStateStore {
     ) -> io::Result<Option<DownstreamUsageSummary>> {
         let conn = self.pool.get().await.map_err(io_other)?;
         let downstream_row = conn
-            .query_opt(
-                "SELECT id, billing_mode, input_token_price_per_million_cents,
-                        output_token_price_per_million_cents, daily_cost_limit_cents
-                 FROM downstreams WHERE id = $1",
-                &[&downstream_id],
-            )
+            .query_opt("SELECT id FROM downstreams WHERE id = $1", &[&downstream_id])
             .await
             .map_err(io_other)?;
-        let Some(downstream_row) = downstream_row else {
+        if downstream_row.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("downstream not found: {downstream_id}"),
             ));
-        };
-        let downstream_billing_mode: String = downstream_row.get(1);
-        let downstream_input_price_cents: Option<i64> = downstream_row.get(2);
-        let downstream_output_price_cents: Option<i64> = downstream_row.get(3);
-        let downstream_cost_limit_cents: Option<i64> = downstream_row.get(4);
-        let cost_billed = downstream_billing_mode == "token"
-            && (downstream_input_price_cents.is_some() || downstream_output_price_cents.is_some())
-            && downstream_cost_limit_cents.is_some();
-
+        }
         let allowlist_count = conn
             .query_one(
                 "SELECT COUNT(DISTINCT LOWER(TRIM(model_slug)))::BIGINT
@@ -665,27 +652,24 @@ impl PostgresStateStore {
         let now = unix_seconds();
         let today_start = u64_to_i64((now / 86_400) * 86_400);
         let month_start = u64_to_i64(current_month_start(now));
-        let sum_column = if cost_billed {
-            "total_cost_cents"
-        } else {
-            "total_tokens"
-        };
-        let sum_sql = format!(
-            "SELECT
-                 COALESCE(SUM({sum_column}) FILTER (WHERE created_at >= $2), 0)::BIGINT,
-                 COALESCE(SUM({sum_column}) FILTER (WHERE created_at >= $3), 0)::BIGINT
+        let sum_sql = "SELECT
+                 COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $2), 0)::BIGINT,
+                 COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $3), 0)::BIGINT,
+                 COALESCE(SUM(total_cost_cents) FILTER (WHERE created_at >= $2), 0)::BIGINT,
+                 COALESCE(SUM(total_cost_cents) FILTER (WHERE created_at >= $3), 0)::BIGINT
              FROM usage_logs
-             WHERE downstream_key_id = $1"
-        );
-        let token_row = conn
-            .query_one(&sum_sql, &[&downstream_id, &today_start, &month_start])
+             WHERE downstream_key_id = $1";
+        let usage_row = conn
+            .query_one(sum_sql, &[&downstream_id, &today_start, &month_start])
             .await
             .map_err(io_other)?;
 
         Ok(Some(DownstreamUsageSummary {
             downstream_id: downstream_id.to_string(),
-            today_tokens: i64_to_u64(token_row.get::<_, i64>(0)),
-            month_tokens: i64_to_u64(token_row.get::<_, i64>(1)),
+            today_tokens: i64_to_u64(usage_row.get::<_, i64>(0)),
+            month_tokens: i64_to_u64(usage_row.get::<_, i64>(1)),
+            today_cost_cents: i64_to_u64(usage_row.get::<_, i64>(2)),
+            month_cost_cents: i64_to_u64(usage_row.get::<_, i64>(3)),
             total_models,
             active_models: i64_to_usize(active_models),
         }))

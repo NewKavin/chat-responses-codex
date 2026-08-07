@@ -2,13 +2,13 @@ use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     fetch_models_from_upstream_keys_concurrently, model_discovery_url, portal_model_is_allowed,
-    unix_seconds, AccountConcurrencyKey, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig,
-    AppState, DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig,
-    EnrichedUsageLog, FreekeySyncError, FreekeySyncItem, GlobalContextProfile,
-    KeyModelDiscoveryResult, ModelQualificationApplySummary, ModelQualificationEvidence,
-    ModelQualificationLevel, ResolvedLogWindow, RouteHealthSnapshotDto, RuntimeCoordinationError,
-    SummaryRange, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog,
-    UsageLogQuery,
+    unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState,
+    DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig,
+    DownstreamUsageSummary, EnrichedUsageLog, FreekeySyncError, FreekeySyncItem,
+    GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
+    ModelQualificationEvidence, ModelQualificationLevel, ResolvedLogWindow, RouteHealthSnapshotDto,
+    RuntimeCoordinationError, SummaryRange, UpstreamConfig, UpstreamMutationError,
+    UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -1916,7 +1916,16 @@ pub(super) async fn admin_list_downstreams(
         });
     }
 
-    Json(downstreams).into_response()
+    let mut items = Vec::with_capacity(downstreams.len());
+    for downstream in downstreams {
+        let usage = state.downstream_usage_summary(&downstream.id).await.ok();
+        items.push(DownstreamListItem {
+            config: downstream,
+            usage,
+        });
+    }
+
+    Json(items).into_response()
 }
 
 #[derive(Serialize)]

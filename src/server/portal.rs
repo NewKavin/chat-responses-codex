@@ -161,15 +161,35 @@ pub(super) async fn portal_overview(
         })
     });
 
+    let cost_daily = downstream.daily_cost_limit().map(|limit| {
+        let used = summary.today_cost_cents;
+        json!({
+            "used_cents": used,
+            "limit_cents": limit,
+            "remaining_cents": limit.saturating_sub(used),
+            "percentage": if limit > 0 {
+                (used as f64 / limit as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+    });
+
     let quota_summary = json!({
         "request_quota": request_quota,
         "token_daily": token_daily,
         "token_monthly": token_monthly,
+        "cost_daily": cost_daily,
     });
 
     let token_summary = json!({
         "today": summary.today_tokens,
         "this_month": summary.month_tokens,
+    });
+
+    let cost_summary = json!({
+        "today_cents": summary.today_cost_cents,
+        "this_month_cents": summary.month_cost_cents,
     });
 
     let model_summary = json!({
@@ -195,6 +215,7 @@ pub(super) async fn portal_overview(
     Json(json!({
         "quota_summary": quota_summary,
         "token_summary": token_summary,
+        "cost_summary": cost_summary,
         "model_summary": model_summary,
         "concurrency": concurrency,
     }))

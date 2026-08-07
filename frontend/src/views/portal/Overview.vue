@@ -86,6 +86,27 @@
         </p>
       </article>
 
+      <article v-if="data.quota_summary.cost_daily" class="quota-summary-item crc-surface">
+        <div class="quota-summary-head">
+          <span class="quota-summary-icon"><Wallet :size="14" :stroke-width="1.8" /></span>
+          <span class="quota-summary-label">每日金额</span>
+          <span class="quota-summary-meta">REMAINING</span>
+        </div>
+        <div class="quota-summary-value-row">
+          <strong>{{ formatMoney(data.quota_summary.cost_daily.used_cents) }}</strong>
+          <span>/ {{ formatMoney(data.quota_summary.cost_daily.limit_cents) }}</span>
+        </div>
+        <el-progress
+          :percentage="formatPct(data.quota_summary.cost_daily.percentage)"
+          :color="getQuotaStatusColor(data.quota_summary.cost_daily.percentage)"
+          :show-text="false"
+          :stroke-width="6"
+        />
+        <p class="quota-summary-foot">
+          剩余 {{ formatMoney(data.quota_summary.cost_daily.remaining_cents) }} · {{ formatPct(data.quota_summary.cost_daily.percentage) }}%
+        </p>
+      </article>
+
       <article v-if="data.quota_summary.token_monthly" class="quota-summary-item crc-surface">
         <div class="quota-summary-head">
           <span class="quota-summary-icon"><CalendarRange :size="14" :stroke-width="1.8" /></span>
@@ -109,16 +130,30 @@
     </section>
 
     <section class="overview-meta-grid crc-stagger">
-      <article class="overview-meta-item crc-surface">
-        <span class="overview-meta-icon"><Activity :size="14" :stroke-width="1.8" /></span>
-        <span class="overview-meta-label">今日 Token 使用</span>
-        <strong>{{ formatCompact(data.token_summary.today) }}</strong>
-      </article>
-      <article class="overview-meta-item crc-surface">
-        <span class="overview-meta-icon"><CalendarDays :size="14" :stroke-width="1.8" /></span>
-        <span class="overview-meta-label">本月 Token 使用</span>
-        <strong>{{ formatCompact(data.token_summary.this_month) }}</strong>
-      </article>
+      <template v-if="isCostBilling">
+        <article class="overview-meta-item crc-surface">
+          <span class="overview-meta-icon"><Activity :size="14" :stroke-width="1.8" /></span>
+          <span class="overview-meta-label">今日金额</span>
+          <strong>{{ formatMoney(data.cost_summary.today_cents) }}</strong>
+        </article>
+        <article class="overview-meta-item crc-surface">
+          <span class="overview-meta-icon"><CalendarDays :size="14" :stroke-width="1.8" /></span>
+          <span class="overview-meta-label">本月金额</span>
+          <strong>{{ formatMoney(data.cost_summary.this_month_cents) }}</strong>
+        </article>
+      </template>
+      <template v-else>
+        <article class="overview-meta-item crc-surface">
+          <span class="overview-meta-icon"><Activity :size="14" :stroke-width="1.8" /></span>
+          <span class="overview-meta-label">今日 Token 使用</span>
+          <strong>{{ formatCompact(data.token_summary.today) }}</strong>
+        </article>
+        <article class="overview-meta-item crc-surface">
+          <span class="overview-meta-icon"><CalendarDays :size="14" :stroke-width="1.8" /></span>
+          <span class="overview-meta-label">本月 Token 使用</span>
+          <strong>{{ formatCompact(data.token_summary.this_month) }}</strong>
+        </article>
+      </template>
       <article class="overview-meta-item crc-surface">
         <span class="overview-meta-icon"><Boxes :size="14" :stroke-width="1.8" /></span>
         <span class="overview-meta-label">可用模型</span>
@@ -332,6 +367,7 @@ import {
   Clock3,
   Gauge,
   KeyRound,
+  Wallet,
   Radio,
   ShieldCheck,
   Zap
@@ -350,8 +386,14 @@ import {
 import { resolvePortalQuotaModelSlugs } from '@/utils/portalQuotaModels'
 
 const data = ref<PortalOverview>({
-  quota_summary: { request_quota: undefined, token_daily: undefined, token_monthly: undefined },
+  quota_summary: {
+    request_quota: undefined,
+    token_daily: undefined,
+    token_monthly: undefined,
+    cost_daily: undefined
+  },
   token_summary: { today: 0, this_month: 0 },
+  cost_summary: { today_cents: 0, this_month_cents: 0 },
   model_summary: { total_models: 0, active_models: 0 },
   concurrency: { available: false, limit: 0, updated_at: 0 }
 })
@@ -372,9 +414,12 @@ const hasQuotaSummary = computed(() =>
   Boolean(
     data.value.quota_summary.request_quota ||
       data.value.quota_summary.token_daily ||
-      data.value.quota_summary.token_monthly
+      data.value.quota_summary.token_monthly ||
+      data.value.quota_summary.cost_daily
   )
 )
+
+const isCostBilling = computed(() => Boolean(data.value.quota_summary.cost_daily))
 
 const showSummarySkeleton = computed(() => !hasQuotaSummary.value && !overviewLoaded.value)
 
@@ -402,6 +447,10 @@ const heroGauges = computed(() => {
   }
   if (monthly) {
     gauges.push({ label: '每月 TOKEN', sub: '本月累计', pct: formatPct(monthly.percentage) })
+  }
+  const costDaily = data.value.quota_summary.cost_daily
+  if (costDaily) {
+    gauges.push({ label: '每日金额', sub: '当日累计', pct: formatPct(costDaily.percentage) })
   }
   return gauges
 })
@@ -438,6 +487,7 @@ const getQuotaStatusColor = (percentage: number) => {
 
 const formatCompact = (value: number) => formatCompactNumber(value)
 const formatPct = (value: number) => formatPercentageTwoDecimals(value)
+const formatMoney = (cents: number) => `¥${((cents || 0) / 100).toFixed(2)}`
 
 let refreshTimer: number | null = null
 

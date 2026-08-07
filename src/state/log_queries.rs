@@ -61,6 +61,8 @@ pub struct DownstreamUsageSummary {
     pub downstream_id: String,
     pub today_tokens: u64,
     pub month_tokens: u64,
+    pub today_cost_cents: u64,
+    pub month_cost_cents: u64,
     pub total_models: usize,
     pub active_models: usize,
 }
@@ -194,6 +196,16 @@ pub fn build_downstream_usage_summary(
         .filter(|log| log.created_at >= month_start)
         .map(|log| log.total_tokens)
         .sum();
+    let today_cost_cents = downstream_logs
+        .iter()
+        .filter(|log| log.created_at >= today_start)
+        .filter_map(|log| log.total_cost_cents)
+        .sum();
+    let month_cost_cents = downstream_logs
+        .iter()
+        .filter(|log| log.created_at >= month_start)
+        .filter_map(|log| log.total_cost_cents)
+        .sum();
 
     let total_models = if !downstream.model_allowlist.is_empty() {
         downstream
@@ -223,6 +235,8 @@ pub fn build_downstream_usage_summary(
         downstream_id: downstream.id.clone(),
         today_tokens,
         month_tokens,
+        today_cost_cents,
+        month_cost_cents,
         total_models,
         active_models,
     })

@@ -119,6 +119,17 @@ describe('portal ui structure', () => {
 })
 
 describe('portal runtime concurrency display', () => {
+  it('shows cost billing amounts instead of token usage', () => {
+    const overview = source('Overview')
+
+    expect(overview).toContain('每日金额')
+    expect(overview).toContain('cost_daily')
+    expect(overview).toContain('formatMoney')
+    expect(overview).toContain('cost_summary')
+    expect(overview).toContain('今日金额')
+    expect(overview).toContain('本月金额')
+  })
+
   it('renders running waiting admitted and limit in the overview', () => {
     const overview = source('Overview')
 

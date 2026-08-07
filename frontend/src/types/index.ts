@@ -179,6 +179,18 @@ export interface DownstreamConfig {
   expires_at?: number
   active: boolean
   billing_mode?: 'request' | 'token'
+  /** 管理端列表附加的用量汇总（今日/本月 token 与金额，按分计）。 */
+  usage?: DownstreamUsage | null
+}
+
+export interface DownstreamUsage {
+  downstream_id: string
+  today_tokens: number
+  month_tokens: number
+  today_cost_cents: number
+  month_cost_cents: number
+  total_models: number
+  active_models: number
 }
 
 // ============================================================================
@@ -285,15 +297,27 @@ export interface DownstreamRuntimeResponse {
   updated_at: number
 }
 
+export interface CostDailyQuota {
+  used_cents: number
+  limit_cents: number
+  remaining_cents: number
+  percentage: number
+}
+
 export interface PortalOverview {
   quota_summary: {
     request_quota?: RequestQuotaUsage
     token_daily?: TokenQuota
     token_monthly?: TokenQuota
+    cost_daily?: CostDailyQuota
   }
   token_summary: {
     today: number
     this_month: number
+  }
+  cost_summary: {
+    today_cents: number
+    this_month_cents: number
   }
   model_summary: {
     total_models: number
