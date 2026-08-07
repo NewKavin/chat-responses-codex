@@ -291,6 +291,23 @@ describe('admin downstream cost billing', () => {
     expect(page).toContain('isCostRow(row)')
   })
 
+  it('shows only the balance in the cost quota column', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('金额计费')
+    expect(page).toContain('余额 ¥')
+    expect(page).not.toContain('已用')
+    expect(page).not.toContain('已消耗')
+    expect(page).not.toContain('IN ¥')
+    expect(page).not.toContain('OUT ¥')
+    expect(page).not.toContain('¥{{ (row.daily_cost_limit_cents ?? 0) / 100 }}/日')
+    // 表单内仍保留单价与日上限设置
+    expect(page).toContain('IN 单价/M')
+    expect(page).toContain('OUT 单价/M')
+    expect(page).toContain('日上限')
+    expect(page).toContain('金额计费（元）')
+  })
+
   it('keeps the batch dialog able to set cost billing fields', () => {
     const page = source('views/admin/Downstreams.vue')
 

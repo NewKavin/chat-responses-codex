@@ -71,15 +71,11 @@
             <span v-if="!row.rate_limit_enabled">未启用限额</span>
             <span v-else-if="isCostRow(row)">
               <el-tag type="danger" size="small">金额计费</el-tag>
-              每日 ¥{{ (row.daily_cost_limit_cents ?? 0) / 100 }}
-              · 已消耗 ¥{{ formatMoney(row.usage?.today_cost_cents ?? 0) }}
-              · 剩余 ¥{{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.today_cost_cents ?? 0))) }}
-              · 输入 ¥{{ (row.input_token_price_per_million_cents ?? 0) / 100 }}
-              · 输出 ¥{{ (row.output_token_price_per_million_cents ?? 0) / 100 }}/百万
+              余额 ¥{{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.today_cost_cents ?? 0))) }}
             </span>
             <span v-else-if="row.billing_mode === 'token'">
               <el-tag type="warning" size="small">Token 计费</el-tag>
-              每日 {{ formatTokenLimit(row.daily_token_limit) }}
+              {{ formatTokenLimit(row.daily_token_limit) }}/日
             </span>
             <span v-else>
               <el-tag size="small">按次数</el-tag>
@@ -191,7 +187,7 @@
           <el-form-item label="计费模式">
             <el-radio-group v-model="form.billing_mode">
               <el-radio-button value="request">按次数</el-radio-button>
-              <el-radio-button value="cost">按金额（每日限额）</el-radio-button>
+              <el-radio-button value="cost">按金额（日限额）</el-radio-button>
             </el-radio-group>
             <el-alert
               title="说明"
@@ -199,23 +195,23 @@
               :closable="false"
               class="helper-text"
             >
-              按次数：时间窗口内请求次数限额；按金额：输入/输出 token 按单价折算费用，从每日金额上限中扣除。
+              按次数：时间窗口内请求次数限额；按金额：输入/输出 token 按单价折算，从日金额上限中扣除。
             </el-alert>
           </el-form-item>
           <template v-if="form.billing_mode === 'cost'">
             <el-form-item>
-              <template #label><span class="filter-label"><Coins :size="13" :stroke-width="2" />金额计费（单位：元）</span></template>
+              <template #label><span class="filter-label"><Coins :size="13" :stroke-width="2" />金额计费（元）</span></template>
               <div class="price-row">
                 <div class="price-field">
-                  <span class="price-label"><ArrowDownToLine :size="13" :stroke-width="2" />输入单价/百万</span>
+                  <span class="price-label"><ArrowDownToLine :size="13" :stroke-width="2" />IN 单价/M</span>
                   <el-input-number v-model="inputTokenPricePerMillion" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
                 </div>
                 <div class="price-field">
-                  <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />输出单价/百万</span>
+                  <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />OUT 单价/M</span>
                   <el-input-number v-model="outputTokenPricePerMillion" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
                 </div>
                 <div class="price-field">
-                  <span class="price-label"><Wallet :size="13" :stroke-width="2" />每日上限</span>
+                  <span class="price-label"><Wallet :size="13" :stroke-width="2" />日上限</span>
                   <el-input-number v-model="dailyCostLimit" :min="0.01" :max="100000000" :step="1" :precision="2" style="width: 100%" />
                 </div>
               </div>
@@ -225,7 +221,7 @@
                 :closable="false"
                 class="helper-text"
               >
-                消耗金额 = 输入 Token × 输入单价 + 输出 Token × 输出单价，滚动 24 小时窗口从每日上限中扣除。只填一个单价时，另一个方向按 0 计。
+                消耗 = 输入 T × IN 单价 + 输出 T × OUT 单价，滚动 24h 从日上限扣除；只填一个单价时另一方向按 0 计。
               </el-alert>
             </el-form-item>
           </template>
@@ -295,23 +291,23 @@
         <el-form-item label="计费模式">
           <el-radio-group v-model="batchForm.billing_mode">
             <el-radio-button value="request">按次数</el-radio-button>
-            <el-radio-button value="cost">按金额（每日限额）</el-radio-button>
+            <el-radio-button value="cost">按金额（日限额）</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <template v-if="batchForm.billing_mode === 'cost'">
           <el-form-item>
-            <template #label><span class="filter-label"><Coins :size="13" :stroke-width="2" />金额计费（单位：元）</span></template>
+            <template #label><span class="filter-label"><Coins :size="13" :stroke-width="2" />金额计费（元）</span></template>
             <div class="price-row">
               <div class="price-field">
-                <span class="price-label"><ArrowDownToLine :size="13" :stroke-width="2" />输入单价/百万</span>
+                <span class="price-label"><ArrowDownToLine :size="13" :stroke-width="2" />IN 单价/M</span>
                 <el-input-number v-model="batchForm.input_token_price_per_million_cents" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
               </div>
               <div class="price-field">
-                <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />输出单价/百万</span>
+                <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />OUT 单价/M</span>
                 <el-input-number v-model="batchForm.output_token_price_per_million_cents" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
               </div>
               <div class="price-field">
-                <span class="price-label"><Wallet :size="13" :stroke-width="2" />每日上限</span>
+                <span class="price-label"><Wallet :size="13" :stroke-width="2" />日上限</span>
                 <el-input-number v-model="batchForm.daily_cost_limit_cents" :min="0.01" :max="100000000" :step="1" :precision="2" style="width: 100%" />
               </div>
             </div>
