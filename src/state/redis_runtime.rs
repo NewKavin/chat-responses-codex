@@ -332,6 +332,74 @@ impl RedisRuntimeCoordinator {
         .await
     }
 
+    pub(super) async fn reserve_downstream_admission(
+        &self,
+        downstream: &DownstreamConfig,
+        event_id: &str,
+        lease_id: &str,
+    ) -> Result<(), DownstreamAdmissionRejection> {
+        let identity = stable_identity(&downstream.id);
+        let request_key = self.key(&identity, "requests");
+        let token_key = self.key(&identity, "tokens");
+        let token_values_key = self.key(&identity, "token_values");
+        let lease_key = self.key(&identity, "leases");
+        let request_window_seconds = downstream
+            .request_quota_window_hours
+            .zip(downstream.request_quota_requests)
+            .map(|(hours, _)| u64::from(hours.max(1)).saturating_mul(60 * 60))
+            .unwrap_or(0);
+        let request_quota = if !downstream.token_billing_mode() && downstream.uses_request_quota() {
+            downstream.request_quota_requests.unwrap_or(0)
+        } else {
+            0
+        };
+        // Token billing mode: only the daily rolling window is enforced.
+        // Cost billing (token mode + price + cost limit) uses the cost limit
+        // in cents; otherwise falls back to the raw token limit.
+        let daily_limit = if downstream.token_billing_mode() {
+            downstream
+                .daily_cost_limit()
+                .or(downstream.daily_token_limit)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let monthly_limit = 0;
+        let result = self
+            .retry_coordination_once(|| {
+                let mut connection = self.connection();
+                let request_key = request_key.clone();
+                let token_key = token_key.clone();
+                let token_values_key = token_values_key.clone();
+                let lease_key = lease_key.clone();
+                let event_id = event_id.to_string();
+                let lease_id = lease_id.to_string();
+                async move {
+                    let script =
+                        redis::Script::new(include_str!("redis_runtime/downstream_admission.lua"));
+                    let mut invocation = script.prepare_invoke();
+                    invocation
+                        .key(request_key)
+                        .key(token_key)
+                        .key(token_values_key)
+                        .key(lease_key)
+                        .arg(event_id)
+                        .arg(downstream.per_minute_limit)
+                        .arg(request_window_seconds)
+                        .arg(request_quota)
+                        .arg(daily_limit)
+                        .arg(monthly_limit)
+                        .arg(lease_id)
+                        .arg(downstream.max_concurrency.max(1))
+                        .arg(self.downstream_lease_duration_ms);
+                    timeout_coordination(invocation.invoke_async::<Vec<i64>>(&mut connection)).await
+                }
+            })
+            .await
+            .map_err(|_| DownstreamAdmissionRejection::RuntimeCoordinationUnavailable)?;
+        parse_downstream_admission(result)
+    }
+
     pub(super) async fn record_downstream_tokens(
         &self,
         downstream_id: &str,
@@ -2323,6 +2391,42 @@ fn parse_downstream_reservation(result: Vec<i64>) -> Result<(), DownstreamAdmiss
             retry_after_seconds,
             limit,
             used,
+        }),
+        _ => Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable),
+    }
+}
+
+fn parse_downstream_admission(result: Vec<i64>) -> Result<(), DownstreamAdmissionRejection> {
+    let tag = result.first().copied().unwrap_or(-1);
+    let used = result.get(1).copied().unwrap_or_default().max(0) as u64;
+    let limit = result.get(2).copied().unwrap_or_default().max(0) as u64;
+    let retry_after_seconds = result.get(3).copied().unwrap_or(1).max(1) as u64;
+    match tag {
+        0 => Ok(()),
+        1 => Err(DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+            retry_after_seconds,
+            limit: limit.min(u64::from(u32::MAX)) as u32,
+            used: used.min(u64::from(u32::MAX)) as u32,
+        }),
+        2 => Err(DownstreamAdmissionRejection::RequestQuotaExceeded {
+            retry_after_seconds,
+            limit: limit.min(u64::from(u32::MAX)) as u32,
+            used: used.min(u64::from(u32::MAX)) as u32,
+            window_seconds: result.get(4).copied().unwrap_or_default().max(0) as u64,
+        }),
+        3 => Err(DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+            retry_after_seconds,
+            limit,
+            used,
+        }),
+        4 => Err(DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
+            retry_after_seconds,
+            limit,
+            used,
+        }),
+        5 => Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
+            retry_after_seconds: result.get(1).copied().unwrap_or(1).max(1) as u64,
+            limit: result.get(2).copied().unwrap_or_default().max(0) as u32,
         }),
         _ => Err(DownstreamAdmissionRejection::RuntimeCoordinationUnavailable),
     }

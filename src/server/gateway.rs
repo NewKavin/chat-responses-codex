@@ -4105,59 +4105,10 @@ async fn process_gateway_request_inner(
         return Err(error);
     }
 
-    let downstream_request_reservation = match state.reserve_downstream_request(&downstream).await {
-        Ok(reservation) => reservation,
-        Err(rejection) => {
-            let retry_after_seconds = rejection.retry_after_seconds();
-            tracing::warn!(
-                request_id = %request_id,
-                downstream_key_id = %downstream.id,
-                path = %request_path,
-                original_model = %model,
-                normalized_model = %normalized_model,
-                retry_after_seconds,
-                "downstream request admission rejected"
-            );
-            let error = GatewayError::downstream_admission_rejection(rejection);
-            let _ = append_gateway_usage_log(
-                &state,
-                &request_id,
-                &downstream.id,
-                &downstream.name,
-                "",
-                None,
-                request_path,
-                model,
-                inference_strength.as_deref(),
-                user_agent.as_deref(),
-                None,
-                error.status_code(),
-                Some(error.to_string()),
-                Some(error.error_category().to_string()),
-                0,
-                0,
-                0,
-                started,
-            )
-            .await;
-            active_request_guard.fail_and_finish(error.error_category());
-            return Err(error);
-        }
-    };
-
-    let downstream_concurrency_lease =
-        match state.try_reserve_downstream_concurrency(&downstream).await {
-            Ok(lease) => lease,
+    let (downstream_request_reservation, downstream_concurrency_lease) =
+        match state.reserve_downstream_admission(&downstream).await {
+            Ok(admission) => admission,
             Err(rejection) => {
-                let rollback_failed = state
-                    .rollback_downstream_request_reservation(downstream_request_reservation.clone())
-                    .await
-                    .is_err();
-                let rejection = if rollback_failed {
-                    crate::state::DownstreamAdmissionRejection::RuntimeCoordinationUnavailable
-                } else {
-                    rejection
-                };
                 let retry_after_seconds = rejection.retry_after_seconds();
                 tracing::warn!(
                     request_id = %request_id,
@@ -4167,7 +4118,8 @@ async fn process_gateway_request_inner(
                     normalized_model = %normalized_model,
                     retry_after_seconds,
                     max_concurrency = downstream.max_concurrency,
-                    "downstream concurrency admission rejected"
+                    rejection = ?rejection,
+                    "downstream admission rejected (request quota or concurrency)"
                 );
                 let error = GatewayError::downstream_admission_rejection(rejection);
                 let _ = append_gateway_usage_log(

@@ -5,7 +5,7 @@ use chat_responses_codex::keys::generate_downstream_key;
 use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
-    AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, AppState,
+    unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, AppState,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
     ModelContextConfig, PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
 };
@@ -1811,6 +1811,97 @@ async fn postgres_usage_log_query_respects_half_open_day_bounds() {
         !ids.contains(&"boundary-end"),
         "log at end_time must be excluded (half-open <)"
     );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
+async fn postgres_append_usage_logs_persists_a_batch_of_rows() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres batch usage log test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    let config = AppConfig::default();
+    let state = AppState::load_from_database_url(&database_url, config)
+        .await
+        .expect("should initialize postgres schema");
+    reset_test_database(&database_url);
+
+    let now = unix_seconds();
+    let logs: Vec<UsageLog> = (0..4)
+        .map(|index| UsageLog {
+            id: format!("batch-log-{index}"),
+            downstream_key_id: "down-batch".into(),
+            upstream_key_id: "up-batch".into(),
+            downstream_name: Some(format!("Batch {index}")),
+            upstream_name: None,
+            endpoint: "/v1/chat/completions".into(),
+            model: "gpt-4.1-mini".into(),
+            inference_strength: None,
+            billing_mode: Some("按次计费".into()),
+            request_count: Some(1),
+            user_agent: Some("batch-test".into()),
+            request_id: format!("req-batch-{index}"),
+            status_code: 200,
+            wire_status_code: 200,
+            stream_diagnostics: None,
+            error_message: None,
+            error_category: None,
+            prompt_tokens: 10 + index,
+            completion_tokens: 5 + index,
+            total_tokens: 15 + 2 * index,
+            total_cost_cents: None,
+            first_token_latency_ms: Some(100 + index),
+            latency_ms: 500 + index,
+            created_at: now + index,
+            compatibility: None,
+        })
+        .collect();
+
+    for log in logs.iter() {
+        state
+            .append_usage_log(log.clone())
+            .await
+            .expect("should enqueue usage log");
+    }
+    state
+        .flush_usage_logs_for_test()
+        .await
+        .expect("should flush the batch of usage logs");
+
+    let page = state
+        .query_usage_logs_page(UsageLogQuery {
+            start_time: now,
+            end_time: now + 4,
+            downstream_id: None,
+            upstream_id: None,
+            status_codes: vec![200],
+            error_categories: vec![],
+            model_substring: None,
+            page: 1,
+            page_size: 50,
+        })
+        .await
+        .expect("query should succeed");
+    assert_eq!(page.total, 4, "all batched usage logs must be persisted");
+    let ids: Vec<&str> = page
+        .logs
+        .iter()
+        .map(|entry| entry.log.id.as_str())
+        .collect();
+    for index in 0..4 {
+        assert!(
+            ids.contains(&format!("batch-log-{index}").as_str()),
+            "missing persisted log batch-log-{index}: {ids:?}"
+        );
+    }
 
     if injected_password.is_some() {
         env::remove_var("PGPASSWORD");

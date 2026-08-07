@@ -25,6 +25,7 @@ tower-http = { version = "=0.6.8", features = ["trace"] }
 tower = "=0.5.3"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
+tracing-appender = "=0.2.3"
 subtle = "2"
 uuid = { version = "=1.23.1", features = ["v4", "serde"] }
 jsonwebtoken = "9.3.0"

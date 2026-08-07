@@ -665,3 +665,81 @@ async fn downstream_billing_mode_defaults_to_request_when_absent() {
     assert_eq!(downstream.billing_mode(), "request");
     assert!(!downstream.token_billing_mode());
 }
+
+#[tokio::test]
+async fn downstream_admission_rolls_back_request_when_concurrency_exhausted() {
+    let tempdir = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let downstream = DownstreamConfig {
+        id: "down-admission-atomic".into(),
+        name: "Atomic admission".into(),
+        hash: String::new(),
+        plaintext_key: None,
+        plaintext_key_prefix: None,
+        model_allowlist: vec![],
+        rate_limit_enabled: true,
+        per_minute_limit: 100,
+        max_concurrency: 1,
+        daily_token_limit: None,
+        monthly_token_limit: None,
+        input_token_price_per_million_cents: None,
+        output_token_price_per_million_cents: None,
+        daily_cost_limit_cents: None,
+        request_quota_window_hours: None,
+        request_quota_requests: None,
+        ip_allowlist: vec![],
+        expires_at: None,
+        active: true,
+        billing_mode: "request".into(),
+    };
+
+    let (first_reservation, first_lease) = state
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect("first admission must succeed");
+    assert!(
+        first_lease.lease_id().is_some(),
+        "rate-limited admission must hold a concurrency lease"
+    );
+
+    let rejection = state
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect_err("second admission must be rejected while the lease is held");
+    assert!(
+        matches!(
+            rejection,
+            DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit: 1, .. }
+        ),
+        "unexpected rejection: {rejection:?}"
+    );
+
+    state
+        .release_downstream_concurrency(first_lease)
+        .await
+        .unwrap();
+
+    // The rejected admission must not have consumed a request-quota slot:
+    // after the lease is released, a fresh admission succeeds even though the
+    // per-minute counter saw two attempts.
+    let (second_reservation, second_lease) = state
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect("rollback of the rejected admission must free the request slot");
+    state
+        .rollback_downstream_request_reservation(second_reservation)
+        .await
+        .unwrap();
+    state
+        .release_downstream_concurrency(second_lease)
+        .await
+        .unwrap();
+    state
+        .rollback_downstream_request_reservation(first_reservation)
+        .await
+        .unwrap();
+}

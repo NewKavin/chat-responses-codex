@@ -92,9 +92,9 @@ pub(super) fn build_downstream_token_windows(
 ) -> HashMap<String, VecDeque<DownstreamTokenEvent>> {
     let mut windows = HashMap::new();
     for log in normalized_usage_logs(logs) {
-        let cost_billed = downstreams
-            .iter()
-            .any(|downstream| downstream.id == log.downstream_key_id && downstream.cost_billing_mode());
+        let cost_billed = downstreams.iter().any(|downstream| {
+            downstream.id == log.downstream_key_id && downstream.cost_billing_mode()
+        });
         windows
             .entry(log.downstream_key_id.clone())
             .or_insert_with(VecDeque::new)
@@ -368,7 +368,8 @@ impl AppState {
         let monthly_limit = downstream.and_then(|d| d.monthly_token_limit);
 
         // Daily quota uses the same rolling 24h window as admission.
-        let daily_start = now.saturating_sub(DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1));
+        let daily_start =
+            now.saturating_sub(DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1));
 
         let month_start = {
             use std::time::UNIX_EPOCH;

@@ -4,8 +4,8 @@ use super::log_queries::{
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, CalendarRange,
     DailyStats, DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary,
-    GlobalContextProfile, ModelContextConfig, PersistedState,
-    ResponseHistoryEntry, UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
+    GlobalContextProfile, ModelContextConfig, PersistedState, ResponseHistoryEntry, UpstreamConfig,
+    UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
@@ -155,7 +155,6 @@ impl PostgresStateStore {
                 upstreams[index].premium_models.push(model_slug);
             }
         }
-
 
         for upstream in &mut upstreams {
             upstream.normalize_for_storage();
@@ -583,7 +582,10 @@ impl PostgresStateStore {
     ) -> io::Result<Option<DownstreamUsageSummary>> {
         let conn = self.pool.get().await.map_err(io_other)?;
         let downstream_row = conn
-            .query_opt("SELECT id FROM downstreams WHERE id = $1", &[&downstream_id])
+            .query_opt(
+                "SELECT id FROM downstreams WHERE id = $1",
+                &[&downstream_id],
+            )
             .await
             .map_err(io_other)?;
         if downstream_row.is_none() {
@@ -1083,7 +1085,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             .await
             .map_err(io_other)?;
         }
-
     }
 
     Ok(())
@@ -1270,70 +1271,95 @@ async fn sync_announcements(
 }
 
 async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Result<()> {
-    for log in logs {
-        let request_count = log.request_count.map(|value| value as i64);
-        let compatibility = log
-            .compatibility
-            .as_ref()
-            .and_then(|value| serde_json::to_string(value).ok());
-        let prompt_tokens = log.prompt_tokens as i64;
-        let completion_tokens = log.completion_tokens as i64;
-        let total_tokens = log.total_tokens as i64;
-        let total_cost_cents = log.total_cost_cents.map(u64_to_i64);
-        let first_token_latency_ms = log.first_token_latency_ms.map(u64_to_i64);
-        let latency_ms = log.latency_ms as i64;
-        let created_at = log.created_at as i64;
-        let status_code = log.status_code as i32;
-        let wire_status_code = log.wire_status_code as i32;
-        let stream_diagnostics_json = log
-            .stream_diagnostics
-            .as_ref()
-            .map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null));
-        let params: &[&(dyn ToSql + Sync)] = &[
-            &log.id,
-            &log.downstream_key_id,
-            &log.upstream_key_id,
-            &log.downstream_name,
-            &log.upstream_name,
-            &log.endpoint,
-            &log.model,
-            &log.inference_strength,
-            &log.billing_mode,
-            &request_count,
-            &log.user_agent,
-            &log.request_id,
-            &status_code,
-            &wire_status_code,
-            &log.error_message,
-            &log.error_category,
-            &compatibility,
-            &prompt_tokens,
-            &completion_tokens,
-            &total_tokens,
-            &total_cost_cents,
-            &first_token_latency_ms,
-            &latency_ms,
-            &created_at,
-            &stream_diagnostics_json,
-        ];
+    const COLUMNS_PER_ROW: usize = 25;
+    // tokio-postgres parameter count is a u16; chunk far below the limit so a
+    // single multi-row INSERT stays well within bounds.
+    const MAX_ROWS_PER_STATEMENT: usize = 2_000;
 
-        tx.execute(
+    for chunk in logs.chunks(MAX_ROWS_PER_STATEMENT) {
+        let mut params: Vec<Box<dyn ToSql + Sync + Send>> =
+            Vec::with_capacity(chunk.len() * COLUMNS_PER_ROW);
+        let mut placeholders = String::with_capacity(chunk.len() * COLUMNS_PER_ROW * 4);
+        for (row_index, log) in chunk.iter().enumerate() {
+            let offset = row_index * COLUMNS_PER_ROW;
+            if row_index > 0 {
+                placeholders.push_str(", ");
+            }
+            placeholders.push('(');
+            for column in 1..=COLUMNS_PER_ROW {
+                if column > 1 {
+                    placeholders.push_str(", ");
+                }
+                let _ = std::fmt::Write::write_fmt(
+                    &mut placeholders,
+                    format_args!("${}", offset + column),
+                );
+            }
+            placeholders.push(')');
+
+            let request_count = log.request_count.map(|value| value as i64);
+            let compatibility = log
+                .compatibility
+                .as_ref()
+                .and_then(|value| serde_json::to_string(value).ok());
+            let prompt_tokens = log.prompt_tokens as i64;
+            let completion_tokens = log.completion_tokens as i64;
+            let total_tokens = log.total_tokens as i64;
+            let total_cost_cents = log.total_cost_cents.map(u64_to_i64);
+            let first_token_latency_ms = log.first_token_latency_ms.map(u64_to_i64);
+            let latency_ms = log.latency_ms as i64;
+            let created_at = log.created_at as i64;
+            let status_code = log.status_code as i32;
+            let wire_status_code = log.wire_status_code as i32;
+            let stream_diagnostics_json = log
+                .stream_diagnostics
+                .as_ref()
+                .map(|value| serde_json::to_value(value).unwrap_or(serde_json::Value::Null));
+
+            for param in [
+                Box::new(log.id.clone()) as Box<dyn ToSql + Sync + Send>,
+                Box::new(log.downstream_key_id.clone()),
+                Box::new(log.upstream_key_id.clone()),
+                Box::new(log.downstream_name.clone()),
+                Box::new(log.upstream_name.clone()),
+                Box::new(log.endpoint.clone()),
+                Box::new(log.model.clone()),
+                Box::new(log.inference_strength.clone()),
+                Box::new(log.billing_mode.clone()),
+                Box::new(request_count),
+                Box::new(log.user_agent.clone()),
+                Box::new(log.request_id.clone()),
+                Box::new(status_code),
+                Box::new(wire_status_code),
+                Box::new(log.error_message.clone()),
+                Box::new(log.error_category.clone()),
+                Box::new(compatibility),
+                Box::new(prompt_tokens),
+                Box::new(completion_tokens),
+                Box::new(total_tokens),
+                Box::new(total_cost_cents),
+                Box::new(first_token_latency_ms),
+                Box::new(latency_ms),
+                Box::new(created_at),
+                Box::new(stream_diagnostics_json),
+            ] {
+                params.push(param);
+            }
+        }
+
+        let sql = format!(
             "INSERT INTO usage_logs (
                 id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                 endpoint, model, inference_strength, billing_mode, request_count,
                 user_agent, request_id, status_code, wire_status_code, error_message, error_category,
                 compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
-            ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16,
-                $17, $18, $19, $20, $21, $22,
-                $23, $24, $25
-            ) ON CONFLICT (id) DO NOTHING",
-            params,
-        )
-        .await
-        .map_err(io_other)?;
+            ) VALUES {placeholders} ON CONFLICT (id) DO NOTHING"
+        );
+        let param_refs: Vec<&(dyn ToSql + Sync)> = params
+            .iter()
+            .map(|param| param.as_ref() as &(dyn ToSql + Sync))
+            .collect();
+        tx.execute(&sql, &param_refs).await.map_err(io_other)?;
     }
 
     Ok(())

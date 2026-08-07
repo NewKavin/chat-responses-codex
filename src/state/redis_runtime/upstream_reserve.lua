@@ -42,16 +42,19 @@ local function cost_since(start_ms)
   return total
 end
 
-if hedge then
-  if redis.call('ZCARD', KEYS[1]) >= max_concurrency then
-    local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-    local retry_after = 1
-    if #oldest >= 2 then
-      retry_after = math.max(1, math.ceil((tonumber(oldest[2]) - now_ms) / 1000))
-    end
-    return {'1', tostring(retry_after)}
+-- The concurrency cap applies to every request (main + hedge), so a
+-- saturated upstream rejects new work up front instead of relying solely
+-- on provider 429s and the reactive account-probe throttle.
+if redis.call('ZCARD', KEYS[1]) >= max_concurrency then
+  local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+  local retry_after = 1
+  if #oldest >= 2 then
+    retry_after = math.max(1, math.ceil((tonumber(oldest[2]) - now_ms) / 1000))
   end
+  return {'1', tostring(retry_after)}
+end
 
+if hedge then
   local minute_cost = cost_since(now_ms - (60 * 1000) + 1)
   if minute_limit > 0 and minute_cost + request_cost > minute_limit then
     return {'2', '1'}

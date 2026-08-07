@@ -35,6 +35,18 @@ fn create_test_state() -> AppState {
 fn create_test_state_with_config(config: AppConfig) -> AppState {
     let now = chat_responses_codex::state::unix_seconds();
 
+    // The default "today" window is the deployment-timezone calendar day. When
+    // the suite runs shortly after midnight, a fixed "now - 1800" offset can
+    // fall into the *previous* day and be excluded by the today filter. Clamp
+    // the fixture timestamps into today's window so the tests are
+    // time-of-day independent.
+    let calendar = DeploymentCalendar::parse("Asia/Shanghai").expect("valid timezone");
+    let today_start = calendar
+        .resolve_detail(None, now)
+        .expect("valid today window")
+        .start_time;
+    let log2_created_at = now.saturating_sub(1800).max(today_start.saturating_add(1));
+
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),
         downstreams: std::sync::Arc::new(vec![]),
@@ -90,7 +102,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 total_cost_cents: None,
                 first_token_latency_ms: None,
                 latency_ms: 300,
-                created_at: now - 1800, // 30 minutes ago
+                created_at: log2_created_at, // 30 minutes ago (clamped into today)
                 compatibility: None,
             },
             UsageLog {

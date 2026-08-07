@@ -558,7 +558,6 @@ impl AccountConcurrencyRegistry {
         u64::try_from(instant.saturating_duration_since(self.origin).as_millis())
             .unwrap_or(u64::MAX)
     }
-
 }
 
 fn ticket_identity_matches(left: &AccountWaitTicket, right: &AccountWaitTicket) -> bool {

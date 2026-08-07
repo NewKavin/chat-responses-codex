@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = env_or("BIND_ADDR", "0.0.0.0:3001");
     let state_path = PathBuf::from(env_or("STATE_PATH", "data/state.json"));
     let log_path = env_or("LOG_PATH", "logs/chat-responses-codex.log");
-    init_tracing(&log_path);
+    let _log_guard = init_tracing(&log_path);
     let context_retry_max_attempts_chat_default = env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 2).max(1);
     let context_retry_max_attempts_responses_default =
         env_u32("CONTEXT_RETRY_MAX_ATTEMPTS", 3).max(1);
@@ -614,7 +614,7 @@ fn spawn_usage_log_retention_task(state: AppState) {
     });
 }
 
-fn init_tracing(log_path: &str) {
+fn init_tracing(log_path: &str) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn"));
     let builder = tracing_subscriber::fmt()
@@ -634,12 +634,17 @@ fn init_tracing(log_path: &str) {
     };
 
     if let Some(file_writer) = file_writer {
-        let writer = move || TeeWriter {
-            file: file_writer.clone(),
-        };
-        let _ = builder.with_writer(writer).try_init();
+        // Route every log line through a non-blocking writer: request threads
+        // only append to an in-memory buffer, while a dedicated worker thread
+        // performs the synchronous stdout+file writes and flushes.  This
+        // removes per-request sync IO from the hot path.
+        let tee = TeeWriter { file: file_writer };
+        let (non_blocking, guard) = tracing_appender::non_blocking(tee);
+        let _ = builder.with_writer(non_blocking).try_init();
+        Some(guard)
     } else {
         let _ = builder.try_init();
+        None
     }
 }
 

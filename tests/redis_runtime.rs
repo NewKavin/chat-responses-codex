@@ -2146,13 +2146,74 @@ async fn redis_upstream_reservations_snapshots_and_exact_release_are_shared() {
 }
 
 #[tokio::test]
+async fn local_main_upstream_request_respects_max_concurrency() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut upstream = redis_test_upstream("local-main-request-concurrency");
+    upstream.max_concurrency = 1;
+    state.insert_upstream(upstream.clone()).await.unwrap();
+
+    let first = state
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    let rejection = state
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .expect_err("the main request must respect max_concurrency");
+    assert!(
+        !rejection.is_runtime_coordination_unavailable(),
+        "a full concurrency slot is an admission rejection, not a coordination failure"
+    );
+
+    state.release_upstream_request(first).await.unwrap();
+    let retry = state
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    state.release_upstream_request(retry).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_main_upstream_request_respects_max_concurrency() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let upstream = redis_test_upstream("redis-main-request-concurrency");
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream.clone()).await.unwrap();
+
+    let first_lease = first
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    let rejection = second
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .expect_err("the main request must observe the shared lease");
+    assert!(!rejection.is_runtime_coordination_unavailable());
+
+    first.release_upstream_request(first_lease).await.unwrap();
+    let retry = second
+        .try_reserve_upstream_request(&upstream, "model-a")
+        .await
+        .unwrap();
+    second.release_upstream_request(retry).await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
 async fn redis_upstream_snapshot_counts_flat_request_cost() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
-    let upstream = redis_test_upstream("precise-upstream-costs");
+    let mut upstream = redis_test_upstream("precise-upstream-costs");
     // Upstream model-weighted request costs were removed; every request
     // consumes a flat 1.0 quota unit.
+    upstream.max_concurrency = 2;
     let request_cost = 1.0_f64;
     first.insert_upstream(upstream.clone()).await.unwrap();
     second.insert_upstream(upstream.clone()).await.unwrap();
@@ -3256,4 +3317,107 @@ async fn redis_downstream_lease_uses_short_ttl_not_upstream_stream_duration() {
     // Keep the lease alive until after the assertions; dropping it releases
     // the Redis lease and would make the ZSET empty.
     drop(lease);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_admission_reserves_request_and_lease_atomically() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let downstream = redis_test_downstream("shared-admission-atomic");
+
+    let (reservation, lease) = first
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect("first combined admission must succeed");
+    assert!(
+        lease.lease_id().is_some(),
+        "combined admission must hold a concurrency lease"
+    );
+
+    // The second instance must observe both the request slot and the lease.
+    let rejection = second
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect_err("second admission must be rejected while lease is held");
+    assert!(
+        matches!(
+            rejection,
+            DownstreamAdmissionRejection::PerMinuteLimitExceeded {
+                limit: 1,
+                used: 1,
+                ..
+            }
+        ),
+        "unexpected rejection: {rejection:?}"
+    );
+
+    first
+        .rollback_downstream_request_reservation(reservation)
+        .await
+        .unwrap();
+    first.release_downstream_concurrency(lease).await.unwrap();
+    let (reservation, lease) = second
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect("admission must succeed after rollback and release");
+    second
+        .rollback_downstream_request_reservation(reservation)
+        .await
+        .unwrap();
+    second.release_downstream_concurrency(lease).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_admission_concurrency_rejection_records_nothing() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let mut downstream = redis_test_downstream("admission-reject-records-nothing");
+    downstream.per_minute_limit = 100;
+    downstream.request_quota_window_hours = Some(1);
+    downstream.request_quota_requests = Some(2);
+
+    let (first_reservation, first_lease) = first
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect("first admission must succeed");
+
+    // With quota 2 and one request recorded, a second admission passes the
+    // request checks but must be rejected on the concurrency limit.
+    let rejection = second
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect_err("second admission must hit the concurrency limit");
+    assert!(
+        matches!(
+            rejection,
+            DownstreamAdmissionRejection::ConcurrencyLimitExceeded { limit: 1, .. }
+        ),
+        "unexpected rejection: {rejection:?}"
+    );
+
+    // Atomicity: the rejected admission must NOT have recorded its request
+    // event. After the first lease is released, a fresh admission succeeds
+    // (quota used is still 1, not 2).
+    first
+        .release_downstream_concurrency(first_lease)
+        .await
+        .unwrap();
+    let (second_reservation, second_lease) = second
+        .reserve_downstream_admission(&downstream)
+        .await
+        .expect("rejected admission must not consume a request-quota slot");
+    second
+        .rollback_downstream_request_reservation(second_reservation)
+        .await
+        .unwrap();
+    second
+        .release_downstream_concurrency(second_lease)
+        .await
+        .unwrap();
+    first
+        .rollback_downstream_request_reservation(first_reservation)
+        .await
+        .unwrap();
 }

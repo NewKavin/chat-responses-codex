@@ -535,10 +535,7 @@ pub(super) async fn prefetch_first_usable_output(
                 reader.replay_later(chunk.clone());
                 match classifier
                     .push(&chunk, |event| {
-                        if let Ok(value) = serde_json::from_str::<Value>(event.data()) {
-                            commit_tracker.observe_json(endpoint, &value);
-                        }
-                        sse_event_has_usable_output(event)
+                        classify_prefetch_payload(event.data(), endpoint, &commit_tracker)
                     })
                     .map_err(protocol_error_to_gateway)?
                 {
@@ -557,10 +554,7 @@ pub(super) async fn prefetch_first_usable_output(
             StreamReadOutcome::Chunk(Ok(None)) => {
                 return match classifier
                     .finish(|event| {
-                        if let Ok(value) = serde_json::from_str::<Value>(event.data()) {
-                            commit_tracker.observe_json(endpoint, &value);
-                        }
-                        sse_event_has_usable_output(event)
+                        classify_prefetch_payload(event.data(), endpoint, &commit_tracker)
                     })
                     .map_err(protocol_error_to_gateway)?
                 {
@@ -614,12 +608,25 @@ pub(super) async fn prefetch_first_usable_output(
     }
 }
 
-fn sse_event_has_usable_output(event: &crate::protocol::stream_aggregate::SseEvent) -> bool {
-    let payload = event.data().trim();
+/// Classify a prefetch SSE payload with a single JSON parse: the parsed value
+/// feeds both the commit tracker (replay safety) and the usable-output check.
+/// Heartbeat/`[DONE]` payloads and invalid JSON skip parsing entirely.
+fn classify_prefetch_payload(
+    payload: &str,
+    endpoint: EndpointKind,
+    commit_tracker: &stream_commit::StreamCommitTracker,
+) -> bool {
+    let payload = payload.trim();
     if payload.is_empty() || payload == "[DONE]" {
         return false;
     }
-    serde_json::from_str::<Value>(payload).is_ok_and(|value| stream_event_has_usable_output(&value))
+    match serde_json::from_str::<Value>(payload) {
+        Ok(value) => {
+            commit_tracker.observe_json(endpoint, &value);
+            stream_event_has_usable_output(&value)
+        }
+        Err(_) => false,
+    }
 }
 
 fn log_stream_body_read_diagnostic(
@@ -2570,5 +2577,80 @@ mod diagnostic_tests {
                 "mismatch for input {buf:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod prefetch_classifier_tests {
+    use super::*;
+
+    #[test]
+    fn chat_usable_delta_returns_true_and_observes_commit() {
+        let tracker = stream_commit::StreamCommitTracker::default();
+        let payload = r#"{"choices":[{"delta":{"content":"hello"}}]}"#;
+        assert!(classify_prefetch_payload(
+            payload,
+            EndpointKind::ChatCompletions,
+            &tracker
+        ));
+        assert!(
+            tracker.semantic_output_observed(),
+            "usable chat delta must be observed by the commit tracker"
+        );
+        assert!(!tracker.can_replay());
+    }
+
+    #[test]
+    fn responses_usable_output_returns_true_and_observes_commit() {
+        let tracker = stream_commit::StreamCommitTracker::default();
+        let payload = r#"{"type":"response.output_text.delta","delta":"hi"}"#;
+        assert!(classify_prefetch_payload(
+            payload,
+            EndpointKind::Responses,
+            &tracker
+        ));
+        assert!(tracker.semantic_output_observed());
+    }
+
+    #[test]
+    fn done_and_empty_payloads_skip_parse_and_do_not_observe() {
+        let tracker = stream_commit::StreamCommitTracker::default();
+        for payload in ["[DONE]", "", "   "] {
+            assert!(!classify_prefetch_payload(
+                payload,
+                EndpointKind::Responses,
+                &tracker
+            ));
+        }
+        assert!(
+            tracker.can_replay(),
+            "heartbeat-like payloads must not block replay"
+        );
+        assert!(!tracker.semantic_output_observed());
+    }
+
+    #[test]
+    fn invalid_json_does_not_observe_or_classify() {
+        let tracker = stream_commit::StreamCommitTracker::default();
+        assert!(!classify_prefetch_payload(
+            "{not json",
+            EndpointKind::ChatCompletions,
+            &tracker
+        ));
+        assert!(tracker.can_replay());
+        assert!(!tracker.semantic_output_observed());
+    }
+
+    #[test]
+    fn non_usable_valid_json_observes_but_returns_false() {
+        let tracker = stream_commit::StreamCommitTracker::default();
+        let payload = r#"{"choices":[{"delta":{"role":"assistant"}}]}"#;
+        assert!(!classify_prefetch_payload(
+            payload,
+            EndpointKind::ChatCompletions,
+            &tracker
+        ));
+        assert!(!tracker.semantic_output_observed());
+        assert!(tracker.can_replay());
     }
 }

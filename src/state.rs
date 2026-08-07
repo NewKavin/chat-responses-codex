@@ -122,10 +122,10 @@ pub use types::{
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConcurrencySnapshot,
-    DownstreamConfig, GlobalContextProfile, ModelContextConfig,
-    PersistedState, RouteFailureClass, RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig,
-    UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
-    DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS, DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
+    DownstreamConfig, GlobalContextProfile, ModelContextConfig, PersistedState, RouteFailureClass,
+    RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig, UpstreamMutationError, UsageLog,
+    ADMIN_SESSION_TTL_SECONDS, DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS,
+    DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS, DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
     DEFAULT_UPSTREAM_HEDGE_ENABLED, DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
@@ -313,7 +313,8 @@ struct DownstreamLeaseState {
 impl DownstreamLeaseState {
     fn prune_expired(&mut self, now_ms: u64) {
         self.admitted.retain(|_, expires_at| *expires_at > now_ms);
-        self.waiting.retain(|lease_id| self.admitted.contains_key(lease_id));
+        self.waiting
+            .retain(|lease_id| self.admitted.contains_key(lease_id));
     }
 
     fn is_empty(&self) -> bool {
@@ -2450,6 +2451,12 @@ impl AppState {
             upstream.request_quota_window_seconds(),
         );
 
+        if state.active_leases.len() >= upstream.max_concurrency.max(1) as usize {
+            return Err(UpstreamAdmissionError::new(
+                "upstream request concurrency capacity is full".into(),
+                1,
+            ));
+        }
         let lease_id = Uuid::new_v4().to_string();
         state.active_leases.insert(lease_id.clone());
         state.minute_events.push_back(QuotaEvent {
@@ -2531,6 +2538,12 @@ impl AppState {
             ));
         }
 
+        if state.active_leases.len() >= upstream.max_concurrency.max(1) as usize {
+            return Err(UpstreamAdmissionError::new(
+                "upstream request concurrency capacity is full".into(),
+                1,
+            ));
+        }
         let lease_id = Uuid::new_v4().to_string();
         state.active_leases.insert(lease_id.clone());
         state.minute_events.push_back(QuotaEvent {
@@ -3000,6 +3013,65 @@ impl AppState {
         Ok(())
     }
 
+    /// Atomically reserve both the request-quota slot and the concurrency
+    /// lease for a downstream request. On Redis the two Lua operations are
+    /// merged into a single round trip; on the local backend a rejected
+    /// concurrency lease rolls back the request slot so admission stays
+    /// all-or-nothing.
+    pub async fn reserve_downstream_admission(
+        &self,
+        downstream: &DownstreamConfig,
+    ) -> Result<
+        (DownstreamRequestReservation, DownstreamConcurrencyLease),
+        DownstreamAdmissionRejection,
+    > {
+        if !downstream.rate_limit_enabled {
+            return Ok((
+                DownstreamRequestReservation {
+                    downstream_id: downstream.id.clone(),
+                    event_id: None,
+                },
+                DownstreamConcurrencyLease {
+                    downstream_id: downstream.id.clone(),
+                    lease_id: None,
+                    release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
+                },
+            ));
+        }
+
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            let event_id = Uuid::new_v4().to_string();
+            let lease_id = Uuid::new_v4().to_string();
+            coordinator
+                .reserve_downstream_admission(downstream, &event_id, &lease_id)
+                .await?;
+            return Ok((
+                DownstreamRequestReservation {
+                    downstream_id: downstream.id.clone(),
+                    event_id: Some(event_id),
+                },
+                DownstreamConcurrencyLease {
+                    downstream_id: downstream.id.clone(),
+                    lease_id: Some(lease_id),
+                    release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
+                },
+            ));
+        }
+
+        let reservation = self.reserve_downstream_request(downstream).await?;
+        match self.try_reserve_downstream_concurrency(downstream).await {
+            Ok(lease) => Ok((reservation, lease)),
+            Err(rejection) => {
+                // Best-effort rollback keeps local admission atomic: a rejected
+                // concurrency lease must not consume a request-quota slot.
+                let _ = self
+                    .rollback_downstream_request_reservation(reservation)
+                    .await;
+                Err(rejection)
+            }
+        }
+    }
+
     pub async fn reserve_downstream_request(
         &self,
         downstream: &DownstreamConfig,
@@ -3063,22 +3135,23 @@ impl AppState {
 
         if !downstream.token_billing_mode() {
             if let Some(request_quota_window_seconds) = request_quota_window_seconds {
-            let request_quota_requests = downstream.request_quota_requests.unwrap_or(0).max(1);
-            let quota_start = now.saturating_sub(request_quota_window_seconds.saturating_sub(1));
-            let quota_count = window
-                .iter()
-                .filter(|event| event.created_at >= quota_start)
-                .count();
-            if quota_count >= request_quota_requests as usize {
-                let oldest = window
+                let request_quota_requests = downstream.request_quota_requests.unwrap_or(0).max(1);
+                let quota_start =
+                    now.saturating_sub(request_quota_window_seconds.saturating_sub(1));
+                let quota_count = window
                     .iter()
-                    .find(|event| event.created_at >= quota_start)
-                    .map(|event| event.created_at)
-                    .unwrap_or(now);
-                let retry_after = oldest
-                    .saturating_add(request_quota_window_seconds)
-                    .saturating_sub(now)
-                    .max(1);
+                    .filter(|event| event.created_at >= quota_start)
+                    .count();
+                if quota_count >= request_quota_requests as usize {
+                    let oldest = window
+                        .iter()
+                        .find(|event| event.created_at >= quota_start)
+                        .map(|event| event.created_at)
+                        .unwrap_or(now);
+                    let retry_after = oldest
+                        .saturating_add(request_quota_window_seconds)
+                        .saturating_sub(now)
+                        .max(1);
                     return Err(DownstreamAdmissionRejection::RequestQuotaExceeded {
                         retry_after_seconds: retry_after,
                         limit: request_quota_requests,
@@ -3215,9 +3288,10 @@ impl AppState {
             .downstream_lease_ttl_seconds
             .saturating_mul(1_000)
             .max(60_000);
-        current
-            .admitted
-            .insert(lease_id.clone(), unix_millis().saturating_add(lease_duration_ms));
+        current.admitted.insert(
+            lease_id.clone(),
+            unix_millis().saturating_add(lease_duration_ms),
+        );
         Ok(DownstreamConcurrencyLease {
             downstream_id: downstream.id.clone(),
             lease_id: Some(lease_id),
@@ -3287,9 +3361,10 @@ impl AppState {
                 .downstream_lease_ttl_seconds
                 .saturating_mul(1_000)
                 .max(60_000);
-            state
-                .admitted
-                .insert(lease_id.to_string(), unix_millis().saturating_add(lease_duration_ms));
+            state.admitted.insert(
+                lease_id.to_string(),
+                unix_millis().saturating_add(lease_duration_ms),
+            );
         }
         Ok(())
     }
@@ -5358,7 +5433,9 @@ mod tests {
         {
             let mut runtime = state.downstream_runtime.lock().unwrap();
             let entry = runtime.entry(downstream.id.clone()).or_default();
-            entry.admitted.insert("expired-lease".into(), now_ms - 1_000);
+            entry
+                .admitted
+                .insert("expired-lease".into(), now_ms - 1_000);
             entry.admitted.insert("live-lease".into(), now_ms + 600_000);
             entry.waiting.insert("expired-lease".into());
         }
@@ -5368,7 +5445,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(counts.admitted, 1, "expired leases must be pruned");
-        assert_eq!(counts.waiting_upstream, 0, "orphaned waiting entries must be pruned");
+        assert_eq!(
+            counts.waiting_upstream, 0,
+            "orphaned waiting entries must be pruned"
+        );
         assert_eq!(counts.running, 1);
 
         let runtime = state.downstream_runtime.lock().unwrap();
@@ -5401,7 +5481,9 @@ mod tests {
             let mut runtime = state.downstream_runtime.lock().unwrap();
             let entry = runtime.get_mut(&downstream.id).unwrap();
             let lease_id = first.lease_id.as_ref().expect("local lease id").clone();
-            entry.admitted.insert(lease_id, crate::util::unix_millis() - 1_000);
+            entry
+                .admitted
+                .insert(lease_id, crate::util::unix_millis() - 1_000);
         }
         let second = state
             .try_reserve_downstream_concurrency(&downstream)
@@ -5429,7 +5511,9 @@ mod tests {
         {
             let mut runtime = state.downstream_runtime.lock().unwrap();
             let entry = runtime.get_mut(&downstream.id).unwrap();
-            entry.admitted.insert(lease_id.clone(), crate::util::unix_millis() + 1_000);
+            entry
+                .admitted
+                .insert(lease_id.clone(), crate::util::unix_millis() + 1_000);
         }
         state.renew_downstream_concurrency(&lease).await.unwrap();
         let runtime = state.downstream_runtime.lock().unwrap();
@@ -5444,4 +5528,3 @@ mod tests {
         );
     }
 }
-
