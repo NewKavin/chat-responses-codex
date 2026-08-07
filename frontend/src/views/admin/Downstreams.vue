@@ -71,7 +71,7 @@
             <span v-if="!row.rate_limit_enabled">未启用限额</span>
             <span v-else-if="isCostRow(row)">
               <el-tag type="danger" size="small">金额计费</el-tag>
-              余额 ¥{{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.today_cost_cents ?? 0))) }}
+              余额 {{ formatMoney(Math.max(0, (row.daily_cost_limit_cents ?? 0) - (row.usage?.today_cost_cents ?? 0))) }}
             </span>
             <span v-else-if="row.billing_mode === 'token'">
               <el-tag type="warning" size="small">Token 计费</el-tag>
@@ -184,6 +184,17 @@
 
         <template v-if="form.rate_limit_enabled">
           <el-divider class="drawer-section">限额配置</el-divider>
+          <el-form-item label="并发限制">
+            <el-input-number v-model="form.max_concurrency" :min="1" :max="5000" />
+            <el-alert
+              title="说明"
+              type="info"
+              :closable="false"
+              class="helper-text"
+            >
+              所有计费模式下生效：同一时刻允许并发处理中的请求数上限。
+            </el-alert>
+          </el-form-item>
           <el-form-item label="计费模式">
             <el-radio-group v-model="form.billing_mode">
               <el-radio-button value="request">按次数</el-radio-button>
@@ -228,9 +239,6 @@
           <template v-else>
             <el-form-item label="每分钟限制" prop="per_minute_limit">
               <el-input-number v-model="form.per_minute_limit" :min="1" :max="10000" />
-            </el-form-item>
-            <el-form-item label="并发限制">
-              <el-input-number v-model="form.max_concurrency" :min="1" :max="5000" />
             </el-form-item>
             <el-form-item label="时间窗口（小时）">
               <el-input-number v-model="requestQuotaHours" :min="1" :max="168" />
