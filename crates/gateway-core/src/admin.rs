@@ -2,7 +2,7 @@ use crate::routing::UpstreamProtocol;
 use crate::state::{
     default_upstream_max_concurrency, default_upstream_request_quota_requests,
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
-    DownstreamConfig, ModelRequestCostConfig, UpstreamConfig,
+    DownstreamConfig, UpstreamConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,6 @@ pub struct UpstreamForm {
     pub request_quota_requests: Option<u32>,
     pub requests_per_minute: Option<u32>,
     pub max_concurrency: Option<u32>,
-    pub model_request_costs: Option<String>,
     pub active: Option<String>,
 }
 
@@ -100,7 +99,6 @@ pub struct UpstreamFormView {
     pub request_quota_requests: String,
     pub requests_per_minute: String,
     pub max_concurrency: String,
-    pub model_request_costs: String,
     pub active: bool,
 }
 
@@ -377,7 +375,6 @@ impl UpstreamFormView {
             request_quota_requests: default_upstream_request_quota_requests().to_string(),
             requests_per_minute: default_upstream_requests_per_minute().to_string(),
             max_concurrency: default_upstream_max_concurrency().to_string(),
-            model_request_costs: String::new(),
             active: true,
         }
     }
@@ -396,7 +393,6 @@ impl UpstreamFormView {
             request_quota_requests: upstream.request_quota_requests.to_string(),
             requests_per_minute: upstream.requests_per_minute.to_string(),
             max_concurrency: upstream.max_concurrency.to_string(),
-            model_request_costs: format_model_request_costs(&upstream.model_request_costs),
             active: upstream.active,
         }
     }
@@ -450,14 +446,6 @@ impl UpstreamFormView {
                 existing_max_concurrency,
                 default_upstream_max_concurrency(),
             ),
-            model_request_costs: form
-                .model_request_costs
-                .clone()
-                .or_else(|| {
-                    existing
-                        .map(|upstream| format_model_request_costs(&upstream.model_request_costs))
-                })
-                .unwrap_or_default(),
             active: form_toggle_enabled(&form.active),
         }
     }
@@ -501,18 +489,6 @@ fn form_toggle_enabled(value: &Option<String>) -> bool {
         .is_some()
 }
 
-fn format_model_request_costs(costs: &[ModelRequestCostConfig]) -> String {
-    if costs.is_empty() {
-        return String::new();
-    }
-
-    costs
-        .iter()
-        .map(|rule| format!("{}={}", rule.slug, rule.cost))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn upstream_form_u32_string(value: Option<u32>, existing: Option<u32>, default: u32) -> String {
     value.or(existing).unwrap_or(default).to_string()
 }
@@ -520,7 +496,6 @@ fn upstream_form_u32_string(value: Option<u32>, existing: Option<u32>, default: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::ModelRequestCostConfig;
 
     fn upstream_config() -> UpstreamConfig {
         UpstreamConfig {
@@ -539,10 +514,6 @@ mod tests {
             request_quota_requests: 11,
             requests_per_minute: 22,
             max_concurrency: 33,
-            model_request_costs: vec![ModelRequestCostConfig {
-                slug: "glm-5".into(),
-                cost: 2.0,
-            }],
             priority: 0,
             premium_models: vec![],
             premium_only: false,
@@ -616,7 +587,6 @@ mod tests {
             request_quota_requests: None,
             requests_per_minute: Some(88),
             max_concurrency: None,
-            model_request_costs: None,
             active: Some("on".into()),
         };
 
@@ -631,7 +601,6 @@ mod tests {
         assert_eq!(view.request_quota_requests, "11");
         assert_eq!(view.requests_per_minute, "88");
         assert_eq!(view.max_concurrency, "33");
-        assert_eq!(view.model_request_costs, "glm-5=2");
 
         let updated = view.with_fetched_models("GLM-5,GLM-5.1".into());
         assert_eq!(updated.models, "GLM-5,GLM-5.1");

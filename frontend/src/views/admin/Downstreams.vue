@@ -69,6 +69,12 @@
         <el-table-column label="限额配置" min-width="320">
           <template #default="{ row }">
             <span v-if="!row.rate_limit_enabled">未启用限额</span>
+            <span v-else-if="isCostRow(row)">
+              <el-tag type="danger" size="small">金额计费</el-tag>
+              每日 ¥{{ (row.daily_cost_limit_cents ?? 0) / 100 }}
+              · 输入 ¥{{ (row.input_token_price_per_million_cents ?? 0) / 100 }}
+              · 输出 ¥{{ (row.output_token_price_per_million_cents ?? 0) / 100 }}/百万
+            </span>
             <span v-else-if="row.billing_mode === 'token'">
               <el-tag type="warning" size="small">Token 计费</el-tag>
               每日 {{ formatTokenLimit(row.daily_token_limit) }}
@@ -183,7 +189,7 @@
           <el-form-item label="计费模式">
             <el-radio-group v-model="form.billing_mode">
               <el-radio-button value="request">按次数</el-radio-button>
-              <el-radio-button value="token">按 Token（每日限额）</el-radio-button>
+              <el-radio-button value="cost">按金额（每日限额）</el-radio-button>
             </el-radio-group>
             <el-alert
               title="说明"
@@ -191,19 +197,33 @@
               :closable="false"
               class="helper-text"
             >
-              按次数：时间窗口内请求次数限额；按 Token：最近 24 小时滚动窗口内 token 消耗限额。两者互斥。
+              按次数：时间窗口内请求次数限额；按金额：输入/输出 token 按单价折算费用，从每日金额上限中扣除。
             </el-alert>
           </el-form-item>
-          <template v-if="form.billing_mode === 'token'">
-            <el-form-item label="每日 Token 限额">
-              <el-input-number v-model="dailyTokenLimit" :min="1" :max="1000000000000" :step="100000" style="width: 100%" />
+          <template v-if="form.billing_mode === 'cost'">
+            <el-form-item>
+              <template #label><span class="filter-label"><Coins :size="13" :stroke-width="2" />金额计费（单位：元）</span></template>
+              <div class="price-row">
+                <div class="price-field">
+                  <span class="price-label"><ArrowDownToLine :size="13" :stroke-width="2" />输入单价/百万</span>
+                  <el-input-number v-model="inputTokenPricePerMillion" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
+                </div>
+                <div class="price-field">
+                  <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />输出单价/百万</span>
+                  <el-input-number v-model="outputTokenPricePerMillion" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
+                </div>
+                <div class="price-field">
+                  <span class="price-label"><Wallet :size="13" :stroke-width="2" />每日上限</span>
+                  <el-input-number v-model="dailyCostLimit" :min="0.01" :max="100000000" :step="1" :precision="2" style="width: 100%" />
+                </div>
+              </div>
               <el-alert
                 title="说明"
                 type="info"
                 :closable="false"
                 class="helper-text"
               >
-                滚动 24 小时窗口：最早的消耗滑出窗口后额度自动释放，不是每天 0 点重置。
+                消耗金额 = 输入 Token × 输入单价 + 输出 Token × 输出单价，滚动 24 小时窗口从每日上限中扣除。只填一个单价时，另一个方向按 0 计。
               </el-alert>
             </el-form-item>
           </template>
@@ -267,22 +287,35 @@
       width="min(520px, calc(100vw - 32px))"
     >
       <el-alert type="info" :closable="false" class="helper-text">
-        已选 {{ selectedRows.length }} 个下游。切换模式后，未勾选清空时仅更新每日 Token 限额。
+        已选 {{ selectedRows.length }} 个下游。填写数值的字段会统一设置，留空表示不修改。
       </el-alert>
       <el-form label-position="top" style="margin-top: 16px">
         <el-form-item label="计费模式">
           <el-radio-group v-model="batchForm.billing_mode">
             <el-radio-button value="request">按次数</el-radio-button>
-            <el-radio-button value="token">按 Token（每日限额）</el-radio-button>
+            <el-radio-button value="cost">按金额（每日限额）</el-radio-button>
           </el-radio-group>
         </el-form-item>
-        <el-form-item v-if="batchForm.billing_mode === 'token'" label="每日 Token 限额">
-          <el-input-number v-model="batchForm.daily_token_limit" :min="1" :max="1000000000000" :step="100000" style="width: 100%" />
-          <span class="form-hint">填写数值则统一设置为该限额；留空表示不修改现有限额。</span>
-        </el-form-item>
-        <el-form-item>
-          <el-checkbox v-model="batchForm.clear_token_limit">清空每日 Token 限额</el-checkbox>
-        </el-form-item>
+        <template v-if="batchForm.billing_mode === 'cost'">
+          <el-form-item>
+            <template #label><span class="filter-label"><Coins :size="13" :stroke-width="2" />金额计费（单位：元）</span></template>
+            <div class="price-row">
+              <div class="price-field">
+                <span class="price-label"><ArrowDownToLine :size="13" :stroke-width="2" />输入单价/百万</span>
+                <el-input-number v-model="batchForm.input_token_price_per_million_cents" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
+              </div>
+              <div class="price-field">
+                <span class="price-label"><ArrowUpFromLine :size="13" :stroke-width="2" />输出单价/百万</span>
+                <el-input-number v-model="batchForm.output_token_price_per_million_cents" :min="0.01" :max="1000000" :step="0.1" :precision="2" style="width: 100%" />
+              </div>
+              <div class="price-field">
+                <span class="price-label"><Wallet :size="13" :stroke-width="2" />每日上限</span>
+                <el-input-number v-model="batchForm.daily_cost_limit_cents" :min="0.01" :max="100000000" :step="1" :precision="2" style="width: 100%" />
+              </div>
+            </div>
+            <span class="form-hint">填写数值则统一设置；留空表示不修改。</span>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="batchDialogVisible = false">取消</el-button>
@@ -336,7 +369,20 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Activity, Clock3, Copy, Gauge, Plus, Search, Settings2, ShieldCheck } from '@lucide/vue'
+import {
+  Activity,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Clock3,
+  Coins,
+  Copy,
+  Gauge,
+  Plus,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Wallet
+} from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
@@ -353,15 +399,19 @@ const runtimeById = ref<Record<string, DownstreamConcurrencySnapshot>>({})
 let runtimeTimer: number | null = null
 const requestQuotaHours = ref(5)
 const requestQuotaCount = ref(600)
-const dailyTokenLimit = ref<number | undefined>(undefined)
+// 按金额计费：输入单位为元，提交时换算成分（¢）。
+const inputTokenPricePerMillion = ref<number | undefined>(undefined)
+const outputTokenPricePerMillion = ref<number | undefined>(undefined)
+const dailyCostLimit = ref<number | undefined>(undefined)
 const availableModels = ref<string[]>([])
 const selectedRows = ref<DownstreamConfig[]>([])
 const batchDialogVisible = ref(false)
 const batchSubmitting = ref(false)
 const batchForm = ref({
-  billing_mode: 'token' as 'request' | 'token',
-  daily_token_limit: undefined as number | undefined,
-  clear_token_limit: false
+  billing_mode: 'cost' as 'request' | 'cost',
+  input_token_price_per_million_cents: undefined as number | undefined,
+  output_token_price_per_million_cents: undefined as number | undefined,
+  daily_cost_limit_cents: undefined as number | undefined
 })
 
 const filters = ref({
@@ -370,7 +420,9 @@ const filters = ref({
   search: ''
 })
 
-const form = ref<Partial<DownstreamConfig>>({
+// UI 层的「按金额」选项，提交时映射回后端的 token 模式。
+type BillingModeUI = 'request' | 'cost'
+const form = ref<Omit<Partial<DownstreamConfig>, 'billing_mode'> & { billing_mode?: BillingModeUI }>({
   id: '',
   name: '',
   hash: '',
@@ -504,7 +556,7 @@ const handleCreate = () => {
   }
   requestQuotaHours.value = 5
   requestQuotaCount.value = 600
-  dailyTokenLimit.value = undefined
+  resetCostFields()
   dialogVisible.value = true
 }
 
@@ -514,11 +566,17 @@ const handleEdit = (row: DownstreamConfig) => {
     ...row,
     rate_limit_enabled: row.rate_limit_enabled ?? true,
     max_concurrency: row.max_concurrency ?? 10,
-    billing_mode: row.billing_mode ?? 'request'
+    billing_mode: isCostRow(row) ? 'cost' : 'request'
   }
   requestQuotaHours.value = row.request_quota_window_hours || 5
   requestQuotaCount.value = row.request_quota_requests || 600
-  dailyTokenLimit.value = row.daily_token_limit ?? undefined
+  if (isCostRow(row)) {
+    inputTokenPricePerMillion.value = row.input_token_price_per_million_cents ? row.input_token_price_per_million_cents / 100 : undefined
+    outputTokenPricePerMillion.value = row.output_token_price_per_million_cents ? row.output_token_price_per_million_cents / 100 : undefined
+    dailyCostLimit.value = row.daily_cost_limit_cents ? row.daily_cost_limit_cents / 100 : undefined
+  } else {
+    resetCostFields()
+  }
   dialogVisible.value = true
 }
 
@@ -532,9 +590,16 @@ const handleSubmit = async () => {
     }
     
     if (form.value.rate_limit_enabled) {
-      if (form.value.billing_mode === 'token') {
-        if (!dailyTokenLimit.value || dailyTokenLimit.value < 1) {
-          ElMessage.error('请填写有效的每日 Token 限额')
+      if (form.value.billing_mode === 'cost') {
+        if (
+          (!inputTokenPricePerMillion.value || inputTokenPricePerMillion.value < 0.01) &&
+          (!outputTokenPricePerMillion.value || outputTokenPricePerMillion.value < 0.01)
+        ) {
+          ElMessage.error('请至少填写输入或输出价格中的一项')
+          return
+        }
+        if (!dailyCostLimit.value || dailyCostLimit.value < 0.01) {
+          ElMessage.error('请填写有效的每日金额上限')
           return
         }
       } else {
@@ -554,13 +619,16 @@ const handleSubmit = async () => {
     }
     submitting.value = true
 
-    const isToken = form.value.billing_mode === 'token'
+    const isCost = form.value.billing_mode === 'cost'
     const submitData: Record<string, unknown> = {
       ...form.value,
-      billing_mode: isToken ? 'token' : 'request',
-      daily_token_limit: isToken ? dailyTokenLimit.value : null,
-      request_quota_window_hours: form.value.rate_limit_enabled && !isToken ? requestQuotaHours.value : null,
-      request_quota_requests: form.value.rate_limit_enabled && !isToken ? requestQuotaCount.value : null
+      billing_mode: isCost ? 'token' : 'request',
+      daily_token_limit: null,
+      input_token_price_per_million_cents: isCost ? Math.round((inputTokenPricePerMillion.value ?? 0) * 100) : null,
+      output_token_price_per_million_cents: isCost ? Math.round((outputTokenPricePerMillion.value ?? 0) * 100) : null,
+      daily_cost_limit_cents: isCost ? Math.round((dailyCostLimit.value ?? 0) * 100) : null,
+      request_quota_window_hours: form.value.rate_limit_enabled ? requestQuotaHours.value : null,
+      request_quota_requests: form.value.rate_limit_enabled ? requestQuotaCount.value : null
     }
 
     if (dialogMode.value === 'create') {
@@ -640,6 +708,18 @@ const formatTokenLimit = (limit?: number) => {
   return String(limit)
 }
 
+// 按金额计费：token 模式 + 至少一个单价 + 每日金额上限同时配置才生效。
+const isCostRow = (row: DownstreamConfig) =>
+  row.billing_mode === 'token' &&
+  (row.input_token_price_per_million_cents != null || row.output_token_price_per_million_cents != null) &&
+  row.daily_cost_limit_cents != null
+
+const resetCostFields = () => {
+  inputTokenPricePerMillion.value = undefined
+  outputTokenPricePerMillion.value = undefined
+  dailyCostLimit.value = undefined
+}
+
 const handleSelectionChange = (rows: DownstreamConfig[]) => {
   selectedRows.value = rows
 }
@@ -652,22 +732,33 @@ const submitBatchMode = async () => {
       ids: string[]
       billing_mode: 'request' | 'token'
       daily_token_limit?: number | null
+      input_token_price_per_million_cents?: number | null
+      output_token_price_per_million_cents?: number | null
+      daily_cost_limit_cents?: number | null
     } = {
       ids,
-      billing_mode: batchForm.value.billing_mode
+      billing_mode: batchForm.value.billing_mode === 'cost' ? 'token' : 'request',
+      daily_token_limit: null
     }
-    if (batchForm.value.clear_token_limit) {
-      payload.daily_token_limit = null
-    } else if (batchForm.value.billing_mode === 'token' && batchForm.value.daily_token_limit) {
-      payload.daily_token_limit = batchForm.value.daily_token_limit
+    if (batchForm.value.billing_mode === 'cost') {
+      if (batchForm.value.input_token_price_per_million_cents) {
+        payload.input_token_price_per_million_cents = Math.round(batchForm.value.input_token_price_per_million_cents * 100)
+      }
+      if (batchForm.value.output_token_price_per_million_cents) {
+        payload.output_token_price_per_million_cents = Math.round(batchForm.value.output_token_price_per_million_cents * 100)
+      }
+      if (batchForm.value.daily_cost_limit_cents) {
+        payload.daily_cost_limit_cents = Math.round(batchForm.value.daily_cost_limit_cents * 100)
+      }
     }
     const { data } = await adminApi.batchSetDownstreamMode(payload)
     ElMessage.success(
       `已更新 ${data.updated} 个下游${data.failed.length ? `，${data.failed.length} 个失败` : ''}`
     )
     batchDialogVisible.value = false
-    batchForm.value.daily_token_limit = undefined
-    batchForm.value.clear_token_limit = false
+    batchForm.value.input_token_price_per_million_cents = undefined
+    batchForm.value.output_token_price_per_million_cents = undefined
+    batchForm.value.daily_cost_limit_cents = undefined
     loadData()
   } catch (error) {
     ElMessage.error('批量设置失败')
@@ -770,6 +861,26 @@ code {
 
 .helper-text {
   margin-top: 8px;
+}
+
+.price-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+.price-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.price-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--crc-text-muted);
 }
 
 :global(.form-drawer .el-drawer__header) {

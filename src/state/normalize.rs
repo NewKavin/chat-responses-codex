@@ -102,25 +102,6 @@ fn derive_supported_models(key_models: &[ApiKeyModelConfig]) -> Vec<String> {
             .collect(),
     )
 }
-
-fn normalized_model_request_costs(
-    values: Vec<ModelRequestCostConfig>,
-) -> Vec<ModelRequestCostConfig> {
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for rule in values {
-        let slug = rule.slug.trim().to_string();
-        if slug.is_empty() || !seen.insert(slug.clone()) {
-            continue;
-        }
-        normalized.push(ModelRequestCostConfig {
-            slug,
-            cost: rule.cost,
-        });
-    }
-    normalized
-}
-
 pub(super) fn normalized_model_contexts(
     values: Vec<ModelContextConfig>,
 ) -> Vec<ModelContextConfig> {
@@ -228,26 +209,6 @@ impl UpstreamConfig {
                     || super::codex_subagent_base_model(model).is_some_and(|base| premium == base)
             })
     }
-
-    pub fn request_cost_for_model(&self, model: &str) -> f64 {
-        let model = model.trim();
-        if model.is_empty() {
-            return 1.0;
-        }
-
-        let resolved_model = self
-            .canonical_route_model(model)
-            .unwrap_or_else(|| model.to_string());
-        self.model_request_costs
-            .iter()
-            .find(|rule| {
-                let slug = rule.slug.trim();
-                slug == model || slug == resolved_model
-            })
-            .map(|rule| rule.cost.max(1.0))
-            .unwrap_or(1.0)
-    }
-
     pub fn request_quota_window_seconds(&self) -> u64 {
         u64::from(self.request_quota_window_hours.max(1)).saturating_mul(60 * 60)
     }
@@ -295,8 +256,6 @@ impl UpstreamConfig {
                 normalized_string_list(std::mem::take(&mut self.supported_models));
         }
         self.premium_models = normalized_string_list(std::mem::take(&mut self.premium_models));
-        self.model_request_costs =
-            normalized_model_request_costs(std::mem::take(&mut self.model_request_costs));
         self.model_contexts = normalized_model_contexts(std::mem::take(&mut self.model_contexts));
         self.default_model_context =
             normalized_default_model_context(self.default_model_context.take());

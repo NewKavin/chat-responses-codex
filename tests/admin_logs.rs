@@ -60,6 +60,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
+                total_cost_cents: None,
                 first_token_latency_ms: Some(10_650),
                 latency_ms: 15_120,
                 created_at: now - 1, // 1 second ago
@@ -86,6 +87,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 50,
                 completion_tokens: 25,
                 total_tokens: 75,
+                total_cost_cents: None,
                 first_token_latency_ms: None,
                 latency_ms: 300,
                 created_at: now - 1800, // 30 minutes ago
@@ -112,6 +114,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                total_cost_cents: None,
                 first_token_latency_ms: None,
                 latency_ms: 100,
                 created_at: now - 120, // 2 minutes ago
@@ -138,6 +141,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                total_cost_cents: None,
                 first_token_latency_ms: None,
                 latency_ms: 50,
                 created_at: now - 60, // 1 minute ago
@@ -164,6 +168,7 @@ fn create_test_state_with_config(config: AppConfig) -> AppState {
                 prompt_tokens: 200,
                 completion_tokens: 100,
                 total_tokens: 300,
+                total_cost_cents: None,
                 first_token_latency_ms: None,
                 latency_ms: 800,
                 created_at: now - 30, // 30 seconds ago
@@ -855,6 +860,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                total_cost_cents: None,
                 first_token_latency_ms: None,
                 latency_ms: 100,
                 created_at: now,
@@ -881,6 +887,7 @@ async fn test_prune_expired_usage_logs_removes_old_entries() {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                total_cost_cents: None,
                 first_token_latency_ms: None,
                 latency_ms: 100,
                 created_at: now - 15 * 86400,
@@ -938,6 +945,7 @@ async fn test_prune_expired_usage_logs_respects_zero_retention() {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            total_cost_cents: None,
             first_token_latency_ms: None,
             latency_ms: 100,
             created_at: now - 999 * 86400,

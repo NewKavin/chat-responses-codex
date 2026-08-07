@@ -4,7 +4,7 @@ use super::log_queries::{
 use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, CalendarRange,
     DailyStats, DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary,
-    GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig, PersistedState,
+    GlobalContextProfile, ModelContextConfig, PersistedState,
     ResponseHistoryEntry, UpstreamConfig, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
 use crate::capabilities::{
@@ -106,7 +106,6 @@ impl PostgresStateStore {
                 requests_per_minute: row.get::<_, i32>(10) as u32,
                 max_concurrency: row.get::<_, i32>(11) as u32,
                 priority: row.get::<_, i32>(12) as u32,
-                model_request_costs: Vec::new(),
                 premium_models: Vec::new(),
                 premium_only: row.get::<_, bool>(13),
                 protect_premium_quota: row.get::<_, bool>(14),
@@ -158,25 +157,6 @@ impl PostgresStateStore {
             }
         }
 
-        for row in conn
-            .query(
-                "SELECT upstream_id, slug, cost FROM upstream_model_request_costs \
-                 ORDER BY upstream_id, position, slug",
-                &[],
-            )
-            .await
-            .map_err(io_other)?
-        {
-            let upstream_id: String = row.get(0);
-            if let Some(&index) = upstream_index.get(&upstream_id) {
-                upstreams[index]
-                    .model_request_costs
-                    .push(ModelRequestCostConfig {
-                        slug: row.get::<_, String>(1),
-                        cost: row.get::<_, i32>(2) as f64,
-                    });
-            }
-        }
 
         for upstream in &mut upstreams {
             upstream.normalize_for_storage();
@@ -187,7 +167,9 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, name, hash, plaintext_key, rate_limit_enabled, per_minute_limit, max_concurrency, \
                  daily_token_limit, monthly_token_limit, request_quota_window_hours, \
-                 request_quota_requests, expires_at, active, billing_mode \
+                 request_quota_requests, expires_at, active, billing_mode, \
+                 input_token_price_per_million_cents, output_token_price_per_million_cents, \
+                 daily_cost_limit_cents \
                  FROM downstreams ORDER BY id",
                 &[],
             )
@@ -212,6 +194,15 @@ impl PostgresStateStore {
                 expires_at: row.get::<_, Option<i64>>(11).map(|value| value as u64),
                 active: row.get::<_, bool>(12),
                 billing_mode: row.get::<_, String>(13),
+                input_token_price_per_million_cents: row
+                    .get::<_, Option<i64>>(14)
+                    .map(i64_to_u64),
+                output_token_price_per_million_cents: row
+                    .get::<_, Option<i64>>(15)
+                    .map(i64_to_u64),
+                daily_cost_limit_cents: row
+                    .get::<_, Option<i64>>(16)
+                    .map(i64_to_u64),
             });
         }
 
@@ -282,7 +273,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name, \
                  endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id, \
-                 status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics \
+                 status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics \
                  FROM usage_logs WHERE created_at >= $1 ORDER BY created_at, request_id, id",
                 &[&runtime_usage_start],
             )
@@ -523,7 +514,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
+                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at < $2
@@ -575,7 +566,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                         endpoint, model, inference_strength, billing_mode, request_count, user_agent, request_id,
-                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
+                        status_code, wire_status_code, error_message, error_category, compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
                  FROM usage_logs
                  WHERE created_at >= $1
                    AND created_at < $2
@@ -594,17 +585,26 @@ impl PostgresStateStore {
         let conn = self.pool.get().await.map_err(io_other)?;
         let downstream_row = conn
             .query_opt(
-                "SELECT id FROM downstreams WHERE id = $1",
+                "SELECT id, billing_mode, input_token_price_per_million_cents,
+                        output_token_price_per_million_cents, daily_cost_limit_cents
+                 FROM downstreams WHERE id = $1",
                 &[&downstream_id],
             )
             .await
             .map_err(io_other)?;
-        if downstream_row.is_none() {
+        let Some(downstream_row) = downstream_row else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("downstream not found: {downstream_id}"),
             ));
-        }
+        };
+        let downstream_billing_mode: String = downstream_row.get(1);
+        let downstream_input_price_cents: Option<i64> = downstream_row.get(2);
+        let downstream_output_price_cents: Option<i64> = downstream_row.get(3);
+        let downstream_cost_limit_cents: Option<i64> = downstream_row.get(4);
+        let cost_billed = downstream_billing_mode == "token"
+            && (downstream_input_price_cents.is_some() || downstream_output_price_cents.is_some())
+            && downstream_cost_limit_cents.is_some();
 
         let allowlist_count = conn
             .query_one(
@@ -665,15 +665,20 @@ impl PostgresStateStore {
         let now = unix_seconds();
         let today_start = u64_to_i64((now / 86_400) * 86_400);
         let month_start = u64_to_i64(current_month_start(now));
+        let sum_column = if cost_billed {
+            "total_cost_cents"
+        } else {
+            "total_tokens"
+        };
+        let sum_sql = format!(
+            "SELECT
+                 COALESCE(SUM({sum_column}) FILTER (WHERE created_at >= $2), 0)::BIGINT,
+                 COALESCE(SUM({sum_column}) FILTER (WHERE created_at >= $3), 0)::BIGINT
+             FROM usage_logs
+             WHERE downstream_key_id = $1"
+        );
         let token_row = conn
-            .query_one(
-                "SELECT
-                     COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $2), 0)::BIGINT,
-                     COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= $3), 0)::BIGINT
-                 FROM usage_logs
-                 WHERE downstream_key_id = $1",
-                &[&downstream_id, &today_start, &month_start],
-            )
+            .query_one(&sum_sql, &[&downstream_id, &today_start, &month_start])
             .await
             .map_err(io_other)?;
 
@@ -1098,24 +1103,6 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             .map_err(io_other)?;
         }
 
-        tx.execute(
-            "DELETE FROM upstream_model_request_costs WHERE upstream_id = $1",
-            &[&upstream.id],
-        )
-        .await
-        .map_err(io_other)?;
-        for (position, rule) in upstream.model_request_costs.iter().enumerate() {
-            let cost = rule.cost as i32;
-            let params: &[&(dyn ToSql + Sync)] =
-                &[&upstream.id, &(position as i32), &rule.slug, &cost];
-            tx.execute(
-                "INSERT INTO upstream_model_request_costs (upstream_id, position, slug, cost)
-                 VALUES ($1, $2, $3, $4)",
-                params,
-            )
-            .await
-            .map_err(io_other)?;
-        }
     }
 
     Ok(())
@@ -1150,6 +1137,13 @@ async fn sync_downstreams(
             .map(|value| value as i32);
         let request_quota_requests = downstream.request_quota_requests.map(|value| value as i32);
         let expires_at = downstream.expires_at.map(|value| value as i64);
+        let input_token_price_per_million_cents = downstream
+            .input_token_price_per_million_cents
+            .map(|value| value as i64);
+        let output_token_price_per_million_cents = downstream
+            .output_token_price_per_million_cents
+            .map(|value| value as i64);
+        let daily_cost_limit_cents = downstream.daily_cost_limit_cents.map(|value| value as i64);
         let params: &[&(dyn ToSql + Sync)] = &[
             &downstream.id,
             &downstream.name,
@@ -1165,6 +1159,9 @@ async fn sync_downstreams(
             &expires_at,
             &downstream.active,
             &downstream.billing_mode,
+            &input_token_price_per_million_cents,
+            &output_token_price_per_million_cents,
+            &daily_cost_limit_cents,
         ];
 
         tx.execute(
@@ -1172,11 +1169,12 @@ async fn sync_downstreams(
                 id, name, hash, plaintext_key, rate_limit_enabled, per_minute_limit,
                 max_concurrency, daily_token_limit, monthly_token_limit,
                 request_quota_window_hours, request_quota_requests, expires_at, active,
-                billing_mode
+                billing_mode, input_token_price_per_million_cents,
+                output_token_price_per_million_cents, daily_cost_limit_cents
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9,
-                $10, $11, $12, $13, $14
+                $10, $11, $12, $13, $14, $15, $16, $17
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1191,7 +1189,10 @@ async fn sync_downstreams(
                 request_quota_requests = EXCLUDED.request_quota_requests,
                 expires_at = EXCLUDED.expires_at,
                 active = EXCLUDED.active,
-                billing_mode = EXCLUDED.billing_mode",
+                billing_mode = EXCLUDED.billing_mode,
+                input_token_price_per_million_cents = EXCLUDED.input_token_price_per_million_cents,
+                output_token_price_per_million_cents = EXCLUDED.output_token_price_per_million_cents,
+                daily_cost_limit_cents = EXCLUDED.daily_cost_limit_cents",
             params,
         )
         .await
@@ -1297,6 +1298,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
         let prompt_tokens = log.prompt_tokens as i64;
         let completion_tokens = log.completion_tokens as i64;
         let total_tokens = log.total_tokens as i64;
+        let total_cost_cents = log.total_cost_cents.map(u64_to_i64);
         let first_token_latency_ms = log.first_token_latency_ms.map(u64_to_i64);
         let latency_ms = log.latency_ms as i64;
         let created_at = log.created_at as i64;
@@ -1327,6 +1329,7 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
             &prompt_tokens,
             &completion_tokens,
             &total_tokens,
+            &total_cost_cents,
             &first_token_latency_ms,
             &latency_ms,
             &created_at,
@@ -1338,13 +1341,13 @@ async fn insert_usage_logs(tx: &Transaction<'_>, logs: &[UsageLog]) -> io::Resul
                 id, downstream_key_id, upstream_key_id, downstream_name, upstream_name,
                 endpoint, model, inference_strength, billing_mode, request_count,
                 user_agent, request_id, status_code, wire_status_code, error_message, error_category,
-                compatibility, prompt_tokens, completion_tokens, total_tokens, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
+                compatibility, prompt_tokens, completion_tokens, total_tokens, total_cost_cents, first_token_latency_ms, latency_ms, created_at, stream_diagnostics
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15, $16,
-                $17, $18, $19, $20, $21,
-                $22, $23, $24
+                $17, $18, $19, $20, $21, $22,
+                $23, $24, $25
             ) ON CONFLICT (id) DO NOTHING",
             params,
         )
@@ -1423,11 +1426,12 @@ fn usage_log_from_row(row: &Row) -> UsageLog {
         prompt_tokens: i64_to_u64(row.get::<_, i64>(17)),
         completion_tokens: i64_to_u64(row.get::<_, i64>(18)),
         total_tokens: i64_to_u64(row.get::<_, i64>(19)),
-        first_token_latency_ms: row.get::<_, Option<i64>>(20).map(i64_to_u64),
-        latency_ms: i64_to_u64(row.get::<_, i64>(21)),
-        created_at: i64_to_u64(row.get::<_, i64>(22)),
+        total_cost_cents: row.get::<_, Option<i64>>(20).map(i64_to_u64),
+        first_token_latency_ms: row.get::<_, Option<i64>>(21).map(i64_to_u64),
+        latency_ms: i64_to_u64(row.get::<_, i64>(22)),
+        created_at: i64_to_u64(row.get::<_, i64>(23)),
         stream_diagnostics: row
-            .get::<_, Option<serde_json::Value>>(23)
+            .get::<_, Option<serde_json::Value>>(24)
             .and_then(|value| serde_json::from_value(value).ok()),
     };
     log.normalize_after_load();
@@ -1574,14 +1578,6 @@ CREATE TABLE IF NOT EXISTS upstream_premium_models (
     PRIMARY KEY (upstream_id, model_slug)
 );
 
-CREATE TABLE IF NOT EXISTS upstream_model_request_costs (
-    upstream_id TEXT NOT NULL REFERENCES upstreams(id) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    slug TEXT NOT NULL,
-    cost INTEGER NOT NULL,
-    PRIMARY KEY (upstream_id, slug)
-);
-
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS request_quota_5h INTEGER NOT NULL DEFAULT 600;
 ALTER TABLE upstreams
@@ -1635,7 +1631,10 @@ CREATE TABLE IF NOT EXISTS downstreams (
     request_quota_requests INTEGER NULL,
     expires_at BIGINT NULL,
     active BOOLEAN NOT NULL,
-    billing_mode TEXT NOT NULL DEFAULT 'request'
+    billing_mode TEXT NOT NULL DEFAULT 'request',
+    input_token_price_per_million_cents BIGINT NULL,
+    output_token_price_per_million_cents BIGINT NULL,
+    daily_cost_limit_cents BIGINT NULL
 );
 
 ALTER TABLE downstreams
@@ -1648,6 +1647,14 @@ ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 10;
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS billing_mode TEXT NOT NULL DEFAULT 'request';
+ALTER TABLE downstreams
+    ADD COLUMN IF NOT EXISTS input_token_price_per_million_cents BIGINT NULL;
+ALTER TABLE downstreams
+    ADD COLUMN IF NOT EXISTS output_token_price_per_million_cents BIGINT NULL;
+ALTER TABLE downstreams
+    ADD COLUMN IF NOT EXISTS daily_cost_limit_cents BIGINT NULL;
+ALTER TABLE downstreams
+    DROP COLUMN IF EXISTS token_price_per_million_cents;
 
 CREATE TABLE IF NOT EXISTS downstream_model_allowlist (
     downstream_id TEXT NOT NULL REFERENCES downstreams(id) ON DELETE CASCADE,
@@ -1700,6 +1707,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     prompt_tokens BIGINT NOT NULL,
     completion_tokens BIGINT NOT NULL,
     total_tokens BIGINT NOT NULL,
+    total_cost_cents BIGINT NULL,
     first_token_latency_ms BIGINT NULL,
     latency_ms BIGINT NOT NULL,
     created_at BIGINT NOT NULL,
@@ -1726,6 +1734,8 @@ ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS compatibility TEXT NULL;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS first_token_latency_ms BIGINT NULL;
+ALTER TABLE usage_logs
+    ADD COLUMN IF NOT EXISTS total_cost_cents BIGINT NULL;
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS wire_status_code INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE usage_logs

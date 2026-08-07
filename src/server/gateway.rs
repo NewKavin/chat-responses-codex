@@ -1315,7 +1315,11 @@ impl StreamUsageLogContext {
             endpoint: endpoint.clone(),
             model: model.clone(),
             inference_strength,
-            billing_mode: Some(downstream_billing_label(&state, &downstream_key_id).await),
+            billing_mode: Some(
+                downstream_billing_info(&state, &downstream_key_id, usage.0, usage.1)
+                    .await
+                    .0,
+            ),
             request_count: Some(1),
             user_agent,
             request_id: request_id.clone(),
@@ -1326,6 +1330,9 @@ impl StreamUsageLogContext {
             prompt_tokens: usage.0,
             completion_tokens: usage.1,
             total_tokens: usage.2,
+            total_cost_cents: downstream_billing_info(&state, &downstream_key_id, usage.0, usage.1)
+                .await
+                .1,
             first_token_latency_ms: first_token_latency.get(),
             latency_ms: started.elapsed().as_millis() as u64,
             created_at: unix_seconds(),
@@ -1478,16 +1485,27 @@ fn metric_exceeds_ratio(value: f64, baseline: f64, ratio: f64) -> bool {
     }
 }
 
-/// Resolve the billing label for a downstream based on its configured mode.
-async fn downstream_billing_label(state: &AppState, downstream_id: &str) -> String {
+/// Resolve the billing label and per-request cost (cents) for a downstream.
+/// Cost is only computed for cost-billed downstreams (token mode + price).
+async fn downstream_billing_info(
+    state: &AppState,
+    downstream_key_id: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) -> (String, Option<u64>) {
     let snapshot = state.snapshot().await;
     match snapshot
         .downstreams
         .iter()
-        .find(|downstream| downstream.id == downstream_id)
+        .find(|downstream| downstream.id == downstream_key_id)
     {
-        Some(downstream) if downstream.token_billing_mode() => "Token 计费".to_string(),
-        _ => "请求计费".to_string(),
+        Some(downstream) if downstream.token_billing_mode() => {
+            let cost = downstream
+                .cost_billing_mode()
+                .then(|| downstream.cost_for_tokens(prompt_tokens, completion_tokens));
+            ("Token 计费".to_string(), cost)
+        }
+        _ => ("请求计费".to_string(), None),
     }
 }
 
@@ -1512,6 +1530,8 @@ async fn append_gateway_usage_log(
     total_tokens: u64,
     started: Instant,
 ) -> std::io::Result<()> {
+    let (billing_label, total_cost_cents) =
+        downstream_billing_info(state, downstream_id, prompt_tokens, completion_tokens).await;
     let log = UsageLog {
         id: request_id.to_string(),
         downstream_key_id: downstream_id.to_string(),
@@ -1521,7 +1541,7 @@ async fn append_gateway_usage_log(
         endpoint: endpoint.to_string(),
         model: model.to_string(),
         inference_strength: inference_strength.map(str::to_string),
-        billing_mode: Some(downstream_billing_label(state, downstream_id).await),
+        billing_mode: Some(billing_label),
         request_count: Some(1),
         user_agent: user_agent.map(str::to_string),
         request_id: request_id.to_string(),
@@ -1532,6 +1552,7 @@ async fn append_gateway_usage_log(
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        total_cost_cents,
         first_token_latency_ms: None,
         latency_ms: started.elapsed().as_millis() as u64,
         created_at: unix_seconds(),
@@ -4737,7 +4758,7 @@ async fn process_gateway_request_inner(
                     .get(&upstream.id)
                     .copied()
                     .unwrap_or_default();
-                let request_cost = upstream.request_cost_for_model(model);
+                let request_cost = 1.0_f64;
                 let minute_pressure = runtime.minute_cost + request_cost;
                 let five_hour_pressure = runtime.five_hour_cost + request_cost;
                 (
@@ -4918,7 +4939,7 @@ async fn process_gateway_request_inner(
                     .get(&upstream.id)
                     .copied()
                     .unwrap_or_default();
-                let request_cost = upstream.request_cost_for_model(model);
+                let request_cost = 1.0_f64;
                 let minute_cost = runtime.minute_cost + request_cost;
                 let five_hour_cost = runtime.five_hour_cost + request_cost;
                 format!(
@@ -4954,7 +4975,7 @@ async fn process_gateway_request_inner(
                     .get(&upstream.id)
                     .copied()
                     .unwrap_or_default();
-                let request_cost = upstream.request_cost_for_model(model);
+                let request_cost = 1.0_f64;
                 let minute_cost = runtime.minute_cost + request_cost;
                 let five_hour_cost = runtime.five_hour_cost + request_cost;
                 let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {

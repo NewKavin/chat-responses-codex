@@ -254,3 +254,58 @@ describe('admin logs single-day picker', () => {
     expect(page).not.toContain('type="datetimerange"')
   })
 })
+
+describe('admin downstream cost billing', () => {
+  it('offers a cost-billing mode with price and daily cost limit inputs', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('按金额')
+    expect(page).toContain('value="cost"')
+    expect(page).toContain('inputTokenPricePerMillion')
+    expect(page).toContain('outputTokenPricePerMillion')
+    expect(page).toContain('dailyCostLimit')
+    expect(page).toContain('input_token_price_per_million_cents')
+    expect(page).toContain('output_token_price_per_million_cents')
+    expect(page).toContain('daily_cost_limit_cents')
+    expect(page).not.toContain('按 Token')
+    expect(page).not.toContain('value="token"')
+  })
+
+  it('converts yuan to cents on submit and cents back to yuan on edit', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toMatch(/input_token_price_per_million_cents:\s*isCost\s*\?/)
+    expect(page).toMatch(/output_token_price_per_million_cents:\s*isCost\s*\?/)
+    expect(page).toMatch(/daily_cost_limit_cents:\s*isCost\s*\?/)
+    expect(page).toContain('input_token_price_per_million_cents / 100')
+    expect(page).toContain('output_token_price_per_million_cents / 100')
+    expect(page).toContain('daily_cost_limit_cents / 100')
+    expect(page).toContain('billing_mode: isCost ? \'token\' : \'request\'')
+  })
+
+  it('keeps input/output prices and daily limit on the same row', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('price-row')
+    expect(page).toContain('inputTokenPricePerMillion')
+    expect(page).toContain('outputTokenPricePerMillion')
+    expect(page).toContain('dailyCostLimit')
+    expect(page).toMatch(/inputTokenPricePerMillion[\s\S]{0,400}outputTokenPricePerMillion[\s\S]{0,400}dailyCostLimit/)
+  })
+
+  it('shows the cost limit in the quota column for cost-billed rows', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toMatch(/金额计费/)
+    expect(page).toContain('isCostRow(row)')
+  })
+
+  it('keeps the batch dialog able to set cost billing fields', () => {
+    const page = source('views/admin/Downstreams.vue')
+
+    expect(page).toContain('batchForm.billing_mode === \'cost\'')
+    expect(page).toContain('batchForm.input_token_price_per_million_cents')
+    expect(page).toContain('batchForm.output_token_price_per_million_cents')
+    expect(page).toContain('batchForm.daily_cost_limit_cents')
+  })
+})

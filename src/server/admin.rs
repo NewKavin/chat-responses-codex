@@ -2144,6 +2144,47 @@ pub(super) async fn admin_update_downstream(
         {
             downstream.monthly_token_limit = None;
         }
+        if let Some(price) = updates
+            .get("input_token_price_per_million_cents")
+            .and_then(|v| v.as_u64())
+        {
+            downstream.input_token_price_per_million_cents = Some(price);
+        }
+        if updates.get("input_token_price_per_million_cents").is_some()
+            && updates
+                .get("input_token_price_per_million_cents")
+                .is_some_and(Value::is_null)
+        {
+            downstream.input_token_price_per_million_cents = None;
+        }
+        if let Some(price) = updates
+            .get("output_token_price_per_million_cents")
+            .and_then(|v| v.as_u64())
+        {
+            downstream.output_token_price_per_million_cents = Some(price);
+        }
+        if updates
+            .get("output_token_price_per_million_cents")
+            .is_some()
+            && updates
+                .get("output_token_price_per_million_cents")
+                .is_some_and(Value::is_null)
+        {
+            downstream.output_token_price_per_million_cents = None;
+        }
+        if let Some(cost_limit) = updates
+            .get("daily_cost_limit_cents")
+            .and_then(|v| v.as_u64())
+        {
+            downstream.daily_cost_limit_cents = Some(cost_limit);
+        }
+        if updates.get("daily_cost_limit_cents").is_some()
+            && updates
+                .get("daily_cost_limit_cents")
+                .is_some_and(Value::is_null)
+        {
+            downstream.daily_cost_limit_cents = None;
+        }
         if let Some(active) = updates.get("active").and_then(|v| v.as_bool()) {
             downstream.active = active;
         }
@@ -2206,6 +2247,15 @@ pub(super) struct BatchBillingModeRequest {
     /// `null` clears the limit; absent leaves it unchanged.
     #[serde(default, deserialize_with = "deserialize_nullable_u64")]
     daily_token_limit: Option<Option<u64>>,
+    /// `null` clears the input price; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "deserialize_nullable_u64")]
+    input_token_price_per_million_cents: Option<Option<u64>>,
+    /// `null` clears the output price; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "deserialize_nullable_u64")]
+    output_token_price_per_million_cents: Option<Option<u64>>,
+    /// `null` clears the cost limit; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "deserialize_nullable_u64")]
+    daily_cost_limit_cents: Option<Option<u64>>,
     #[serde(default, deserialize_with = "deserialize_nullable_u32")]
     request_quota_window_hours: Option<Option<u32>>,
     #[serde(default, deserialize_with = "deserialize_nullable_u32")]
@@ -2253,6 +2303,15 @@ pub(super) async fn admin_batch_set_downstream_mode(
         // Option<Option<T>>: None = untouched, Some(None) = clear, Some(v) = set
         if let Some(value) = payload.daily_token_limit {
             downstream.daily_token_limit = value;
+        }
+        if let Some(value) = payload.input_token_price_per_million_cents {
+            downstream.input_token_price_per_million_cents = value;
+        }
+        if let Some(value) = payload.output_token_price_per_million_cents {
+            downstream.output_token_price_per_million_cents = value;
+        }
+        if let Some(value) = payload.daily_cost_limit_cents {
+            downstream.daily_cost_limit_cents = value;
         }
         if let Some(value) = payload.request_quota_window_hours {
             downstream.request_quota_window_hours = value;

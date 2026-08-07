@@ -9,8 +9,8 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::{build_router, poll_concurrency_status_once};
 use chat_responses_codex::state::{
     AccountConcurrencyKey, AccountProbeOutcome, ApiKeyModelConfig, AppConfig, AppState,
-    DownstreamAdmissionRejection, DownstreamConfig, KeyHealthKey, ModelKeySyncService,
-    ModelRequestCostConfig, PersistedState, ProbeDecision, RouteAvailability, RouteFailureClass,
+    CoordinationTestFault, DownstreamAdmissionRejection, DownstreamConfig, KeyHealthKey,
+    ModelKeySyncService, PersistedState, ProbeDecision, RouteAvailability, RouteFailureClass,
     RouteHealthKey, RouteOutcome, RouteSetAggregateKey, RuntimeCoordinationBackend, UpstreamConfig,
     UsageLog,
 };
@@ -144,6 +144,9 @@ fn redis_test_downstream(id: &str) -> DownstreamConfig {
         max_concurrency: 1,
         daily_token_limit: None,
         monthly_token_limit: None,
+        input_token_price_per_million_cents: None,
+        output_token_price_per_million_cents: None,
+        daily_cost_limit_cents: None,
         request_quota_window_hours: None,
         request_quota_requests: None,
         ip_allowlist: vec![],
@@ -162,10 +165,6 @@ fn redis_test_upstream(id: &str) -> UpstreamConfig {
         requests_per_minute: 100,
         request_quota_window_hours: 1,
         request_quota_requests: 100,
-        model_request_costs: vec![ModelRequestCostConfig {
-            slug: "model-a".into(),
-            cost: 2.5,
-        }],
         ..UpstreamConfig::default()
     }
 }
@@ -214,18 +213,6 @@ fn redis_integer_array(response: &str) -> Vec<i64> {
         .filter_map(|line| line.strip_prefix(':'))
         .map(|value| value.parse().expect("Redis array integer must be valid"))
         .collect()
-}
-
-fn redis_command_calls(response: &str, command: &str) -> u64 {
-    let prefix = format!("cmdstat_{command}:");
-    response
-        .lines()
-        .find(|line| line.starts_with(&prefix))
-        .and_then(|line| line.strip_prefix(&prefix))
-        .and_then(|stats| stats.split(',').find(|field| field.starts_with("calls=")))
-        .and_then(|field| field.strip_prefix("calls="))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0)
 }
 
 async fn redis_route_health_state_key(config: &AppConfig) -> String {
@@ -283,6 +270,12 @@ async fn redis_test_states(config: &AppConfig) -> (AppState, AppState, tempfile:
     (first, second, directory)
 }
 
+fn coordination_fault(state: &AppState) -> std::sync::Arc<CoordinationTestFault> {
+    state
+        .coordination_test_fault()
+        .expect("test states must use the Redis runtime backend")
+}
+
 fn redis_test_usage_log(id: &str, downstream_id: &str, total_tokens: u64) -> UsageLog {
     UsageLog {
         id: id.into(),
@@ -305,6 +298,7 @@ fn redis_test_usage_log(id: &str, downstream_id: &str, total_tokens: u64) -> Usa
         prompt_tokens: total_tokens,
         completion_tokens: 0,
         total_tokens,
+        total_cost_cents: None,
         first_token_latency_ms: None,
         latency_ms: 1,
         created_at: 0,
@@ -338,33 +332,6 @@ async fn redis_test_command(config: &AppConfig, arguments: &[String]) -> String 
         .unwrap()
         .unwrap();
     String::from_utf8(response[..length].to_vec()).unwrap()
-}
-
-async fn pause_test_redis(config: &AppConfig, milliseconds: u64) {
-    let response = redis_test_command(
-        config,
-        &[
-            "CLIENT".into(),
-            "PAUSE".into(),
-            milliseconds.to_string(),
-            "ALL".into(),
-        ],
-    )
-    .await;
-    assert_eq!(response, "+OK\r\n");
-}
-
-async fn wait_for_test_redis_recovery(state: &AppState) {
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            if state.runtime_coordination_healthcheck().await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("test Redis must recover after CLIENT PAUSE");
 }
 
 #[tokio::test]
@@ -810,7 +777,8 @@ async fn redis_admin_downstream_snapshot_failure_returns_typed_503() {
         &config.jwt_secret,
     )
     .unwrap();
-    pause_test_redis(&config, 5_000).await;
+    let fault = coordination_fault(&state);
+    fault.arm_outage(true);
 
     let response = app
         .oneshot(
@@ -828,7 +796,7 @@ async fn redis_admin_downstream_snapshot_failure_returns_typed_503() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["error"]["code"], "runtime_state_unavailable");
-    wait_for_test_redis_recovery(&state).await;
+    fault.arm_outage(false);
 }
 
 #[tokio::test]
@@ -844,7 +812,8 @@ async fn redis_portal_downstream_snapshot_failure_preserves_quota() {
     downstream.request_quota_requests = Some(1_000);
     state.add_downstream(downstream).await.unwrap();
     let app = build_router(state.clone());
-    pause_test_redis(&config, 5_000).await;
+    let fault = coordination_fault(&state);
+    fault.arm_outage(true);
 
     let response = app
         .oneshot(
@@ -870,7 +839,7 @@ async fn redis_portal_downstream_snapshot_failure_preserves_quota() {
     assert!(payload["concurrency"].get("running").is_none());
     assert!(payload["concurrency"].get("waiting_upstream").is_none());
     assert!(payload["concurrency"].get("admitted").is_none());
-    wait_for_test_redis_recovery(&state).await;
+    fault.arm_outage(false);
 }
 
 #[tokio::test]
@@ -1326,7 +1295,8 @@ async fn redis_account_mutation_fails_closed_during_outage() {
     let config = redis_test_config();
     let (first, _second, _directory) = redis_test_states(&config).await;
     let account = AccountConcurrencyKey::new("up-outage", "fingerprint-a");
-    pause_test_redis(&config, 5_000).await;
+    let fault = coordination_fault(&first);
+    fault.arm_outage(true);
 
     let error = first
         .register_account_waiter(&account, "req-outage", "down-a", "lease-outage")
@@ -1341,7 +1311,8 @@ async fn redis_account_waiter_registration_retry_is_idempotent() {
     let config = redis_test_config();
     let (first, _second, _directory) = redis_test_states(&config).await;
     let account = AccountConcurrencyKey::new("up-register-retry", "fingerprint-a");
-    pause_test_redis(&config, 2_100).await;
+    let fault = coordination_fault(&first);
+    fault.lose_next_responses(1);
     first
         .register_account_waiter(&account, "req-retry", "down-a", "lease-retry")
         .await
@@ -1358,7 +1329,8 @@ async fn redis_account_rejection_retry_advances_one_generation() {
     let config = redis_test_config();
     let (first, _second, _directory) = redis_test_states(&config).await;
     let account = AccountConcurrencyKey::new("up-reject-retry", "fingerprint-a");
-    pause_test_redis(&config, 2_100).await;
+    let fault = coordination_fault(&first);
+    fault.lose_next_responses(1);
     first
         .observe_account_concurrency(&account, None)
         .await
@@ -1470,7 +1442,8 @@ async fn redis_account_probe_grant_retry_returns_the_original_lease() {
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(220)).await;
-    pause_test_redis(&config, 2_100).await;
+    let fault = coordination_fault(&first);
+    fault.lose_next_responses(1);
 
     assert!(matches!(
         first.try_acquire_account_probe(&ticket).await.unwrap(),
@@ -1497,7 +1470,8 @@ async fn redis_account_probe_finish_retry_is_idempotent() {
         ProbeDecision::Granted(probe) => probe,
         other => panic!("expected a probe grant, got {other:?}"),
     };
-    pause_test_redis(&config, 2_100).await;
+    let fault = coordination_fault(&first);
+    fault.lose_next_responses(1);
 
     first
         .finish_account_probe(&probe, AccountProbeOutcome::Accepted)
@@ -1770,6 +1744,45 @@ async fn redis_daily_token_keys_use_daily_retention() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_cost_billing_token_keys_use_daily_retention() {
+    let config = redis_test_config();
+    let (first, _second, _directory) = redis_test_states(&config).await;
+    let mut downstream = redis_test_downstream("cost-billing-retention");
+    downstream.per_minute_limit = 60;
+    downstream.billing_mode = "token".into();
+    downstream.input_token_price_per_million_cents = Some(1000);
+    downstream.output_token_price_per_million_cents = Some(1000);
+    downstream.daily_cost_limit_cents = Some(3000);
+    // 按金额计费不依赖每日 token 数；留空验证金额窗口依然按 24h 滚动。
+    downstream.daily_token_limit = None;
+    first.insert_downstream(downstream.clone()).await.unwrap();
+    first
+        .append_usage_log(redis_test_usage_log(
+            "cost-billing-retention",
+            &downstream.id,
+            1,
+        ))
+        .await
+        .unwrap();
+
+    let identity = format!("{:x}", Sha256::digest(downstream.id.as_bytes()));
+    let token_key = format!(
+        "{}:v1:downstream:{{{identity}}}:tokens",
+        config.redis_key_prefix
+    );
+    let response = redis_test_command(&config, &["TTL".into(), token_key]).await;
+    let ttl = response
+        .strip_prefix(':')
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .expect("TTL must return an integer");
+    assert!(
+        ttl > 86_000 && ttl <= 86_460,
+        "cost-billed downstream without a token limit must still keep a 24h rolling window, got TTL {ttl}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_release_and_rollback_retry_once_after_timeout() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
@@ -1780,7 +1793,8 @@ async fn redis_release_and_rollback_retry_once_after_timeout() {
         .try_reserve_downstream_concurrency(&downstream)
         .await
         .unwrap();
-    pause_test_redis(&config, 2_100).await;
+    let fault = coordination_fault(&first);
+    fault.lose_next_responses(1);
     first
         .release_downstream_concurrency(lease)
         .await
@@ -1795,7 +1809,7 @@ async fn redis_release_and_rollback_retry_once_after_timeout() {
         .unwrap();
 
     let reservation = first.reserve_downstream_request(&downstream).await.unwrap();
-    pause_test_redis(&config, 2_100).await;
+    fault.lose_next_responses(1);
     first
         .rollback_downstream_request_reservation(reservation)
         .await
@@ -1813,7 +1827,8 @@ async fn redis_reserves_retry_commit_after_response_loss_without_double_counting
     let (first, second, _directory) = redis_test_states(&config).await;
 
     let downstream = redis_test_downstream("reserve-replay-request");
-    pause_test_redis(&config, 2_100).await;
+    let fault = coordination_fault(&first);
+    fault.lose_next_responses(1);
     let reservation = first
         .reserve_downstream_request(&downstream)
         .await
@@ -1832,7 +1847,7 @@ async fn redis_reserves_retry_commit_after_response_loss_without_double_counting
         .unwrap();
 
     let downstream = redis_test_downstream("reserve-replay-lease");
-    pause_test_redis(&config, 2_100).await;
+    fault.lose_next_responses(1);
     let downstream_lease = first
         .try_reserve_downstream_concurrency(&downstream)
         .await
@@ -1849,7 +1864,7 @@ async fn redis_reserves_retry_commit_after_response_loss_without_double_counting
     let upstream = redis_test_upstream("reserve-replay-upstream");
     first.insert_upstream(upstream.clone()).await.unwrap();
     second.insert_upstream(upstream.clone()).await.unwrap();
-    pause_test_redis(&config, 2_100).await;
+    fault.lose_next_responses(1);
     let upstream_lease = first
         .try_reserve_upstream_request(&upstream, "model-a")
         .await
@@ -1861,8 +1876,8 @@ async fn redis_reserves_retry_commit_after_response_loss_without_double_counting
         .remove(&upstream.id)
         .unwrap();
     assert_eq!(snapshot.in_flight, 1);
-    assert_eq!(snapshot.minute_cost, 2.5);
-    assert_eq!(snapshot.five_hour_cost, 2.5);
+    assert_eq!(snapshot.minute_cost, 1.0);
+    assert_eq!(snapshot.five_hour_cost, 1.0);
     first
         .release_upstream_request(upstream_lease)
         .await
@@ -1892,7 +1907,8 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
     let upstream_retry_during_outage = upstream_lease.clone();
     let upstream_retry_after_recovery = upstream_lease.clone();
 
-    pause_test_redis(&config, 5_000).await;
+    let fault = coordination_fault(&first);
+    fault.arm_outage(true);
     let (downstream_result, upstream_result) = tokio::join!(
         first.release_downstream_concurrency(downstream_lease),
         first.release_upstream_request(upstream_lease),
@@ -1900,8 +1916,8 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
     assert!(downstream_result.is_err());
     assert!(upstream_result.is_err());
 
-    wait_for_test_redis_recovery(&first).await;
-    pause_test_redis(&config, 5_000).await;
+    fault.arm_outage(false);
+    fault.arm_outage(true);
     let (downstream_result, upstream_result) = tokio::join!(
         first.release_downstream_concurrency(downstream_retry_during_outage),
         first.release_upstream_request(upstream_retry_during_outage),
@@ -1915,7 +1931,7 @@ async fn failed_redis_releases_can_be_retried_by_a_clone() {
         "a retained upstream clone must retry Redis instead of returning false success"
     );
 
-    wait_for_test_redis_recovery(&first).await;
+    fault.arm_outage(false);
     let (downstream_result, upstream_result) = tokio::join!(
         first.release_downstream_concurrency(downstream_retry_after_recovery),
         first.release_upstream_request(upstream_retry_after_recovery),
@@ -1955,7 +1971,8 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
     first.insert_downstream(downstream.clone()).await.unwrap();
     let log = redis_test_usage_log("retryable-token-log", &downstream.id, 10);
 
-    pause_test_redis(&config, 5_000).await;
+    let fault = coordination_fault(&first);
+    fault.arm_outage(true);
     let error = first
         .append_usage_log(log.clone())
         .await
@@ -1972,6 +1989,7 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
     );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
+    fault.arm_outage(false);
     first.append_usage_log(log.clone()).await.unwrap();
     let matching_logs = first
         .snapshot()
@@ -2003,22 +2021,18 @@ async fn redis_token_recording_retries_commit_after_response_loss() {
         ))
         .await
         .unwrap();
-    assert_eq!(
-        redis_test_command(&config, &["CONFIG".into(), "RESETSTAT".into()]).await,
-        "+OK\r\n"
-    );
 
-    pause_test_redis(&config, 2_100).await;
+    let fault = coordination_fault(&first);
+    fault.lose_next_responses(1);
     first
         .append_usage_log(log.clone())
         .await
         .expect("token recording must replay the same event after a lost response");
 
-    let command_stats = redis_test_command(&config, &["INFO".into(), "commandstats".into()]).await;
     assert_eq!(
-        redis_command_calls(&command_stats, "zadd"),
-        2,
-        "token recording must execute its ZADD exactly once initially and once on replay: {command_stats:?}"
+        fault.lost_response_commits(),
+        1,
+        "the lost attempt must commit its token write before the coordinator replays it"
     );
 
     assert_eq!(
@@ -2121,7 +2135,8 @@ async fn failed_redis_cleanup_leaves_downstream_available_for_retry() {
     first.insert_downstream(downstream.clone()).await.unwrap();
     first.reserve_downstream_request(&downstream).await.unwrap();
 
-    pause_test_redis(&config, 5_000).await;
+    let fault = coordination_fault(&first);
+    fault.arm_outage(true);
     first
         .remove_downstream(&downstream.id)
         .await
@@ -2136,7 +2151,7 @@ async fn failed_redis_cleanup_leaves_downstream_available_for_retry() {
         "failed cleanup must not persist the removal"
     );
 
-    wait_for_test_redis_recovery(&first).await;
+    fault.arm_outage(false);
     assert!(first.remove_downstream(&downstream.id).await.unwrap());
     second
         .reserve_downstream_request(&downstream)
@@ -2150,7 +2165,9 @@ async fn redis_upstream_reservations_snapshots_and_exact_release_are_shared() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
     let mut upstream = redis_test_upstream("shared-upstream-admission");
-    upstream.requests_per_minute = 2;
+    // Flat 1.0 request cost: a limit of 1 makes the second (hedge) request
+    // exceed the retained minute quota event after the lease is released.
+    upstream.requests_per_minute = 1;
     first.insert_upstream(upstream.clone()).await.unwrap();
     second.insert_upstream(upstream.clone()).await.unwrap();
 
@@ -2161,8 +2178,8 @@ async fn redis_upstream_reservations_snapshots_and_exact_release_are_shared() {
     let snapshots = second.upstream_runtime_snapshots().await.unwrap();
     let snapshot = snapshots.get(&upstream.id).unwrap();
     assert_eq!(snapshot.in_flight, 1);
-    assert_eq!(snapshot.minute_cost, 2.5);
-    assert_eq!(snapshot.five_hour_cost, 2.5);
+    assert_eq!(snapshot.minute_cost, 1.0);
+    assert_eq!(snapshot.five_hour_cost, 1.0);
 
     let concurrency_rejection = second
         .try_reserve_upstream_hedge(&upstream, "model-a")
@@ -2177,8 +2194,8 @@ async fn redis_upstream_reservations_snapshots_and_exact_release_are_shared() {
     let snapshots = second.upstream_runtime_snapshots().await.unwrap();
     let snapshot = snapshots.get(&upstream.id).unwrap();
     assert_eq!(snapshot.in_flight, 0);
-    assert_eq!(snapshot.minute_cost, 2.5);
-    assert_eq!(snapshot.five_hour_cost, 2.5);
+    assert_eq!(snapshot.minute_cost, 1.0);
+    assert_eq!(snapshot.five_hour_cost, 1.0);
 
     let minute_rejection = second
         .try_reserve_upstream_hedge(&upstream, "model-a")
@@ -2187,7 +2204,7 @@ async fn redis_upstream_reservations_snapshots_and_exact_release_are_shared() {
     assert!(!minute_rejection.is_runtime_coordination_unavailable());
 
     upstream.requests_per_minute = 100;
-    upstream.request_quota_requests = 2;
+    upstream.request_quota_requests = 1;
     let window_rejection = second
         .try_reserve_upstream_hedge(&upstream, "model-a")
         .await
@@ -2215,12 +2232,13 @@ async fn redis_upstream_reservations_snapshots_and_exact_release_are_shared() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
-async fn redis_upstream_snapshot_round_trips_precise_fractional_costs() {
+async fn redis_upstream_snapshot_counts_flat_request_cost() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
-    let mut upstream = redis_test_upstream("precise-upstream-costs");
-    let request_cost = 1.234_567_890_123_456_7;
-    upstream.model_request_costs[0].cost = request_cost;
+    let upstream = redis_test_upstream("precise-upstream-costs");
+    // Upstream model-weighted request costs were removed; every request
+    // consumes a flat 1.0 quota unit.
+    let request_cost = 1.0_f64;
     first.insert_upstream(upstream.clone()).await.unwrap();
     second.insert_upstream(upstream.clone()).await.unwrap();
 
@@ -2302,13 +2320,14 @@ async fn redis_upstream_admission_distinguishes_capacity_from_coordination_failu
     assert!(!capacity.is_runtime_coordination_unavailable());
     first.release_upstream_request(lease).await.unwrap();
 
-    pause_test_redis(&config, 2_500).await;
+    let fault = coordination_fault(&second);
+    fault.arm_outage(true);
     let coordination = second
         .try_reserve_upstream_request(&upstream, "model-a")
         .await
         .expect_err("Redis timeout must fail closed");
     assert!(coordination.is_runtime_coordination_unavailable());
-    wait_for_test_redis_recovery(&second).await;
+    fault.arm_outage(false);
 }
 
 #[tokio::test]
@@ -2332,7 +2351,7 @@ async fn redis_upstream_snapshot_failure_returns_stable_gateway_503() {
     downstream.rate_limit_enabled = false;
     state.insert_downstream(downstream).await.unwrap();
 
-    pause_test_redis(&config, 2_500).await;
+    coordination_fault(&state).arm_outage(true);
     let response = build_router(state)
         .oneshot(
             Request::builder()
@@ -3085,7 +3104,7 @@ async fn redis_route_health_finish_retry_is_idempotent() {
         other => panic!("expected healthy permit, got {other:?}"),
     };
 
-    pause_test_redis(&config, 2_100).await;
+    coordination_fault(&first).lose_next_responses(1);
     permit
         .finish(RouteOutcome::RouteFailure(
             RouteFailureClass::TransientServer,
@@ -3153,11 +3172,12 @@ async fn redis_targeted_model_sync_retains_pending_cleanup_until_coordination_re
         .unwrap();
     let worker = ModelKeySyncService::spawn(state.clone()).expect("model sync enabled");
 
-    pause_test_redis(&config, 5_500).await;
+    coordination_fault(&state).arm_outage(true);
     assert!(state.submit_targeted_model_discovery(upstream_id, &fingerprint, "model-a"));
     tokio::time::sleep(Duration::from_millis(4_500)).await;
     assert_eq!(state.targeted_model_discovery_pending_count(), 1);
 
+    coordination_fault(&state).arm_outage(false);
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if state.targeted_model_discovery_pending_count() == 0
@@ -3266,4 +3286,59 @@ async fn redis_coordinated_probe_plan_reserves_and_releases_upstream_capacity() 
         .remove("redis-coordinated-probe")
         .expect("upstream snapshot must exist");
     assert_eq!(snapshot.in_flight, 0, "probe leases must all be released");
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_lease_uses_short_ttl_not_upstream_stream_duration() {
+    let config = AppConfig {
+        downstream_lease_ttl_seconds: 300,
+        ..redis_test_config()
+    };
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let downstream = redis_test_downstream("down-lease-ttl");
+    let lease = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+
+    let key = redis_downstream_key(&config, "down-lease-ttl", "leases");
+    let members = redis_test_command(
+        &config,
+        &["ZRANGE".into(), key.clone(), "0".into(), "-1".into()],
+    )
+    .await;
+    // RESP array of bulk strings: *1\r\n$36\r\n<uuid>\r\n
+    let lease_id = members
+        .split("\r\n")
+        .nth(2)
+        .expect("ZRANGE must return the reserved lease id")
+        .to_string();
+    let score_raw = redis_test_command(&config, &["ZSCORE".into(), key, lease_id.clone()]).await;
+    // RESP bulk string: $13\r\n1786070635555\r\n
+    let score_ms: i64 = score_raw
+        .split("\r\n")
+        .nth(1)
+        .expect("ZSCORE must return a bulk string")
+        .parse()
+        .expect("ZSCORE must return an integer");
+
+    let time_raw = redis_test_command(&config, &["TIME".into()]).await;
+    // RESP array of bulk strings: *2\r\n$10\r\n1786069805\r\n$6\r\n499055\r\n
+    let time_parts: Vec<&str> = time_raw.split("\r\n").collect();
+    let seconds: i64 = time_parts[2].parse().expect("TIME seconds");
+    let micros: i64 = time_parts[4].parse().expect("TIME micros");
+    let now_ms = seconds * 1000 + micros / 1000;
+
+    let remaining_ms = score_ms - now_ms;
+    // Downstream lease must use the short configured TTL (~300s), NOT the
+    // upstream stream max duration (24h + 60s) that leaks ghost leases after
+    // a gateway restart.
+    assert!(
+        (290_000..=320_000).contains(&remaining_ms),
+        "downstream lease should expire with the short TTL (~300s), got {remaining_ms}ms"
+    );
+    // Keep the lease alive until after the assertions; dropping it releases
+    // the Redis lease and would make the ZSET empty.
+    drop(lease);
 }

@@ -7,8 +7,7 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, AppState,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
-    ModelContextConfig, ModelRequestCostConfig, PersistedState, UpstreamConfig, UsageLog,
-    UsageLogQuery,
+    ModelContextConfig, PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
 };
 use serde_json::json;
 use serde_json::Map;
@@ -54,7 +53,6 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
                 "request_quota_requests": 888,
                 "requests_per_minute": 33,
                 "max_concurrency": 7,
-                "model_request_costs": [],
                 "model_contexts": [],
                 "priority": 0,
                 "premium_models": [],
@@ -239,16 +237,6 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         request_quota_requests: 888,
         requests_per_minute: 33,
         max_concurrency: 7,
-        model_request_costs: vec![
-            ModelRequestCostConfig {
-                slug: "GLM-4.1-mini".into(),
-                cost: 2.0,
-            },
-            ModelRequestCostConfig {
-                slug: "GLM-4.1-mini-Long".into(),
-                cost: 3.0,
-            },
-        ],
         priority: 0,
         premium_models: vec![],
         premium_only: false,
@@ -272,6 +260,9 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         max_concurrency: 10,
         daily_token_limit: Some(1_000),
         monthly_token_limit: Some(2_000),
+        input_token_price_per_million_cents: None,
+        output_token_price_per_million_cents: None,
+        daily_cost_limit_cents: None,
         request_quota_window_hours: Some(5),
         request_quota_requests: Some(600),
         ip_allowlist: vec!["127.0.0.1".into()],
@@ -300,6 +291,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         prompt_tokens: 11,
         completion_tokens: 13,
         total_tokens: 24,
+        total_cost_cents: None,
         first_token_latency_ms: None,
         latency_ms: 78,
         created_at: 1_725_000_001,
@@ -419,6 +411,7 @@ async fn postgres_roundtrip_preserves_compatibility_metadata_and_first_token_lat
         prompt_tokens: 13,
         completion_tokens: 7,
         total_tokens: 20,
+        total_cost_cents: None,
         first_token_latency_ms: Some(42),
         latency_ms: 44,
         created_at: 1_725_000_101,
@@ -544,7 +537,6 @@ async fn postgres_roundtrip_preserves_api_key_model_mapping() {
         "request_quota_requests": 888,
         "requests_per_minute": 33,
         "max_concurrency": 7,
-        "model_request_costs": [],
         "priority": 0,
         "premium_models": [],
         "premium_only": false,
@@ -1072,10 +1064,6 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         request_quota_requests: 888,
         requests_per_minute: 33,
         max_concurrency: 7,
-        model_request_costs: vec![ModelRequestCostConfig {
-            slug: "GLM-4.1-mini".into(),
-            cost: 2.0,
-        }],
         priority: 0,
         premium_models: vec![],
         premium_only: false,
@@ -1097,6 +1085,9 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         max_concurrency: 10,
         daily_token_limit: Some(1_000),
         monthly_token_limit: Some(2_000),
+        input_token_price_per_million_cents: None,
+        output_token_price_per_million_cents: None,
+        daily_cost_limit_cents: None,
         request_quota_window_hours: Some(5),
         request_quota_requests: Some(600),
         ip_allowlist: vec!["127.0.0.1".into()],
@@ -1125,6 +1116,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         prompt_tokens: 11,
         completion_tokens: 13,
         total_tokens: 24,
+        total_cost_cents: None,
         first_token_latency_ms: None,
         latency_ms: 78,
         created_at: 1_725_000_001,
@@ -1202,10 +1194,6 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         request_quota_requests: 888,
         requests_per_minute: 33,
         max_concurrency: 7,
-        model_request_costs: vec![ModelRequestCostConfig {
-            slug: "GLM-4.1-mini".into(),
-            cost: 2.0,
-        }],
         priority: 0,
         premium_models: vec![],
         premium_only: false,
@@ -1227,6 +1215,9 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         max_concurrency: 10,
         daily_token_limit: Some(1_000),
         monthly_token_limit: Some(2_000),
+        input_token_price_per_million_cents: None,
+        output_token_price_per_million_cents: None,
+        daily_cost_limit_cents: None,
         request_quota_window_hours: Some(5),
         request_quota_requests: Some(600),
         ip_allowlist: vec!["127.0.0.1".into()],
@@ -1255,6 +1246,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         prompt_tokens: 11,
         completion_tokens: 13,
         total_tokens: 24,
+        total_cost_cents: None,
         first_token_latency_ms: None,
         latency_ms: 78,
         created_at: 1_725_000_001,
@@ -1322,10 +1314,6 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             protocols: vec![UpstreamProtocol::Responses],
             supported_models: vec!["Delete-Model".into()],
             premium_models: vec!["Delete-Premium".into()],
-            model_request_costs: vec![ModelRequestCostConfig {
-                slug: "Delete-Model".into(),
-                cost: 1.0,
-            }],
             active: false,
             ..Default::default()
         })
@@ -1345,6 +1333,9 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             max_concurrency: 10,
             daily_token_limit: None,
             monthly_token_limit: None,
+            input_token_price_per_million_cents: None,
+            output_token_price_per_million_cents: None,
+            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             expires_at: None,
@@ -1383,6 +1374,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             prompt_tokens: 1,
             completion_tokens: 1,
             total_tokens: 2,
+            total_cost_cents: None,
             first_token_latency_ms: None,
             latency_ms: 1,
             created_at: 1_725_000_001,
@@ -1438,15 +1430,6 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
         query_count(
             &database_url,
             "upstream_premium_models",
-            "upstream_id",
-            &upstream_id,
-        ),
-        0
-    );
-    assert_eq!(
-        query_count(
-            &database_url,
-            "upstream_model_request_costs",
             "upstream_id",
             &upstream_id,
         ),
@@ -1548,7 +1531,7 @@ async fn execute_pg_sql(database_url: &str, sql: &str) {
 async fn reset_test_database_async(database_url: &str) {
     execute_pg_sql(
         database_url,
-        "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_model_request_costs, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
+        "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
     )
     .await;
 }
@@ -1596,7 +1579,7 @@ fn reset_test_database(database_url: &str) {
             "-v",
             "ON_ERROR_STOP=1",
             "-c",
-            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_model_request_costs, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
+            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
         ])
         .output()
         .expect("psql should run");
@@ -1661,6 +1644,7 @@ async fn stream_diagnostics_round_trip_through_postgres() {
         prompt_tokens: 10,
         completion_tokens: 5,
         total_tokens: 15,
+        total_cost_cents: None,
         first_token_latency_ms: Some(1_200),
         latency_ms: 2_000,
         created_at: 1_785_695_500,
@@ -1746,6 +1730,7 @@ async fn legacy_row_without_wire_status_gets_normalized_on_load() {
         prompt_tokens: 1,
         completion_tokens: 1,
         total_tokens: 2,
+        total_cost_cents: None,
         first_token_latency_ms: None,
         latency_ms: 100,
         created_at: 1_785_695_700,
@@ -1824,6 +1809,7 @@ async fn postgres_usage_log_query_respects_half_open_day_bounds() {
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
+        total_cost_cents: None,
         first_token_latency_ms: None,
         latency_ms: 0,
         created_at: day.start_time, // exactly at start boundary

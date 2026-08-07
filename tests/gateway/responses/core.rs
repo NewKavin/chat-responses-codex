@@ -30,20 +30,6 @@ fn codex_fast_preview_variant_requires_base_authorization_and_route() {
     assert_eq!(routed_upstream.resolved_model_name(mixed_case_alias), None);
 }
 
-#[test]
-fn codex_fast_preview_variant_inherits_base_request_cost() {
-    let upstream = UpstreamConfig {
-        supported_models: vec!["glm-5.2".into()],
-        model_request_costs: vec![ModelRequestCostConfig {
-            slug: "glm-5.2".into(),
-            cost: 3.0,
-        }],
-        ..Default::default()
-    };
-
-    assert_eq!(upstream.request_cost_for_model("glm-5.2-fast-preview"), 3.0);
-}
-
 #[tokio::test]
 async fn downstream_responses_supports_configured_portal_models() {
     let capture = Arc::new(Mutex::new(Vec::<RequestCapture>::new()));
@@ -138,6 +124,9 @@ async fn downstream_responses_supports_configured_portal_models() {
                 max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -277,6 +266,9 @@ async fn codex_subagent_fast_preview_model_uses_authorized_base_route() {
                 max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -393,6 +385,9 @@ async fn downstream_responses_allows_function_call_success_with_zero_output_toke
                 max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -518,6 +513,9 @@ async fn downstream_models_do_not_live_discover_an_empty_portal_catalog() {
                 max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -754,6 +752,9 @@ async fn empty_persisted_catalog_skips_discovery_but_preserves_legacy_request_ro
                 max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],

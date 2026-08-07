@@ -12,8 +12,7 @@ pub use chat_responses_codex::keys::GeneratedDownstreamKey;
 pub use chat_responses_codex::routing::UpstreamProtocol;
 pub use chat_responses_codex::server::build_router;
 pub use chat_responses_codex::state::{
-    AppConfig, AppState, DownstreamConfig, ModelContextConfig, ModelRequestCostConfig,
-    PersistedState, UpstreamConfig,
+    AppConfig, AppState, DownstreamConfig, ModelContextConfig, PersistedState, UpstreamConfig,
 };
 pub use futures_util::stream;
 pub use http_body_util::BodyExt;

@@ -91,7 +91,9 @@ pub use calendar::{
 use file_store::FileStateStore;
 pub use log_queries::{DownstreamUsageSummary, EnrichedUsageLog, UsageLogPage, UsageLogQuery};
 use postgres::PostgresStateStore;
-pub use redis_runtime::{RuntimeCoordinationBackend, RuntimeCoordinationError};
+pub use redis_runtime::{
+    CoordinationTestFault, RuntimeCoordinationBackend, RuntimeCoordinationError,
+};
 pub use store::{StateStore, StoreFuture};
 
 pub use freekey_sync::{FreekeySyncError, FreekeySyncItem, FreekeySyncSummary};
@@ -121,7 +123,7 @@ pub use types::{
     default_upstream_request_quota_window_hours, default_upstream_requests_per_minute,
     AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConcurrencySnapshot,
-    DownstreamConfig, GlobalContextProfile, ModelContextConfig, ModelRequestCostConfig,
+    DownstreamConfig, GlobalContextProfile, ModelContextConfig,
     PersistedState, RouteFailureClass, RouteHealthSnapshotDto, StreamDiagnostics, UpstreamConfig,
     UpstreamMutationError, UsageLog, ADMIN_SESSION_TTL_SECONDS,
     DEFAULT_UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS, DEFAULT_UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS,
@@ -746,6 +748,7 @@ impl AppState {
             .cloned()
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
+        let downstreams = state.downstreams.clone();
         let store_path = store_path.into();
         let config_store: Arc<dyn StateStore> = Arc::new(FileStateStore::new(store_path.clone()));
         Self {
@@ -768,6 +771,7 @@ impl AppState {
             ))),
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
+                &downstreams,
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
@@ -816,6 +820,7 @@ impl AppState {
             .cloned()
             .chain(archived_usage_logs.iter().cloned())
             .collect::<Vec<_>>();
+        let downstreams = state.downstreams.clone();
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
@@ -836,6 +841,7 @@ impl AppState {
             ))),
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
+                &downstreams,
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
@@ -877,6 +883,7 @@ impl AppState {
             std::mem::take(Arc::make_mut(&mut state.global_context_profiles)),
         ));
         let downstream_usage_logs = state.usage_logs.clone();
+        let downstreams = state.downstreams.clone();
         let postgres = Arc::new(postgres);
         let config_store: Arc<dyn StateStore> = postgres.clone();
         Self {
@@ -899,6 +906,7 @@ impl AppState {
             ))),
             downstream_token_windows: Arc::new(Mutex::new(build_downstream_token_windows(
                 &downstream_usage_logs,
+                &downstreams,
             ))),
             downstream_runtime: Arc::new(StdMutex::new(HashMap::new())),
             active_requests: Arc::new(StdMutex::new(HashMap::new())),
@@ -1231,6 +1239,19 @@ impl AppState {
 
     pub async fn runtime_coordination_healthcheck(&self) -> io::Result<()> {
         self.runtime_coordination.healthcheck().await
+    }
+
+    /// Test-only seam: returns the coordination fault injector when the
+    /// state uses the Redis runtime backend, so an integration test can arm
+    /// a simulated outage or lost response without pausing the shared Redis.
+    #[doc(hidden)]
+    pub fn coordination_test_fault(&self) -> Option<std::sync::Arc<CoordinationTestFault>> {
+        match &self.runtime_coordination {
+            RuntimeCoordinationBackend::Redis(coordinator) => {
+                Some(coordinator.coordination_fault.clone())
+            }
+            RuntimeCoordinationBackend::Local => None,
+        }
     }
 
     pub fn client_for_url(&self, url: &str) -> Client {
@@ -2448,15 +2469,11 @@ impl AppState {
     pub async fn try_reserve_upstream_request(
         &self,
         upstream: &UpstreamConfig,
-        model: &str,
+        _model: &str,
     ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
-        let request_cost = upstream.request_cost_for_model(model);
-        if request_cost <= 0.0 {
-            return Err(UpstreamAdmissionError::new(
-                "invalid upstream model request cost".into(),
-                1,
-            ));
-        }
+        // Upstream model-weighted request costs were removed; every request
+        // consumes a flat 1.0 quota unit.
+        let request_cost = 1.0_f64;
 
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let lease_id = Uuid::new_v4().to_string();
@@ -2509,15 +2526,11 @@ impl AppState {
     pub async fn try_reserve_upstream_hedge(
         &self,
         upstream: &UpstreamConfig,
-        model: &str,
+        _model: &str,
     ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
-        let request_cost = upstream.request_cost_for_model(model);
-        if request_cost <= 0.0 {
-            return Err(UpstreamAdmissionError::new(
-                "invalid upstream model request cost".into(),
-                1,
-            ));
-        }
+        // Upstream model-weighted request costs were removed; every request
+        // consumes a flat 1.0 quota unit.
+        let request_cost = 1.0_f64;
 
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let lease_id = Uuid::new_v4().to_string();
@@ -2851,26 +2864,33 @@ impl AppState {
         &self,
         log: &UsageLog,
     ) -> Result<(), RuntimeCoordinationError> {
+        let event = {
+            let state = self.inner.lock().await;
+            state
+                .downstreams
+                .iter()
+                .find(|downstream| downstream.id == log.downstream_key_id)
+                .filter(|downstream| {
+                    downstream.rate_limit_enabled && downstream.token_billing_mode()
+                })
+                .map(|downstream| {
+                    let value = if downstream.cost_billing_mode() {
+                        downstream.cost_for_tokens(log.prompt_tokens, log.completion_tokens)
+                    } else {
+                        log.total_tokens
+                    };
+                    (downstream_token_retention_seconds(downstream), value)
+                })
+        };
+        let Some((retention_seconds, event_value)) = event else {
+            return Ok(());
+        };
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
-            let retention_seconds = {
-                let state = self.inner.lock().await;
-                state
-                    .downstreams
-                    .iter()
-                    .find(|downstream| downstream.id == log.downstream_key_id)
-                    .filter(|downstream| {
-                        downstream.rate_limit_enabled && downstream.token_billing_mode()
-                    })
-                    .map(downstream_token_retention_seconds)
-            };
-            let Some(retention_seconds) = retention_seconds else {
-                return Ok(());
-            };
             return coordinator
                 .record_downstream_tokens(
                     &log.downstream_key_id,
                     &format!("history:{}", log.id),
-                    log.total_tokens,
+                    event_value,
                     retention_seconds,
                 )
                 .await;
@@ -2881,7 +2901,7 @@ impl AppState {
             .or_insert_with(VecDeque::new)
             .push_back(DownstreamTokenEvent {
                 created_at: log.created_at,
-                tokens: log.total_tokens,
+                tokens: event_value,
             });
         Ok(())
     }
@@ -3141,7 +3161,34 @@ impl AppState {
                 }
             }
 
-            if let Some(daily_token_limit) = downstream.daily_token_limit {
+            if let Some(daily_cost_limit) = downstream.daily_cost_limit() {
+                let daily_used = token_window
+                    .iter()
+                    .filter(|event| {
+                        event.created_at
+                            >= now.saturating_sub(
+                                DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
+                            )
+                    })
+                    .map(|event| event.tokens)
+                    .sum::<u64>();
+                if daily_used >= daily_cost_limit.max(1) {
+                    let retry_after_seconds = downstream_token_retry_after_seconds(
+                        token_window,
+                        now,
+                        DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
+                        daily_used
+                            .saturating_add(1)
+                            .saturating_sub(daily_cost_limit.max(1)),
+                    )
+                    .max(1);
+                    return Err(DownstreamAdmissionRejection::DailyTokenQuotaExceeded {
+                        retry_after_seconds,
+                        limit: daily_cost_limit.max(1),
+                        used: daily_used,
+                    });
+                }
+            } else if let Some(daily_token_limit) = downstream.daily_token_limit {
                 let daily_used = token_window
                     .iter()
                     .filter(|event| {

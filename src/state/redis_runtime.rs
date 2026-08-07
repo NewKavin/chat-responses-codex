@@ -35,6 +35,82 @@ const ROUTE_HEALTH_FAILURE_STREAK_RESET_MS: u64 = 10 * 60 * 1_000;
 #[error("runtime coordination unavailable")]
 pub struct RuntimeCoordinationError;
 
+/// Test-only fault injection for the Redis runtime coordinator.
+///
+/// Integration tests cannot reach `#[cfg(test)]` items, so this seam is
+/// always compiled but inert unless a test arms it. It lets a single test
+/// simulate a Redis outage (every coordination operation fails before any
+/// Redis write is dispatched) or a lost response (the next operation
+/// attempt's Redis write is dispatched but its reply is treated as lost, so
+/// the coordinator's retry path replays it) without pausing the shared test
+/// Redis instance that other tests run against in parallel.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct CoordinationTestFault {
+    outage: std::sync::atomic::AtomicBool,
+    lost_response_attempts: std::sync::atomic::AtomicUsize,
+    lost_response_commits: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum CoordinationFaultMode {
+    None,
+    Outage,
+    LostResponse,
+}
+
+impl CoordinationTestFault {
+    /// While `outage` is true every coordination operation fails immediately.
+    pub fn arm_outage(&self, outage: bool) {
+        self.outage
+            .store(outage, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make the next `count` coordination operation attempts fail at the
+    /// reply level: the operation's Redis write is executed to completion
+    /// (so it really commits) but its result is reported as lost, forcing
+    /// the coordinator to retry once and then succeed against live Redis.
+    pub fn lose_next_responses(&self, count: usize) {
+        self.lost_response_attempts
+            .fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Number of lost-response attempts whose Redis write actually committed
+    /// server-side before the coordinator replayed the operation.
+    pub fn lost_response_commits(&self) -> usize {
+        self.lost_response_commits
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn record_lost_response_commit(&self) {
+        self.lost_response_commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn should_fail(&self) -> CoordinationFaultMode {
+        if self.outage.load(std::sync::atomic::Ordering::SeqCst) {
+            return CoordinationFaultMode::Outage;
+        }
+        let remaining = self
+            .lost_response_attempts
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if remaining > 0
+            && self
+                .lost_response_attempts
+                .compare_exchange(
+                    remaining,
+                    remaining - 1,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+        {
+            return CoordinationFaultMode::LostResponse;
+        }
+        CoordinationFaultMode::None
+    }
+}
+
 #[derive(Clone)]
 pub enum RuntimeCoordinationBackend {
     Local,
@@ -75,6 +151,7 @@ impl RuntimeCoordinationBackend {
         let coordinator = tokio::time::timeout(REDIS_STARTUP_TIMEOUT, async move {
             let manager = ConnectionManager::new(client.clone()).await?;
             let coordinator = Arc::new(RedisRuntimeCoordinator {
+                coordination_fault: Arc::new(CoordinationTestFault::default()),
                 client,
                 manager: Arc::new(RwLock::new(manager)),
                 key_prefix,
@@ -82,6 +159,10 @@ impl RuntimeCoordinationBackend {
                     .upstream_stream_max_duration_seconds
                     .saturating_add(60)
                     .saturating_mul(1_000),
+                downstream_lease_duration_ms: config
+                    .downstream_lease_ttl_seconds
+                    .saturating_mul(1_000)
+                    .max(60_000),
                 account_waiter_budget_ms: config.upstream_concurrency_recovery_max_wait_ms,
                 account_waiter_ttl_ms: config
                     .upstream_concurrency_recovery_max_wait_ms
@@ -134,10 +215,12 @@ impl RuntimeCoordinationBackend {
 }
 
 pub struct RedisRuntimeCoordinator {
+    pub(super) coordination_fault: Arc<CoordinationTestFault>,
     client: redis::Client,
     manager: Arc<RwLock<ConnectionManager>>,
     key_prefix: Arc<str>,
     lease_duration_ms: u64,
+    downstream_lease_duration_ms: u64,
     account_waiter_budget_ms: u64,
     account_waiter_ttl_ms: u64,
     account_probe_ttl_ms: u64,
@@ -196,8 +279,13 @@ impl RedisRuntimeCoordinator {
             0
         };
         // Token billing mode: only the daily rolling window is enforced.
+        // Cost billing (token mode + price + cost limit) uses the cost limit
+        // in cents; otherwise falls back to the raw token limit.
         let daily_limit = if downstream.token_billing_mode() {
-            downstream.daily_token_limit.unwrap_or(0)
+            downstream
+                .daily_cost_limit()
+                .or(downstream.daily_token_limit)
+                .unwrap_or(0)
         } else {
             0
         };
@@ -308,7 +396,7 @@ impl RedisRuntimeCoordinator {
                         .key(lease_key)
                         .arg(lease_id)
                         .arg(downstream.max_concurrency.max(1))
-                        .arg(self.lease_duration_ms);
+                        .arg(self.downstream_lease_duration_ms);
                     timeout_coordination(invocation.invoke_async::<Vec<i64>>(&mut connection)).await
                 }
             })
@@ -1017,6 +1105,9 @@ impl RedisRuntimeCoordinator {
             self.key(&identity, "leases"),
             self.key(&identity, "waiting"),
         ]);
+        if self.coordination_fault.should_fail() != CoordinationFaultMode::None {
+            return Err(RuntimeCoordinationError);
+        }
         let result = timeout_coordination(command.query_async::<i64>(&mut connection))
             .await
             .map(|_| ());
@@ -1404,6 +1495,9 @@ impl RedisRuntimeCoordinator {
         schedule: &[u64],
     ) -> Result<(), RuntimeCoordinationError> {
         let ttl_seconds = self.retention_ttl_seconds_for(retry_after, &[schedule]);
+        if self.coordination_fault.should_fail() != CoordinationFaultMode::None {
+            return Err(RuntimeCoordinationError);
+        }
         let mut connection = self.connection();
         let script = redis::Script::new(include_str!("redis_runtime/route_health_observe.lua"));
         let mut invocation = script.prepare_invoke();
@@ -1445,6 +1539,9 @@ impl RedisRuntimeCoordinator {
         global_index_key: &str,
         kind: &str,
     ) -> Result<(), RuntimeCoordinationError> {
+        if self.coordination_fault.should_fail() != CoordinationFaultMode::None {
+            return Err(RuntimeCoordinationError);
+        }
         let mut connection = self.connection();
         let script = redis::Script::new(include_str!("redis_runtime/route_health_observe.lua"));
         let mut invocation = script.prepare_invoke();
@@ -1856,10 +1953,32 @@ impl RedisRuntimeCoordinator {
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, RuntimeCoordinationError>>,
     {
-        match operation().await {
+        let first = match self.coordination_fault.should_fail() {
+            CoordinationFaultMode::None => operation().await,
+            CoordinationFaultMode::Outage => return Err(RuntimeCoordinationError),
+            CoordinationFaultMode::LostResponse => {
+                // The write commits server-side but the reply is treated as
+                // lost: run the operation to completion so the Redis write
+                // really lands, then report failure so the coordinator retries
+                // and replays the same operation idempotently.
+                if operation().await.is_ok() {
+                    self.coordination_fault.record_lost_response_commit();
+                }
+                Err(RuntimeCoordinationError)
+            }
+        };
+        match first {
             Ok(value) => Ok(value),
             Err(_) => {
                 self.refresh_manager().await?;
+                match self.coordination_fault.should_fail() {
+                    CoordinationFaultMode::None => {}
+                    CoordinationFaultMode::Outage => return Err(RuntimeCoordinationError),
+                    CoordinationFaultMode::LostResponse => {
+                        let _ = operation().await;
+                        return Err(RuntimeCoordinationError);
+                    }
+                }
                 operation().await
             }
         }

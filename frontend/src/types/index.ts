@@ -93,7 +93,6 @@ export interface UpstreamConfig {
   request_quota_requests: number
   requests_per_minute: number
   max_concurrency: number
-  model_request_costs: ModelRequestCost[]
   priority: number
   premium_models: string[]
   protect_premium_quota: boolean
@@ -136,10 +135,6 @@ export interface UpstreamRuntimeState {
   cooldown_remaining: number
 }
 
-export interface ModelRequestCost {
-  slug: string
-  cost: number
-}
 
 export interface ModelContextConfig {
   slug: string
@@ -172,6 +167,12 @@ export interface DownstreamConfig {
   max_concurrency: number
   daily_token_limit?: number
   monthly_token_limit?: number
+  /** 每百万输入 token 价格（分）。与每日金额上限同时配置时启用按金额计费。 */
+  input_token_price_per_million_cents?: number
+  /** 每百万输出 token 价格（分）。与每日金额上限同时配置时启用按金额计费。 */
+  output_token_price_per_million_cents?: number
+  /** 每日金额上限（分）。与输入/输出单价同时配置时启用按金额计费。 */
+  daily_cost_limit_cents?: number
   request_quota_window_hours?: number
   request_quota_requests?: number
   ip_allowlist: string[]

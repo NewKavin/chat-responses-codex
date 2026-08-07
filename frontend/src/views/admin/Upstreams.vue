@@ -226,28 +226,6 @@
           </div>
         </el-form-item>
 
-        <el-form-item label="模型成本">
-          <el-table :data="form.model_request_costs" style="width: 100%; margin-bottom: 10px">
-            <el-table-column label="模型" width="200">
-              <template #default="{ row }">
-                <el-select v-model="row.slug" placeholder="选择模型" filterable allow-create>
-                  <el-option v-for="model in availableModelsForCost" :key="model" :label="model" :value="model" />
-                </el-select>
-              </template>
-            </el-table-column>
-            <el-table-column prop="cost" label="成本" width="120">
-              <template #default="{ row }">
-                <el-input-number v-model="row.cost" :min="0" :step="0.01" :precision="4" />
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="100">
-              <template #default="{ row }">
-                <el-button size="small" type="danger" @click="removeModelCost(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-button @click="addModelCost" size="small">添加模型成本</el-button>
-        </el-form-item>
 
         <el-divider class="drawer-section">模型上下文</el-divider>
         <el-tabs v-model="contextConfigTab">
@@ -276,7 +254,7 @@
               <el-table-column label="模型" width="220">
                 <template #default="{ row }">
                   <el-select v-model="row.slug" placeholder="选择模型" filterable allow-create>
-                    <el-option v-for="model in availableModelsForCost" :key="model" :label="model" :value="model" />
+                    <el-option v-for="model in availableModelOptions" :key="model" :label="model" :value="model" />
                   </el-select>
                 </template>
               </el-table-column>
@@ -419,7 +397,6 @@ const form = ref<Partial<UpstreamConfig>>({
     context_group: ''
   },
   active: true,
-  model_request_costs: [],
   model_contexts: [],
   priority: 0,
   premium_models: [],
@@ -429,7 +406,7 @@ const form = ref<Partial<UpstreamConfig>>({
   failure_count: 0
 })
 
-const availableModelsForCost = computed(() => {
+const availableModelOptions = computed(() => {
   const supported = form.value.supported_models || []
   return Array.from(new Set(supported)).sort()
 })
@@ -449,20 +426,6 @@ const selectableModelOptions = computed(() => Array.from(new Set([
 const resetDiscoveryCandidates = () => {
   discoveredModelCandidates.value = []
   latestDiscoveryResults.value = []
-}
-
-const addModelCost = () => {
-  if (!form.value.model_request_costs) {
-    form.value.model_request_costs = []
-  }
-  form.value.model_request_costs.push({ slug: '', cost: 0 })
-}
-
-const removeModelCost = (row: any) => {
-  const index = form.value.model_request_costs?.indexOf(row)
-  if (index !== undefined && index > -1) {
-    form.value.model_request_costs?.splice(index, 1)
-  }
 }
 
 const addModelContext = () => {
@@ -708,7 +671,6 @@ const handleCreate = () => {
       context_group: ''
     },
     active: true,
-    model_request_costs: [],
     model_contexts: [],
     priority: 0,
     premium_models: [],
@@ -740,7 +702,6 @@ const handleCopy = (row: UpstreamConfig) => {
       ? { ...row.default_model_context }
       : { context_limit: 200000, output_reserve: 4096, max_output_tokens: 0, context_group: '' },
     active: row.active,
-    model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
     model_contexts: row.model_contexts ? [...row.model_contexts] : [],
     priority: row.priority,
     premium_models: [...(row.premium_models || [])],
@@ -786,7 +747,6 @@ const handleEdit = (row: UpstreamConfig) => {
           max_output_tokens: 0,
           context_group: ''
         },
-    model_request_costs: row.model_request_costs ? [...row.model_request_costs] : [],
     model_contexts: row.model_contexts ? [...row.model_contexts] : []
   }
   dialogVisible.value = true

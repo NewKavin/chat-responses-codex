@@ -136,6 +136,13 @@ pub struct AppConfig {
     pub upstream_stream_keepalive_interval_seconds: u64,
     pub upstream_stream_idle_timeout_seconds: u64,
     pub upstream_stream_max_duration_seconds: u64,
+    /// TTL for downstream admission leases in Redis (seconds). Downstream
+    /// leases are pure admission counters for requests that finish in
+    /// seconds-to-minutes; a short TTL ensures stale leases left behind by a
+    /// gateway restart expire quickly instead of occupying the concurrency
+    /// display (and potentially blocking real requests) for the upstream
+    /// stream max duration (default 24h).
+    pub downstream_lease_ttl_seconds: u64,
     pub upstream_hedge_enabled: bool,
     pub upstream_hedge_delay_ms: u64,
     pub upstream_hedge_interval_ms: u64,
@@ -214,6 +221,7 @@ impl Default for AppConfig {
             upstream_stream_keepalive_interval_seconds: 3,
             upstream_stream_idle_timeout_seconds: 1_800,
             upstream_stream_max_duration_seconds: 86_400,
+            downstream_lease_ttl_seconds: 300,
             upstream_hedge_enabled: DEFAULT_UPSTREAM_HEDGE_ENABLED,
             upstream_hedge_delay_ms: DEFAULT_UPSTREAM_HEDGE_DELAY_MS,
             upstream_hedge_interval_ms: DEFAULT_UPSTREAM_HEDGE_INTERVAL_MS,
@@ -274,8 +282,6 @@ pub struct UpstreamConfig {
     pub requests_per_minute: u32,
     #[serde(default = "default_upstream_max_concurrency")]
     pub max_concurrency: u32,
-    #[serde(default)]
-    pub model_request_costs: Vec<ModelRequestCostConfig>,
     #[serde(default)]
     pub priority: u32,
     #[serde(default)]
@@ -338,7 +344,6 @@ impl Default for UpstreamConfig {
             request_quota_requests: default_upstream_request_quota_requests(),
             requests_per_minute: default_upstream_requests_per_minute(),
             max_concurrency: default_upstream_max_concurrency(),
-            model_request_costs: Vec::new(),
             priority: 0,
             premium_models: Vec::new(),
             premium_only: false,
@@ -360,12 +365,6 @@ pub struct ApiKeyModelConfig {
     pub api_key: String,
     #[serde(default)]
     pub supported_models: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ModelRequestCostConfig {
-    pub slug: String,
-    pub cost: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,6 +445,15 @@ pub struct DownstreamConfig {
     pub daily_token_limit: Option<u64>,
     #[serde(default)]
     pub monthly_token_limit: Option<u64>,
+    /// Input price per million tokens in cents (分). 1000 = 10 元 per 1M tokens.
+    #[serde(default)]
+    pub input_token_price_per_million_cents: Option<u64>,
+    /// Output price per million tokens in cents (分). 1000 = 10 元 per 1M tokens.
+    #[serde(default)]
+    pub output_token_price_per_million_cents: Option<u64>,
+    /// Daily cost limit in cents (分), e.g. 3000 = 30 元 per rolling 24h.
+    #[serde(default)]
+    pub daily_cost_limit_cents: Option<u64>,
     #[serde(default)]
     pub request_quota_window_hours: Option<u32>,
     #[serde(default)]
@@ -484,6 +492,40 @@ impl DownstreamConfig {
     /// True when this downstream is configured for token-based daily quota.
     pub fn token_billing_mode(&self) -> bool {
         self.billing_mode() == "token"
+    }
+
+    /// True when cost-based daily billing is configured (token mode + at least
+    /// one input/output price + cost limit).
+    pub fn cost_billing_mode(&self) -> bool {
+        self.token_billing_mode()
+            && (self.input_token_price_per_million_cents.is_some()
+                || self.output_token_price_per_million_cents.is_some())
+            && self.daily_cost_limit_cents.is_some()
+    }
+
+    /// Daily cost limit in cents when cost billing is active, otherwise None.
+    pub fn daily_cost_limit(&self) -> Option<u64> {
+        if self.cost_billing_mode() {
+            self.daily_cost_limit_cents
+        } else {
+            None
+        }
+    }
+
+    /// Convert input/output token counts to cost in cents using the configured
+    /// per-million prices. A missing price contributes 0 for that direction.
+    /// Returns 0 when no price is configured.
+    pub fn cost_for_tokens(&self, input_tokens: u64, output_tokens: u64) -> u64 {
+        let input_cost = self
+            .input_token_price_per_million_cents
+            .map(|price| u128::from(input_tokens) * u128::from(price) / 1_000_000)
+            .unwrap_or(0);
+        let output_cost = self
+            .output_token_price_per_million_cents
+            .map(|price| u128::from(output_tokens) * u128::from(price) / 1_000_000)
+            .unwrap_or(0);
+        // cost_cents = input_tokens * input_price / 1M + output_tokens * output_price / 1M
+        (input_cost + output_cost) as u64
     }
 }
 
@@ -588,6 +630,8 @@ pub struct UsageLog {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_cents: Option<u64>,
     #[serde(default)]
     pub first_token_latency_ms: Option<u64>,
     pub latency_ms: u64,

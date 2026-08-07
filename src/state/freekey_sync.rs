@@ -639,22 +639,6 @@ impl AppState {
                     {
                         upstream.max_concurrency = max_concurrency as u32;
                     }
-                    if let Some(model_request_costs) = updates
-                        .get("model_request_costs")
-                        .and_then(|v| v.as_array())
-                    {
-                        upstream.model_request_costs = model_request_costs
-                            .iter()
-                            .filter_map(|value| {
-                                let slug = value.get("slug").and_then(|v| v.as_str())?;
-                                let cost = value.get("cost").and_then(|v| v.as_f64())?;
-                                Some(ModelRequestCostConfig {
-                                    slug: slug.to_string(),
-                                    cost,
-                                })
-                            })
-                            .collect();
-                    }
                     if let Some(priority_value) = updates.get("priority") {
                         let priority = priority_value
                             .as_u64()

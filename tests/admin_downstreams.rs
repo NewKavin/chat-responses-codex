@@ -50,6 +50,9 @@ fn create_test_state() -> AppState {
                 max_concurrency: 10,
                 daily_token_limit: Some(10000),
                 monthly_token_limit: Some(100000),
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
                 request_quota_window_hours: Some(24),
                 request_quota_requests: Some(1000),
                 ip_allowlist: vec!["192.168.1.0/24".to_string()],
@@ -71,6 +74,9 @@ fn create_test_state() -> AppState {
                 max_concurrency: 10,
                 daily_token_limit: None,
                 monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
                 request_quota_window_hours: None,
                 request_quota_requests: None,
                 ip_allowlist: vec![],
@@ -588,6 +594,113 @@ async fn test_downstreams_update_preserves_key_hash() {
 }
 
 // ============================================================================
+// Downstream Update Cost-Billing Fields
+// ============================================================================
+
+#[tokio::test]
+async fn admin_update_downstream_persists_cost_billing_fields() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let updates = json!({
+        "billing_mode": "token",
+        "input_token_price_per_million_cents": 1000,
+        "output_token_price_per_million_cents": 3000,
+        "daily_cost_limit_cents": 5000
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&updates).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert_eq!(downstream.billing_mode, "token");
+    assert_eq!(downstream.input_token_price_per_million_cents, Some(1000));
+    assert_eq!(downstream.output_token_price_per_million_cents, Some(3000));
+    assert_eq!(downstream.daily_cost_limit_cents, Some(5000));
+    assert!(downstream.cost_billing_mode());
+}
+
+#[tokio::test]
+async fn admin_update_downstream_clears_cost_billing_fields() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let set_updates = json!({
+        "billing_mode": "token",
+        "input_token_price_per_million_cents": 1000,
+        "output_token_price_per_million_cents": 3000,
+        "daily_cost_limit_cents": 5000
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&set_updates).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let clear_updates = json!({
+        "input_token_price_per_million_cents": null,
+        "output_token_price_per_million_cents": null,
+        "daily_cost_limit_cents": null
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {}", token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&clear_updates).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert_eq!(downstream.input_token_price_per_million_cents, None);
+    assert_eq!(downstream.output_token_price_per_million_cents, None);
+    assert_eq!(downstream.daily_cost_limit_cents, None);
+    assert!(!downstream.cost_billing_mode());
+}
+
+// ============================================================================
 // Downstream Delete Tests
 // ============================================================================
 
@@ -950,4 +1063,106 @@ async fn downstream_batch_set_mode_clears_token_limit_and_reports_missing() {
         .unwrap();
     assert_eq!(downstream.billing_mode(), "request");
     assert_eq!(downstream.daily_token_limit, None);
+}
+
+#[tokio::test]
+async fn downstream_batch_set_mode_updates_cost_billing_fields() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-mode")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1"],
+                        "billing_mode": "token",
+                        "input_token_price_per_million_cents": 1000, "output_token_price_per_million_cents": 1000,
+                        "daily_cost_limit_cents": 3000
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["updated"], 1);
+
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert!(
+        downstream.cost_billing_mode(),
+        "token mode + price + cost limit must enable cost billing"
+    );
+    assert_eq!(downstream.input_token_price_per_million_cents, Some(1000));
+    assert_eq!(downstream.output_token_price_per_million_cents, Some(1000));
+    assert_eq!(downstream.daily_cost_limit_cents, Some(3000));
+}
+
+#[tokio::test]
+async fn downstream_batch_set_mode_clears_cost_billing_fields() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-mode")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1"],
+                        "billing_mode": "request",
+                        "daily_token_limit": null,
+                        "input_token_price_per_million_cents": null, "output_token_price_per_million_cents": null,
+                        "daily_cost_limit_cents": null
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["updated"], 1);
+
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert!(!downstream.cost_billing_mode());
+    assert_eq!(downstream.input_token_price_per_million_cents, None);
+    assert_eq!(downstream.output_token_price_per_million_cents, None);
+    assert_eq!(downstream.daily_cost_limit_cents, None);
 }

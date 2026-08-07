@@ -88,15 +88,25 @@ pub(super) fn build_downstream_request_windows(
 
 pub(super) fn build_downstream_token_windows(
     logs: &[UsageLog],
+    downstreams: &[DownstreamConfig],
 ) -> HashMap<String, VecDeque<DownstreamTokenEvent>> {
     let mut windows = HashMap::new();
     for log in normalized_usage_logs(logs) {
+        let cost_billed = downstreams
+            .iter()
+            .any(|downstream| downstream.id == log.downstream_key_id && downstream.cost_billing_mode());
         windows
             .entry(log.downstream_key_id.clone())
             .or_insert_with(VecDeque::new)
             .push_back(DownstreamTokenEvent {
                 created_at: log.created_at,
-                tokens: log.total_tokens,
+                // Cost-billed logs carry the converted cost (cents); plain
+                // token-billed logs fall back to the raw token count.
+                tokens: if cost_billed {
+                    log.total_cost_cents.unwrap_or(0)
+                } else {
+                    log.total_tokens
+                },
             });
     }
     windows
@@ -122,7 +132,10 @@ pub(super) fn normalized_usage_logs(logs: &[UsageLog]) -> Vec<UsageLog> {
 }
 
 pub(super) fn downstream_token_retention_seconds(downstream: &DownstreamConfig) -> u64 {
-    if downstream.daily_token_limit.is_some() {
+    // Cost-billed downstreams (token mode + price + daily cost limit) have no
+    // token limit, but their rolling window is still daily: the Redis token
+    // store holds cents rather than raw tokens.
+    if downstream.daily_token_limit.is_some() || downstream.cost_billing_mode() {
         DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS
     } else {
         60
@@ -342,7 +355,16 @@ impl AppState {
 
         let downstream = snapshot.downstreams.iter().find(|d| d.id == downstream_id);
 
-        let daily_limit = downstream.and_then(|d| d.daily_token_limit);
+        // Cost-billed downstreams report the daily quota in cents (费用分);
+        // plain token-billed downstreams keep the raw token count.
+        let cost_billed = downstream.map(|d| d.cost_billing_mode()).unwrap_or(false);
+        let daily_limit = downstream.and_then(|d| {
+            if cost_billed {
+                d.daily_cost_limit()
+            } else {
+                d.daily_token_limit
+            }
+        });
         let monthly_limit = downstream.and_then(|d| d.monthly_token_limit);
 
         // Daily quota uses the same rolling 24h window as admission.
@@ -367,7 +389,13 @@ impl AppState {
                 .filter(|log| {
                     log.downstream_key_id == downstream_id && log.created_at >= daily_start
                 })
-                .map(|log| log.total_tokens)
+                .map(|log| {
+                    if cost_billed {
+                        log.total_cost_cents.unwrap_or(0)
+                    } else {
+                        log.total_tokens
+                    }
+                })
                 .sum();
 
             let percentage = if limit > 0 {
