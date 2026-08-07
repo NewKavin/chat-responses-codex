@@ -630,6 +630,69 @@ async fn redis_downstream_concurrency_leases_are_shared_and_idempotent() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_downstream_lease_renewal_extends_lease_ttl() {
+    let config = redis_test_config();
+    let (state, _directory) = {
+        let (first, _second, directory) = redis_test_states(&config).await;
+        (first, directory)
+    };
+    let downstream = redis_test_downstream("renewal-extends-lease");
+    let lease = state
+        .try_reserve_downstream_concurrency(&downstream)
+        .await
+        .unwrap();
+    let lease_id = lease.lease_id().expect("redis lease id").to_string();
+
+    let identity = format!("{:x}", Sha256::digest(downstream.id.as_bytes()));
+    let lease_key = format!(
+        "{}:v1:downstream:{{{identity}}}:leases",
+        config.redis_key_prefix
+    );
+
+    // Push the lease to the brink of expiry, then renew it.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    redis_test_command(
+        &config,
+        &[
+            "ZADD".into(),
+            lease_key.clone(),
+            (now_ms + 1_000).to_string(),
+            lease_id.clone(),
+        ],
+    )
+    .await;
+    state.renew_downstream_concurrency(&lease).await.unwrap();
+    let renewed_score = redis_bulk_u64(
+        &redis_test_command(
+            &config,
+            &["ZSCORE".into(), lease_key.clone(), lease_id.clone()],
+        )
+        .await,
+    );
+    assert!(
+        renewed_score > now_ms + 60_000,
+        "renewal must push the lease score at least one TTL into the future"
+    );
+
+    let counts = state
+        .downstream_runtime_snapshot(&downstream)
+        .await
+        .unwrap();
+    assert_eq!(counts.admitted, 1, "renewed lease must still be counted");
+
+    state.release_downstream_concurrency(lease).await.unwrap();
+    let counts = state
+        .downstream_runtime_snapshot(&downstream)
+        .await
+        .unwrap();
+    assert_eq!(counts.admitted, 0, "released lease must be gone");
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_account_queue_grants_one_fifo_probe_across_instances() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;

@@ -723,6 +723,12 @@ pub(super) fn proxied_stream_body(
                     if let Some(log_context) = state.log_context.as_ref() {
                         log_context.touch_active_request();
                     }
+                    if let Some(completion_context) = state.completion_context.as_ref() {
+                        completion_context
+                            .downstream_concurrency_guard
+                            .renew_if_due()
+                            .await;
+                    }
                     state.buffer.extend_from_slice(&chunk);
                     if let Err(error) = state.drain_usage_from_buffer() {
                         let frame = state.finish_with_gateway_error_after_pending(error).await;
@@ -1445,6 +1451,12 @@ pub(super) fn translated_stream_body(
                 StreamReadOutcome::Chunk(Ok(Some(chunk))) => {
                     if let Some(log_context) = state.log_context.as_ref() {
                         log_context.touch_active_request();
+                    }
+                    if let Some(completion_context) = state.completion_context.as_ref() {
+                        completion_context
+                            .downstream_concurrency_guard
+                            .renew_if_due()
+                            .await;
                     }
                     state.buffer.extend_from_slice(&chunk);
                     if let Err(error) = state.drain_buffer() {

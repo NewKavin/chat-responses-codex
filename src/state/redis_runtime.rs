@@ -426,6 +426,32 @@ impl RedisRuntimeCoordinator {
         .await
     }
 
+    pub(super) async fn renew_downstream_lease(
+        &self,
+        downstream_id: &str,
+        lease_id: &str,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let identity = stable_identity(downstream_id);
+        let lease_key = self.key(&identity, "leases");
+        self.retry_coordination_once(|| {
+            let mut connection = self.connection();
+            let lease_key = lease_key.clone();
+            let lease_id = lease_id.to_string();
+            async move {
+                let script = redis::Script::new(include_str!("redis_runtime/lease_renew.lua"));
+                let mut invocation = script.prepare_invoke();
+                invocation
+                    .key(lease_key)
+                    .arg(lease_id)
+                    .arg(self.downstream_lease_duration_ms);
+                timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
+    }
+
     pub(super) async fn mark_downstream_waiting(
         &self,
         downstream_id: &str,

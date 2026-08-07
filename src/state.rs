@@ -189,7 +189,7 @@ use usage::{
 pub use crate::util::{
     build_upstream_http_client, encode_secret_suffix, join_upstream_url, new_id,
     prune_expired_admin_sessions, should_bypass_proxy_for_host, should_bypass_proxy_for_url,
-    unix_seconds,
+    unix_millis, unix_seconds,
 };
 
 const RESPONSE_HISTORY_MAX_ENTRIES: usize = 2048;
@@ -301,8 +301,24 @@ pub struct DownstreamRuntimeCounts {
 
 #[derive(Default)]
 struct DownstreamLeaseState {
-    admitted: HashSet<String>,
+    /// admitted lease id -> absolute expiry (unix millis).  Expiry is what
+    /// makes the local runtime coordination self-healing: a lease whose
+    /// release was skipped (e.g. a dropped guard outside a Tokio runtime)
+    /// stops consuming capacity once it lapses, instead of pinning the
+    /// downstream's "running" count forever.
+    admitted: HashMap<String, u64>,
     waiting: HashSet<String>,
+}
+
+impl DownstreamLeaseState {
+    fn prune_expired(&mut self, now_ms: u64) {
+        self.admitted.retain(|_, expires_at| *expires_at > now_ms);
+        self.waiting.retain(|lease_id| self.admitted.contains_key(lease_id));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.admitted.is_empty() && self.waiting.is_empty()
+    }
 }
 
 #[derive(Clone)]
@@ -325,6 +341,12 @@ impl std::fmt::Debug for DownstreamConcurrencyLease {
 impl DownstreamConcurrencyLease {
     pub fn downstream_id(&self) -> &str {
         &self.downstream_id
+    }
+
+    /// The opaque lease identifier, when a runtime lease was actually
+    /// reserved (rate limiting enabled). `None` for unrestricted leases.
+    pub fn lease_id(&self) -> Option<&str> {
+        self.lease_id.as_deref()
     }
 }
 
@@ -1118,7 +1140,7 @@ impl AppState {
         let downstream = runtime
             .get_mut(&lease.downstream_id)
             .ok_or(RuntimeCoordinationError)?;
-        if !downstream.admitted.contains(lease_id) || !downstream.waiting.contains(lease_id) {
+        if !downstream.admitted.contains_key(lease_id) || !downstream.waiting.contains(lease_id) {
             return Err(RuntimeCoordinationError);
         }
         let decision = self
@@ -3181,14 +3203,21 @@ impl AppState {
             .lock()
             .expect("downstream runtime lock poisoned");
         let current = runtime.entry(downstream.id.clone()).or_default();
+        current.prune_expired(unix_millis());
         if current.admitted.len() >= downstream.max_concurrency.max(1) as usize {
             return Err(DownstreamAdmissionRejection::ConcurrencyLimitExceeded {
                 retry_after_seconds: 1,
                 limit: downstream.max_concurrency.max(1),
             });
         }
-
-        current.admitted.insert(lease_id.clone());
+        let lease_duration_ms = self
+            .config
+            .downstream_lease_ttl_seconds
+            .saturating_mul(1_000)
+            .max(60_000);
+        current
+            .admitted
+            .insert(lease_id.clone(), unix_millis().saturating_add(lease_duration_ms));
         Ok(DownstreamConcurrencyLease {
             downstream_id: downstream.id.clone(),
             lease_id: Some(lease_id),
@@ -3216,7 +3245,7 @@ impl AppState {
                 let remove_entry = runtime.get_mut(&lease.downstream_id).is_some_and(|state| {
                     state.admitted.remove(&lease_id);
                     state.waiting.remove(&lease_id);
-                    state.admitted.is_empty() && state.waiting.is_empty()
+                    state.is_empty()
                 });
                 if remove_entry {
                     runtime.remove(&lease.downstream_id);
@@ -3230,6 +3259,39 @@ impl AppState {
             release_guard.complete();
         }
         result
+    }
+
+    pub async fn renew_downstream_concurrency(
+        &self,
+        lease: &DownstreamConcurrencyLease,
+    ) -> Result<(), RuntimeCoordinationError> {
+        let Some(lease_id) = lease.lease_id.as_deref() else {
+            return Ok(());
+        };
+        if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
+            return coordinator
+                .renew_downstream_lease(&lease.downstream_id, lease_id)
+                .await;
+        }
+        let mut runtime = self
+            .downstream_runtime
+            .lock()
+            .expect("downstream runtime lock poisoned");
+        let Some(state) = runtime.get_mut(&lease.downstream_id) else {
+            // The lease was already released; renewal is a no-op.
+            return Ok(());
+        };
+        if state.admitted.contains_key(lease_id) {
+            let lease_duration_ms = self
+                .config
+                .downstream_lease_ttl_seconds
+                .saturating_mul(1_000)
+                .max(60_000);
+            state
+                .admitted
+                .insert(lease_id.to_string(), unix_millis().saturating_add(lease_duration_ms));
+        }
+        Ok(())
     }
 
     pub async fn mark_downstream_waiting(
@@ -3251,7 +3313,8 @@ impl AppState {
         let state = runtime
             .get_mut(&lease.downstream_id)
             .ok_or(RuntimeCoordinationError)?;
-        if !state.admitted.contains(lease_id) {
+        state.prune_expired(unix_millis());
+        if !state.admitted.contains_key(lease_id) {
             return Err(RuntimeCoordinationError);
         }
         state.waiting.insert(lease_id.to_string());
@@ -3289,10 +3352,18 @@ impl AppState {
                 .downstream_runtime_snapshot(&downstream.id)
                 .await;
         }
-        let runtime = self
+        let mut runtime = self
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
+        let should_prune = runtime
+            .get(&downstream.id)
+            .is_some_and(|state| !state.waiting.is_empty() || !state.admitted.is_empty());
+        if should_prune {
+            if let Some(state) = runtime.get_mut(&downstream.id) {
+                state.prune_expired(unix_millis());
+            }
+        }
         let Some(state) = runtime.get(&downstream.id) else {
             return Ok(DownstreamRuntimeCounts::default());
         };
@@ -3333,10 +3404,14 @@ impl AppState {
             return Ok(snapshots);
         }
 
-        let runtime = self
+        let mut runtime = self
             .downstream_runtime
             .lock()
             .expect("downstream runtime lock poisoned");
+        let now_ms = unix_millis();
+        for state in runtime.values_mut() {
+            state.prune_expired(now_ms);
+        }
         Ok(routing
             .downstreams
             .iter()
@@ -5245,4 +5320,128 @@ mod tests {
         );
         drop(archived_guard);
     }
+
+    fn test_downstream_config(id: &str) -> DownstreamConfig {
+        DownstreamConfig {
+            id: id.into(),
+            name: "test downstream".into(),
+            hash: String::new(),
+            plaintext_key: None,
+            plaintext_key_prefix: None,
+            model_allowlist: vec![],
+            rate_limit_enabled: true,
+            per_minute_limit: 100,
+            max_concurrency: 1,
+            daily_token_limit: None,
+            monthly_token_limit: None,
+            input_token_price_per_million_cents: None,
+            output_token_price_per_million_cents: None,
+            daily_cost_limit_cents: None,
+            request_quota_window_hours: None,
+            request_quota_requests: None,
+            ip_allowlist: vec![],
+            expires_at: None,
+            active: true,
+            billing_mode: "request".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_downstream_leases_expire_and_are_pruned_from_snapshots() {
+        let state = AppState::new(
+            PersistedState::default(),
+            PathBuf::from("unused-state-path.json"),
+            AppConfig::default(),
+        );
+        let downstream = test_downstream_config("local-ttl-downstream");
+        let now_ms = crate::util::unix_millis();
+        {
+            let mut runtime = state.downstream_runtime.lock().unwrap();
+            let entry = runtime.entry(downstream.id.clone()).or_default();
+            entry.admitted.insert("expired-lease".into(), now_ms - 1_000);
+            entry.admitted.insert("live-lease".into(), now_ms + 600_000);
+            entry.waiting.insert("expired-lease".into());
+        }
+
+        let counts = state
+            .downstream_runtime_snapshot(&downstream)
+            .await
+            .unwrap();
+        assert_eq!(counts.admitted, 1, "expired leases must be pruned");
+        assert_eq!(counts.waiting_upstream, 0, "orphaned waiting entries must be pruned");
+        assert_eq!(counts.running, 1);
+
+        let runtime = state.downstream_runtime.lock().unwrap();
+        let entry = runtime.get(&downstream.id).unwrap();
+        assert!(!entry.admitted.contains_key("expired-lease"));
+        assert!(entry.admitted.contains_key("live-lease"));
+        assert!(!entry.waiting.contains("expired-lease"));
+    }
+
+    #[tokio::test]
+    async fn local_downstream_expired_leases_free_capacity_for_new_requests() {
+        let state = AppState::new(
+            PersistedState::default(),
+            PathBuf::from("unused-state-path.json"),
+            AppConfig::default(),
+        );
+        let downstream = test_downstream_config("local-ttl-capacity");
+        let first = state
+            .try_reserve_downstream_concurrency(&downstream)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .try_reserve_downstream_concurrency(&downstream)
+                .await
+                .is_err(),
+            "second reservation must be rejected while the first lease is live"
+        );
+        {
+            let mut runtime = state.downstream_runtime.lock().unwrap();
+            let entry = runtime.get_mut(&downstream.id).unwrap();
+            let lease_id = first.lease_id.as_ref().expect("local lease id").clone();
+            entry.admitted.insert(lease_id, crate::util::unix_millis() - 1_000);
+        }
+        let second = state
+            .try_reserve_downstream_concurrency(&downstream)
+            .await
+            .unwrap();
+        assert!(
+            second.lease_id.is_some(),
+            "expired lease must release capacity for a new reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_downstream_lease_renewal_extends_expiry() {
+        let state = AppState::new(
+            PersistedState::default(),
+            PathBuf::from("unused-state-path.json"),
+            AppConfig::default(),
+        );
+        let downstream = test_downstream_config("local-ttl-renewal");
+        let lease = state
+            .try_reserve_downstream_concurrency(&downstream)
+            .await
+            .unwrap();
+        let lease_id = lease.lease_id.as_ref().expect("local lease id").clone();
+        {
+            let mut runtime = state.downstream_runtime.lock().unwrap();
+            let entry = runtime.get_mut(&downstream.id).unwrap();
+            entry.admitted.insert(lease_id.clone(), crate::util::unix_millis() + 1_000);
+        }
+        state.renew_downstream_concurrency(&lease).await.unwrap();
+        let runtime = state.downstream_runtime.lock().unwrap();
+        let entry = runtime.get(&downstream.id).unwrap();
+        let expires_at = *entry
+            .admitted
+            .get(&lease_id)
+            .expect("renewal must keep the lease present");
+        assert!(
+            expires_at > crate::util::unix_millis() + 60_000,
+            "renewal must push the expiry into the future"
+        );
+    }
 }
+

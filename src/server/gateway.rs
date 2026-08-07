@@ -17,7 +17,7 @@ use crate::protocol::{
 };
 use crate::routing::UpstreamProtocol;
 use crate::state::{
-    join_upstream_url, portal_model_is_allowed, unix_seconds, AccountConcurrencyKey,
+    join_upstream_url, portal_model_is_allowed, unix_millis, unix_seconds, AccountConcurrencyKey,
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
@@ -40,7 +40,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -2398,6 +2398,7 @@ struct DownstreamConcurrencyGuardInner {
     state: AppState,
     lease: DownstreamConcurrencyLease,
     release_state: Arc<AtomicU8>,
+    last_renewed_at: Arc<AtomicU64>,
 }
 
 impl DownstreamConcurrencyGuardInner {
@@ -2458,7 +2459,45 @@ impl DownstreamConcurrencyGuard {
                 state,
                 lease,
                 release_state: Arc::new(AtomicU8::new(GUARD_RELEASE_ACTIVE)),
+                last_renewed_at: Arc::new(AtomicU64::new(unix_millis())),
             }),
+        }
+    }
+
+    /// Periodically extends the downstream concurrency lease while the stream
+    /// is actively producing chunks.  Long-running streams (> lease TTL) would
+    /// otherwise see their lease expire and the portal "running" count drop to
+    /// zero while the request is still in flight.  Renewal is throttled to half
+    /// the configured TTL and never fails the stream: coordination errors are
+    /// logged and the next chunk retries.
+    async fn renew_if_due(&self) {
+        let interval_ms = (self.inner.state.config.downstream_lease_ttl_seconds / 2)
+            .max(30)
+            .saturating_mul(1_000);
+        let now_ms = unix_millis();
+        let last = self.inner.last_renewed_at.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) < interval_ms {
+            return;
+        }
+        if self
+            .inner
+            .last_renewed_at
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        if let Err(error) = self
+            .inner
+            .state
+            .renew_downstream_concurrency(&self.inner.lease)
+            .await
+        {
+            tracing::warn!(
+                downstream_id = %self.inner.lease.downstream_id(),
+                error = %error,
+                "failed to renew downstream concurrency lease; retrying on next chunk"
+            );
         }
     }
 

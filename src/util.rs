@@ -15,6 +15,17 @@ pub fn unix_seconds() -> u64 {
         .as_secs()
 }
 
+/// Current Unix timestamp (milliseconds).
+pub fn unix_millis() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 /// Generate a new prefixed UUID.
 pub fn new_id(prefix: &str) -> String {
     format!("{}_{}", prefix, Uuid::new_v4())

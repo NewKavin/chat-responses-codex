@@ -524,6 +524,7 @@ mod tests {
             managed_source: None,
             last_synced_at: 0,
             strip_nonstandard_chat_fields: false,
+            remark: String::new(),
         }
     }
 
@@ -540,11 +541,15 @@ mod tests {
             max_concurrency: 10,
             daily_token_limit: Some(1_000),
             monthly_token_limit: None,
+            input_token_price_per_million_cents: None,
+            output_token_price_per_million_cents: None,
+            daily_cost_limit_cents: None,
             request_quota_window_hours: None,
             request_quota_requests: None,
             ip_allowlist: vec!["127.0.0.1".into()],
             expires_at: Some(1_725_000_000),
             active: false,
+            billing_mode: "request".into(),
         }
     }
 
