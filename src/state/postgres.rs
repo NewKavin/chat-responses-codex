@@ -187,7 +187,7 @@ impl PostgresStateStore {
             .query(
                 "SELECT id, name, hash, plaintext_key, rate_limit_enabled, per_minute_limit, max_concurrency, \
                  daily_token_limit, monthly_token_limit, request_quota_window_hours, \
-                 request_quota_requests, expires_at, active \
+                 request_quota_requests, expires_at, active, billing_mode \
                  FROM downstreams ORDER BY id",
                 &[],
             )
@@ -211,6 +211,7 @@ impl PostgresStateStore {
                 ip_allowlist: Vec::new(),
                 expires_at: row.get::<_, Option<i64>>(11).map(|value| value as u64),
                 active: row.get::<_, bool>(12),
+                billing_mode: row.get::<_, String>(13),
             });
         }
 
@@ -1163,17 +1164,19 @@ async fn sync_downstreams(
             &request_quota_requests,
             &expires_at,
             &downstream.active,
+            &downstream.billing_mode,
         ];
 
         tx.execute(
             "INSERT INTO downstreams (
                 id, name, hash, plaintext_key, rate_limit_enabled, per_minute_limit,
                 max_concurrency, daily_token_limit, monthly_token_limit,
-                request_quota_window_hours, request_quota_requests, expires_at, active
+                request_quota_window_hours, request_quota_requests, expires_at, active,
+                billing_mode
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9,
-                $10, $11, $12, $13
+                $10, $11, $12, $13, $14
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1187,7 +1190,8 @@ async fn sync_downstreams(
                 request_quota_window_hours = EXCLUDED.request_quota_window_hours,
                 request_quota_requests = EXCLUDED.request_quota_requests,
                 expires_at = EXCLUDED.expires_at,
-                active = EXCLUDED.active",
+                active = EXCLUDED.active,
+                billing_mode = EXCLUDED.billing_mode",
             params,
         )
         .await
@@ -1630,7 +1634,8 @@ CREATE TABLE IF NOT EXISTS downstreams (
     request_quota_window_hours INTEGER NULL,
     request_quota_requests INTEGER NULL,
     expires_at BIGINT NULL,
-    active BOOLEAN NOT NULL
+    active BOOLEAN NOT NULL,
+    billing_mode TEXT NOT NULL DEFAULT 'request'
 );
 
 ALTER TABLE downstreams
@@ -1641,6 +1646,8 @@ ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS rate_limit_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE downstreams
     ADD COLUMN IF NOT EXISTS max_concurrency INTEGER NOT NULL DEFAULT 10;
+ALTER TABLE downstreams
+    ADD COLUMN IF NOT EXISTS billing_mode TEXT NOT NULL DEFAULT 'request';
 
 CREATE TABLE IF NOT EXISTS downstream_model_allowlist (
     downstream_id TEXT NOT NULL REFERENCES downstreams(id) ON DELETE CASCADE,

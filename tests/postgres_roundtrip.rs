@@ -277,6 +277,7 @@ async fn postgres_roundtrip_preserves_normalized_state_and_authoritative_empty_m
         ip_allowlist: vec!["127.0.0.1".into()],
         expires_at: Some(1_725_000_000),
         active: true,
+        billing_mode: "request".into(),
     };
     let log = UsageLog {
         id: "log-1".into(),
@@ -1101,6 +1102,7 @@ async fn postgres_update_upstream_preserves_existing_usage_logs() {
         ip_allowlist: vec!["127.0.0.1".into()],
         expires_at: Some(1_725_000_000),
         active: true,
+        billing_mode: "request".into(),
     };
     let log = UsageLog {
         id: format!("log-{suffix}"),
@@ -1230,6 +1232,7 @@ async fn postgres_update_upstream_does_not_rewrite_existing_usage_log_rows() {
         ip_allowlist: vec!["127.0.0.1".into()],
         expires_at: Some(1_725_000_000),
         active: true,
+        billing_mode: "request".into(),
     };
     let log = UsageLog {
         id: format!("log-{suffix}"),
@@ -1346,6 +1349,7 @@ async fn postgres_delete_config_cascades_and_preserves_usage_logs() {
             request_quota_requests: None,
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         })
         .await
         .expect("should persist delete fixture downstream");

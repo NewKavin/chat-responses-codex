@@ -136,6 +136,7 @@ impl DelayedStreamFixture {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                    billing_mode: "request".into(),
                 }]),
                 ..Default::default()
             },
@@ -371,6 +372,7 @@ impl DelayedStreamFixture {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                    billing_mode: "request".into(),
                 }]),
                 ..Default::default()
             },

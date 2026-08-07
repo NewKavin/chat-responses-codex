@@ -80,6 +80,7 @@ async fn local_probe_grant_atomically_requires_and_clears_downstream_waiting() {
         ip_allowlist: vec![],
         expires_at: None,
         active: true,
+        billing_mode: "request".into(),
     };
     let state = AppState::new(
         PersistedState {

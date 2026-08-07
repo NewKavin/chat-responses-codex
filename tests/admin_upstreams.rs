@@ -361,6 +361,7 @@ fn qualification_persisted_state() -> PersistedState {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         ..Default::default()
     }
@@ -4249,4 +4250,98 @@ async fn batch_explicit_model_mapping_skips_discovery_when_auto_discovery_is_ena
         .unwrap();
     assert_eq!(upstream.supported_models, vec!["manual-model"]);
     assert_eq!(upstream.api_key_models.len(), 2);
+}
+
+#[tokio::test]
+async fn admin_list_upstreams_exposes_concurrency_status_observations() {
+    use chat_responses_codex::state::AccountConcurrencyKey;
+
+    let state = create_test_state_with_upstreams(vec![UpstreamConfig {
+        id: "up-conc".to_string(),
+        name: "Concurrency Upstream".to_string(),
+        base_url: "https://api.conc.example.com".to_string(),
+        api_key: "sk-conc-key".to_string(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["gpt-4".to_string()],
+        concurrency_status_enabled: true,
+        active: true,
+        ..Default::default()
+    }]);
+
+    let fingerprint = upstream_key_fingerprint("up-conc", "sk-conc-key");
+    let account = AccountConcurrencyKey::new("up-conc", fingerprint.clone());
+    state
+        .store_provider_concurrency_observation(&account, 3, 10)
+        .await
+        .unwrap();
+
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+
+    let upstream = payload
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "up-conc")
+        .expect("upstream should be listed");
+
+    let status = &upstream["concurrency_status"];
+    assert!(status.is_object(), "concurrency_status should be an object");
+    assert_eq!(status["data_accounts"], 1);
+    assert_eq!(status["total_accounts"], 1);
+    assert_eq!(status["accounts"][0]["concurrency"], 3);
+    assert_eq!(status["accounts"][0]["concurrency_limit"], 10);
+    assert_eq!(status["accounts"][0]["key_fingerprint"], fingerprint);
+    assert!(
+        status["last_observed_at"].as_u64().unwrap() > 0,
+        "last_observed_at should be populated"
+    );
+}
+
+#[tokio::test]
+async fn admin_list_upstreams_null_concurrency_status_when_disabled() {
+    let state = create_test_state();
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+
+    for upstream in payload.as_array().unwrap() {
+        assert!(
+            upstream["concurrency_status"].is_null(),
+            "disabled upstream should have null concurrency_status"
+        );
+    }
 }

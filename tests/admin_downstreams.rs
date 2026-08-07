@@ -55,6 +55,7 @@ fn create_test_state() -> AppState {
                 ip_allowlist: vec!["192.168.1.0/24".to_string()],
                 expires_at: Some(1735689600), // 2025-01-01
                 active: true,
+                billing_mode: "request".into(),
             },
             DownstreamConfig {
                 id: "downstream-2".to_string(),
@@ -75,6 +76,7 @@ fn create_test_state() -> AppState {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: false,
+                billing_mode: "request".into(),
             },
         ]),
         usage_logs: vec![],
@@ -791,4 +793,161 @@ async fn test_downstreams_rotate_invalidates_old_key() {
         .find(|d| d.id == "downstream-1")
         .unwrap();
     assert_ne!(downstream.hash, original_hash);
+}
+
+#[tokio::test]
+async fn downstream_update_supports_billing_mode_and_daily_token_limit() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "billing_mode": "token",
+                        "daily_token_limit": 500000
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert_eq!(downstream.billing_mode(), "token");
+    assert_eq!(downstream.daily_token_limit, Some(500_000));
+}
+
+#[tokio::test]
+async fn downstream_update_rejects_invalid_billing_mode() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/downstreams/downstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({ "billing_mode": "bogus" })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn downstream_batch_set_mode_updates_multiple() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-mode")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1", "downstream-2"],
+                        "billing_mode": "token",
+                        "daily_token_limit": 123456
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["updated"], 2);
+    assert!(payload["failed"].as_array().unwrap().is_empty());
+
+    let snapshot = state.snapshot().await;
+    for id in ["downstream-1", "downstream-2"] {
+        let downstream = snapshot.downstreams.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(downstream.billing_mode(), "token");
+        assert_eq!(downstream.daily_token_limit, Some(123_456));
+    }
+}
+
+#[tokio::test]
+async fn downstream_batch_set_mode_clears_token_limit_and_reports_missing() {
+    let state = create_test_state();
+    let app = chat_responses_codex::server::build_router(state.clone());
+
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/downstreams/batch-mode")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({
+                        "ids": ["downstream-1", "missing-1"],
+                        "billing_mode": "request",
+                        "daily_token_limit": null
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["updated"], 1);
+    assert_eq!(payload["failed"][0]["id"], "missing-1");
+
+    let snapshot = state.snapshot().await;
+    let downstream = snapshot
+        .downstreams
+        .iter()
+        .find(|d| d.id == "downstream-1")
+        .unwrap();
+    assert_eq!(downstream.billing_mode(), "request");
+    assert_eq!(downstream.daily_token_limit, None);
 }

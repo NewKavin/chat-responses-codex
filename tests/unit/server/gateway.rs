@@ -578,6 +578,7 @@ async fn stream_completion_fixture(
         ip_allowlist: vec![],
         expires_at: None,
         active: true,
+        billing_mode: "request".into(),
     };
     let downstream_lease = state
         .try_reserve_downstream_concurrency(&downstream)
@@ -665,6 +666,7 @@ async fn probe_reservation_failure_requeues_before_retrying_the_account() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
+                billing_mode: "request".into(),
             }]),
             ..Default::default()
         },
@@ -739,6 +741,7 @@ async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
         ip_allowlist: vec![],
         expires_at: None,
         active: true,
+        billing_mode: "request".into(),
     };
     let state = AppState::new(
         PersistedState {
@@ -875,6 +878,7 @@ async fn probe_completion_coordination_failure_is_not_replaced_by_route_exhausti
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
+                billing_mode: "request".into(),
             }]),
             ..Default::default()
         },
@@ -1373,6 +1377,7 @@ async fn stream_only_recovery_at_capacity_preserves_ordinary_candidate_fallback(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
+                billing_mode: "request".into(),
             }]),
             ..Default::default()
         },
@@ -2013,6 +2018,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
+                billing_mode: "request".into(),
             }]),
             ..Default::default()
         },

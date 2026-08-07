@@ -297,6 +297,7 @@ impl AggregateHarness {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         };
         let tempdir = tempdir().unwrap();
         let state = AppState::new(
@@ -479,6 +480,7 @@ fn downstream_config(
         ip_allowlist: vec![],
         expires_at: None,
         active: true,
+        billing_mode: "request".into(),
     }
 }
 

@@ -6,9 +6,14 @@
         <h1 class="crc-page-title">下游管理</h1>
         <p class="crc-page-description">管理门户身份、可用模型、调用限额、生命周期和访问密钥。</p>
       </div>
-      <el-button type="primary" @click="handleCreate">
-        <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建下游
-      </el-button>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <el-button :disabled="!selectedRows.length" @click="batchDialogVisible = true">
+          <Settings2 :size="15" :stroke-width="2" style="margin-right: 5px" />批量设置计费模式
+        </el-button>
+        <el-button type="primary" @click="handleCreate">
+          <Plus :size="15" :stroke-width="2" style="margin-right: 5px" />创建下游
+        </el-button>
+      </div>
     </header>
 
     <el-form :inline="true" class="crc-toolbar downstream-filters">
@@ -35,7 +40,8 @@
     </el-form>
       
     <div class="crc-table-shell downstreams-table-shell">
-      <el-table class="compact-downstreams-table" :data="downstreams" v-loading="loading" stripe>
+      <el-table class="compact-downstreams-table" :data="downstreams" v-loading="loading" stripe @selection-change="handleSelectionChange">
+        <el-table-column type="selection" width="45" />
         <el-table-column prop="id" label="ID" width="150" />
         <el-table-column prop="name" label="名称" width="200" />
         <el-table-column label="秘钥" width="220">
@@ -63,7 +69,12 @@
         <el-table-column label="限额配置" min-width="320">
           <template #default="{ row }">
             <span v-if="!row.rate_limit_enabled">未启用限额</span>
+            <span v-else-if="row.billing_mode === 'token'">
+              <el-tag type="warning" size="small">Token 计费</el-tag>
+              每日 {{ formatTokenLimit(row.daily_token_limit) }}
+            </span>
             <span v-else>
+              <el-tag size="small">按次数</el-tag>
               {{ row.per_minute_limit }}/分钟 · 并发 {{ row.max_concurrency }} · {{ row.request_quota_window_hours || 0 }} 小时 {{ row.request_quota_requests || 0 }} 次
             </span>
           </template>
@@ -169,18 +180,47 @@
 
         <template v-if="form.rate_limit_enabled">
           <el-divider class="drawer-section">限额配置</el-divider>
-          <el-form-item label="每分钟限制" prop="per_minute_limit">
-            <el-input-number v-model="form.per_minute_limit" :min="1" :max="10000" />
+          <el-form-item label="计费模式">
+            <el-radio-group v-model="form.billing_mode">
+              <el-radio-button value="request">按次数</el-radio-button>
+              <el-radio-button value="token">按 Token（每日限额）</el-radio-button>
+            </el-radio-group>
+            <el-alert
+              title="说明"
+              type="info"
+              :closable="false"
+              class="helper-text"
+            >
+              按次数：时间窗口内请求次数限额；按 Token：最近 24 小时滚动窗口内 token 消耗限额。两者互斥。
+            </el-alert>
           </el-form-item>
-          <el-form-item label="并发限制">
-            <el-input-number v-model="form.max_concurrency" :min="1" :max="5000" />
-          </el-form-item>
-          <el-form-item label="时间窗口（小时）">
-            <el-input-number v-model="requestQuotaHours" :min="1" :max="168" />
-          </el-form-item>
-          <el-form-item label="窗口请求次数">
-            <el-input-number v-model="requestQuotaCount" :min="1" :max="1000000" />
-          </el-form-item>
+          <template v-if="form.billing_mode === 'token'">
+            <el-form-item label="每日 Token 限额">
+              <el-input-number v-model="dailyTokenLimit" :min="1" :max="1000000000000" :step="100000" style="width: 100%" />
+              <el-alert
+                title="说明"
+                type="info"
+                :closable="false"
+                class="helper-text"
+              >
+                滚动 24 小时窗口：最早的消耗滑出窗口后额度自动释放，不是每天 0 点重置。
+              </el-alert>
+            </el-form-item>
+          </template>
+          <template v-else>
+            <el-form-item label="每分钟限制" prop="per_minute_limit">
+              <el-input-number v-model="form.per_minute_limit" :min="1" :max="10000" />
+            </el-form-item>
+            <el-form-item label="并发限制">
+              <el-input-number v-model="form.max_concurrency" :min="1" :max="5000" />
+            </el-form-item>
+            <el-form-item label="时间窗口（小时）">
+              <el-input-number v-model="requestQuotaHours" :min="1" :max="168" />
+            </el-form-item>
+            <el-form-item label="窗口请求次数">
+              <el-input-number v-model="requestQuotaCount" :min="1" :max="1000000" />
+            </el-form-item>
+          </template>
         </template>
 
         <el-form-item label="模型白名单">
@@ -220,6 +260,36 @@
       </template>
     </el-drawer>
     
+    <!-- Batch Billing Mode Dialog -->
+    <el-dialog
+      v-model="batchDialogVisible"
+      title="批量设置计费模式"
+      width="min(520px, calc(100vw - 32px))"
+    >
+      <el-alert type="info" :closable="false" class="helper-text">
+        已选 {{ selectedRows.length }} 个下游。切换模式后，未勾选清空时仅更新每日 Token 限额。
+      </el-alert>
+      <el-form label-position="top" style="margin-top: 16px">
+        <el-form-item label="计费模式">
+          <el-radio-group v-model="batchForm.billing_mode">
+            <el-radio-button value="request">按次数</el-radio-button>
+            <el-radio-button value="token">按 Token（每日限额）</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="batchForm.billing_mode === 'token'" label="每日 Token 限额">
+          <el-input-number v-model="batchForm.daily_token_limit" :min="1" :max="1000000000000" :step="100000" style="width: 100%" />
+          <span class="form-hint">填写数值则统一设置为该限额；留空表示不修改现有限额。</span>
+        </el-form-item>
+        <el-form-item>
+          <el-checkbox v-model="batchForm.clear_token_limit">清空每日 Token 限额</el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="batchDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchSubmitting" @click="submitBatchMode">确定</el-button>
+      </template>
+    </el-dialog>
+
     <!-- Rotate Key Dialog -->
     <el-dialog
       v-model="rotateDialogVisible"
@@ -266,7 +336,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Activity, Clock3, Copy, Gauge, Plus, Search, ShieldCheck } from '@lucide/vue'
+import { Activity, Clock3, Copy, Gauge, Plus, Search, Settings2, ShieldCheck } from '@lucide/vue'
 import { adminApi } from '@/api/admin'
 import type { DownstreamConfig, DownstreamConcurrencySnapshot } from '@/types'
 import { getCopyableKey, hasUsablePlaintextKey, maskPlaintextKey } from '@/utils/keyUtils'
@@ -283,7 +353,16 @@ const runtimeById = ref<Record<string, DownstreamConcurrencySnapshot>>({})
 let runtimeTimer: number | null = null
 const requestQuotaHours = ref(5)
 const requestQuotaCount = ref(600)
+const dailyTokenLimit = ref<number | undefined>(undefined)
 const availableModels = ref<string[]>([])
+const selectedRows = ref<DownstreamConfig[]>([])
+const batchDialogVisible = ref(false)
+const batchSubmitting = ref(false)
+const batchForm = ref({
+  billing_mode: 'token' as 'request' | 'token',
+  daily_token_limit: undefined as number | undefined,
+  clear_token_limit: false
+})
 
 const filters = ref({
   status: 'all',
@@ -300,7 +379,8 @@ const form = ref<Partial<DownstreamConfig>>({
   per_minute_limit: 100,
   max_concurrency: 10,
   ip_allowlist: [],
-  active: true
+  active: true,
+  billing_mode: 'request'
 })
 
 const ipAllowlistText = computed({
@@ -419,10 +499,12 @@ const handleCreate = () => {
     per_minute_limit: 100,
     max_concurrency: 10,
     ip_allowlist: [],
-    active: true
+    active: true,
+    billing_mode: 'request'
   }
   requestQuotaHours.value = 5
   requestQuotaCount.value = 600
+  dailyTokenLimit.value = undefined
   dialogVisible.value = true
 }
 
@@ -431,10 +513,12 @@ const handleEdit = (row: DownstreamConfig) => {
   form.value = {
     ...row,
     rate_limit_enabled: row.rate_limit_enabled ?? true,
-    max_concurrency: row.max_concurrency ?? 10
+    max_concurrency: row.max_concurrency ?? 10,
+    billing_mode: row.billing_mode ?? 'request'
   }
   requestQuotaHours.value = row.request_quota_window_hours || 5
   requestQuotaCount.value = row.request_quota_requests || 600
+  dailyTokenLimit.value = row.daily_token_limit ?? undefined
   dialogVisible.value = true
 }
 
@@ -448,25 +532,35 @@ const handleSubmit = async () => {
     }
     
     if (form.value.rate_limit_enabled) {
-      if (!form.value.per_minute_limit || form.value.per_minute_limit < 1) {
-        ElMessage.error('请填写有效的每分钟限制')
-        return
-      }
-      if (!form.value.max_concurrency || form.value.max_concurrency < 1) {
-        ElMessage.error('请填写有效的并发限制')
-        return
-      }
-      if (requestQuotaHours.value < 1 || requestQuotaCount.value < 1) {
-        ElMessage.error('请填写有效的时间窗口和请求次数')
-        return
+      if (form.value.billing_mode === 'token') {
+        if (!dailyTokenLimit.value || dailyTokenLimit.value < 1) {
+          ElMessage.error('请填写有效的每日 Token 限额')
+          return
+        }
+      } else {
+        if (!form.value.per_minute_limit || form.value.per_minute_limit < 1) {
+          ElMessage.error('请填写有效的每分钟限制')
+          return
+        }
+        if (!form.value.max_concurrency || form.value.max_concurrency < 1) {
+          ElMessage.error('请填写有效的并发限制')
+          return
+        }
+        if (requestQuotaHours.value < 1 || requestQuotaCount.value < 1) {
+          ElMessage.error('请填写有效的时间窗口和请求次数')
+          return
+        }
       }
     }
     submitting.value = true
 
+    const isToken = form.value.billing_mode === 'token'
     const submitData: Record<string, unknown> = {
       ...form.value,
-      request_quota_window_hours: form.value.rate_limit_enabled ? requestQuotaHours.value : null,
-      request_quota_requests: form.value.rate_limit_enabled ? requestQuotaCount.value : null
+      billing_mode: isToken ? 'token' : 'request',
+      daily_token_limit: isToken ? dailyTokenLimit.value : null,
+      request_quota_window_hours: form.value.rate_limit_enabled && !isToken ? requestQuotaHours.value : null,
+      request_quota_requests: form.value.rate_limit_enabled && !isToken ? requestQuotaCount.value : null
     }
 
     if (dialogMode.value === 'create') {
@@ -535,6 +629,50 @@ const handleDelete = async (row: DownstreamConfig) => {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
     }
+  }
+}
+
+const formatTokenLimit = (limit?: number) => {
+  if (!limit) return '未设置'
+  if (limit >= 1_000_000_000) return `${(limit / 1_000_000_000).toFixed(1)}B`
+  if (limit >= 1_000_000) return `${(limit / 1_000_000).toFixed(1)}M`
+  if (limit >= 1_000) return `${(limit / 1_000).toFixed(1)}K`
+  return String(limit)
+}
+
+const handleSelectionChange = (rows: DownstreamConfig[]) => {
+  selectedRows.value = rows
+}
+
+const submitBatchMode = async () => {
+  try {
+    batchSubmitting.value = true
+    const ids = selectedRows.value.map(row => row.id)
+    const payload: {
+      ids: string[]
+      billing_mode: 'request' | 'token'
+      daily_token_limit?: number | null
+    } = {
+      ids,
+      billing_mode: batchForm.value.billing_mode
+    }
+    if (batchForm.value.clear_token_limit) {
+      payload.daily_token_limit = null
+    } else if (batchForm.value.billing_mode === 'token' && batchForm.value.daily_token_limit) {
+      payload.daily_token_limit = batchForm.value.daily_token_limit
+    }
+    const { data } = await adminApi.batchSetDownstreamMode(payload)
+    ElMessage.success(
+      `已更新 ${data.updated} 个下游${data.failed.length ? `，${data.failed.length} 个失败` : ''}`
+    )
+    batchDialogVisible.value = false
+    batchForm.value.daily_token_limit = undefined
+    batchForm.value.clear_token_limit = false
+    loadData()
+  } catch (error) {
+    ElMessage.error('批量设置失败')
+  } finally {
+    batchSubmitting.value = false
   }
 }
 

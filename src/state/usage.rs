@@ -69,7 +69,6 @@ pub(super) struct DownstreamRequestEvent {
 }
 
 pub(super) const DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS: u64 = 24 * 60 * 60;
-pub(super) const DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 pub(super) fn build_downstream_request_windows(
     logs: &[UsageLog],
@@ -123,9 +122,7 @@ pub(super) fn normalized_usage_logs(logs: &[UsageLog]) -> Vec<UsageLog> {
 }
 
 pub(super) fn downstream_token_retention_seconds(downstream: &DownstreamConfig) -> u64 {
-    if downstream.monthly_token_limit.is_some() {
-        DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS
-    } else if downstream.daily_token_limit.is_some() {
+    if downstream.daily_token_limit.is_some() {
         DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS
     } else {
         60
@@ -286,7 +283,10 @@ impl AppState {
         &self,
         downstream: &DownstreamConfig,
     ) -> Option<RequestQuotaUsage> {
-        if !downstream.rate_limit_enabled || !downstream.uses_request_quota() {
+        if !downstream.rate_limit_enabled
+            || !downstream.uses_request_quota()
+            || downstream.token_billing_mode()
+        {
             return None;
         }
 
@@ -345,7 +345,8 @@ impl AppState {
         let daily_limit = downstream.and_then(|d| d.daily_token_limit);
         let monthly_limit = downstream.and_then(|d| d.monthly_token_limit);
 
-        let today_start = (now / 86400) * 86400;
+        // Daily quota uses the same rolling 24h window as admission.
+        let daily_start = now.saturating_sub(DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS.saturating_sub(1));
 
         let month_start = {
             use std::time::UNIX_EPOCH;
@@ -364,7 +365,7 @@ impl AppState {
                 .usage_logs
                 .iter()
                 .filter(|log| {
-                    log.downstream_key_id == downstream_id && log.created_at >= today_start
+                    log.downstream_key_id == downstream_id && log.created_at >= daily_start
                 })
                 .map(|log| log.total_tokens)
                 .sum();

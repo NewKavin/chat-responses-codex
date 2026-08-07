@@ -456,6 +456,8 @@ pub struct DownstreamConfig {
     pub expires_at: Option<u64>,
     #[serde(default = "default_true")]
     pub active: bool,
+    #[serde(default = "default_downstream_billing_mode")]
+    pub billing_mode: String,
 }
 
 impl DownstreamConfig {
@@ -467,6 +469,21 @@ impl DownstreamConfig {
 
     pub fn uses_token_quota(&self) -> bool {
         self.daily_token_limit.is_some() || self.monthly_token_limit.is_some()
+    }
+
+    /// Returns the billing mode: "request" (per-request quota) or "token"
+    /// (daily rolling token quota).
+    pub fn billing_mode(&self) -> &str {
+        if self.billing_mode == "token" {
+            "token"
+        } else {
+            "request"
+        }
+    }
+
+    /// True when this downstream is configured for token-based daily quota.
+    pub fn token_billing_mode(&self) -> bool {
+        self.billing_mode() == "token"
     }
 }
 
@@ -627,6 +644,10 @@ pub struct PersistedState {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_downstream_billing_mode() -> String {
+    "request".to_string()
 }
 
 fn default_downstream_per_minute_limit() -> u32 {

@@ -183,7 +183,6 @@ use usage::{
     build_downstream_request_windows, build_downstream_token_windows,
     downstream_token_retention_seconds, downstream_token_retry_after_seconds,
     DownstreamRequestEvent, DownstreamTokenEvent, DOWNSTREAM_DAILY_TOKEN_WINDOW_SECONDS,
-    DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
 };
 
 pub use crate::util::{
@@ -2860,9 +2859,7 @@ impl AppState {
                     .iter()
                     .find(|downstream| downstream.id == log.downstream_key_id)
                     .filter(|downstream| {
-                        downstream.rate_limit_enabled
-                            && downstream.uses_token_quota()
-                            && !downstream.uses_request_quota()
+                        downstream.rate_limit_enabled && downstream.token_billing_mode()
                     })
                     .map(downstream_token_retention_seconds)
             };
@@ -3100,7 +3097,8 @@ impl AppState {
             });
         }
 
-        if let Some(request_quota_window_seconds) = request_quota_window_seconds {
+        if !downstream.token_billing_mode() {
+            if let Some(request_quota_window_seconds) = request_quota_window_seconds {
             let request_quota_requests = downstream.request_quota_requests.unwrap_or(0).max(1);
             let quota_start = now.saturating_sub(request_quota_window_seconds.saturating_sub(1));
             let quota_count = window
@@ -3117,16 +3115,17 @@ impl AppState {
                     .saturating_add(request_quota_window_seconds)
                     .saturating_sub(now)
                     .max(1);
-                return Err(DownstreamAdmissionRejection::RequestQuotaExceeded {
-                    retry_after_seconds: retry_after,
-                    limit: request_quota_requests,
-                    used: quota_count as u32,
-                    window_seconds: request_quota_window_seconds,
-                });
+                    return Err(DownstreamAdmissionRejection::RequestQuotaExceeded {
+                        retry_after_seconds: retry_after,
+                        limit: request_quota_requests,
+                        used: quota_count as u32,
+                        window_seconds: request_quota_window_seconds,
+                    });
+                }
             }
         }
 
-        if downstream.uses_token_quota() && !downstream.uses_request_quota() {
+        if downstream.token_billing_mode() {
             let mut token_windows = self.downstream_token_windows.lock().await;
             let token_window = token_windows
                 .entry(downstream.id.clone())
@@ -3167,35 +3166,6 @@ impl AppState {
                         retry_after_seconds,
                         limit: daily_token_limit.max(1),
                         used: daily_used,
-                    });
-                }
-            }
-
-            if let Some(monthly_token_limit) = downstream.monthly_token_limit {
-                let monthly_used = token_window
-                    .iter()
-                    .filter(|event| {
-                        event.created_at
-                            >= now.saturating_sub(
-                                DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS.saturating_sub(1),
-                            )
-                    })
-                    .map(|event| event.tokens)
-                    .sum::<u64>();
-                if monthly_used >= monthly_token_limit.max(1) {
-                    let retry_after_seconds = downstream_token_retry_after_seconds(
-                        token_window,
-                        now,
-                        DOWNSTREAM_MONTHLY_TOKEN_WINDOW_SECONDS,
-                        monthly_used
-                            .saturating_add(1)
-                            .saturating_sub(monthly_token_limit.max(1)),
-                    )
-                    .max(1);
-                    return Err(DownstreamAdmissionRejection::MonthlyTokenQuotaExceeded {
-                        retry_after_seconds,
-                        limit: monthly_token_limit.max(1),
-                        used: monthly_used,
                     });
                 }
             }

@@ -190,20 +190,18 @@ impl RedisRuntimeCoordinator {
             .zip(downstream.request_quota_requests)
             .map(|(hours, _)| u64::from(hours.max(1)).saturating_mul(60 * 60))
             .unwrap_or(0);
-        let request_quota = if downstream.uses_request_quota() {
+        let request_quota = if !downstream.token_billing_mode() && downstream.uses_request_quota() {
             downstream.request_quota_requests.unwrap_or(0)
         } else {
             0
         };
-        let uses_token_quota = downstream.uses_token_quota() && !downstream.uses_request_quota();
-        let daily_limit = uses_token_quota
-            .then_some(downstream.daily_token_limit)
-            .flatten()
-            .unwrap_or(0);
-        let monthly_limit = uses_token_quota
-            .then_some(downstream.monthly_token_limit)
-            .flatten()
-            .unwrap_or(0);
+        // Token billing mode: only the daily rolling window is enforced.
+        let daily_limit = if downstream.token_billing_mode() {
+            downstream.daily_token_limit.unwrap_or(0)
+        } else {
+            0
+        };
+        let monthly_limit = 0;
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();

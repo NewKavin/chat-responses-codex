@@ -41,6 +41,7 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         ip_allowlist: vec!["192.168.1.0/24".to_string()],
         expires_at: None,
         active: true,
+        billing_mode: "request".into(),
     };
 
     let state = PersistedState {

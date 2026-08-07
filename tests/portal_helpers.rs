@@ -76,6 +76,7 @@ fn create_test_state_with_logs(logs: Vec<UsageLog>) -> AppState {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: logs,
         announcement: None,
@@ -324,6 +325,7 @@ async fn test_compute_request_quota_usage_returns_none_if_no_quota() {
         ip_allowlist: vec![],
         expires_at: None,
         active: true,
+        billing_mode: "request".into(),
     };
 
     let usage = state.compute_request_quota_usage(&downstream).await;
@@ -1476,6 +1478,7 @@ async fn test_compute_model_stats_empty_allowlist() {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: logs,
         announcement: None,

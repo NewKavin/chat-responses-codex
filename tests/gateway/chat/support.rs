@@ -90,6 +90,7 @@ pub(super) async fn capture_single_chat_request(
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
+                billing_mode: "request".into(),
             }]),
             usage_logs: vec![],
             announcement: None,

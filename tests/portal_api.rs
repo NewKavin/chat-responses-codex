@@ -72,6 +72,7 @@ fn canonical_upstream_state() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: vec![
             UsageLog {
@@ -216,6 +217,7 @@ fn create_test_state() -> (AppState, String) {
             ip_allowlist: vec!["192.168.1.0/24".to_string()],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: vec![
             UsageLog {
@@ -285,6 +287,10 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
     let generated = generate_downstream_key("sk");
     let now = chat_responses_codex::state::unix_seconds();
 
+    let today_start = (now / 86_400) * 86_400;
+    let log_a_created_at = today_start + 300;
+    let log_b_created_at = today_start + 600;
+
     let state = PersistedState {
         upstreams: std::sync::Arc::new(vec![]),
         downstreams: std::sync::Arc::new(vec![DownstreamConfig {
@@ -304,6 +310,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: vec![
             UsageLog {
@@ -329,7 +336,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 total_tokens: 100,
                 first_token_latency_ms: None,
                 latency_ms: 200,
-                created_at: now - 600,
+                created_at: log_a_created_at,
                 compatibility: None,
             },
             UsageLog {
@@ -355,7 +362,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
                 total_tokens: 120,
                 first_token_latency_ms: None,
                 latency_ms: 210,
-                created_at: now - 300,
+                created_at: log_b_created_at,
                 compatibility: None,
             },
         ],
@@ -421,6 +428,7 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs,
         announcement: None,
@@ -1275,6 +1283,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -1608,6 +1617,7 @@ fn create_state_with_context_limits() -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: vec![],
         announcement: None,
@@ -1701,6 +1711,7 @@ fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: vec![UsageLog {
             id: "tz-log-1".to_string(),

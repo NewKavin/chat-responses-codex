@@ -59,6 +59,7 @@ fn create_test_state(base_url: String) -> (AppState, String) {
             ip_allowlist: vec![],
             expires_at: None,
             active: true,
+            billing_mode: "request".into(),
         }]),
         usage_logs: vec![],
         announcement: None,

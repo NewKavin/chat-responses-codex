@@ -2,12 +2,13 @@ use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::routing::UpstreamProtocol;
 use crate::state::{
     fetch_models_from_upstream_keys_concurrently, model_discovery_url, portal_model_is_allowed,
-    unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppState,
-    DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig, EnrichedUsageLog,
-    FreekeySyncError, FreekeySyncItem, GlobalContextProfile, KeyModelDiscoveryResult,
-    ModelQualificationApplySummary, ModelQualificationEvidence, ModelQualificationLevel,
-    ResolvedLogWindow, RouteHealthSnapshotDto, RuntimeCoordinationError, SummaryRange,
-    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    unix_seconds, AccountConcurrencyKey, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig,
+    AppState, DefaultModelContextConfig, DownstreamConcurrencySnapshot, DownstreamConfig,
+    EnrichedUsageLog, FreekeySyncError, FreekeySyncItem, GlobalContextProfile,
+    KeyModelDiscoveryResult, ModelQualificationApplySummary, ModelQualificationEvidence,
+    ModelQualificationLevel, ResolvedLogWindow, RouteHealthSnapshotDto, RuntimeCoordinationError,
+    SummaryRange, UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog,
+    UsageLogQuery,
 };
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -551,6 +552,67 @@ fn classify_user_agent(user_agent: Option<&str>) -> Option<String> {
 // ============================================================================
 
 /// List all upstreams
+#[derive(serde::Serialize)]
+struct AccountConcurrencyStatusDto {
+    key_fingerprint: String,
+    concurrency: u32,
+    concurrency_limit: u32,
+    observed_at: u64,
+    fresh_until: u64,
+}
+
+#[derive(serde::Serialize)]
+struct UpstreamConcurrencyStatusDto {
+    accounts: Vec<AccountConcurrencyStatusDto>,
+    last_observed_at: Option<u64>,
+    data_accounts: usize,
+    total_accounts: usize,
+}
+
+/// Read stored concurrency observations for every account key of an upstream.
+/// Best-effort: coordination failures yield `None` for the whole upstream.
+async fn read_upstream_concurrency_status(
+    state: &AppState,
+    upstream: &UpstreamConfig,
+) -> Option<UpstreamConcurrencyStatusDto> {
+    let keys = upstream.account_api_keys();
+    let mut accounts = Vec::new();
+    let mut last_observed_at: Option<u64> = None;
+    for key in keys {
+        let fingerprint = upstream_key_fingerprint(&upstream.id, &key);
+        let account = AccountConcurrencyKey {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: fingerprint.clone(),
+        };
+        match state.provider_concurrency_observation(&account).await {
+            Ok(Some(observation)) => {
+                last_observed_at =
+                    Some(last_observed_at.map_or(observation.observed_at, |current| {
+                        current.max(observation.observed_at)
+                    }));
+                accounts.push(AccountConcurrencyStatusDto {
+                    key_fingerprint: fingerprint,
+                    concurrency: observation.concurrency,
+                    concurrency_limit: observation.concurrency_limit,
+                    observed_at: observation.observed_at,
+                    fresh_until: observation.fresh_until,
+                });
+            }
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+    }
+    Some(UpstreamConcurrencyStatusDto {
+        data_accounts: accounts.len(),
+        total_accounts: {
+            // account_api_keys() already dedups; recompute count from the same set
+            upstream.account_api_keys().len()
+        },
+        accounts,
+        last_observed_at,
+    })
+}
+
 pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = state.snapshot().await;
     let runtime_snapshots = match state.upstream_runtime_snapshots().await {
@@ -572,6 +634,7 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         config: UpstreamConfig,
         runtime_state: Option<UpstreamRuntimeStateResponse>,
         route_health: RouteHealthSnapshotDto,
+        concurrency_status: Option<UpstreamConcurrencyStatusDto>,
     }
 
     #[derive(serde::Serialize)]
@@ -587,46 +650,50 @@ pub(super) async fn admin_list_upstreams(State(state): State<AppState>) -> impl 
         cooldown_remaining: u64,
     }
 
-    let upstreams_with_runtime: Vec<UpstreamWithRuntime> = Arc::unwrap_or_clone(snapshot.upstreams)
-        .into_iter()
-        .map(|config| {
-            let runtime_state = runtime_snapshots.get(&config.id).map(|runtime| {
-                let minute_percentage = if config.requests_per_minute > 0 {
-                    (runtime.minute_cost / config.requests_per_minute as f64 * 100.0).min(100.0)
-                } else {
-                    0.0
-                };
+    let mut upstreams_with_runtime = Vec::with_capacity(snapshot.upstreams.len());
+    for config in Arc::unwrap_or_clone(snapshot.upstreams) {
+        let runtime_state = runtime_snapshots.get(&config.id).map(|runtime| {
+            let minute_percentage = if config.requests_per_minute > 0 {
+                (runtime.minute_cost / config.requests_per_minute as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
 
-                let five_hour_percentage = if config.request_quota_requests > 0 {
-                    (runtime.five_hour_cost / config.request_quota_requests as f64 * 100.0)
-                        .min(100.0)
-                } else {
-                    0.0
-                };
+            let five_hour_percentage = if config.request_quota_requests > 0 {
+                (runtime.five_hour_cost / config.request_quota_requests as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
 
-                UpstreamRuntimeStateResponse {
-                    in_flight: runtime.in_flight,
-                    minute_cost: runtime.minute_cost,
-                    minute_limit: config.requests_per_minute,
-                    minute_percentage,
-                    five_hour_cost: runtime.five_hour_cost,
-                    five_hour_limit: config.request_quota_requests,
-                    five_hour_percentage,
-                    cooldown_until: runtime.cooldown_until,
-                    cooldown_remaining: runtime.cooldown_remaining(now),
-                }
-            });
-
-            UpstreamWithRuntime {
-                route_health: route_health_snapshots
-                    .get(&config.id)
-                    .cloned()
-                    .unwrap_or_default(),
-                config,
-                runtime_state,
+            UpstreamRuntimeStateResponse {
+                in_flight: runtime.in_flight,
+                minute_cost: runtime.minute_cost,
+                minute_limit: config.requests_per_minute,
+                minute_percentage,
+                five_hour_cost: runtime.five_hour_cost,
+                five_hour_limit: config.request_quota_requests,
+                five_hour_percentage,
+                cooldown_until: runtime.cooldown_until,
+                cooldown_remaining: runtime.cooldown_remaining(now),
             }
-        })
-        .collect();
+        });
+
+        let concurrency_status = if config.concurrency_status_enabled {
+            read_upstream_concurrency_status(&state, &config).await
+        } else {
+            None
+        };
+
+        upstreams_with_runtime.push(UpstreamWithRuntime {
+            route_health: route_health_snapshots
+                .get(&config.id)
+                .cloned()
+                .unwrap_or_default(),
+            config,
+            runtime_state,
+            concurrency_status,
+        });
+    }
 
     Json(upstreams_with_runtime).into_response()
 }
@@ -2005,6 +2072,20 @@ pub(super) async fn admin_update_downstream(
         {
             downstream.rate_limit_enabled = rate_limit_enabled;
         }
+        if let Some(billing_mode) = updates.get("billing_mode").and_then(|v| v.as_str()) {
+            if billing_mode != "request" && billing_mode != "token" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "billing_mode must be \"request\" or \"token\""
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            downstream.billing_mode = billing_mode.to_string();
+        }
         if let Some(request_quota_window_hours) = updates
             .get("request_quota_window_hours")
             .and_then(|v| v.as_u64())
@@ -2099,6 +2180,94 @@ pub(super) async fn admin_update_downstream(
         )
             .into_response()
     }
+}
+
+/// `null` -> `Some(None)` (clear); missing key -> `None` (leave unchanged);
+/// value -> `Some(Some(v))` (set).
+fn deserialize_nullable_u64<'de, D>(deserializer: D) -> Result<Option<Option<u64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<u64>::deserialize(deserializer)?))
+}
+
+fn deserialize_nullable_u32<'de, D>(deserializer: D) -> Result<Option<Option<u32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<u32>::deserialize(deserializer)?))
+}
+
+/// Batch set billing mode (and optional quota fields) for multiple downstreams.
+#[derive(serde::Deserialize)]
+pub(super) struct BatchBillingModeRequest {
+    ids: Vec<String>,
+    billing_mode: Option<String>,
+    /// `null` clears the limit; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "deserialize_nullable_u64")]
+    daily_token_limit: Option<Option<u64>>,
+    #[serde(default, deserialize_with = "deserialize_nullable_u32")]
+    request_quota_window_hours: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "deserialize_nullable_u32")]
+    request_quota_requests: Option<Option<u32>>,
+}
+
+pub(super) async fn admin_batch_set_downstream_mode(
+    State(state): State<AppState>,
+    Json(payload): Json<BatchBillingModeRequest>,
+) -> impl IntoResponse {
+    if payload.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "message": "ids must not be empty" }
+            })),
+        )
+            .into_response();
+    }
+    if let Some(mode) = payload.billing_mode.as_deref() {
+        if mode != "request" && mode != "token" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": { "message": "billing_mode must be \"request\" or \"token\"" }
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let snapshot = state.snapshot().await;
+    let mut updated = 0usize;
+    let mut failed: Vec<serde_json::Value> = Vec::new();
+
+    for id in &payload.ids {
+        let Some(mut downstream) = snapshot.downstreams.iter().find(|d| d.id == *id).cloned()
+        else {
+            failed.push(json!({ "id": id, "error": "not found" }));
+            continue;
+        };
+        if let Some(mode) = payload.billing_mode.as_deref() {
+            downstream.billing_mode = mode.to_string();
+        }
+        // Option<Option<T>>: None = untouched, Some(None) = clear, Some(v) = set
+        if let Some(value) = payload.daily_token_limit {
+            downstream.daily_token_limit = value;
+        }
+        if let Some(value) = payload.request_quota_window_hours {
+            downstream.request_quota_window_hours = value;
+        }
+        if let Some(value) = payload.request_quota_requests {
+            downstream.request_quota_requests = value;
+        }
+        match state.update_downstream(id, downstream.clone()).await {
+            Ok(true) => updated += 1,
+            Ok(false) => failed.push(json!({ "id": id, "error": "not found" })),
+            Err(error) => failed.push(json!({ "id": id, "error": error.to_string() })),
+        }
+    }
+
+    Json(json!({ "updated": updated, "failed": failed })).into_response()
 }
 
 /// Delete downstream by ID

@@ -325,6 +325,16 @@ export const adminApi = {
   deleteDownstream: (id: string) => adminHttp.delete(`/admin/downstreams/${id}`),
   toggleDownstream: (id: string) => adminHttp.post<{ active: boolean }>(`/admin/downstreams/${id}/toggle`),
   rotateDownstream: (id: string) => adminHttp.post<{ plaintext_key: string }>(`/admin/downstreams/${id}/rotate`),
+  batchSetDownstreamMode: (data: {
+    ids: string[]
+    billing_mode?: 'request' | 'token'
+    daily_token_limit?: number | null
+    request_quota_window_hours?: number | null
+    request_quota_requests?: number | null
+  }) => adminHttp.post<{ updated: number; failed: Array<{ id: string; error: string }> }>(
+    '/admin/downstreams/batch-mode',
+    data
+  ),
 
   getDownstreamRuntime: () =>
     adminHttp.get<DownstreamRuntimeResponse>('/admin/downstreams/runtime'),

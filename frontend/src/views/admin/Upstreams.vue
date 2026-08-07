@@ -112,18 +112,29 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="私有并发状态接口" width="170" align="center">
+        <el-table-column label="私有并发状态接口" width="240" align="center">
           <template #default="{ row }">
-            <el-tooltip
-              content="非 OpenAI 标准接口，默认关闭"
-              placement="top"
-            >
-              <el-switch
-                v-model="row.concurrency_status_enabled"
-                :disabled="isInlineSaving(row.id, 'concurrency_status_enabled')"
-                @change="updateInlineConcurrencyStatus(row)"
-              />
-            </el-tooltip>
+            <div class="concurrency-status-cell">
+              <el-tooltip
+                content="非 OpenAI 标准接口，默认关闭"
+                placement="top"
+              >
+                <el-switch
+                  v-model="row.concurrency_status_enabled"
+                  :disabled="isInlineSaving(row.id, 'concurrency_status_enabled')"
+                  @change="updateInlineConcurrencyStatus(row)"
+                />
+              </el-tooltip>
+              <el-tooltip
+                v-if="concurrencyStatusView(row)"
+                :content="concurrencyStatusView(row)!.tooltip"
+                placement="top"
+              >
+                <el-tag :type="concurrencyStatusView(row)!.type" size="small">
+                  {{ concurrencyStatusView(row)!.text }}
+                </el-tag>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
 
@@ -496,6 +507,45 @@ const rules = {
   base_url: [{ required: true, message: '请输入Base URL', trigger: 'blur' }],
   api_key: [{ required: true, message: '请输入API Key', trigger: 'blur' }],
   protocols: [{ required: true, message: '请选择协议', trigger: 'change' }]
+}
+
+const formatRelativeTime = (unixSeconds: number) => {
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds)
+  if (diff < 60) return '刚刚'
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+  return `${Math.floor(diff / 86400)} 天前`
+}
+
+const concurrencyStatusView = (row: UpstreamConfig) => {
+  const status = row.concurrency_status
+  if (!row.concurrency_status_enabled || !status) return null
+  const updated = status.last_observed_at ? formatRelativeTime(status.last_observed_at) : ''
+  if (status.data_accounts === 0) {
+    return {
+      type: 'info' as const,
+      text: '暂无探测数据',
+      tooltip: '接口未响应或未到探测周期（约 5 秒一轮）'
+    }
+  }
+  const lines = status.accounts.map(
+    (account) =>
+      `${account.key_fingerprint.slice(0, 8)}… 并发 ${account.concurrency}/${account.concurrency_limit}（${formatRelativeTime(account.observed_at)}）`
+  )
+  const detail = lines.join('\n') + (updated ? ` · ${updated}更新` : '')
+  if (status.data_accounts === status.total_accounts && status.total_accounts === 1) {
+    const first = status.accounts[0]
+    return {
+      type: 'success' as const,
+      text: `并发 ${first.concurrency}/${first.concurrency_limit}`,
+      tooltip: detail
+    }
+  }
+  return {
+    type: 'warning' as const,
+    text: `${status.data_accounts}/${status.total_accounts} 账号有数据`,
+    tooltip: detail
+  }
 }
 
 const loadData = async () => {
@@ -989,6 +1039,12 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.concurrency-status-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
 .upstreams-page {
   min-height: 100%;
 }

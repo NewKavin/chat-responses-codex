@@ -2120,6 +2120,7 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
                 ip_allowlist: vec![],
                 expires_at: None,
                 active: true,
+                billing_mode: "request".into(),
             }]),
             usage_logs: vec![],
             announcement: None,

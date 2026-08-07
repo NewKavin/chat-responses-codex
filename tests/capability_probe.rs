@@ -654,6 +654,7 @@ async fn probe_service_honors_global_concurrency_across_upstreams() {
                     ip_allowlist: Vec::new(),
                     expires_at: None,
                     active: true,
+                    billing_mode: "request".into(),
                 }]),
                 ..PersistedState::default()
             },
@@ -715,6 +716,7 @@ async fn probe_service_periodically_reconciles_expired_verified_profiles() {
                     ip_allowlist: Vec::new(),
                     expires_at: None,
                     active: true,
+                    billing_mode: "request".into(),
                 }]),
                 ..PersistedState::default()
             },
@@ -863,6 +865,7 @@ async fn per_key_probe_profiles_keep_independent_reasoning_controls() {
                     ip_allowlist: Vec::new(),
                     expires_at: None,
                     active: true,
+                    billing_mode: "request".into(),
                 }]),
                 ..PersistedState::default()
             },
@@ -2743,6 +2746,7 @@ async fn normal_gateway_request_never_launches_a_probe() {
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                    billing_mode: "request".into(),
                 }]),
                 usage_logs: vec![],
                 announcement: None,
@@ -2831,6 +2835,7 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                     ip_allowlist: vec![],
                     expires_at: None,
                     active: true,
+                    billing_mode: "request".into(),
                 }]),
                 usage_logs: vec![],
                 announcement: None,

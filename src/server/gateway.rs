@@ -1315,11 +1315,7 @@ impl StreamUsageLogContext {
             endpoint: endpoint.clone(),
             model: model.clone(),
             inference_strength,
-            billing_mode: Some(if usage.2 > 0 {
-                "Token 计费".to_string()
-            } else {
-                "请求计费".to_string()
-            }),
+            billing_mode: Some(downstream_billing_label(&state, &downstream_key_id).await),
             request_count: Some(1),
             user_agent,
             request_id: request_id.clone(),
@@ -1482,6 +1478,19 @@ fn metric_exceeds_ratio(value: f64, baseline: f64, ratio: f64) -> bool {
     }
 }
 
+/// Resolve the billing label for a downstream based on its configured mode.
+async fn downstream_billing_label(state: &AppState, downstream_id: &str) -> String {
+    let snapshot = state.snapshot().await;
+    match snapshot
+        .downstreams
+        .iter()
+        .find(|downstream| downstream.id == downstream_id)
+    {
+        Some(downstream) if downstream.token_billing_mode() => "Token 计费".to_string(),
+        _ => "请求计费".to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn append_gateway_usage_log(
     state: &AppState,
@@ -1512,11 +1521,7 @@ async fn append_gateway_usage_log(
         endpoint: endpoint.to_string(),
         model: model.to_string(),
         inference_strength: inference_strength.map(str::to_string),
-        billing_mode: Some(if total_tokens > 0 {
-            "Token 计费".to_string()
-        } else {
-            "请求计费".to_string()
-        }),
+        billing_mode: Some(downstream_billing_label(state, downstream_id).await),
         request_count: Some(1),
         user_agent: user_agent.map(str::to_string),
         request_id: request_id.to_string(),
@@ -1753,6 +1758,12 @@ pub fn build_router(state: AppState) -> Router {
                 state.clone(),
                 admin_auth_middleware,
             )),
+        )
+        .route(
+            "/api/admin/downstreams/batch-mode",
+            post(admin_batch_set_downstream_mode).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
         )
         .route(
             "/api/admin/downstreams/{id}",

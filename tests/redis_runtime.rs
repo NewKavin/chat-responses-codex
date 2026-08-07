@@ -149,6 +149,7 @@ fn redis_test_downstream(id: &str) -> DownstreamConfig {
         ip_allowlist: vec![],
         expires_at: None,
         active: true,
+        billing_mode: "request".into(),
     }
 }
 
@@ -1649,6 +1650,7 @@ async fn redis_downstream_token_usage_is_shared() {
     let mut downstream = redis_test_downstream("shared-token-limit");
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(10);
+    downstream.billing_mode = "token".into();
 
     first.insert_downstream(downstream.clone()).await.unwrap();
 
@@ -1711,6 +1713,7 @@ async fn redis_token_retry_after_waits_until_enough_tokens_expire() {
     let mut downstream = redis_test_downstream("token-retry-after");
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(100);
+    downstream.billing_mode = "token".into();
     first.insert_downstream(downstream.clone()).await.unwrap();
 
     first
@@ -1745,6 +1748,7 @@ async fn redis_daily_token_keys_use_daily_retention() {
     let mut downstream = redis_test_downstream("daily-token-retention");
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(100);
+    downstream.billing_mode = "token".into();
     first.insert_downstream(downstream.clone()).await.unwrap();
     first
         .append_usage_log(redis_test_usage_log("daily-retention", &downstream.id, 1))
@@ -1947,6 +1951,7 @@ async fn failed_redis_token_recording_does_not_queue_a_duplicate_usage_log() {
     let mut downstream = redis_test_downstream("token-record-retry");
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(100);
+    downstream.billing_mode = "token".into();
     first.insert_downstream(downstream.clone()).await.unwrap();
     let log = redis_test_usage_log("retryable-token-log", &downstream.id, 10);
 
@@ -1986,6 +1991,7 @@ async fn redis_token_recording_retries_commit_after_response_loss() {
     let mut downstream = redis_test_downstream("token-record-response-loss");
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(100);
+    downstream.billing_mode = "token".into();
     first.insert_downstream(downstream.clone()).await.unwrap();
     let log = redis_test_usage_log("token-record-response-loss", &downstream.id, 10);
 
@@ -2055,6 +2061,7 @@ async fn redis_downstream_token_replay_preserves_original_score_and_value() {
     let mut downstream = redis_test_downstream("token-replay-first-write-wins");
     downstream.per_minute_limit = 60;
     downstream.daily_token_limit = Some(1_000);
+    downstream.billing_mode = "token".into();
     first.insert_downstream(downstream.clone()).await.unwrap();
 
     let log_id = "replayed-token-event";
