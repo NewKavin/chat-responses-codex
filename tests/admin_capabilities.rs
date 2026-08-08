@@ -265,6 +265,123 @@ async fn manual_probe_only_enqueues_and_returns_accepted() {
 }
 
 #[tokio::test]
+async fn capability_probe_all_rejects_revision_zero_policy() {
+    let fixture =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    let response = fixture
+        .post_json("/api/admin/capabilities/probe-all", json!({}))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "capability_policy_missing"
+    );
+}
+
+#[tokio::test]
+async fn capability_probe_all_builds_every_exact_key_and_protocol() {
+    let fixture =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    fixture.import_revision(1).await;
+
+    let mut chat_upstream = fixture.state.upstreams().await.into_iter().next().unwrap();
+    chat_upstream.api_key = "chat-key-a".into();
+    chat_upstream.api_keys = vec!["chat-key-b".into()];
+    chat_upstream.api_key_models = vec![
+        ApiKeyModelConfig {
+            api_key: "chat-key-a".into(),
+            supported_models: vec!["opaque".into()],
+        },
+        ApiKeyModelConfig {
+            api_key: "chat-key-b".into(),
+            supported_models: vec!["opaque".into()],
+        },
+    ];
+    fixture
+        .state
+        .update_upstream("up-1", chat_upstream)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .insert_upstream(UpstreamConfig {
+            id: "up-responses".into(),
+            name: "Responses only".into(),
+            base_url: "https://responses.example.invalid".into(),
+            api_key: "responses-key".into(),
+            protocol: chat_responses_codex::routing::UpstreamProtocol::Responses,
+            protocols: vec![chat_responses_codex::routing::UpstreamProtocol::Responses],
+            supported_models: vec!["opaque".into()],
+            active: true,
+            ..UpstreamConfig::default()
+        })
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(1);
+    fixture.state.set_capability_probe_sender(sender);
+
+    let response = fixture
+        .post_json("/api/admin/capabilities/probe-all", json!({}))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["configuration_revision"], 1);
+    assert_eq!(body["queued_routes"], 3);
+    assert!(body["started_at"].is_number());
+    let candidates = body["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 3);
+    for candidate in candidates {
+        assert!(candidate["route_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("route_"));
+        assert!(candidate.get("key_fingerprint").is_none());
+    }
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate["protocol"] == "responses"));
+    assert!(!body.to_string().contains("key_fingerprint"));
+
+    let full_queue = fixture
+        .post_json("/api/admin/capabilities/probe-all", json!({}))
+        .await;
+    assert_eq!(full_queue.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response_json(full_queue).await["error"]["code"],
+        "gateway_capability_probe_unavailable"
+    );
+
+    let batch = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let jobs = batch.into_jobs();
+    assert_eq!(jobs.len(), 3);
+    let chat_key_fingerprints = jobs
+        .iter()
+        .filter(|job| job.key.protocol == WireProtocol::ChatCompletions)
+        .map(|job| job.key.key_fingerprint.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(chat_key_fingerprints.len(), 2);
+    for job in &jobs {
+        assert!(!body.to_string().contains(&job.key.key_fingerprint));
+    }
+    assert_eq!(
+        jobs.iter()
+            .filter(|job| job.key.protocol == WireProtocol::ChatCompletions)
+            .count(),
+        2
+    );
+    assert_eq!(
+        jobs.iter()
+            .filter(|job| job.key.protocol == WireProtocol::Responses)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn admin_capability_routes_require_and_preserve_the_selected_key_identity() {
     let fixture =
         AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;

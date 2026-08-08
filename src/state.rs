@@ -419,6 +419,27 @@ impl Drop for LeaseReleaseGuard {
     }
 }
 
+#[derive(Clone, Serialize)]
+pub struct ProbeCandidateSummary {
+    pub upstream_id: String,
+    pub route_id: String,
+    pub exposed_model_slug: String,
+    pub runtime_model_slug: String,
+    pub protocol: WireProtocol,
+}
+
+pub struct ManualProbeBatchReceipt {
+    pub configuration_revision: u64,
+    pub started_at: u64,
+    pub candidates: Vec<ProbeCandidateSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualProbeBatchError {
+    CapabilityPolicyMissing,
+    QueueUnavailable,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
@@ -1652,6 +1673,96 @@ impl AppState {
             submissions.remove(&key);
         }
         false
+    }
+
+    pub async fn queue_manual_capability_probe_batch(
+        &self,
+        upstream_ids: &BTreeSet<String>,
+        models: &BTreeSet<String>,
+    ) -> Result<ManualProbeBatchReceipt, ManualProbeBatchError> {
+        let routing = self.routing_snapshot().await;
+        let capability_snapshot = self.capability_snapshot();
+        let configuration = capability_snapshot.configuration.source();
+        if configuration.revision == 0 || !configuration.probe.enabled {
+            return Err(ManualProbeBatchError::CapabilityPolicyMissing);
+        }
+
+        let mut prepared_jobs = Vec::new();
+        for upstream in routing.upstreams.iter().filter(|upstream| {
+            upstream.active && (upstream_ids.is_empty() || upstream_ids.contains(&upstream.id))
+        }) {
+            for (key, exposed_model_slugs) in self.capability_probe_jobs_for_upstream(upstream) {
+                let protocol = match key.protocol {
+                    WireProtocol::ChatCompletions => UpstreamProtocol::ChatCompletions,
+                    WireProtocol::Responses => UpstreamProtocol::Responses,
+                    WireProtocol::Messages => continue,
+                };
+                let mut prepared_job = None;
+                let mut prepared_model_slugs = BTreeSet::new();
+                for exposed_model_slug in exposed_model_slugs
+                    .into_iter()
+                    .filter(|model| models.is_empty() || models.contains(model))
+                {
+                    let Ok(Some(job)) = Self::build_capability_probe_job_for_key_with_snapshot(
+                        &capability_snapshot,
+                        upstream,
+                        &key.key_fingerprint,
+                        &exposed_model_slug,
+                        &key.runtime_model_slug,
+                        protocol,
+                        ProbeReason::Manual,
+                    ) else {
+                        continue;
+                    };
+                    prepared_job.get_or_insert(job);
+                    prepared_model_slugs.insert(exposed_model_slug);
+                }
+                if let Some(mut job) = prepared_job {
+                    job.exposed_model_slugs = prepared_model_slugs;
+                    prepared_jobs.push(job);
+                }
+            }
+        }
+        prepared_jobs.sort_by(|left, right| left.key.cmp(&right.key));
+        if prepared_jobs.is_empty() {
+            return Err(ManualProbeBatchError::CapabilityPolicyMissing);
+        }
+
+        let candidates = prepared_jobs
+            .iter()
+            .map(|job| ProbeCandidateSummary {
+                upstream_id: job.key.upstream_id.clone(),
+                route_id: anonymous_route_id(
+                    &job.key.upstream_id,
+                    &job.key.key_fingerprint,
+                    &job.key.runtime_model_slug,
+                    job.key.protocol,
+                ),
+                exposed_model_slug: job
+                    .exposed_model_slugs
+                    .iter()
+                    .next()
+                    .expect("prepared capability probe has an exposed model")
+                    .clone(),
+                runtime_model_slug: job.key.runtime_model_slug.clone(),
+                protocol: job.key.protocol,
+            })
+            .collect::<Vec<_>>();
+        let sender = self
+            .capability_probe_sender
+            .lock()
+            .expect("probe sender lock poisoned")
+            .clone()
+            .ok_or(ManualProbeBatchError::QueueUnavailable)?;
+        sender
+            .try_send(ProbeJobBatch::new(prepared_jobs))
+            .map_err(|_| ManualProbeBatchError::QueueUnavailable)?;
+
+        Ok(ManualProbeBatchReceipt {
+            configuration_revision: configuration.revision,
+            started_at: unix_seconds(),
+            candidates,
+        })
     }
 
     pub fn finish_capability_probe_submission(

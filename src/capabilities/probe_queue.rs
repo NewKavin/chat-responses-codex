@@ -36,8 +36,8 @@ pub struct ProbeJob {
     pub plan_configuration: Arc<CompiledCapabilityConfiguration>,
 }
 
-/// One bounded ingress slot. Jobs are expanded synchronously into
-/// `ProbeQueueState`, which keeps its existing per-route deduplication.
+/// One bounded ingress slot. The worker retains every accepted job while
+/// expanding the batch into `ProbeQueueState` as capacity becomes available.
 #[derive(Clone, Debug)]
 pub struct ProbeJobBatch {
     jobs: Vec<ProbeJob>,
@@ -58,6 +58,10 @@ impl ProbeJobBatch {
 
     pub fn jobs(&self) -> &[ProbeJob] {
         &self.jobs
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
     }
 }
 
@@ -87,6 +91,20 @@ impl ProbeQueueState {
     }
 
     pub fn enqueue(&mut self, job: ProbeJob) -> bool {
+        self.enqueue_preserving_full(job).unwrap_or(false)
+    }
+
+    pub fn enqueue_batch(&mut self, batch: ProbeJobBatch) -> ProbeJobBatch {
+        let mut jobs = batch.into_jobs().into_iter();
+        while let Some(job) = jobs.next() {
+            if let Err(job) = self.enqueue_preserving_full(job) {
+                return ProbeJobBatch::new(std::iter::once(job).chain(jobs).collect());
+            }
+        }
+        ProbeJobBatch::new(Vec::new())
+    }
+
+    fn enqueue_preserving_full(&mut self, job: ProbeJob) -> Result<bool, ProbeJob> {
         if self.known.contains(&job.key) {
             if let Some(pending) = self
                 .pending
@@ -98,7 +116,7 @@ impl ProbeQueueState {
                 } else {
                     *pending = job;
                 }
-                return false;
+                return Ok(false);
             }
             if self.active.contains(&job.key) {
                 if self.active_jobs.get(&job.key).is_some_and(|active| {
@@ -107,22 +125,22 @@ impl ProbeQueueState {
                             .exposed_model_slugs
                             .is_subset(&active.exposed_model_slugs)
                 }) {
-                    return false;
+                    return Ok(false);
                 }
                 if self.active.len() + self.pending.len() >= self.max_jobs {
-                    return false;
+                    return Err(job);
                 }
                 self.pending.push_back(job);
-                return true;
+                return Ok(true);
             }
-            return false;
+            return Ok(false);
         }
         if self.active.len() + self.pending.len() >= self.max_jobs {
-            return false;
+            return Err(job);
         }
         self.known.insert(job.key.clone());
         self.pending.push_back(job);
-        true
+        Ok(true)
     }
 
     pub fn set_limits(&mut self, max_global: usize, max_per_upstream: usize) {

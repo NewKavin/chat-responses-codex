@@ -1682,6 +1682,13 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/capabilities/probe-all",
+            post(admin_capability_probe_all).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
             "/api/admin/capabilities/profiles/{upstream_id}",
             axum::routing::delete(admin_capability_profiles_delete).route_layer(
                 axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),

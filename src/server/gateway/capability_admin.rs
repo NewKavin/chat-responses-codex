@@ -32,6 +32,13 @@ pub(super) struct ManualProbeRequest {
     protocol: String,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct ProbeAllRequest {
+    upstream_ids: Vec<String>,
+    models: Vec<String>,
+}
+
 pub(super) async fn admin_capabilities_export(State(state): State<AppState>) -> Response {
     let snapshot = state.capability_snapshot();
     let mut configuration = snapshot.configuration.source().clone();
@@ -343,6 +350,38 @@ pub(super) async fn admin_capability_probe(
         );
     }
     (StatusCode::ACCEPTED, Json(json!({"queued": true}))).into_response()
+}
+
+pub(super) async fn admin_capability_probe_all(
+    State(state): State<AppState>,
+    Json(body): Json<ProbeAllRequest>,
+) -> Response {
+    let upstream_ids = body.upstream_ids.into_iter().collect::<BTreeSet<_>>();
+    let models = body.models.into_iter().collect::<BTreeSet<_>>();
+    match state
+        .queue_manual_capability_probe_batch(&upstream_ids, &models)
+        .await
+    {
+        Ok(receipt) => Json(json!({
+            "configuration_revision": receipt.configuration_revision,
+            "started_at": receipt.started_at,
+            "queued_routes": receipt.candidates.len(),
+            "candidates": receipt.candidates,
+        }))
+        .into_response(),
+        Err(crate::state::ManualProbeBatchError::CapabilityPolicyMissing) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {
+                "code": "capability_policy_missing",
+                "message": "capability policy is required before probing"
+            }})),
+        )
+            .into_response(),
+        Err(crate::state::ManualProbeBatchError::QueueUnavailable) => capability_probe_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway_capability_probe_unavailable",
+        ),
+    }
 }
 
 pub(super) async fn admin_capability_profiles_delete(

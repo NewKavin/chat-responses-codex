@@ -201,6 +201,28 @@ fn queue_limits_pending_jobs_per_reconcile_batch() {
     assert!(queue.start_next().is_none());
 }
 
+#[test]
+fn accepted_batch_retains_every_job_when_queue_capacity_is_smaller_than_batch() {
+    let mut queue = ProbeQueueState::new(1, 1, 1);
+    let mut remaining = queue.enqueue_batch(ProbeJobBatch::new(vec![
+        job("u1", "m1"),
+        job("u1", "m2"),
+        job("u1", "m3"),
+    ]));
+    assert_eq!(queue.pending_len(), 1);
+    assert_eq!(remaining.jobs().len(), 2);
+
+    for expected_model in ["m1", "m2", "m3"] {
+        let next = queue.start_next().unwrap();
+        assert_eq!(next.key.runtime_model_slug, expected_model);
+        queue.finish(&next.key);
+        remaining = queue.enqueue_batch(remaining);
+    }
+
+    assert!(remaining.is_empty());
+    assert!(queue.start_next().is_none());
+}
+
 #[tokio::test]
 async fn ingress_capacity_counts_atomic_submission_batches_not_jobs() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);

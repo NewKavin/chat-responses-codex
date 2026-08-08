@@ -412,9 +412,8 @@ pub async fn run_probe_plan_with_coordination_for_test(
 
 impl CapabilityProbeService {
     pub fn spawn(state: AppState) -> Self {
-        // Capacity bounds pending submission batches. Each accepted batch is
-        // expanded synchronously into ProbeQueueState, which deduplicates jobs
-        // by exact route key.
+        // Capacity bounds pending submission batches. The worker retains any
+        // batch remainder until ProbeQueueState has room for every exact route.
         let (sender, mut receiver) =
             mpsc::channel::<ProbeJobBatch>(state.config.capability_probe_queue_capacity.max(1));
         state.set_capability_probe_sender(sender.clone());
@@ -425,6 +424,7 @@ impl CapabilityProbeService {
             let mut queue =
                 ProbeQueueState::new(1, 1, state.config.capability_probe_queue_capacity);
             let mut active = FuturesUnordered::new();
+            let mut deferred_batch = None;
             let mut receiver_open = true;
             let mut reconcile_tick = tokio::time::interval_at(
                 Instant::now() + Duration::from_secs(1),
@@ -444,6 +444,12 @@ impl CapabilityProbeService {
                     probe.max_per_upstream_concurrency,
                 );
                 if probe.enabled {
+                    if let Some(batch) = deferred_batch.take() {
+                        let remaining = queue.enqueue_batch(batch);
+                        if !remaining.is_empty() {
+                            deferred_batch = Some(remaining);
+                        }
+                    }
                     while let Some(next) = queue.start_next() {
                         let state = state.clone();
                         active.push(async move {
@@ -457,7 +463,7 @@ impl CapabilityProbeService {
                     queue.clear_pending();
                 }
 
-                if active.is_empty() && !receiver_open {
+                if active.is_empty() && !receiver_open && deferred_batch.is_none() {
                     break;
                 }
 
@@ -478,15 +484,20 @@ impl CapabilityProbeService {
                             state.finish_capability_probe_submission(&key, &binding);
                         }
                     }
-                    received = receiver.recv(), if receiver_open => {
+                    received = receiver.recv(), if receiver_open && deferred_batch.is_none() => {
                         match received {
                             Some(batch) => {
                                 if state.capability_snapshot().configuration.source().probe.enabled {
-                                    for job in batch.into_jobs() {
-                                        if !queue.enqueue(job) && queue.is_full() {
-                                            tracing::warn!("capability probe queue reached its job capacity");
-                                        }
+                                    let remaining = queue.enqueue_batch(batch);
+                                    if !remaining.is_empty() {
+                                        tracing::info!(
+                                            jobs = remaining.jobs().len(),
+                                            "capability probe batch is waiting for queue capacity"
+                                        );
+                                        deferred_batch = Some(remaining);
                                     }
+                                } else {
+                                    deferred_batch = Some(batch);
                                 }
                             }
                             None => receiver_open = false,
