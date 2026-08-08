@@ -2961,7 +2961,7 @@ impl ResponseHistoryContext {
             .and_then(Value::as_str)
     }
 
-    fn exact_continuation_state(&self) -> Result<Option<GatewayContinuationState>, GatewayError> {
+    fn exact_continuation_state(&self) -> Result<Option<LoadedContinuation>, GatewayError> {
         let Some(value) = self.history_request_state.get("_gateway_continuation") else {
             return Ok(None);
         };
@@ -2977,12 +2977,9 @@ impl ResponseHistoryContext {
             .map_err(|_| {
                 response_history_invalid("cached gateway continuation state is malformed")
             })?;
-        if !continuation.validate_version() {
-            return Err(response_history_invalid(
-                "cached gateway continuation version is unsupported",
-            ));
-        }
-        Ok(Some(continuation))
+        continuation.load().map(Some).map_err(|_| {
+            response_history_invalid("cached gateway continuation version is unsupported")
+        })
     }
 
     fn legacy_continuation_upstream_id(&self) -> Result<Option<&str>, GatewayError> {
@@ -4254,12 +4251,15 @@ async fn process_gateway_request_inner(
         );
     }
 
-    let exact_continuation = response_history_context
+    let loaded_exact_continuation = response_history_context
         .as_ref()
         .map(ResponseHistoryContext::exact_continuation_state)
         .transpose()?
         .flatten();
-    if exact_continuation.as_ref().is_some_and(|continuation| {
+    let loaded_continuation_state = loaded_exact_continuation
+        .as_ref()
+        .map(LoadedContinuation::state);
+    if loaded_continuation_state.is_some_and(|continuation| {
         !continuation.has_protocol_transition(
             WireProtocol::from(endpoint.native_protocol()),
             continuation.profile_key().protocol,
@@ -4269,7 +4269,7 @@ async fn process_gateway_request_inner(
             "cached gateway continuation adapter identity is incompatible",
         ));
     }
-    if exact_continuation.as_ref().is_some_and(|continuation| {
+    if loaded_continuation_state.is_some_and(|continuation| {
         !response_history_context
             .as_ref()
             .is_some_and(|context| context.has_trusted_tool_registry_version(continuation))
@@ -4288,12 +4288,12 @@ async fn process_gateway_request_inner(
     if legacy_continuation_upstream_id.is_some() {
         requested_features.allow_reasoning_history_downgrade = false;
     }
-    if let Some(continuation) = exact_continuation.as_ref() {
+    if let Some(continuation) = loaded_continuation_state {
         continuation.apply_to_requested(&mut requested_features);
     }
     let required_capabilities = requested_features.required.clone();
     let capability_snapshot = state.capability_snapshot();
-    if exact_continuation.as_ref().is_some_and(|continuation| {
+    if loaded_continuation_state.is_some_and(|continuation| {
         !continuation.has_current_configuration_fingerprint(
             &capability_snapshot,
             &routing_snapshot.upstreams,
@@ -4304,8 +4304,7 @@ async fn process_gateway_request_inner(
             "cached gateway continuation route configuration has changed",
         ));
     }
-    if exact_continuation
-        .as_ref()
+    if loaded_continuation_state
         .is_some_and(|continuation| !continuation.has_current_probe_schema(&capability_snapshot))
     {
         return Err(response_history_invalid(
@@ -4330,6 +4329,85 @@ async fn process_gateway_request_inner(
                 key_fingerprint.to_string(),
             ))
         };
+    let exact_continuation = match loaded_exact_continuation {
+        Some(LoadedContinuation::V2(continuation)) => Some(continuation),
+        Some(LoadedContinuation::V1NeedsDerivation(continuation)) => {
+            let mut derived_contracts = Vec::new();
+            for upstream in routing_snapshot.upstreams.iter().filter(|upstream| {
+                upstream.active
+                    && upstream.id == continuation.profile_key().upstream_id
+                    && upstream.supports_model(model)
+            }) {
+                let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
+                    continue;
+                };
+                for api_key in route_api_keys(upstream, &runtime_model_slug) {
+                    let key_fingerprint = route_key_fingerprint(upstream, &api_key);
+                    for protocol in upstream.supported_protocols() {
+                        if !continuation.matches_route(upstream, &key_fingerprint, model, protocol)
+                        {
+                            continue;
+                        }
+                        let Some(evaluation) =
+                            route_capability(upstream, &key_fingerprint, protocol)
+                        else {
+                            continue;
+                        };
+                        let (Some(resolved), Some(profile)) = (
+                            evaluation.resolved.as_ref(),
+                            capability_snapshot.profiles.get(continuation.profile_key()),
+                        ) else {
+                            continue;
+                        };
+                        let Ok(configuration_fingerprint) =
+                            AppState::route_configuration_fingerprint_with_snapshot(
+                                &capability_snapshot,
+                                upstream,
+                                &key_fingerprint,
+                                model,
+                                &runtime_model_slug,
+                                protocol,
+                            )
+                        else {
+                            continue;
+                        };
+                        if configuration_fingerprint != continuation.configuration_fingerprint()
+                            || profile.configuration_fingerprint
+                                != continuation.configuration_fingerprint()
+                            || profile.key != *continuation.profile_key()
+                        {
+                            continue;
+                        }
+                        if let Some(contract) = continuation_contract_for_route(
+                            upstream,
+                            &runtime_model_slug,
+                            WireProtocol::from(endpoint.native_protocol()),
+                            WireProtocol::from(protocol),
+                            continuation.required_capabilities(),
+                            resolved,
+                            profile,
+                            continuation.tool_registry_version(),
+                        ) {
+                            derived_contracts.push(contract);
+                        }
+                    }
+                }
+            }
+            if derived_contracts.len() != 1 {
+                return Err(response_history_invalid(
+                    "cached legacy continuation does not identify exactly one current contract",
+                ));
+            }
+            Some(
+                continuation.with_contract(
+                    derived_contracts
+                        .pop()
+                        .expect("one derived continuation contract"),
+                ),
+            )
+        }
+        None => None,
+    };
     let legacy_continuation_profile =
         if let Some(upstream_id) = legacy_continuation_upstream_id.as_deref() {
             let mut eligible_profiles = Vec::new();

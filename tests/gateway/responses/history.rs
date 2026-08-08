@@ -1,8 +1,172 @@
 use super::*;
 use chat_responses_codex::capabilities::{
     Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
-    WireProtocol,
+    WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
+
+async fn run_versioned_v1_continuation_case(duplicate_exact_route: bool) -> (StatusCode, usize) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_for_server = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_request: Request<Body>| {
+            let hits = hits_for_server.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-v1-derived",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "deepseek-v4-flash",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "resumed"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let model = "deepseek-v4-flash";
+    let upstream = UpstreamConfig {
+        id: "v1-exact-route".into(),
+        name: "v1 exact route".into(),
+        base_url: format!("http://{address}"),
+        api_key: "v1-exact-secret".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec![model.into()],
+        active: true,
+        ..Default::default()
+    };
+    let mut upstreams = vec![upstream.clone()];
+    if duplicate_exact_route {
+        upstreams.push(upstream.clone());
+    }
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(upstreams),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-v1-continuation".into(),
+                name: "v1 continuation client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = DialectProfileState::Verified;
+    for capability in [Capability::TextInput, Capability::NonStreamingResponse] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile.clone()).await.unwrap();
+    state.store_response_history(
+        "v1-derived-history",
+        vec![json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "initial"}]
+        })],
+        serde_json::Map::from_iter([(
+            "_gateway_continuation".to_string(),
+            json!({
+                "version": 1,
+                "profile_key": profile.key,
+                "configuration_fingerprint": profile.configuration_fingerprint,
+                "probe_schema_version": DIALECT_PROBE_SCHEMA_VERSION,
+                "reasoning_carrier": null,
+                "required_capabilities": [],
+                "adapter_identity": {
+                    "protocol_transition": {
+                        "schema_version": 1,
+                        "downstream_protocol": "responses",
+                        "upstream_protocol": "chat_completions"
+                    },
+                    "tool_registry_version": null
+                }
+            }),
+        )]),
+    );
+
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "previous_response_id": "v1-derived-history",
+                        "input": "continue",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    (response.status(), hits.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn v1_continuation_derives_contract_only_from_unique_current_profile() {
+    let (unique_status, unique_hits) = run_versioned_v1_continuation_case(false).await;
+    assert_eq!(unique_status, StatusCode::OK);
+    assert_eq!(unique_hits, 1);
+
+    let (ambiguous_status, ambiguous_hits) = run_versioned_v1_continuation_case(true).await;
+    assert_eq!(ambiguous_status, StatusCode::BAD_REQUEST);
+    assert_eq!(ambiguous_hits, 0);
+}
 
 #[tokio::test]
 async fn legacy_continuation_rejects_ambiguous_multi_protocol_upstream_before_dispatch() {
@@ -597,7 +761,7 @@ async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime
     assert_eq!(payload["error"]["code"], "gateway_response_history_invalid");
     let stored = state.response_history("resp-context-exact").await.unwrap();
     assert_eq!(
-        stored.request_state["_gateway_continuation"]["profile_key"]["runtime_model_slug"],
+        stored.request_state["_gateway_continuation"]["preferred_profile"]["runtime_model_slug"],
         exposed_model
     );
 }

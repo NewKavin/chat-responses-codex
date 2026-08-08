@@ -71,6 +71,19 @@ struct ContinuationAdapterIdentity {
     tool_registry_version: Option<u32>,
 }
 
+pub(super) enum LoadedContinuation {
+    V2(GatewayContinuationState),
+    V1NeedsDerivation(GatewayContinuationState),
+}
+
+impl LoadedContinuation {
+    pub(super) fn state(&self) -> &GatewayContinuationState {
+        match self {
+            Self::V2(state) | Self::V1NeedsDerivation(state) => state,
+        }
+    }
+}
+
 impl GatewayContinuationState {
     pub(super) fn new(
         profile_key: DialectProfileKey,
@@ -100,11 +113,14 @@ impl GatewayContinuationState {
         }
     }
 
-    pub(super) fn validate_version(&self) -> bool {
-        matches!(
-            self.version,
-            LEGACY_GATEWAY_CONTINUATION_VERSION | GATEWAY_CONTINUATION_VERSION
-        )
+    pub(super) fn load(self) -> Result<LoadedContinuation, &'static str> {
+        match (self.version, self.compatibility_contract.is_some()) {
+            (GATEWAY_CONTINUATION_VERSION, true) => Ok(LoadedContinuation::V2(self)),
+            (LEGACY_GATEWAY_CONTINUATION_VERSION, false) => {
+                Ok(LoadedContinuation::V1NeedsDerivation(self))
+            }
+            _ => Err("unsupported or malformed continuation version"),
+        }
     }
 
     pub(super) fn profile_key(&self) -> &DialectProfileKey {
@@ -117,6 +133,23 @@ impl GatewayContinuationState {
 
     pub(super) fn contract(&self) -> Option<&ContinuationCompatibilityContract> {
         self.compatibility_contract.as_ref()
+    }
+
+    pub(super) fn required_capabilities(&self) -> &BTreeSet<Capability> {
+        &self.required_capabilities
+    }
+
+    pub(super) fn with_contract(self, contract: ContinuationCompatibilityContract) -> Self {
+        Self {
+            version: GATEWAY_CONTINUATION_VERSION,
+            preferred_profile: self.preferred_profile,
+            configuration_fingerprint: self.configuration_fingerprint,
+            compatibility_contract: Some(contract),
+            probe_schema_version: DIALECT_PROBE_SCHEMA_VERSION,
+            reasoning_carrier: self.reasoning_carrier,
+            required_capabilities: self.required_capabilities,
+            adapter_identity: self.adapter_identity,
+        }
     }
 
     pub(super) fn configuration_fingerprint(&self) -> &str {
