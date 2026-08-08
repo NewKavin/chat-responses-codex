@@ -1956,6 +1956,7 @@ async fn upstream_network_error_message_includes_upstream_name_and_reason() {
                 id: "up-1".into(),
                 name: "my-upstream-name".into(),
                 remark: String::new(),
+                continuation_provider_group: None,
                 base_url: format!("http://{}", orphan_port),
                 api_key: "upstream-secret".into(),
                 protocol: UpstreamProtocol::ChatCompletions,

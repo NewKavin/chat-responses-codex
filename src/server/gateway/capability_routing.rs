@@ -2,17 +2,19 @@ use crate::capabilities::{
     Capability, CapabilityResolutionError, CapabilityResolver, CapabilityRuntimeSnapshot,
     CapabilitySource, DialectProfileKey, DialectProfileState, ReasoningCarrier, RequestedFeatures,
     ResolutionInput, ResolvedCapabilities, RouteIdentity, RuntimeCapabilityHintSnapshot,
-    SemanticPolicy, WireProtocol,
+    SemanticPolicy, UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
 use crate::keys::upstream_key_fingerprint;
 use crate::routing::UpstreamProtocol;
 use crate::state::{AppState, UpstreamConfig};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use sha2::Digest;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::EndpointKind;
 
-const GATEWAY_CONTINUATION_VERSION: u32 = 1;
+const GATEWAY_CONTINUATION_VERSION: u32 = 2;
+const LEGACY_GATEWAY_CONTINUATION_VERSION: u32 = 1;
 const PROTOCOL_TRANSITION_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -37,12 +39,29 @@ impl ProtocolTransitionIdentity {
 #[serde(deny_unknown_fields)]
 pub(super) struct GatewayContinuationState {
     version: u32,
-    profile_key: DialectProfileKey,
+    #[serde(alias = "profile_key")]
+    preferred_profile: DialectProfileKey,
     configuration_fingerprint: String,
+    #[serde(default)]
+    compatibility_contract: Option<ContinuationCompatibilityContract>,
     probe_schema_version: u32,
     reasoning_carrier: Option<ReasoningCarrier>,
     required_capabilities: BTreeSet<Capability>,
     adapter_identity: ContinuationAdapterIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ContinuationCompatibilityContract {
+    pub(super) provider_group: String,
+    pub(super) runtime_model_slug: String,
+    pub(super) protocol_transition: ProtocolTransitionIdentity,
+    pub(super) required_capabilities: BTreeSet<Capability>,
+    pub(super) reasoning_carrier: Option<ReasoningCarrier>,
+    pub(super) effort_map: BTreeMap<String, String>,
+    pub(super) correction_rules: Vec<crate::capabilities::DialectCorrectionRule>,
+    pub(super) tool_registry_version: Option<u32>,
+    pub(super) probe_schema_version: u32,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -63,9 +82,10 @@ impl GatewayContinuationState {
         tool_registry_version: Option<u32>,
     ) -> Self {
         Self {
-            version: GATEWAY_CONTINUATION_VERSION,
-            profile_key,
+            version: LEGACY_GATEWAY_CONTINUATION_VERSION,
+            preferred_profile: profile_key,
             configuration_fingerprint,
+            compatibility_contract: None,
             probe_schema_version: crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
             reasoning_carrier: profile_reasoning_carrier
                 .filter(|carrier| *carrier != ReasoningCarrier::None),
@@ -81,11 +101,22 @@ impl GatewayContinuationState {
     }
 
     pub(super) fn validate_version(&self) -> bool {
-        self.version == GATEWAY_CONTINUATION_VERSION
+        matches!(
+            self.version,
+            LEGACY_GATEWAY_CONTINUATION_VERSION | GATEWAY_CONTINUATION_VERSION
+        )
     }
 
     pub(super) fn profile_key(&self) -> &DialectProfileKey {
-        &self.profile_key
+        &self.preferred_profile
+    }
+
+    pub(super) fn preferred_profile(&self) -> &DialectProfileKey {
+        &self.preferred_profile
+    }
+
+    pub(super) fn contract(&self) -> Option<&ContinuationCompatibilityContract> {
+        self.compatibility_contract.as_ref()
     }
 
     pub(super) fn configuration_fingerprint(&self) -> &str {
@@ -97,7 +128,7 @@ impl GatewayContinuationState {
     }
 
     pub(super) fn apply_to_requested(&self, requested: &mut RequestedFeatures) {
-        requested.continuation_profile = Some(self.profile_key.clone());
+        requested.continuation_profile = Some(self.preferred_profile.clone());
         requested.continuation_reasoning_carrier = self.reasoning_carrier;
         requested
             .required
@@ -137,11 +168,11 @@ impl GatewayContinuationState {
         exposed_model: &str,
         protocol: UpstreamProtocol,
     ) -> bool {
-        self.profile_key.upstream_id == upstream.id
-            && self.profile_key.key_fingerprint == key_fingerprint
-            && self.profile_key.protocol == WireProtocol::from(protocol)
+        self.preferred_profile.upstream_id == upstream.id
+            && self.preferred_profile.key_fingerprint == key_fingerprint
+            && self.preferred_profile.protocol == WireProtocol::from(protocol)
             && upstream.resolved_model_name(exposed_model).as_deref()
-                == Some(self.profile_key.runtime_model_slug.as_str())
+                == Some(self.preferred_profile.runtime_model_slug.as_str())
     }
 
     pub(super) fn has_current_configuration_fingerprint(
@@ -166,7 +197,7 @@ impl GatewayContinuationState {
                                 upstream,
                                 &key_fingerprint,
                                 exposed_model,
-                                &self.profile_key.runtime_model_slug,
+                                &self.preferred_profile.runtime_model_slug,
                                 protocol,
                             )
                             .is_ok_and(|fingerprint| {
@@ -183,12 +214,63 @@ impl GatewayContinuationState {
             .get(self.profile_key())
             .is_some_and(|profile| {
                 self.probe_schema_version() == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
-                    && profile.key == self.profile_key
+                    && profile.key == self.preferred_profile
                     && profile.configuration_fingerprint == self.configuration_fingerprint
                     && profile.probe_schema_version
                         == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
             })
     }
+}
+
+fn continuation_provider_group(
+    upstream: &UpstreamConfig,
+    runtime_model_slug: &str,
+) -> Result<String, String> {
+    let material = match upstream.continuation_provider_group.as_deref() {
+        Some(explicit) => format!("explicit\0{}", explicit.trim().to_ascii_lowercase()),
+        None => format!(
+            "derived\0{}\0{}",
+            crate::capabilities::normalize_route_base_url(&upstream.base_url)?,
+            runtime_model_slug.trim().to_ascii_lowercase(),
+        ),
+    };
+    Ok(format!("{:x}", sha2::Sha256::digest(material.as_bytes())))
+}
+
+pub(super) fn continuation_contract_for_route(
+    upstream: &UpstreamConfig,
+    runtime_model_slug: &str,
+    downstream_protocol: WireProtocol,
+    upstream_protocol: WireProtocol,
+    required_capabilities: &BTreeSet<Capability>,
+    resolved: &ResolvedCapabilities,
+    profile: &UpstreamDialectProfile,
+    tool_registry_version: Option<u32>,
+) -> Option<ContinuationCompatibilityContract> {
+    if profile.state == DialectProfileState::Unknown
+        || profile.probe_schema_version != DIALECT_PROBE_SCHEMA_VERSION
+        || !required_capabilities
+            .iter()
+            .all(|capability| resolved.supports(*capability))
+    {
+        return None;
+    }
+    let provider_group = continuation_provider_group(upstream, runtime_model_slug).ok()?;
+    Some(ContinuationCompatibilityContract {
+        provider_group,
+        runtime_model_slug: runtime_model_slug.to_string(),
+        protocol_transition: ProtocolTransitionIdentity::new(
+            downstream_protocol,
+            upstream_protocol,
+        ),
+        required_capabilities: required_capabilities.clone(),
+        reasoning_carrier: (resolved.reasoning_carrier != ReasoningCarrier::None)
+            .then_some(resolved.reasoning_carrier),
+        effort_map: resolved.effort_map.clone(),
+        correction_rules: resolved.correction_rules.clone(),
+        tool_registry_version,
+        probe_schema_version: DIALECT_PROBE_SCHEMA_VERSION,
+    })
 }
 
 pub(super) fn request_has_unknown_tool_kind(endpoint: EndpointKind, body: &Value) -> bool {
@@ -1070,6 +1152,101 @@ fn semantic_or_empty(semantic: &SemanticPolicy) -> &SemanticPolicy {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn baseline_continuation_contract(provider_group: String) -> ContinuationCompatibilityContract {
+        ContinuationCompatibilityContract {
+            provider_group,
+            runtime_model_slug: "deepseek-v4-flash".into(),
+            protocol_transition: ProtocolTransitionIdentity::new(
+                WireProtocol::Responses,
+                WireProtocol::ChatCompletions,
+            ),
+            required_capabilities: BTreeSet::from([
+                Capability::ReasoningOutput,
+                Capability::ToolContinuation,
+            ]),
+            reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
+            effort_map: std::collections::BTreeMap::from([
+                ("low".into(), "low".into()),
+                ("high".into(), "high".into()),
+            ]),
+            correction_rules: Vec::new(),
+            tool_registry_version: Some(1),
+            probe_schema_version: crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION,
+        }
+    }
+
+    #[test]
+    fn continuation_contract_matches_equivalent_accounts_not_exact_keys() {
+        let upstream_a = UpstreamConfig {
+            id: "account-a".into(),
+            base_url: "https://relay.example/v1/".into(),
+            api_key: "secret-a".into(),
+            continuation_provider_group: Some(" internal-deepseek ".into()),
+            ..UpstreamConfig::default()
+        };
+        let upstream_b = UpstreamConfig {
+            id: "account-b".into(),
+            base_url: "https://another-alias.example/v1".into(),
+            api_key: "secret-b".into(),
+            continuation_provider_group: Some("INTERNAL-DEEPSEEK".into()),
+            ..UpstreamConfig::default()
+        };
+        let provider_group_a =
+            continuation_provider_group(&upstream_a, "deepseek-v4-flash").unwrap();
+        let provider_group_b =
+            continuation_provider_group(&upstream_b, "deepseek-v4-flash").unwrap();
+        assert_eq!(provider_group_a, provider_group_b);
+        assert!(!provider_group_a.contains("internal-deepseek"));
+        assert!(!provider_group_a.contains("secret"));
+
+        let baseline = baseline_continuation_contract(provider_group_a);
+        assert_eq!(
+            baseline,
+            baseline_continuation_contract(provider_group_b),
+            "account identity and credentials must not participate in compatibility"
+        );
+
+        let mut mismatches = Vec::new();
+        let mut changed = baseline.clone();
+        changed.provider_group = "different-group".into();
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed.runtime_model_slug = "glm-5".into();
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed.protocol_transition =
+            ProtocolTransitionIdentity::new(WireProtocol::Responses, WireProtocol::Responses);
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed
+            .required_capabilities
+            .insert(Capability::HostedTools);
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed.reasoning_carrier = Some(ReasoningCarrier::ResponsesReasoningItem);
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed.effort_map.insert("medium".into(), "mid".into());
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed.correction_rules.push(
+            crate::capabilities::DialectCorrectionRule::RemoveOptionalField {
+                field: "temperature".into(),
+            },
+        );
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed.tool_registry_version = Some(2);
+        mismatches.push(changed);
+        let mut changed = baseline.clone();
+        changed.probe_schema_version += 1;
+        mismatches.push(changed);
+
+        for mismatch in mismatches {
+            assert_ne!(baseline, mismatch);
+        }
+    }
 
     #[test]
     fn continuation_route_requires_the_exact_key_fingerprint() {
