@@ -1512,6 +1512,7 @@ fn route_attempts_converts_classified_upstream_feedback_before_aggregation() {
     let error = GatewayError::from_classified_upstream_failure(
         crate::upstream_feedback::ClassifiedUpstreamFailure {
             class: FailureClass::ModelUnsupported,
+            semantic: crate::upstream_feedback::UpstreamResponseSemantic::Generic,
             upstream_status: Some(400),
             retry_after: None,
         },

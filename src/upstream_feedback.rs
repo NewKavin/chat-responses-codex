@@ -6,8 +6,17 @@ use std::time::Duration;
 pub use crate::state::RouteFailureClass as FailureClass;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamResponseSemantic {
+    Generic,
+    ExplicitConcurrency,
+    ExplicitContextOverflow,
+    TargetModelCapacity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassifiedUpstreamFailure {
     pub class: FailureClass,
+    pub semantic: UpstreamResponseSemantic,
     pub upstream_status: Option<u16>,
     pub retry_after: Option<Duration>,
 }
@@ -159,6 +168,33 @@ impl StructuredError {
                 )
         })
     }
+
+    fn is_context_overflow(&self, message: &str) -> bool {
+        self.has_code(&[
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "input_too_long",
+            "request_too_large",
+            "prompt_too_long",
+            "max_context_length_exceeded",
+        ]) || [
+            "request exceeds limit",
+            "maximum context length",
+            "context length exceeded",
+            "context window exceeded",
+            "input is too long",
+            "prompt is too long",
+            "超过最大上下文",
+            "上下文长度超出",
+            "输入内容过长",
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
+    }
+
+    fn is_explicit_concurrency(&self, message: &str) -> bool {
+        self.is_concurrency_capacity() || message_is_concurrency_capacity(message)
+    }
 }
 
 fn scalar_string(value: &Value) -> Option<String> {
@@ -282,21 +318,12 @@ fn message_is_protocol_unsupported(message: &str) -> bool {
 
 fn message_is_capacity_unavailable(message: &str) -> bool {
     [
-        "concurrency limit",
-        "concurrent request",
         "server is busy",
         "provider is busy",
         "temporarily overloaded",
-        "capacity unavailable",
-        // Chinese providers (GLM/Zhipu, one-api/new-api relays) report
-        // concurrency saturation in Chinese; missing these downgrades the
-        // failure to a generic rate limit with a much longer cooldown.
-        "并发",
         "繁忙",
         "过载",
         "超载",
-        "负载饱和",
-        "负载已饱和",
     ]
     .iter()
     .any(|pattern| message.contains(pattern))
@@ -376,20 +403,16 @@ fn is_explicit_request_rejection(parsed: &StructuredError, message: &str) -> boo
     ]) || message_is_request_rejected(message)
 }
 
-pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> ClassifiedUpstreamFailure {
-    let parsed = StructuredError::parse(input.body);
-    let message = parsed.normalized_message(input.body);
-    let retry_after = parse_retry_after(input.headers);
-
-    let class = if (500..600).contains(&input.status) {
-        if message_names_target_model(&message, input.target_model) {
-            FailureClass::CapacityUnavailable
-        } else {
-            FailureClass::TransientServer
-        }
-    } else if matches!(input.status, 401..=403) {
+fn classify_nonsemantic_default(
+    status: u16,
+    parsed: &StructuredError,
+    message: &str,
+) -> FailureClass {
+    if (500..600).contains(&status) {
+        FailureClass::TransientServer
+    } else if matches!(status, 401..=403) {
         FailureClass::Credentials
-    } else if input.status == 429 {
+    } else if status == 429 {
         if parsed.is_key_quota() {
             FailureClass::KeyQuota
         } else if parsed.has_status(401)
@@ -427,12 +450,10 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
             FailureClass::ProtocolUnsupported
         } else if is_explicit_request_rejection(&parsed, &message) {
             FailureClass::RequestRejected
-        } else if parsed.is_concurrency_capacity() || message_is_concurrency_capacity(&message) {
-            FailureClass::CapacityUnavailable
         } else {
             FailureClass::RateLimited
         }
-    } else if input.status == 0 {
+    } else if status == 0 {
         FailureClass::Transport
     } else if parsed.is_key_quota() {
         FailureClass::KeyQuota
@@ -475,20 +496,47 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
     ]) || message_is_protocol_unsupported(&message)
     {
         FailureClass::ProtocolUnsupported
-    } else if message_names_target_model(&message, input.target_model)
-        || message_is_capacity_unavailable(&message)
-    {
+    } else if message_is_capacity_unavailable(message) {
         FailureClass::CapacityUnavailable
-    } else if matches!(input.status, 404 | 405) {
+    } else if matches!(status, 404 | 405) {
         FailureClass::ProtocolUnsupported
-    } else if matches!(input.status, 408 | 425) {
+    } else if matches!(status, 408 | 425) {
         FailureClass::TransientServer
     } else {
         FailureClass::RequestRejected
+    }
+}
+
+pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> ClassifiedUpstreamFailure {
+    let parsed = StructuredError::parse(input.body);
+    let message = parsed.normalized_message(input.body);
+    let retry_after = parse_retry_after(input.headers);
+
+    let (semantic, class) = if parsed.is_context_overflow(&message) {
+        (
+            UpstreamResponseSemantic::ExplicitContextOverflow,
+            FailureClass::RequestRejected,
+        )
+    } else if parsed.is_explicit_concurrency(&message) {
+        (
+            UpstreamResponseSemantic::ExplicitConcurrency,
+            FailureClass::CapacityUnavailable,
+        )
+    } else if message_names_target_model(&message, input.target_model) {
+        (
+            UpstreamResponseSemantic::TargetModelCapacity,
+            FailureClass::CapacityUnavailable,
+        )
+    } else {
+        (
+            UpstreamResponseSemantic::Generic,
+            classify_nonsemantic_default(input.status, &parsed, &message),
+        )
     };
 
     ClassifiedUpstreamFailure {
         class,
+        semantic,
         upstream_status: (input.status != 0).then_some(input.status),
         retry_after,
     }
@@ -510,6 +558,37 @@ pub enum UpstreamFeedbackClassification {
     Unknown,
 }
 
+impl ClassifiedUpstreamFailure {
+    pub fn summary_classification(self) -> UpstreamFeedbackClassification {
+        match self.semantic {
+            UpstreamResponseSemantic::ExplicitConcurrency => {
+                UpstreamFeedbackClassification::ConcurrencyFull
+            }
+            UpstreamResponseSemantic::TargetModelCapacity => {
+                UpstreamFeedbackClassification::ProviderBusy
+            }
+            UpstreamResponseSemantic::ExplicitContextOverflow => {
+                UpstreamFeedbackClassification::Unknown
+            }
+            UpstreamResponseSemantic::Generic => match self.class {
+                FailureClass::RateLimited | FailureClass::KeyQuota => {
+                    UpstreamFeedbackClassification::RateLimited
+                }
+                FailureClass::TransientServer | FailureClass::Transport => {
+                    UpstreamFeedbackClassification::TemporaryUnavailable
+                }
+                FailureClass::CapacityUnavailable => UpstreamFeedbackClassification::ProviderBusy,
+                FailureClass::ModelUnsupported
+                | FailureClass::FeatureUnsupported
+                | FailureClass::ProtocolUnsupported => {
+                    UpstreamFeedbackClassification::ProtocolUnsupported
+                }
+                _ => UpstreamFeedbackClassification::Unknown,
+            },
+        }
+    }
+}
+
 impl UpstreamFeedbackClassification {
     /// Classify upstream response based on HTTP status, headers, and body
     pub fn from_response(
@@ -517,154 +596,13 @@ impl UpstreamFeedbackClassification {
         headers: &reqwest::header::HeaderMap,
         body: Option<&str>,
     ) -> Self {
-        if status == 429 {
-            if let Some(body_text) = body {
-                let body_lower = body_text.to_lowercase();
-
-                if body_lower.contains("concurrency")
-                    || body_lower.contains("concurrent")
-                    || body_lower.contains("in-flight")
-                    || body_lower.contains("并发")
-                {
-                    return Self::ConcurrencyFull;
-                }
-
-                if body_lower.contains("rate limit")
-                    || body_lower.contains("rate_limit")
-                    || body_lower.contains("too many requests")
-                    || body_lower.contains("token_quota")
-                    || body_lower.contains("token quota")
-                    || body_lower.contains("quota_failed")
-                    || body_lower.contains("quota exceeded")
-                    || body_lower.contains("quota_exceeded")
-                    || body_lower.contains("限流")
-                    || body_lower.contains("限速")
-                    || body_lower.contains("频率过高")
-                    || body_lower.contains("请求过多")
-                    || body_lower.contains("速率限制")
-                {
-                    return Self::RateLimited;
-                }
-
-                if body_lower.contains("busy")
-                    || body_lower.contains("overloaded")
-                    || body_lower.contains("capacity")
-                    || body_lower.contains("throttle")
-                    || body_lower.contains("繁忙")
-                    || body_lower.contains("过载")
-                    || body_lower.contains("超载")
-                    || body_lower.contains("负载饱和")
-                    || body_lower.contains("负载已饱和")
-                {
-                    return Self::ProviderBusy;
-                }
-            }
-
-            // HTTP 429 without stronger hints is treated as rate limiting.
-            return Self::RateLimited;
-        }
-
-        // Check for Retry-After header (indicates rate limiting or temporary unavailability)
-        if headers.contains_key("retry-after") {
-            if status == 429 {
-                return Self::RateLimited;
-            }
-            // Retry-After on other status codes indicates temporary unavailability
-            return Self::TemporaryUnavailable;
-        }
-
-        // Check for rate limit headers
-        if (headers.contains_key("x-ratelimit-remaining")
-            || headers.contains_key("x-rate-limit-remaining")
-            || headers.contains_key("ratelimit-remaining"))
-            && status == 429
-        {
-            return Self::RateLimited;
-        }
-
-        // 5xx errors are temporary unavailability
-        if (500..600).contains(&status) {
-            return Self::TemporaryUnavailable;
-        }
-
-        // 404/405 indicate protocol not supported
-        if status == 404 || status == 405 {
-            return Self::ProtocolUnsupported;
-        }
-
-        // Check response body for busy/rate limit indicators
-        if let Some(body_text) = body {
-            let body_lower = body_text.to_lowercase();
-
-            // Check for rate limit indicators in body
-            if body_lower.contains("rate limit")
-                || body_lower.contains("rate_limit")
-                || body_lower.contains("too many requests")
-                || body_lower.contains("token_quota")
-                || body_lower.contains("token quota")
-                || body_lower.contains("quota_failed")
-                || body_lower.contains("quota exceeded")
-                || body_lower.contains("quota_exceeded")
-                || body_lower.contains("限流")
-                || body_lower.contains("限速")
-                || body_lower.contains("频率过高")
-                || body_lower.contains("请求过多")
-                || body_lower.contains("速率限制")
-            {
-                return Self::RateLimited;
-            }
-
-            // Check for busy indicators
-            if body_lower.contains("busy")
-                || body_lower.contains("overloaded")
-                || body_lower.contains("capacity")
-                || body_lower.contains("throttle")
-                || body_lower.contains("繁忙")
-                || body_lower.contains("过载")
-                || body_lower.contains("超载")
-                || body_lower.contains("负载饱和")
-                || body_lower.contains("负载已饱和")
-            {
-                return Self::ProviderBusy;
-            }
-
-            // Check for concurrency full indicators
-            if body_lower.contains("concurrency")
-                || body_lower.contains("concurrent")
-                || body_lower.contains("in-flight")
-                || body_lower.contains("并发")
-            {
-                return Self::ConcurrencyFull;
-            }
-
-            // Check for protocol/feature unsupported indicators (be specific to avoid false positives)
-            if body_lower.contains("unsupported response format")
-                || body_lower.contains("does not support responses")
-                || body_lower.contains("protocol not supported")
-                || body_lower.contains("endpoint not supported")
-                || body_lower.contains("streaming not supported")
-                || body_lower.contains("stream not supported")
-                || body_lower.contains("model not supported")
-                || body_lower.contains("model is not supported")
-                || body_lower.contains("not supported when using")
-                || body_lower.contains("unsupported model")
-                || body_lower.contains("model unsupported")
-                || body_lower.contains("model not found")
-                || body_lower.contains("model_not_found")
-                || body_lower.contains("no such model")
-                || (body_lower.contains("unsupported") && body_lower.contains("tool"))
-                || (body_lower.contains("not supported") && body_lower.contains("feature"))
-            {
-                return Self::ProtocolUnsupported;
-            }
-        }
-
-        // 400/422 without specific indicators are unknown
-        if status == 400 || status == 422 {
-            return Self::Unknown;
-        }
-
-        Self::Unknown
+        classify_upstream_response(UpstreamFeedbackInput {
+            status,
+            headers,
+            body,
+            target_model: None,
+        })
+        .summary_classification()
     }
 
     /// Whether this classification indicates the upstream should be cooled down

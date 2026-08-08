@@ -11,6 +11,53 @@ fn assert_class(status: u16, body: &str, expected: FailureClass) {
     assert_eq!(classified.class, expected);
 }
 
+fn assert_semantic(status: u16, body: &str, expected: UpstreamResponseSemantic) {
+    let headers = reqwest::header::HeaderMap::new();
+    let classified = classify_upstream_response(UpstreamFeedbackInput {
+        status,
+        headers: &headers,
+        body: Some(body),
+        target_model: Some("glm-5.2"),
+    });
+    assert_eq!(classified.semantic, expected);
+}
+
+#[test]
+fn explicit_concurrency_semantics_are_status_independent() {
+    for status in [429, 502, 503] {
+        for body in [
+            r#"{"error":{"code":"concurrency_limit_exceeded"}}"#,
+            r#"{"error":{"message":"concurrency limit exceeded"}}"#,
+            r#"{"error":{"message":"您当前使用该API的并发数过高"}}"#,
+            r#"{"error":{"message":"当前分组上游负载已饱和"}}"#,
+        ] {
+            assert_semantic(status, body, UpstreamResponseSemantic::ExplicitConcurrency);
+        }
+    }
+}
+
+#[test]
+fn explicit_context_overflow_wins_over_outer_5xx() {
+    for status in [400, 413, 502, 503] {
+        assert_semantic(
+            status,
+            r#"{"error":{"code":"context_length_exceeded","message":"maximum context length exceeded"}}"#,
+            UpstreamResponseSemantic::ExplicitContextOverflow,
+        );
+    }
+}
+
+#[test]
+fn generic_busy_and_relay_failures_are_not_concurrency_or_context() {
+    for body in [
+        r#"{"error":{"message":"server busy"}}"#,
+        r#"{"error":{"message":"temporarily unavailable"}}"#,
+        r#"{"error":{"code":"relay_error","message":"relay failed"}}"#,
+    ] {
+        assert_semantic(503, body, UpstreamResponseSemantic::Generic);
+    }
+}
+
 #[test]
 fn classifies_route_failures_by_precedence() {
     assert_class(
