@@ -355,6 +355,221 @@ async fn explicit_concurrency_5xx_uses_account_recovery_and_healthy_routes() {
 }
 
 #[tokio::test]
+async fn semantic_output_blocks_concurrency_failover() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let primary_hits = Arc::new(AtomicUsize::new(0));
+    let alternate_hits = Arc::new(AtomicUsize::new(0));
+    let primary_hits_for_server = primary_hits.clone();
+    let alternate_hits_for_server = alternate_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap| {
+            let primary_hits = primary_hits_for_server.clone();
+            let alternate_hits = alternate_hits_for_server.clone();
+            async move {
+                let authorization = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if authorization == "Bearer primary-key" {
+                    primary_hits.fetch_add(1, Ordering::SeqCst);
+                    let semantic_output = stream::once(async {
+                        Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                            "data: {}\n\n",
+                            json!({
+                                "id": "chatcmpl-primary",
+                                "object": "chat.completion.chunk",
+                                "created": 1,
+                                "model": "gpt-4",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "reasoning_content": "reasoning-before-capacity-failure",
+                                        "tool_calls": [{
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "exec_command",
+                                                "arguments": "{\"cmd\":"
+                                            }
+                                        }]
+                                    },
+                                    "finish_reason": null
+                                }]
+                            })
+                        )))
+                    });
+                    let concurrency_failure = stream::once(async {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                            b"data: {\"error\":{\"code\":\"concurrency_limit_exceeded\",\"message\":\"concurrency limit exceeded\"}}\n\n",
+                        ))
+                    });
+                    return (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(semantic_output.chain(concurrency_failure)),
+                    )
+                        .into_response();
+                }
+
+                alternate_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"id\":\"chatcmpl-alternate\",\"object\":\"chat.completion.chunk\",",
+                        "\"created\":1,\"model\":\"gpt-4\",\"choices\":[{\"index\":0,",
+                        "\"delta\":{\"content\":\"unexpected-replay\"},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![
+                UpstreamConfig {
+                    id: "primary".into(),
+                    name: "primary".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "primary-key".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4".into()],
+                    priority: 10,
+                    max_concurrency: 4,
+                    active: true,
+                    ..UpstreamConfig::default()
+                },
+                UpstreamConfig {
+                    id: "alternate".into(),
+                    name: "alternate".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "alternate-key".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4".into()],
+                    priority: 0,
+                    max_concurrency: 4,
+                    active: true,
+                    ..UpstreamConfig::default()
+                },
+            ]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-semantic-output".into(),
+                name: "semantic output client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_same_route_retry_enabled: false,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
+            ..AppConfig::default()
+        },
+    );
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-4",
+                        "input": "Run pwd after thinking.",
+                        "stream": true,
+                        "tools": [{
+                            "type": "function",
+                            "function": {
+                                "name": "exec_command",
+                                "description": "Run a command",
+                                "parameters": {"type": "object"}
+                            }
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_body_text(response).await;
+    let events = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .map(|payload| serde_json::from_str::<Value>(payload).unwrap())
+        .collect::<Vec<_>>();
+    let call_identity_events = events
+        .iter()
+        .filter(|event| {
+            event.get("type").and_then(Value::as_str) == Some("response.output_item.added")
+                && event.pointer("/item/call_id").and_then(Value::as_str) == Some("call_1")
+        })
+        .count();
+    let terminal_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.get("type").and_then(Value::as_str),
+                Some("response.completed" | "response.incomplete" | "response.failed")
+            )
+        })
+        .count();
+
+    assert_eq!(primary_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(alternate_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(call_identity_events, 1, "unexpected SSE body: {body}");
+    assert_eq!(terminal_events, 1, "unexpected SSE body: {body}");
+    assert_eq!(body.matches("data: [DONE]").count(), 1);
+    assert!(body.contains("reasoning-before-capacity-failure"));
+    assert!(body.contains("response.function_call_arguments.delta"));
+    assert!(body.contains("event: response.failed"));
+    assert!(!body.contains("unexpected-replay"));
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
 async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
