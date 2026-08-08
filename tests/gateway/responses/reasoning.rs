@@ -327,8 +327,7 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
     assert_eq!(request_body["messages"][2]["tool_call_id"], "call_1");
 }
 
-#[tokio::test]
-async fn responses_continuation_503_fails_over_to_compatible_account() {
+async fn run_compatible_continuation_failover_case(verify_preferred_profile_update: bool) {
     let exact_hits = Arc::new(AtomicUsize::new(0));
     let alternative_hits = Arc::new(AtomicUsize::new(0));
     let captured_alternative = Arc::new(Mutex::new(None::<Value>));
@@ -528,7 +527,7 @@ async fn responses_continuation_503_fails_over_to_compatible_account() {
         state.upsert_dialect_profile(profile).await.unwrap();
     }
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let first_response = app
         .clone()
         .oneshot(
@@ -560,8 +559,24 @@ async fn responses_continuation_503_fails_over_to_compatible_account() {
     assert_eq!(first_response.status(), StatusCode::OK);
     assert_eq!(exact_hits.load(Ordering::SeqCst), 1);
     assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
+    let original_history = state
+        .response_history("resp-exact-profile")
+        .await
+        .expect("initial response must store continuation history");
+    let original_continuation = &original_history.request_state["_gateway_continuation"];
+    assert_eq!(original_continuation["version"], 2);
+    let original_contract = original_continuation["compatibility_contract"].clone();
+    let capability_snapshot = state.capability_snapshot();
+    let alternative_profile = capability_snapshot
+        .profiles
+        .values()
+        .find(|profile| profile.key.upstream_id == "alternative-route")
+        .expect("alternative route must have an exact profile");
+    let expected_preferred_profile = serde_json::to_value(&alternative_profile.key).unwrap();
+    let expected_configuration_fingerprint = alternative_profile.configuration_fingerprint.clone();
 
     let continuation_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -600,6 +615,65 @@ async fn responses_continuation_503_fails_over_to_compatible_account() {
     assert!(replayed_input.contains("exact-thought"));
     assert!(replayed_input.contains("call_1"));
     assert!(replayed_input.contains("result"));
+    if !verify_preferred_profile_update {
+        return;
+    }
+
+    let stored = state
+        .response_history("resp-compatible-profile")
+        .await
+        .expect("successful failover must store continuation history");
+    let continuation = &stored.request_state["_gateway_continuation"];
+    assert_eq!(continuation["version"], 2);
+    assert_eq!(
+        continuation["preferred_profile"],
+        expected_preferred_profile
+    );
+    assert_eq!(
+        continuation["configuration_fingerprint"],
+        expected_configuration_fingerprint
+    );
+    assert_eq!(continuation["compatibility_contract"], original_contract);
+
+    let exact_hits_before_second_resume = exact_hits.load(Ordering::SeqCst);
+    let second_resume = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "previous_response_id": "resp-compatible-profile",
+                        "input": "continue again"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_resume.status(), StatusCode::OK);
+    assert_eq!(
+        exact_hits.load(Ordering::SeqCst),
+        exact_hits_before_second_resume
+    );
+    assert_eq!(alternative_hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn responses_continuation_503_fails_over_to_compatible_account() {
+    run_compatible_continuation_failover_case(false).await;
+}
+
+#[tokio::test]
+async fn successful_continuation_failover_updates_preferred_profile() {
+    run_compatible_continuation_failover_case(true).await;
 }
 
 #[tokio::test]

@@ -1663,24 +1663,52 @@ pub(super) async fn send_to_upstream(
             final_upstream_model.clone(),
             WireProtocol::from(upstream_protocol),
         );
-        let profile_reasoning_carrier = active_capability_snapshot
+        let profile = active_capability_snapshot
             .profiles
             .get(&profile_key)
             .filter(|profile| {
                 profile.configuration_fingerprint == configuration_fingerprint
                     && profile.probe_schema_version
                         == crate::capabilities::DIALECT_PROBE_SCHEMA_VERSION
-            })
-            .and_then(|profile| profile.reasoning_carrier);
-        let continuation = GatewayContinuationState::new(
-            profile_key,
-            configuration_fingerprint,
-            profile_reasoning_carrier,
-            requested_features.required.clone(),
-            WireProtocol::from(endpoint.native_protocol()),
-            WireProtocol::from(upstream_protocol),
-            context.tool_registry_version(),
-        );
+            });
+        let continuation = match context.exact_continuation_state()? {
+            Some(LoadedContinuation::V2(continuation)) => {
+                continuation.with_preferred_profile(profile_key, configuration_fingerprint)
+            }
+            Some(LoadedContinuation::V1NeedsDerivation(_)) => {
+                return Err(response_history_invalid(
+                    "cached legacy continuation contract was not derived before dispatch",
+                ));
+            }
+            None => {
+                let continuation = GatewayContinuationState::new(
+                    profile_key,
+                    configuration_fingerprint,
+                    profile.and_then(|profile| profile.reasoning_carrier),
+                    requested_features.required.clone(),
+                    WireProtocol::from(endpoint.native_protocol()),
+                    WireProtocol::from(upstream_protocol),
+                    context.tool_registry_version(),
+                );
+                resolved_capabilities
+                    .as_ref()
+                    .zip(profile)
+                    .and_then(|(resolved, profile)| {
+                        continuation_contract_for_route(
+                            upstream,
+                            &final_upstream_model,
+                            WireProtocol::from(endpoint.native_protocol()),
+                            WireProtocol::from(upstream_protocol),
+                            &requested_features.required,
+                            resolved,
+                            profile,
+                            context.tool_registry_version(),
+                        )
+                    })
+                    .map(|contract| continuation.clone().with_contract(contract))
+                    .unwrap_or(continuation)
+            }
+        };
         response_history_context = Some(context.with_selected_route(continuation, None)?);
     }
     if let Some(object) = upstream_body.as_object_mut() {

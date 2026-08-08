@@ -2675,10 +2675,10 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
         .expect("successful legacy continuation should be stored");
     assert_eq!(
         upgraded.request_state["_gateway_continuation"]["version"],
-        1
+        2
     );
     assert_eq!(
-        upgraded.request_state["_gateway_continuation"]["profile_key"],
+        upgraded.request_state["_gateway_continuation"]["preferred_profile"],
         json!({
             "upstream_id": "z-prev",
             "key_fingerprint": chat_responses_codex::keys::upstream_key_fingerprint(
@@ -2689,4 +2689,5 @@ async fn continuation_is_pinned_to_history_upstream_when_capabilities_match() {
             "protocol": "responses"
         })
     );
+    assert!(upgraded.request_state["_gateway_continuation"]["compatibility_contract"].is_object());
 }

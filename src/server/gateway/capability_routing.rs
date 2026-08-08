@@ -152,6 +152,16 @@ impl GatewayContinuationState {
         }
     }
 
+    pub(super) fn with_preferred_profile(
+        mut self,
+        preferred_profile: DialectProfileKey,
+        configuration_fingerprint: String,
+    ) -> Self {
+        self.preferred_profile = preferred_profile;
+        self.configuration_fingerprint = configuration_fingerprint;
+        self
+    }
+
     pub(super) fn configuration_fingerprint(&self) -> &str {
         &self.configuration_fingerprint
     }

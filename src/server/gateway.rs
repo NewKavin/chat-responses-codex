@@ -4408,6 +4408,12 @@ async fn process_gateway_request_inner(
         }
         None => None,
     };
+    if let (Some(context), Some(continuation)) = (
+        response_history_context.as_mut(),
+        exact_continuation.as_ref(),
+    ) {
+        *context = context.with_selected_route(continuation.clone(), None)?;
+    }
     let legacy_continuation_profile =
         if let Some(upstream_id) = legacy_continuation_upstream_id.as_deref() {
             let mut eligible_profiles = Vec::new();
@@ -5585,6 +5591,14 @@ async fn process_gateway_request_inner(
                             } else {
                                 (body.clone(), response_history_context.clone(), None)
                             };
+                        let mut dispatch_response_history_context =
+                            dispatch_response_history_context;
+                        if let (Some(context), Some(continuation)) = (
+                            dispatch_response_history_context.as_mut(),
+                            exact_continuation.as_ref(),
+                        ) {
+                            *context = context.with_selected_route(continuation.clone(), None)?;
+                        }
 
                         let route_hedge_candidates = if request_stream
                             && attempt_mode == UpstreamAttemptMode::SsePassThrough
