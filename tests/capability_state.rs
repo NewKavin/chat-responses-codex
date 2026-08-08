@@ -343,6 +343,67 @@ async fn default_runtime_does_not_queue_automatic_capability_probes() {
 }
 
 #[tokio::test]
+async fn reconciliation_waits_until_an_operational_retry_is_due() {
+    let dir = tempdir().unwrap();
+    let upstream = learning_upstream("up-retry-due", "glm-5.2");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            downstreams: Arc::new(vec![startup_downstream()]),
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig {
+            automatic_capability_probes_enabled: true,
+            ..AppConfig::default()
+        },
+    );
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            probe: ProbeConfiguration {
+                refresh_interval_seconds: 3_600,
+                ..ProbeConfiguration::default()
+            },
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let key = DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "glm-5.2",
+        WireProtocol::ChatCompletions,
+    );
+    let mut profile = UpstreamDialectProfile::unknown(key);
+    profile.configuration_fingerprint = state
+        .route_configuration_fingerprint(
+            &upstream,
+            &key_fingerprint,
+            "glm-5.2",
+            "glm-5.2",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        )
+        .unwrap();
+    profile.last_attempt_at = Some(1_000);
+    profile.last_operational_failure = Some("minimal_text_failed".into());
+    profile.last_probe_outcome = Some(ProbeProfileOutcome::OperationalFailure);
+    profile.probe_retry_count = 1;
+    profile.next_probe_at = Some(1_005);
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    assert!(state
+        .reconcile_dialect_profiles(1_004)
+        .await
+        .unwrap()
+        .is_empty());
+    let due = state.reconcile_dialect_profiles(1_005).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].key.upstream_id, upstream.id);
+}
+
+#[tokio::test]
 async fn default_runtime_rejects_automatic_but_allows_manual_probe_jobs() {
     let dir = tempdir().unwrap();
     let state = AppState::new(

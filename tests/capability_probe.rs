@@ -12,15 +12,17 @@ use chat_responses_codex::capabilities::{
     apply_probe_outcome, apply_probe_outcome_partial, AgentClientProfile, Capability,
     CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, CompatibilityExpectation,
     DeclarativeProbeCase, DialectProfileKey, EvidenceState, HttpsImageFixture, PredicateOperator,
-    ProbeCandidates, ProbeJob, ProbeOutcome, ProbeQueueState, ProbeReason, ReasoningCarrier,
-    ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
+    ProbeCandidates, ProbeJob, ProbeOutcome, ProbeProfileOutcome, ProbeQueueState, ProbeReason,
+    ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile,
+    WireProtocol,
 };
 use chat_responses_codex::protocol::stream_aggregate::MAX_STREAM_AGGREGATE_TOTAL_BYTES;
 use chat_responses_codex::server::{
     probe_plan_for_job, probe_plan_for_route, run_probe_plan_for_model_for_test,
-    run_probe_plan_for_test, CapabilityProbeMockReply, CapabilityProbePlan, CapabilityProbeService,
-    ReasoningTrigger,
+    run_probe_plan_for_test, run_probe_plan_with_coordination_for_test, CapabilityProbeMockReply,
+    CapabilityProbePlan, CapabilityProbeService, ProbePlanCompleteness, ReasoningTrigger,
 };
+use chat_responses_codex::state::RouteHealthKey;
 
 #[test]
 fn matching_expectation_adds_https_image_case_to_probe_plan() {
@@ -3482,6 +3484,11 @@ fn partial_probe_outcome_merges_without_erasing_prior_reasoning_evidence() {
         vec!["low".into(), "medium".into(), "high".into()],
     );
     profile.state = chat_responses_codex::capabilities::DialectProfileState::Partial;
+    profile.last_success_at = Some(40);
+    profile.last_operational_failure = Some("previous_probe_failed".into());
+    profile.http_status = Some(503);
+    profile.last_probe_outcome = Some(ProbeProfileOutcome::OperationalFailure);
+    profile.probe_retry_count = 1;
 
     // A capacity-skipped probe: most cases never ran (Unobserved), only the
     // function-tool case observed Supported, and two new reasoning levels were
@@ -3543,8 +3550,167 @@ fn partial_probe_outcome_merges_without_erasing_prior_reasoning_evidence() {
         profile.reasoning_carrier,
         Some(ReasoningCarrier::ReasoningContent)
     );
-    assert_eq!(profile.last_success_at, Some(42));
+    assert_eq!(profile.last_success_at, Some(40));
+    assert_eq!(
+        profile.last_operational_failure.as_deref(),
+        Some("previous_probe_failed")
+    );
+    assert_eq!(profile.http_status, Some(503));
+    assert_eq!(
+        profile.last_probe_outcome,
+        Some(ProbeProfileOutcome::Deferred)
+    );
+    assert_eq!(profile.probe_retry_count, 1);
+    assert_eq!(profile.next_probe_at, Some(43));
+}
+
+#[test]
+fn operational_failure_preserves_prior_reasoning_evidence_and_schedules_retry() {
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: "kf".into(),
+        upstream_id: "probe-upstream".into(),
+        runtime_model_slug: "deepseek-v4-flash".into(),
+        protocol: WireProtocol::ChatCompletions,
+    });
+    profile.state = chat_responses_codex::capabilities::DialectProfileState::Verified;
+    profile.last_success_at = Some(900);
+    profile
+        .reasoning_controls
+        .insert("reasoning_effort".into(), vec!["low".into(), "high".into()]);
+    profile
+        .capabilities
+        .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+    profile.evidence_codes.insert("reasoning_low".into());
+
+    apply_probe_outcome(
+        &mut profile,
+        ProbeOutcome::OperationalFailure {
+            code: "minimal_text_failed".into(),
+            http_status: Some(503),
+            attempted_at: 1_000,
+        },
+    );
+
+    assert_eq!(
+        profile.reasoning_controls["reasoning_effort"],
+        vec!["low", "high"]
+    );
+    assert_eq!(
+        profile.capabilities[&Capability::ReasoningOutput],
+        EvidenceState::Supported
+    );
+    assert!(profile.evidence_codes.contains("reasoning_low"));
+    assert_eq!(profile.last_success_at, Some(900));
+    assert_eq!(
+        profile.last_probe_outcome,
+        Some(ProbeProfileOutcome::OperationalFailure)
+    );
+    assert_eq!(profile.probe_retry_count, 1);
+    assert_eq!(profile.next_probe_at, Some(1_005));
+
+    apply_probe_outcome(
+        &mut profile,
+        ProbeOutcome::Conclusive {
+            capabilities: [(Capability::ReasoningOutput, EvidenceState::Supported)]
+                .into_iter()
+                .collect(),
+            token_limit_field: None,
+            reasoning_carrier: Some(ReasoningCarrier::ReasoningContent),
+            reasoning_controls: [("reasoning_effort".into(), vec!["low".into(), "high".into()])]
+                .into_iter()
+                .collect(),
+            correction_rules: Vec::new(),
+            extension_evidence: Default::default(),
+            evidence_codes: ["reasoning_recovered".into()].into_iter().collect(),
+            event_types: Default::default(),
+            http_status: 200,
+            attempted_at: 1_006,
+        },
+    );
+
+    assert_eq!(
+        profile.last_probe_outcome,
+        Some(ProbeProfileOutcome::Accepted)
+    );
+    assert_eq!(profile.probe_retry_count, 0);
+    assert_eq!(profile.next_probe_at, None);
     assert_eq!(profile.last_operational_failure, None);
+    assert_eq!(profile.last_success_at, Some(1_006));
+}
+
+#[tokio::test]
+async fn capacity_skipped_probe_is_deferred_without_route_cooldown() {
+    let mock = ProbeMock::chat(|_| text_response("must not be called")).await;
+    let upstream = UpstreamConfig {
+        id: "capacity-skipped-upstream".into(),
+        name: "capacity skipped".into(),
+        base_url: mock.base_url.clone(),
+        api_key: "capacity-key".into(),
+        max_concurrency: 1,
+        supported_models: vec!["deepseek-v4-flash".into()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            ..PersistedState::default()
+        },
+        tempdir().unwrap().path().join("state.json"),
+        AppConfig::default(),
+    );
+    let key_fingerprint =
+        chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+    let held = state
+        .try_reserve_upstream_account_request(&upstream, &key_fingerprint, "deepseek-v4-flash")
+        .await
+        .unwrap();
+
+    let (outcome, completeness) = run_probe_plan_with_coordination_for_test(
+        &mock.base_url,
+        &upstream.api_key,
+        "deepseek-v4-flash",
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false }],
+            output_token_cap: 16,
+        },
+        2,
+        Some(state.clone()),
+        Some(upstream.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(completeness, ProbePlanCompleteness::CapacitySkipped);
+    let attempted_at = match &outcome {
+        ProbeOutcome::Conclusive { attempted_at, .. } => *attempted_at,
+        ProbeOutcome::OperationalFailure { .. } => panic!("capacity skip must remain partial"),
+    };
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+        upstream.id.clone(),
+        key_fingerprint.clone(),
+        "deepseek-v4-flash",
+        WireProtocol::ChatCompletions,
+    ));
+    apply_probe_outcome_partial(&mut profile, outcome);
+
+    assert_eq!(
+        profile.last_probe_outcome,
+        Some(ProbeProfileOutcome::Deferred)
+    );
+    assert!(profile
+        .next_probe_at
+        .is_some_and(|at| at > attempted_at && at <= attempted_at + 2));
+    assert_eq!(profile.last_success_at, None);
+    assert_eq!(mock.request_count(), 0);
+    let route = RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint,
+        runtime_model_slug: "deepseek-v4-flash".into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    assert!(state.route_health_snapshot(&route).await.unwrap().is_none());
+    state.release_upstream_request(held).await.unwrap();
 }
 
 #[test]

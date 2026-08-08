@@ -4,9 +4,19 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    Capability, DialectCorrectionRule, DialectProfileState, EvidenceState, ReasoningCarrier,
-    TokenLimitField, UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
+    Capability, DialectCorrectionRule, DialectProfileState, EvidenceState, ProbeProfileOutcome,
+    ReasoningCarrier, TokenLimitField, UpstreamDialectProfile, WireProtocol,
+    DIALECT_PROBE_SCHEMA_VERSION,
 };
+
+const OPERATIONAL_RETRY_DELAYS_SECONDS: [u64; 5] = [5, 15, 60, 300, 900];
+
+fn next_operational_retry(attempted_at: u64, failures: u32) -> u64 {
+    let index = usize::try_from(failures.saturating_sub(1))
+        .unwrap_or(usize::MAX)
+        .min(OPERATIONAL_RETRY_DELAYS_SECONDS.len() - 1);
+    attempted_at.saturating_add(OPERATIONAL_RETRY_DELAYS_SECONDS[index])
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RouteFingerprintInput {
@@ -90,6 +100,12 @@ pub fn apply_probe_outcome(profile: &mut UpstreamDialectProfile, outcome: ProbeO
             profile.last_attempt_at = Some(attempted_at);
             profile.http_status = http_status;
             profile.last_operational_failure = Some(code);
+            profile.last_probe_outcome = Some(ProbeProfileOutcome::OperationalFailure);
+            profile.probe_retry_count = profile.probe_retry_count.saturating_add(1);
+            profile.next_probe_at = Some(next_operational_retry(
+                attempted_at,
+                profile.probe_retry_count,
+            ));
         }
         ProbeOutcome::Conclusive {
             capabilities,
@@ -115,6 +131,8 @@ pub fn apply_probe_outcome(profile: &mut UpstreamDialectProfile, outcome: ProbeO
             profile.last_attempt_at = Some(attempted_at);
             profile.last_success_at = Some(attempted_at);
             profile.last_operational_failure = None;
+            profile.probe_retry_count = 0;
+            profile.next_probe_at = None;
             let supported = profile
                 .capabilities
                 .values()
@@ -132,6 +150,12 @@ pub fn apply_probe_outcome(profile: &mut UpstreamDialectProfile, outcome: ProbeO
             } else {
                 DialectProfileState::Partial
             };
+            profile.last_probe_outcome =
+                Some(if profile.state == DialectProfileState::Unsupported {
+                    ProbeProfileOutcome::Rejected
+                } else {
+                    ProbeProfileOutcome::Accepted
+                });
         }
     }
 }
@@ -187,10 +211,12 @@ pub fn apply_probe_outcome_partial(profile: &mut UpstreamDialectProfile, outcome
     }
     profile.evidence_codes.extend(evidence_codes);
     profile.event_types.extend(event_types);
-    profile.http_status = Some(http_status);
+    if profile.last_operational_failure.is_none() {
+        profile.http_status = Some(http_status);
+    }
     profile.last_attempt_at = Some(attempted_at);
-    profile.last_success_at = Some(attempted_at);
-    profile.last_operational_failure = None;
+    profile.last_probe_outcome = Some(ProbeProfileOutcome::Deferred);
+    profile.next_probe_at = Some(attempted_at.saturating_add(1));
     let supported = profile
         .capabilities
         .values()

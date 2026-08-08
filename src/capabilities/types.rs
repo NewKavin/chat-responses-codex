@@ -447,6 +447,15 @@ pub enum DialectProfileState {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeProfileOutcome {
+    Accepted,
+    Rejected,
+    OperationalFailure,
+    Deferred,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpstreamDialectProfile {
@@ -463,6 +472,12 @@ pub struct UpstreamDialectProfile {
     pub last_attempt_at: Option<u64>,
     pub last_success_at: Option<u64>,
     pub last_operational_failure: Option<String>,
+    #[serde(default)]
+    pub last_probe_outcome: Option<ProbeProfileOutcome>,
+    #[serde(default)]
+    pub probe_retry_count: u32,
+    #[serde(default)]
+    pub next_probe_at: Option<u64>,
     pub evidence_codes: BTreeSet<String>,
     pub http_status: Option<u16>,
     pub event_types: BTreeSet<String>,
@@ -484,6 +499,9 @@ impl UpstreamDialectProfile {
             last_attempt_at: None,
             last_success_at: None,
             last_operational_failure: None,
+            last_probe_outcome: None,
+            probe_retry_count: 0,
+            next_probe_at: None,
             evidence_codes: BTreeSet::new(),
             http_status: None,
             event_types: BTreeSet::new(),

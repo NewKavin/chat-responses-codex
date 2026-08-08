@@ -183,6 +183,20 @@ fn dialect_profile_key_is_routable(routing: &PersistedState, key: &DialectProfil
             .any(|api_key| upstream_key_fingerprint(&upstream.id, api_key) == key.key_fingerprint)
 }
 
+fn capability_profile_is_current_or_retry_pending(
+    profile: &UpstreamDialectProfile,
+    fingerprint: &str,
+    now: u64,
+    refresh_interval_seconds: u64,
+) -> bool {
+    if let Some(next_probe_at) = profile.next_probe_at {
+        return profile.configuration_fingerprint == fingerprint
+            && profile.probe_schema_version == DIALECT_PROBE_SCHEMA_VERSION
+            && now < next_probe_at;
+    }
+    profile_is_current(profile, fingerprint, now, refresh_interval_seconds)
+}
+
 use context_profile::{
     normalize_context_profile_base_url, normalize_global_context_profiles_for_storage,
 };
@@ -4144,7 +4158,7 @@ impl AppState {
                         let current = snapshot.profiles.get(&key);
                         if !current
                             .map(|profile| {
-                                profile_is_current(
+                                capability_profile_is_current_or_retry_pending(
                                     profile,
                                     &fingerprint,
                                     now,
@@ -4534,7 +4548,12 @@ impl AppState {
                             }
                         };
                         let current = snapshot.profiles.get(&key).is_some_and(|profile| {
-                            profile_is_current(profile, &fingerprint, now, refresh_interval_seconds)
+                            capability_profile_is_current_or_retry_pending(
+                                profile,
+                                &fingerprint,
+                                now,
+                                refresh_interval_seconds,
+                            )
                         });
                         if current {
                             continue;
