@@ -15,13 +15,13 @@ local function blocked(key)
   end
   local cooldown_until = tonumber(state_value(key, 'cooldown_until_ms') or '0')
   if cooldown_until > now_ms then
-    return {'1', class, tostring(math.max(1, cooldown_until - now_ms))}
+    return {'1', class, tostring(math.max(1, cooldown_until - now_ms)), state_value(key, 'failure_status') or ''}
   end
   local active_lease = state_value(key, 'half_open_lease')
   if active_lease and active_lease ~= '' then
     local expires_at = tonumber(state_value(key, 'half_open_expires_at_ms') or '0')
     if expires_at > now_ms then
-      return {'2', class, '1000'}
+      return {'2', class, '1000', state_value(key, 'failure_status') or ''}
     end
     redis.call(
       'HDEL', key,

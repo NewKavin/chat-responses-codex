@@ -1303,7 +1303,7 @@ impl RedisRuntimeCoordinator {
         lease: &RedisHealthLease,
         outcome: RouteOutcome,
     ) -> Result<(), RuntimeCoordinationError> {
-        let (outcome_name, class, retry_after) = route_outcome_parts(outcome);
+        let (outcome_name, class, retry_after, upstream_status) = route_outcome_parts(outcome);
         let route_schedule = class
             .filter(|class| route_failure_has_cooldown(*class))
             .map(|class| {
@@ -1352,6 +1352,7 @@ impl RedisRuntimeCoordinator {
             .arg(&lease.route.key_fingerprint)
             .arg(&lease.route.runtime_model_slug)
             .arg(wire_protocol_name(lease.route.protocol))
+            .arg(upstream_status.map(|status| status.to_string()).unwrap_or_default())
             .arg(route_schedule.len() as u64);
         for cooldown_ms in route_schedule {
             invocation.arg(cooldown_ms);
@@ -1392,6 +1393,7 @@ impl RedisRuntimeCoordinator {
             class,
             retry_after,
             class == RouteFailureClass::ConcurrencySaturated && retry_after.is_some(),
+            None,
             &route.upstream_id,
             &route.key_fingerprint,
             &route.runtime_model_slug,
@@ -1432,6 +1434,7 @@ impl RedisRuntimeCoordinator {
             class,
             retry_after,
             false,
+            None,
             &key.upstream_id,
             &key.key_fingerprint,
             "",
@@ -1455,6 +1458,7 @@ impl RedisRuntimeCoordinator {
             class,
             retry_after,
             false,
+            None,
             &aggregate.upstream_id,
             "",
             &aggregate.runtime_model_slug,
@@ -1483,6 +1487,7 @@ impl RedisRuntimeCoordinator {
         class: RouteFailureClass,
         retry_after: Option<Duration>,
         exact_retry: bool,
+        upstream_status: Option<u16>,
         upstream_id: &str,
         key_fingerprint: &str,
         model_slug: &str,
@@ -1514,6 +1519,7 @@ impl RedisRuntimeCoordinator {
             .arg(model_slug)
             .arg(protocol)
             .arg(if exact_retry { 1 } else { 0 })
+            .arg(upstream_status.map(|status| status.to_string()).unwrap_or_default())
             .arg(schedule.len() as u64);
         for cooldown_ms in schedule {
             invocation.arg(*cooldown_ms);
@@ -2051,7 +2057,7 @@ fn parse_route_health_reservation(
                 half_open,
             }))
         }
-        Some("1") | Some("2") if result.len() == 3 => {
+        Some("1") | Some("2") if result.len() == 4 => {
             let class = result
                 .get(1)
                 .and_then(|value| route_failure_class(value))
@@ -2062,10 +2068,19 @@ fn parse_route_health_reservation(
                     .map_err(|_| RuntimeCoordinationError)?
                     .max(1),
             );
+            let upstream_status = parse_optional_status(result.get(3))?;
             if result.first().map(String::as_str) == Some("1") {
-                Ok(RouteAvailability::Cooling { class, retry_after })
+                Ok(RouteAvailability::Cooling {
+                    class,
+                    retry_after,
+                    upstream_status,
+                })
             } else {
-                Ok(RouteAvailability::HalfOpenBusy { class, retry_after })
+                Ok(RouteAvailability::HalfOpenBusy {
+                    class,
+                    retry_after,
+                    upstream_status,
+                })
             }
         }
         _ => Err(RuntimeCoordinationError),
@@ -2190,6 +2205,18 @@ fn health_snapshot_recovery(snapshot: &HealthStateSnapshot) -> Option<RouteRecov
     })
 }
 
+fn parse_optional_status(
+    value: Option<&String>,
+) -> Result<Option<u16>, RuntimeCoordinationError> {
+    match value.map(String::as_str) {
+        None | Some("") => Ok(None),
+        Some(value) => value
+            .parse::<u16>()
+            .map(Some)
+            .map_err(|_| RuntimeCoordinationError),
+    }
+}
+
 fn parse_optional_generation(
     value: Option<&String>,
 ) -> Result<Option<u64>, RuntimeCoordinationError> {
@@ -2222,21 +2249,36 @@ fn optional_duration_ms(duration: Option<Duration>) -> i64 {
 
 fn route_outcome_parts(
     outcome: RouteOutcome,
-) -> (&'static str, Option<RouteFailureClass>, Option<Duration>) {
+) -> (
+    &'static str,
+    Option<RouteFailureClass>,
+    Option<Duration>,
+    Option<u16>,
+) {
     match outcome {
-        RouteOutcome::Success => ("success", None, None),
-        RouteOutcome::RouteFailure(class) => ("route_failure", Some(class), None),
-        RouteOutcome::RouteFailureWithRetry { class, retry_after } => {
-            ("route_failure_with_retry", Some(class), Some(retry_after))
-        }
-        RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None),
+        RouteOutcome::Success => ("success", None, None, None),
+        RouteOutcome::RouteFailure {
+            class,
+            upstream_status,
+        } => ("route_failure", Some(class), None, upstream_status),
+        RouteOutcome::RouteFailureWithRetry {
+            class,
+            retry_after,
+            upstream_status,
+        } => (
+            "route_failure_with_retry",
+            Some(class),
+            Some(retry_after),
+            upstream_status,
+        ),
+        RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None),
         RouteOutcome::KeyFailureWithRetry { class, retry_after } => {
-            ("key_failure_with_retry", Some(class), Some(retry_after))
+            ("key_failure_with_retry", Some(class), Some(retry_after), None)
         }
         RouteOutcome::UncertainRouteFailure(class) => {
-            ("uncertain_route_failure", Some(class), None)
+            ("uncertain_route_failure", Some(class), None, None)
         }
-        RouteOutcome::Cancelled => ("cancelled", None, None),
+        RouteOutcome::Cancelled => ("cancelled", None, None, None),
     }
 }
 
@@ -2338,9 +2380,60 @@ mod tests {
                 "invalid".into(),
             ],
             vec!["1".into(), "transient_server".into()],
-            vec!["2".into(), "transient_server".into(), "invalid".into()],
+            vec!["1".into(), "transient_server".into(), "1000".into()],
+            vec!["1".into(), "not_a_class".into(), "1000".into(), "503".into()],
+            vec!["1".into(), "transient_server".into(), "invalid".into(), "503".into()],
+            vec!["1".into(), "transient_server".into(), "1000".into(), "65536".into()],
         ] {
             assert!(parse_route_health_reservation(reply, &route, &key, "lease").is_err());
+        }
+        match parse_route_health_reservation(
+            vec![
+                "1".into(),
+                "transient_server".into(),
+                "1000".into(),
+                "503".into(),
+            ],
+            &route,
+            &key,
+            "lease",
+        )
+        .unwrap()
+        {
+            RouteAvailability::Cooling {
+                class,
+                retry_after,
+                upstream_status,
+            } => {
+                assert_eq!(class, RouteFailureClass::TransientServer);
+                assert_eq!(retry_after, Duration::from_millis(1000));
+                assert_eq!(upstream_status, Some(503));
+            }
+            other => panic!("expected cooling reply, got {other:?}"),
+        }
+        match parse_route_health_reservation(
+            vec![
+                "2".into(),
+                "concurrency_saturated".into(),
+                "2000".into(),
+                "".into(),
+            ],
+            &route,
+            &key,
+            "lease",
+        )
+        .unwrap()
+        {
+            RouteAvailability::HalfOpenBusy {
+                class,
+                retry_after,
+                upstream_status,
+            } => {
+                assert_eq!(class, RouteFailureClass::ConcurrencySaturated);
+                assert_eq!(retry_after, Duration::from_millis(2000));
+                assert_eq!(upstream_status, None);
+            }
+            other => panic!("expected half-open busy reply, got {other:?}"),
         }
         assert!(parse_health_state_snapshot(vec![
             "1".into(),

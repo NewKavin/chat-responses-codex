@@ -60,10 +60,12 @@ pub enum RouteAvailability<T> {
     Cooling {
         class: RouteFailureClass,
         retry_after: Duration,
+        upstream_status: Option<u16>,
     },
     HalfOpenBusy {
         class: RouteFailureClass,
         retry_after: Duration,
+        upstream_status: Option<u16>,
     },
 }
 
@@ -219,10 +221,14 @@ impl Drop for RouteHealthPermit {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteOutcome {
     Success,
-    RouteFailure(RouteFailureClass),
+    RouteFailure {
+        class: RouteFailureClass,
+        upstream_status: Option<u16>,
+    },
     RouteFailureWithRetry {
         class: RouteFailureClass,
         retry_after: Duration,
+        upstream_status: Option<u16>,
     },
     KeyFailure(RouteFailureClass),
     KeyFailureWithRetry {
@@ -237,6 +243,7 @@ pub enum RouteOutcome {
 struct HealthState {
     consecutive_failures: u32,
     last_failure_class: Option<RouteFailureClass>,
+    last_failure_status: Option<u16>,
     last_failure_at: Option<Instant>,
     cooldown_until: Option<Instant>,
     half_open_generation: Option<u64>,
@@ -249,6 +256,7 @@ impl HealthState {
         Self {
             consecutive_failures: 0,
             last_failure_class: None,
+            last_failure_status: None,
             last_failure_at: None,
             cooldown_until: None,
             half_open_generation: None,
@@ -274,6 +282,7 @@ impl HealthState {
     fn clear(&mut self, now: Instant) {
         self.consecutive_failures = 0;
         self.last_failure_class = None;
+        self.last_failure_status = None;
         self.last_failure_at = None;
         self.cooldown_until = None;
         self.half_open_generation = None;
@@ -523,6 +532,7 @@ impl RouteHealthRegistry {
                         .last_failure_class
                         .expect("cooling key health must retain its failure class"),
                     retry_after: state.retry_after(now),
+                    upstream_status: state.last_failure_status,
                 };
             }
             if state.half_open_generation.is_some() {
@@ -531,6 +541,7 @@ impl RouteHealthRegistry {
                         .last_failure_class
                         .expect("half-open key health must retain its failure class"),
                     retry_after: state.retry_after(now).max(HALF_OPEN_BUSY_RETRY),
+                    upstream_status: state.last_failure_status,
                 };
             }
         }
@@ -542,6 +553,7 @@ impl RouteHealthRegistry {
                         .last_failure_class
                         .expect("cooling route health must retain its failure class"),
                     retry_after: state.retry_after(now),
+                    upstream_status: state.last_failure_status,
                 };
             }
             if state.half_open_generation.is_some() {
@@ -550,6 +562,7 @@ impl RouteHealthRegistry {
                         .last_failure_class
                         .expect("half-open route health must retain its failure class"),
                     retry_after: state.retry_after(now).max(HALF_OPEN_BUSY_RETRY),
+                    upstream_status: state.last_failure_status,
                 };
             }
         }
@@ -619,13 +632,26 @@ impl RouteHealthRegistry {
                     self.release_key_lease(&lease.key, lease.key_generation, now);
                 }
             }
-            RouteOutcome::RouteFailure(class) => {
+            RouteOutcome::RouteFailure {
+                class,
+                upstream_status,
+            } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
-                self.observe_route_failure_at(&lease.route, class, None, now);
+                self.observe_route_failure_at(&lease.route, class, None, upstream_status, now);
             }
-            RouteOutcome::RouteFailureWithRetry { class, retry_after } => {
+            RouteOutcome::RouteFailureWithRetry {
+                class,
+                retry_after,
+                upstream_status,
+            } => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
-                self.observe_route_failure_at(&lease.route, class, Some(retry_after), now);
+                self.observe_route_failure_at(
+                    &lease.route,
+                    class,
+                    Some(retry_after),
+                    upstream_status,
+                    now,
+                );
             }
             RouteOutcome::KeyFailure(class) => {
                 self.release_route_lease(&lease.route, lease.route_generation, now);
@@ -638,7 +664,7 @@ impl RouteHealthRegistry {
             RouteOutcome::UncertainRouteFailure(class) => {
                 self.release_key_lease(&lease.key, lease.key_generation, now);
                 if !self.reapply_concurrency_probe_delay(&lease, now) {
-                    self.observe_route_failure_at(&lease.route, class, None, now);
+                    self.observe_route_failure_at(&lease.route, class, None, None, now);
                 }
             }
             RouteOutcome::Cancelled => {
@@ -656,7 +682,7 @@ impl RouteHealthRegistry {
         class: RouteFailureClass,
         retry_after: Option<Duration>,
     ) {
-        self.observe_route_failure_at(route, class, retry_after, Instant::now());
+        self.observe_route_failure_at(route, class, retry_after, None, Instant::now());
     }
 
     pub fn clear_route_health(&mut self, route: &RouteHealthKey) {
@@ -725,6 +751,7 @@ impl RouteHealthRegistry {
         route: &RouteHealthKey,
         class: RouteFailureClass,
         retry_after: Option<Duration>,
+        upstream_status: Option<u16>,
         now: Instant,
     ) {
         if !route_failure_has_cooldown(class) {
@@ -745,6 +772,7 @@ impl RouteHealthRegistry {
         state.state_generation = state.state_generation.wrapping_add(1).max(1);
         state.consecutive_failures = step;
         state.last_failure_class = Some(class);
+        state.last_failure_status = upstream_status;
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
         state.last_access = now;

@@ -211,8 +211,8 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         "message must name the rate limit cause: {message}"
     );
     assert!(
-        message.contains("upstream concurrency limit saturated (1 route)"),
-        "message must name the concurrency cause without a synthetic status: {message}"
+        message.contains("upstream concurrency limit saturated (1 route, upstream HTTP 503)"),
+        "message must name the concurrency cause with its real status: {message}"
     );
     assert!(
         message.contains("please try again in 2s"),
@@ -225,6 +225,34 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
     let details = error.safe_details();
     assert_eq!(details["routing_rounds"], 3);
     assert_eq!(details["waited_ms"], 9_800);
+}
+
+#[test]
+fn cooled_routes_carry_real_upstream_status_in_summary() {
+    let mut ledger = AttemptLedger::default();
+    for index in 0..8 {
+        ledger.record_cooled(AttemptFailure {
+            route_id: format!("route-{index}"),
+            upstream_status: Some(502),
+            class: FailureClass::TransientServer,
+            retry_after: Some(Duration::from_secs(3)),
+        });
+    }
+
+    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(6_900), None);
+
+    assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    let message = error.message();
+    assert!(
+        message.contains("transient upstream server errors (8 routes, upstream HTTP 502)"),
+        "message must surface the real upstream status from cooldowns: {message}"
+    );
+    assert!(
+        message.contains("please try again in 3s"),
+        "message must include the recovery estimate: {message}"
+    );
+    let details = error.safe_details();
+    assert_eq!(details["class_counts"]["transient_server"], 8);
 }
 
 #[test]
@@ -328,7 +356,10 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
     );
     assert_eq!(
         route_health_outcome(&error),
-        RouteOutcome::RouteFailure(FailureClass::ConcurrencySaturated)
+        RouteOutcome::RouteFailure {
+            class: FailureClass::ConcurrencySaturated,
+            upstream_status: None,
+        }
     );
 }
 

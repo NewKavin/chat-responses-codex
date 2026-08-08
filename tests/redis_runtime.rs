@@ -2455,9 +2455,10 @@ async fn redis_transient_route_cooldown_uses_configured_base_and_max() {
         other => panic!("expected half-open permit after configured cooldown, got {other:?}"),
     };
     permit
-        .finish(RouteOutcome::RouteFailure(
-            RouteFailureClass::TransientServer,
-        ))
+        .finish(RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: None,
+        })
         .await
         .unwrap();
     let recovery = second
@@ -2584,9 +2585,10 @@ async fn redis_route_health_reconcile_defers_active_lease_then_removes_on_finish
         .is_some_and(|snapshot| snapshot.half_open));
 
     permit
-        .finish(RouteOutcome::RouteFailure(
-            RouteFailureClass::TransientServer,
-        ))
+        .finish(RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: None,
+        })
         .await
         .unwrap();
     assert!(first.route_health_snapshot(&route).await.unwrap().is_none());
@@ -2696,6 +2698,7 @@ async fn redis_route_health_global_eviction_removes_the_owners_upstream_index() 
             "model-a".into(),
             "responses".into(),
             "0".into(),
+            "".into(),
             "1".into(),
             "1000".into(),
         ],
@@ -2780,6 +2783,7 @@ async fn redis_route_health_finish_rejects_capacity_exhaustion_and_corrupt_marke
         "fingerprint".into(),
         "model-a".into(),
         "responses".into(),
+        "".into(),
         "1".into(),
         "1000".into(),
         "0".into(),
@@ -3082,9 +3086,10 @@ async fn redis_route_health_finish_retry_is_idempotent() {
 
     coordination_fault(&first).lose_next_responses(1);
     permit
-        .finish(RouteOutcome::RouteFailure(
-            RouteFailureClass::TransientServer,
-        ))
+        .finish(RouteOutcome::RouteFailure {
+            class: RouteFailureClass::TransientServer,
+            upstream_status: None,
+        })
         .await
         .unwrap();
 

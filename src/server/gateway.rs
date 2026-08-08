@@ -21,7 +21,7 @@ use crate::state::{
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, RuntimeCoordinationError, StreamDiagnostics, UpstreamAdmissionError,
+    RouteSetAggregateKey, RuntimeCoordinationError, StreamDiagnostics,
     UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
@@ -508,19 +508,29 @@ fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
             .map(|retry_after| RouteOutcome::RouteFailureWithRetry {
                 class: FailureClass::ConcurrencySaturated,
                 retry_after,
+                upstream_status: None,
             })
-            .unwrap_or(RouteOutcome::RouteFailure(
-                FailureClass::ConcurrencySaturated,
-            ));
+            .unwrap_or(RouteOutcome::RouteFailure {
+                class: FailureClass::ConcurrencySaturated,
+                upstream_status: None,
+            });
     }
+    let upstream_status = error.upstream_status();
     match error.route_failure_class() {
         Some(class @ (FailureClass::Credentials | FailureClass::KeyQuota)) => retry_after
             .map(|retry_after| RouteOutcome::KeyFailureWithRetry { class, retry_after })
             .unwrap_or(RouteOutcome::KeyFailure(class)),
         Some(FailureClass::RequestRejected) => RouteOutcome::Success,
         Some(class) => retry_after
-            .map(|retry_after| RouteOutcome::RouteFailureWithRetry { class, retry_after })
-            .unwrap_or(RouteOutcome::RouteFailure(class)),
+            .map(|retry_after| RouteOutcome::RouteFailureWithRetry {
+                class,
+                retry_after,
+                upstream_status,
+            })
+            .unwrap_or(RouteOutcome::RouteFailure {
+                class,
+                upstream_status,
+            }),
         None => RouteOutcome::Cancelled,
     }
 }
@@ -569,6 +579,7 @@ fn record_cooled_route_attempt(
     protocol: UpstreamProtocol,
     class: FailureClass,
     retry_after: Duration,
+    upstream_status: Option<u16>,
 ) {
     route_attempts.record_cooled(AttemptFailure {
         route_id: anonymous_route_id(
@@ -577,7 +588,7 @@ fn record_cooled_route_attempt(
             runtime_model_slug,
             WireProtocol::from(protocol),
         ),
-        upstream_status: Some(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+        upstream_status,
         class,
         retry_after: Some(retry_after.max(Duration::from_secs(1))),
     });
@@ -5073,8 +5084,16 @@ async fn process_gateway_request_inner(
                             RouteAvailability::Ready(permit) => {
                                 break Some(Arc::new(TokioMutex::new(Some(permit))));
                             }
-                            RouteAvailability::Cooling { class, retry_after }
-                            | RouteAvailability::HalfOpenBusy { class, retry_after } => {
+                            RouteAvailability::Cooling {
+                                class,
+                                retry_after,
+                                upstream_status,
+                            }
+                            | RouteAvailability::HalfOpenBusy {
+                                class,
+                                retry_after,
+                                upstream_status,
+                            } => {
                                 if account_recovery.active_probe_account() == Some(&account_key) {
                                     tokio::select! {
                                         _ = tokio::time::sleep(retry_after) => {}
@@ -5108,6 +5127,7 @@ async fn process_gateway_request_inner(
                                     protocol,
                                     class,
                                     retry_after,
+                                    upstream_status,
                                 );
                                 last_error = Some(GatewayError::TemporaryUpstreamUnavailable(
                                     "all eligible upstream routes are temporarily unavailable"
@@ -5167,6 +5187,7 @@ async fn process_gateway_request_inner(
                                     protocol,
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
+                                    None,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream account is waiting for recovery".into(),
@@ -5181,7 +5202,7 @@ async fn process_gateway_request_inner(
                         let upstream_request_lease = {
                             #[cfg(test)]
                             if take_upstream_reservation_failure_test_hook(&upstream.id) {
-                                Err(UpstreamAdmissionError::new(
+                                Err(crate::state::UpstreamAdmissionError::new(
                                     "upstream request concurrency capacity is full".into(),
                                     1,
                                 ))
@@ -5224,6 +5245,7 @@ async fn process_gateway_request_inner(
                                     RouteOutcome::RouteFailureWithRetry {
                                         class: FailureClass::ConcurrencySaturated,
                                         retry_after,
+                                        upstream_status: None,
                                     },
                                 )
                                 .await?;
@@ -5235,6 +5257,7 @@ async fn process_gateway_request_inner(
                                     protocol,
                                     FailureClass::ConcurrencySaturated,
                                     retry_after,
+                                    None,
                                 );
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message:
@@ -5990,11 +6013,13 @@ async fn process_gateway_request_inner(
                                                 RouteOutcome::RouteFailureWithRetry {
                                                     class: FailureClass::ConcurrencySaturated,
                                                     retry_after,
+                                                    upstream_status: None,
                                                 }
                                             })
-                                            .unwrap_or(RouteOutcome::RouteFailure(
-                                                FailureClass::ConcurrencySaturated,
-                                            ))
+                                            .unwrap_or(RouteOutcome::RouteFailure {
+                                                class: FailureClass::ConcurrencySaturated,
+                                                upstream_status: None,
+                                            })
                                     },
                                 )
                                 .await?;
@@ -6065,6 +6090,7 @@ async fn process_gateway_request_inner(
                                         RouteOutcome::RouteFailureWithRetry {
                                             class: FailureClass::RateLimited,
                                             retry_after,
+                                            upstream_status: None,
                                         }
                                     },
                                 )
@@ -6221,7 +6247,10 @@ async fn process_gateway_request_inner(
                                     if stream_only_recovery.consumed {
                                         RouteOutcome::Cancelled
                                     } else {
-                                        RouteOutcome::RouteFailure(FailureClass::TransientServer)
+                                        RouteOutcome::RouteFailure {
+                                            class: FailureClass::TransientServer,
+                                            upstream_status: None,
+                                        }
                                     },
                                 )
                                 .await?;

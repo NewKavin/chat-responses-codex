@@ -279,7 +279,10 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
         };
         registry.finish(
             lease,
-            RouteOutcome::RouteFailure(RouteFailureClass::ConcurrencySaturated),
+            RouteOutcome::RouteFailure {
+            class: RouteFailureClass::ConcurrencySaturated,
+            upstream_status: None,
+        },
         );
         let expected_delay = Duration::from_millis(expected_delay);
         assert_eq!(
@@ -370,6 +373,7 @@ async fn stale_healthy_success_does_not_clear_newer_concurrency_saturation() {
         RouteAvailability::Cooling {
             class: RouteFailureClass::ConcurrencySaturated,
             retry_after,
+            ..
         } if retry_after > Duration::ZERO
     ));
 }

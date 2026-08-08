@@ -9,7 +9,8 @@ local ttl_seconds = tonumber(ARGV[6])
 local global_capacity = tonumber(ARGV[7])
 local upstream_capacity = tonumber(ARGV[8])
 local exact_retry = ARGV[13] == '1'
-local schedule_count = tonumber(ARGV[14])
+local failure_status = ARGV[14]
+local schedule_count = tonumber(ARGV[15])
 
 local function prune_index(index_key)
   local members = redis.call('ZRANGE', index_key, 0, -1)
@@ -89,7 +90,7 @@ end
 local cooldown_ms = 0
 if schedule_count > 0 then
   local schedule_index = math.min(step, schedule_count)
-  cooldown_ms = tonumber(ARGV[14 + schedule_index])
+  cooldown_ms = tonumber(ARGV[15 + schedule_index])
 end
 if explicit_retry_ms >= 0 then
   if exact_retry then
@@ -112,6 +113,11 @@ redis.call('HSET', KEYS[1],
   'model_slug', ARGV[11],
   'protocol', ARGV[12]
 )
+if failure_status == '' then
+  redis.call('HDEL', KEYS[1], 'failure_status')
+else
+  redis.call('HSET', KEYS[1], 'failure_status', failure_status)
+end
 redis.call(
   'HDEL', KEYS[1],
   'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',

@@ -278,9 +278,9 @@ impl RequestRouteAttempts {
 pub(super) struct FailureClassSummary {
     pub class: FailureClass,
     pub routes: usize,
-    /// Most common upstream HTTP status physically observed for this class in
-    /// the current request. Pre-existing cooldowns carry no real status, so
-    /// they contribute to `routes` but never to this field.
+    /// Most common upstream HTTP status observed for this class in the
+    /// current request, counting both physical failures and pre-existing
+    /// cooldowns (which now carry the status that caused the cooldown).
     pub upstream_status: Option<u16>,
 }
 
@@ -392,6 +392,7 @@ impl AttemptLedger {
             for failure in self
                 .failures
                 .iter()
+                .chain(self.cooled_candidates.iter())
                 .filter(|failure| failure.class == class)
             {
                 if let Some(status) = failure.upstream_status {

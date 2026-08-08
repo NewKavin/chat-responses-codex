@@ -1220,12 +1220,24 @@ impl AppState {
                 RouteAvailability::Ready(lease) => RouteAvailability::Ready(
                     RouteHealthPermit::new_redis(coordinator.clone(), lease),
                 ),
-                RouteAvailability::Cooling { class, retry_after } => {
-                    RouteAvailability::Cooling { class, retry_after }
-                }
-                RouteAvailability::HalfOpenBusy { class, retry_after } => {
-                    RouteAvailability::HalfOpenBusy { class, retry_after }
-                }
+                RouteAvailability::Cooling {
+                    class,
+                    retry_after,
+                    upstream_status,
+                } => RouteAvailability::Cooling {
+                    class,
+                    retry_after,
+                    upstream_status,
+                },
+                RouteAvailability::HalfOpenBusy {
+                    class,
+                    retry_after,
+                    upstream_status,
+                } => RouteAvailability::HalfOpenBusy {
+                    class,
+                    retry_after,
+                    upstream_status,
+                },
             });
         }
         let availability = self.route_health.lock().await.reserve(route, key);
@@ -1233,12 +1245,24 @@ impl AppState {
             RouteAvailability::Ready(lease) => RouteAvailability::Ready(
                 RouteHealthPermit::new_local(self.route_health.clone(), lease),
             ),
-            RouteAvailability::Cooling { class, retry_after } => {
-                RouteAvailability::Cooling { class, retry_after }
-            }
-            RouteAvailability::HalfOpenBusy { class, retry_after } => {
-                RouteAvailability::HalfOpenBusy { class, retry_after }
-            }
+            RouteAvailability::Cooling {
+                class,
+                retry_after,
+                upstream_status,
+            } => RouteAvailability::Cooling {
+                class,
+                retry_after,
+                upstream_status,
+            },
+            RouteAvailability::HalfOpenBusy {
+                class,
+                retry_after,
+                upstream_status,
+            } => RouteAvailability::HalfOpenBusy {
+                class,
+                retry_after,
+                upstream_status,
+            },
         })
     }
 

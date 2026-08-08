@@ -11,6 +11,7 @@ local streak_reset_ms = tonumber(ARGV[8])
 local ttl_seconds = tonumber(ARGV[9])
 local global_capacity = tonumber(ARGV[10])
 local upstream_capacity = tonumber(ARGV[11])
+local failure_status = ARGV[16]
 
 local committed_result = redis.call('GET', KEYS[8])
 if committed_result then
@@ -25,7 +26,7 @@ local function commit_result(result)
   return result
 end
 
-local cursor = 16
+local cursor = 17
 local route_schedule_count = tonumber(ARGV[cursor])
 cursor = cursor + 1
 local route_schedule = {}
@@ -177,6 +178,11 @@ local function observe(
     'model_slug', model_slug,
     'protocol', protocol
   )
+  if failure_status == '' then
+    redis.call('HDEL', state_key, 'failure_status')
+  else
+    redis.call('HSET', state_key, 'failure_status', failure_status)
+  end
   redis.call(
     'HDEL', state_key,
     'half_open_lease', 'half_open_generation', 'half_open_expires_at_ms',
