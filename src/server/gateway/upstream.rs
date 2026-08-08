@@ -6,20 +6,13 @@ use crate::capabilities::{
 };
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use crate::protocol::image_adapter::ImageDialect;
-use crate::upstream_feedback::{classify_upstream_response, UpstreamFeedbackInput};
+use crate::upstream_feedback::{
+    classify_upstream_response, UpstreamFeedbackInput, UpstreamResponseSemantic,
+};
 use std::collections::BTreeSet;
 
 const GATEWAY_CLAUDE_METADATA_KEY: &str = "_gateway_claude";
 const GATEWAY_CLAUDE_THINKING_KEY: &str = "_gateway_claude_thinking";
-
-pub(super) fn is_context_limit_error(error_text: &str) -> bool {
-    let normalized = error_text.to_ascii_lowercase();
-    normalized.contains("request exceeds limit")
-        || normalized.contains("exceeded by")
-        || normalized.contains("context length")
-        || normalized.contains("context window")
-        || normalized.contains("token limit")
-}
 
 pub(super) fn parse_u16_code(value: &Value) -> Option<u16> {
     if let Some(code) = value.as_u64().and_then(|code| u16::try_from(code).ok()) {
@@ -2028,9 +2021,7 @@ pub(super) async fn send_to_upstream(
             .await;
         }
 
-        // Only a bad-request response can enter the legacy context-cap retry.
-        // Auth, quota, conflict, and server failures keep their original category.
-        if status == StatusCode::BAD_REQUEST && is_context_limit_error(&error_text) {
+        if classified_feedback.semantic == UpstreamResponseSemantic::ExplicitContextOverflow {
             if !stream_only_recovery.consumed && !context_retry_attempted {
                 if let Some((cap_field, current_cap, reduced_cap)) =
                     halve_generation_cap_for_context_retry(&mut upstream_body)

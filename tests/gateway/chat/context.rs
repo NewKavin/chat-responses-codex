@@ -260,6 +260,260 @@ async fn context_limit_error_without_adjustable_token_cap_returns_bad_request() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn explicit_context_wrappers_do_not_cool_route() {
+    with_proxy_env_cleared(|| async move {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let directory = tempdir().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let attempts_for_server = attempts.clone();
+            let upstream_app = Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let attempts = attempts_for_server.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        (
+                            status,
+                            axum::Json(json!({
+                                "error": {
+                                    "code": "context_length_exceeded",
+                                    "message": "maximum context length exceeded"
+                                }
+                            })),
+                        )
+                    }
+                }),
+            );
+            let upstream_server = tokio::spawn(async move {
+                axum::serve(listener, upstream_app).await.unwrap();
+            });
+
+            let downstream_key = generate_downstream_key("gw");
+            let upstream = UpstreamConfig {
+                id: format!("context-wrapper-{}", status.as_u16()),
+                name: format!("context wrapper {}", status.as_u16()),
+                base_url: format!("http://{address}"),
+                api_key: "context-wrapper-secret".into(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4.1-mini".into()],
+                active: true,
+                ..UpstreamConfig::default()
+            };
+            let state = AppState::new(
+                PersistedState {
+                    upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                    downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                        id: format!("down-context-wrapper-{}", status.as_u16()),
+                        name: "context wrapper test".into(),
+                        hash: downstream_key.hash.clone(),
+                        plaintext_key: Some(downstream_key.plaintext.clone()),
+                        plaintext_key_prefix: None,
+                        model_allowlist: vec!["gpt-4.1-mini".into()],
+                        rate_limit_enabled: false,
+                        per_minute_limit: 60,
+                        max_concurrency: 10,
+                        daily_token_limit: None,
+                        monthly_token_limit: None,
+                        input_token_price_per_million_cents: None,
+                        output_token_price_per_million_cents: None,
+                        daily_cost_limit_cents: None,
+                        request_quota_window_hours: None,
+                        request_quota_requests: None,
+                        ip_allowlist: vec![],
+                        expires_at: None,
+                        active: true,
+                        billing_mode: "request".into(),
+                    }]),
+                    usage_logs: vec![],
+                    announcement: None,
+                    global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+                },
+                directory.path().join("state.json"),
+                AppConfig {
+                    upstream_same_route_retry_enabled: false,
+                    upstream_route_exhaustion_retry_max_wait_ms: 0,
+                    ..AppConfig::default()
+                },
+            );
+            let route = chat_responses_codex::state::RouteHealthKey {
+                upstream_id: upstream.id.clone(),
+                key_fingerprint: upstream_model_key_fingerprint(&upstream, "gpt-4.1-mini"),
+                runtime_model_slug: "gpt-4.1-mini".into(),
+                protocol: WireProtocol::ChatCompletions,
+            };
+            let response = build_router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header(
+                            header::AUTHORIZATION,
+                            format!("Bearer {}", downstream_key.plaintext),
+                        )
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "model": "gpt-4.1-mini",
+                                "max_tokens": 120,
+                                "messages": [{"role": "user", "content": "Hello"}]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "status={status}"
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let error: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                error["error"]["code"], "upstream_context_limit",
+                "status={status}"
+            );
+            assert!(attempts.load(Ordering::SeqCst) <= 2, "status={status}");
+            assert!(
+                state.route_health_snapshot(&route).await.unwrap().is_none(),
+                "status={status}"
+            );
+
+            upstream_server.abort();
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generic_503_remains_bounded_transient_failure() {
+    with_proxy_env_cleared(|| async move {
+        let directory = tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_bodies_for_server = seen_bodies.clone();
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let seen_bodies = seen_bodies_for_server.clone();
+                async move {
+                    let (_, body) = request.into_parts();
+                    let body = to_bytes(body, usize::MAX).await.unwrap();
+                    seen_bodies
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).unwrap());
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(json!({"error": {"message": "server busy"}})),
+                    )
+                }
+            }),
+        );
+        let upstream_server = tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                    id: "generic-503-upstream".into(),
+                    name: "generic 503 upstream".into(),
+                    base_url: format!("http://{address}"),
+                    api_key: "generic-503-secret".into(),
+                    protocol: UpstreamProtocol::ChatCompletions,
+                    protocols: vec![UpstreamProtocol::ChatCompletions],
+                    supported_models: vec!["gpt-4.1-mini".into()],
+                    active: true,
+                    ..UpstreamConfig::default()
+                }]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                    id: "down-generic-503".into(),
+                    name: "generic 503 test".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    rate_limit_enabled: false,
+                    per_minute_limit: 60,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    input_token_price_per_million_cents: None,
+                    output_token_price_per_million_cents: None,
+                    daily_cost_limit_cents: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                    billing_mode: "request".into(),
+                }]),
+                usage_logs: vec![],
+                announcement: None,
+                global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            },
+            directory.path().join("state.json"),
+            AppConfig {
+                upstream_same_route_retry_enabled: true,
+                upstream_route_exhaustion_retry_enabled: false,
+                ..AppConfig::default()
+            },
+        );
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "gpt-4.1-mini",
+                            "max_tokens": 120,
+                            "messages": [{"role": "user", "content": "Hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert!(matches!(
+            error["error"]["code"].as_str(),
+            Some("upstream_routes_exhausted" | "upstream_temporary_unavailable")
+        ));
+        let seen = seen_bodies.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen.len() <= 2);
+        assert!(seen.iter().all(|body| body == &seen[0]));
+        assert!(seen.iter().all(|body| body["max_tokens"] == 120));
+
+        upstream_server.abort();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() {
     with_proxy_env_cleared(|| async move {
         let capture = Arc::new(Mutex::new(RequestCapture::default()));

@@ -816,9 +816,9 @@ impl GatewayError {
                     Some(FailureClass::FeatureUnsupported)
                 } else if category == "upstream_protocol_unsupported" {
                     Some(FailureClass::ProtocolUnsupported)
-                } else if category == "upstream_request_rejected"
-                    || category == "upstream_context_limit"
-                {
+                } else if category == "upstream_context_limit" {
+                    None
+                } else if category == "upstream_request_rejected" {
                     Some(FailureClass::RequestRejected)
                 } else if category == "upstream_rate_limited" {
                     Some(FailureClass::RateLimited)
