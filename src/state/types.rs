@@ -126,6 +126,8 @@ pub struct AppConfig {
     pub capability_probe_queue_capacity: usize,
     pub capability_probe_request_timeout_seconds: u64,
     pub automatic_capability_probes_enabled: bool,
+    #[serde(default)]
+    pub capability_policy_bootstrap_on_zero: bool,
     pub admin_logs_page_size_max: usize,
     pub upstream_http_pool_max_idle_per_host: usize,
     pub upstream_user_agent: String,
@@ -217,6 +219,7 @@ impl Default for AppConfig {
             capability_probe_queue_capacity: 256,
             capability_probe_request_timeout_seconds: 20,
             automatic_capability_probes_enabled: false,
+            capability_policy_bootstrap_on_zero: false,
             admin_logs_page_size_max: 200,
             upstream_http_pool_max_idle_per_host: 32,
             upstream_user_agent: "codex/0.144.6".into(),

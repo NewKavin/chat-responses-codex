@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .max(1),
         automatic_capability_probes_enabled: env_bool("AUTOMATIC_CAPABILITY_PROBES_ENABLED", false),
+        capability_policy_bootstrap_on_zero: env_bool("CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO", false),
         admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
         upstream_http_pool_max_idle_per_host: env_usize("UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST", 32)
             .max(8),

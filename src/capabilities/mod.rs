@@ -1,3 +1,4 @@
+mod bootstrap;
 mod policy;
 mod probe_queue;
 mod profile;
@@ -5,6 +6,7 @@ mod resolver;
 mod runtime_hints;
 mod types;
 
+pub use bootstrap::deployment_capability_configuration;
 pub use policy::{
     is_sensitive_url, sanitize_sensitive_urls, CapabilityPolicyError,
     CompiledCapabilityConfiguration, CompiledExpectation,

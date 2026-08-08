@@ -4098,13 +4098,20 @@ impl AppState {
         let _guard = self.capability_update_lock.lock().await;
         let migrated =
             crate::capabilities::sanitize_sensitive_urls(&mut capability_state.configuration);
+        let bootstrapped = self.config.capability_policy_bootstrap_on_zero
+            && capability_state.configuration.revision == 0;
+        if bootstrapped {
+            capability_state.configuration =
+                crate::capabilities::deployment_capability_configuration()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        }
         let compiled = Arc::new(
             capability_state
                 .configuration
                 .compile()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
         );
-        if migrated {
+        if bootstrapped || migrated {
             self.config_store
                 .persist_capability_configuration(&capability_state.configuration)
                 .await?;

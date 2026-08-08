@@ -40,6 +40,88 @@ fn blocker_probe_batch() -> ProbeJobBatch {
 }
 
 #[tokio::test]
+async fn enabled_deployment_bootstrap_replaces_only_revision_zero() {
+    async fn write_capability_state(
+        state_path: &std::path::Path,
+        configuration: CapabilityConfiguration,
+    ) {
+        let document = CapabilityStateDocument {
+            configuration,
+            profiles: Default::default(),
+        };
+        let sidecar = state_path.with_file_name(format!(
+            "{}.capabilities.json",
+            state_path.file_name().unwrap().to_string_lossy()
+        ));
+        tokio::fs::write(sidecar, serde_json::to_vec_pretty(&document).unwrap())
+            .await
+            .unwrap();
+    }
+
+    let zero_dir = tempdir().unwrap();
+    let zero_path = zero_dir.path().join("state.json");
+    write_capability_state(&zero_path, CapabilityConfiguration::default()).await;
+    let zero = AppState::load_from_path(
+        &zero_path,
+        AppConfig {
+            capability_policy_bootstrap_on_zero: true,
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let bootstrapped = zero.capability_snapshot();
+    assert!(bootstrapped.configuration.source().revision > 0);
+    assert!(!bootstrapped.configuration.source().policies.is_empty());
+    let persisted: CapabilityStateDocument = serde_json::from_slice(
+        &tokio::fs::read(zero_path.with_file_name("state.json.capabilities.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        persisted.configuration,
+        *bootstrapped.configuration.source()
+    );
+
+    let custom_dir = tempdir().unwrap();
+    let custom_path = custom_dir.path().join("state.json");
+    let custom = CapabilityConfiguration {
+        revision: 88,
+        ..CapabilityConfiguration::default()
+    };
+    write_capability_state(&custom_path, custom.clone()).await;
+    let custom_sidecar = custom_path.with_file_name("state.json.capabilities.json");
+    let custom_bytes = tokio::fs::read(&custom_sidecar).await.unwrap();
+    let loaded = AppState::load_from_path(
+        &custom_path,
+        AppConfig {
+            capability_policy_bootstrap_on_zero: true,
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(loaded.capability_snapshot().configuration.source(), &custom);
+    assert_eq!(tokio::fs::read(custom_sidecar).await.unwrap(), custom_bytes);
+
+    let disabled_dir = tempdir().unwrap();
+    let disabled_path = disabled_dir.path().join("state.json");
+    write_capability_state(&disabled_path, CapabilityConfiguration::default()).await;
+    let disabled = AppState::load_from_path(&disabled_path, AppConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        disabled
+            .capability_snapshot()
+            .configuration
+            .source()
+            .revision,
+        0
+    );
+}
+
+#[tokio::test]
 async fn file_backend_keeps_capabilities_out_of_main_state() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("gateway-state.json");

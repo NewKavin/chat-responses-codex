@@ -77,6 +77,8 @@ services:
       UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}
       # Automatic capability probes send real inference requests and consume model tokens.
       AUTOMATIC_CAPABILITY_PROBES_ENABLED: ${AUTOMATIC_CAPABILITY_PROBES_ENABLED:-false}
+      # Only revision zero is replaced; an operator-managed nonzero policy is preserved.
+      CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO: ${CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO:-true}
       UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS: ${UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS:-30}
       # UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.
       UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS: ${UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS:-300}
