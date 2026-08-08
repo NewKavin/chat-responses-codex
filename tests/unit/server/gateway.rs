@@ -728,6 +728,139 @@ async fn probe_reservation_failure_requeues_before_retrying_the_account() {
 }
 
 #[tokio::test]
+async fn reservation_capacity_rejection_is_concurrency_exhaustion_not_bad_gateway() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits_for_handler = hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = hits_for_handler.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({
+                    "id": "chatcmpl-reservation-capacity",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "unit-probe-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "unexpected"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = crate::keys::generate_downstream_key("gw");
+    let upstream = UpstreamConfig {
+        id: "up-reservation-capacity".into(),
+        name: "reservation capacity".into(),
+        base_url: format!("http://{address}"),
+        api_key: "reservation-capacity-secret".into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["unit-probe-model".into()],
+        active: true,
+        ..Default::default()
+    };
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream]),
+            downstreams: Arc::new(vec![crate::state::DownstreamConfig {
+                id: "down-reservation-capacity".into(),
+                name: "reservation capacity client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["unit-probe-model".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 0,
+                max_concurrency: 2,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            // No retry rounds: the reservation stays rejected so the terminal
+            // error is deterministic.
+            upstream_route_exhaustion_retry_enabled: false,
+            ..AppConfig::default()
+        },
+    );
+    install_upstream_reservation_failure_test_hook("up-reservation-capacity".to_string());
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        build_router(state.clone()).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "unit-probe-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("capacity rejection must resolve within the timeout")
+    .unwrap();
+
+    // A local concurrency admission rejection must never surface as an
+    // upstream 502 "invalid response": the upstream was never called.
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["error"]["code"], "upstream_routes_exhausted");
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("upstream concurrency limit saturated"),
+        "message should name concurrency saturation, got: {message}"
+    );
+    assert!(
+        !message.contains("upstream_invalid_response"),
+        "message must not claim an invalid upstream response: {message}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "upstream must never be called"
+    );
+}
+
+#[tokio::test]
 async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
     let directory = tempdir().unwrap();
     let downstream = crate::state::DownstreamConfig {

@@ -5141,7 +5141,7 @@ pub struct UpstreamAdmissionError {
 }
 
 impl UpstreamAdmissionError {
-    fn new(message: String, retry_after_seconds: u64) -> Self {
+    pub fn new(message: String, retry_after_seconds: u64) -> Self {
         Self {
             message,
             retry_after_seconds: retry_after_seconds.max(1),

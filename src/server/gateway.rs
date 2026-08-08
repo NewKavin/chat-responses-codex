@@ -21,8 +21,8 @@ use crate::state::{
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, RuntimeCoordinationError, StreamDiagnostics, UpstreamConfig,
-    UpstreamRequestLease, UsageLog,
+    RouteSetAggregateKey, RuntimeCoordinationError, StreamDiagnostics, UpstreamAdmissionError,
+    UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
@@ -2804,7 +2804,7 @@ static PRE_HEADER_PREPARATION_TEST_GATE: Mutex<Option<PreHeaderPreparationTestGa
     Mutex::new(None);
 
 #[cfg(test)]
-static UPSTREAM_RESERVATION_FAILURE_TEST_UPSTREAM: Mutex<Option<String>> = Mutex::new(None);
+static UPSTREAM_RESERVATION_FAILURE_TEST_UPSTREAM: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 fn install_pre_header_preparation_test_gate() -> (
@@ -2832,11 +2832,7 @@ fn install_upstream_reservation_failure_test_hook(upstream_id: impl Into<String>
     let mut failure = UPSTREAM_RESERVATION_FAILURE_TEST_UPSTREAM
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert!(
-        failure.is_none(),
-        "upstream reservation failure already armed"
-    );
-    *failure = Some(upstream_id.into());
+    failure.push(upstream_id.into());
 }
 
 #[cfg(test)]
@@ -2844,11 +2840,12 @@ fn take_upstream_reservation_failure_test_hook(upstream_id: &str) -> bool {
     let mut failure = UPSTREAM_RESERVATION_FAILURE_TEST_UPSTREAM
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if failure.as_deref() != Some(upstream_id) {
-        return false;
+    if let Some(index) = failure.iter().position(|id| id == upstream_id) {
+        failure.swap_remove(index);
+        true
+    } else {
+        false
     }
-    failure.take();
-    true
 }
 
 #[cfg(test)]
@@ -5184,23 +5181,28 @@ async fn process_gateway_request_inner(
                         let upstream_request_lease = {
                             #[cfg(test)]
                             if take_upstream_reservation_failure_test_hook(&upstream.id) {
-                                Err(false)
+                                Err(UpstreamAdmissionError::new(
+                                    "upstream request concurrency capacity is full".into(),
+                                    1,
+                                ))
                             } else {
-                                state
-                                    .try_reserve_upstream_request(&upstream, model)
-                                    .await
-                                    .map_err(|error| error.is_runtime_coordination_unavailable())
+                                state.try_reserve_upstream_request(&upstream, model).await
                             }
                             #[cfg(not(test))]
-                            state
-                                .try_reserve_upstream_request(&upstream, model)
-                                .await
-                                .map_err(|error| error.is_runtime_coordination_unavailable())
+                            state.try_reserve_upstream_request(&upstream, model).await
                         };
                         let upstream_request_lease = match upstream_request_lease {
                             Ok(lease) => lease,
-                            Err(runtime_coordination_unavailable) => {
-                                if !runtime_coordination_unavailable && account_probe.is_some() {
+                            Err(admission_error) => {
+                                if admission_error.is_runtime_coordination_unavailable() {
+                                    finish_route_health_permit(
+                                        &route_health_permit,
+                                        RouteOutcome::Cancelled,
+                                    )
+                                    .await?;
+                                    return Err(runtime_coordination_unavailable_gateway_error());
+                                }
+                                if account_probe.is_some() {
                                     account_recovery
                                         .complete_attempt(
                                             &account_key,
@@ -5209,17 +5211,38 @@ async fn process_gateway_request_inner(
                                         .await?;
                                     continue;
                                 }
+                                // Local concurrency admission rejection: the
+                                // upstream was never called, so this must be
+                                // classified as ConcurrencySaturated (429/503
+                                // family with retry-after) instead of a
+                                // misleading 502 "upstream_invalid_response".
+                                let retry_after = Duration::from_secs(
+                                    admission_error.retry_after_seconds.max(1),
+                                );
                                 finish_route_health_permit(
                                     &route_health_permit,
-                                    RouteOutcome::Cancelled,
+                                    RouteOutcome::RouteFailureWithRetry {
+                                        class: FailureClass::ConcurrencySaturated,
+                                        retry_after,
+                                    },
                                 )
                                 .await?;
-                                if runtime_coordination_unavailable {
-                                    return Err(runtime_coordination_unavailable_gateway_error());
-                                }
-                                last_error = Some(GatewayError::Upstream(
-                                    "failed to reserve upstream request capacity".into(),
-                                ));
+                                record_cooled_route_attempt(
+                                    &request_route_attempts,
+                                    &upstream,
+                                    &key_fingerprint,
+                                    &runtime_model_slug,
+                                    protocol,
+                                    FailureClass::ConcurrencySaturated,
+                                    retry_after,
+                                );
+                                last_error = Some(GatewayError::ConcurrencyFull {
+                                    message:
+                                        "upstream request concurrency capacity is full".into(),
+                                    retry_after: Some(retry_after),
+                                });
+                                last_failure_upstream =
+                                    Some((upstream.id.clone(), Some(upstream.name.clone())));
                                 break;
                             }
                         };
