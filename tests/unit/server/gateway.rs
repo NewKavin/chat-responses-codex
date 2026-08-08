@@ -634,6 +634,234 @@ async fn stream_completion_fixture(
 }
 
 #[tokio::test]
+async fn local_upstream_concurrency_is_scoped_per_account() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let upstream = UpstreamConfig {
+        id: "shared-upstream".into(),
+        max_concurrency: 1,
+        active: true,
+        ..Default::default()
+    };
+    let fingerprint_a = crate::keys::upstream_key_fingerprint(&upstream.id, "account-a");
+    let fingerprint_b = crate::keys::upstream_key_fingerprint(&upstream.id, "account-b");
+
+    let lease_a = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_a, "model-a")
+        .await
+        .expect("account A should reserve its first slot");
+    let lease_b = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_b, "model-a")
+        .await
+        .expect("account B should have an independent slot");
+    let same_account_rejection = state
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_a, "model-a")
+        .await
+        .expect_err("a second request on account A must exceed its limit");
+
+    assert_eq!(same_account_rejection.retry_after_seconds, 1);
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .expect("shared upstream runtime snapshot")
+            .in_flight,
+        2,
+    );
+
+    state.release_upstream_request(lease_a).await.unwrap();
+    state.release_upstream_request(lease_b).await.unwrap();
+}
+
+#[tokio::test]
+async fn local_upstream_hedge_concurrency_is_scoped_per_account() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let upstream = UpstreamConfig {
+        id: "shared-hedge-upstream".into(),
+        max_concurrency: 1,
+        requests_per_minute: 100,
+        request_quota_requests: 100,
+        active: true,
+        ..Default::default()
+    };
+    let fingerprint_a = crate::keys::upstream_key_fingerprint(&upstream.id, "account-a");
+    let fingerprint_b = crate::keys::upstream_key_fingerprint(&upstream.id, "account-b");
+
+    let lease_a = state
+        .try_reserve_upstream_account_hedge(&upstream, &fingerprint_a, "model-a")
+        .await
+        .expect("account A should reserve its first hedge slot");
+    let lease_b = state
+        .try_reserve_upstream_account_hedge(&upstream, &fingerprint_b, "model-a")
+        .await
+        .expect("account B should have an independent hedge slot");
+    let rejection = state
+        .try_reserve_upstream_account_hedge(&upstream, &fingerprint_a, "model-a")
+        .await
+        .expect_err("a second hedge on account A must exceed its limit");
+    assert_eq!(
+        rejection.reason,
+        crate::state::UpstreamAdmissionRejectionReason::LocalConcurrency,
+    );
+
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .expect("shared hedge upstream runtime snapshot")
+            .in_flight,
+        2,
+    );
+    state.release_upstream_request(lease_a).await.unwrap();
+    state.release_upstream_request(lease_b).await.unwrap();
+}
+
+#[tokio::test]
+async fn gateway_uses_independent_local_slots_for_keys_on_one_upstream() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits_for_handler = hits.clone();
+    let gate_for_handler = gate.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_body: String| {
+            let hits = hits_for_handler.clone();
+            let gate = gate_for_handler.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                let _permit = gate.acquire().await.unwrap();
+                axum::Json(json!({
+                    "id": "chatcmpl-independent-account-slots",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "unit-account-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let downstream_key = crate::keys::generate_downstream_key("gw");
+    let upstream = UpstreamConfig {
+        id: "shared-key-upstream".into(),
+        name: "shared key upstream".into(),
+        base_url: format!("http://{address}"),
+        api_key: "account-a".into(),
+        api_keys: vec!["account-b".into()],
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["unit-account-model".into()],
+        max_concurrency: 1,
+        active: true,
+        ..Default::default()
+    };
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream]),
+            downstreams: Arc::new(vec![crate::state::DownstreamConfig {
+                id: "down-independent-account-slots".into(),
+                name: "independent account slots client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["unit-account-model".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 0,
+                max_concurrency: 2,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..Default::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 0,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
+            upstream_route_exhaustion_retry_max_rounds: 1,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state);
+    let request = |prompt: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "unit-account-model",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = tokio::spawn(app.clone().oneshot(request("first")));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while hits.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first account request should reach the upstream");
+    let second = tokio::spawn(app.oneshot(request("second")));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while hits.load(Ordering::SeqCst) < 2 && !second.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second request should either use account B or fail admission");
+
+    gate.add_permits(2);
+    let first_status = first.await.unwrap().unwrap().status();
+    let second_status = second.await.unwrap().unwrap().status();
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn probe_reservation_failure_requeues_before_retrying_the_account() {
     let hits = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -760,7 +988,7 @@ async fn probe_reservation_failure_requeues_before_retrying_the_account() {
 }
 
 #[tokio::test]
-async fn reservation_capacity_rejection_is_concurrency_exhaustion_not_bad_gateway() {
+async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route() {
     let hits = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -802,6 +1030,12 @@ async fn reservation_capacity_rejection_is_concurrency_exhaustion_not_bad_gatewa
         active: true,
         ..Default::default()
     };
+    let route = RouteHealthKey {
+        upstream_id: upstream.id.clone(),
+        key_fingerprint: route_key_fingerprint(&upstream, &upstream.api_key),
+        runtime_model_slug: "unit-probe-model".into(),
+        protocol: WireProtocol::ChatCompletions,
+    };
     let directory = tempdir().unwrap();
     let state = AppState::new(
         PersistedState {
@@ -833,6 +1067,8 @@ async fn reservation_capacity_rejection_is_concurrency_exhaustion_not_bad_gatewa
         directory.path().join("state.json"),
         AppConfig {
             upstream_hedge_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 0,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
             // No retry rounds: the reservation stays rejected so the terminal
             // error is deterministic.
             upstream_route_exhaustion_retry_enabled: false,
@@ -870,10 +1106,8 @@ async fn reservation_capacity_rejection_is_concurrency_exhaustion_not_bad_gatewa
     // A local concurrency admission rejection must never surface as an
     // upstream 502 "invalid response": the upstream was never called.
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let body: Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["error"]["code"], "upstream_routes_exhausted");
     assert_eq!(body["error"]["type"], "rate_limit_error");
     let message = body["error"]["message"].as_str().unwrap_or_default();
@@ -889,6 +1123,10 @@ async fn reservation_capacity_rejection_is_concurrency_exhaustion_not_bad_gatewa
         hits.load(Ordering::SeqCst),
         0,
         "upstream must never be called"
+    );
+    assert!(
+        state.route_health_snapshot(&route).await.unwrap().is_none(),
+        "local admission must not create provider route health"
     );
 }
 

@@ -1971,7 +1971,11 @@ with the exact result as the nonce string.";
         let mut delay = Duration::from_millis(100);
         for attempt in 0..3 {
             match state
-                .try_reserve_upstream_request(upstream, &self.runtime_model_slug)
+                .try_reserve_upstream_account_request(
+                    upstream,
+                    &upstream_key_fingerprint(&upstream.id, &self.api_key),
+                    &self.runtime_model_slug,
+                )
                 .await
             {
                 Ok(lease) => {
@@ -1980,28 +1984,35 @@ with the exact result as the nonce string.";
                         lease,
                     })));
                 }
-                Err(error) if error.is_runtime_coordination_unavailable() => {
-                    return Err(io::Error::other(RuntimeCoordinationError));
-                }
-                Err(error) if attempt < 2 => {
-                    tracing::warn!(
-                        upstream_id = %upstream.id,
-                        error = %error.message,
-                        "capability probe request reservation rejected, retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                    delay *= 2;
-                }
                 Err(error) => {
-                    tracing::warn!(
-                        upstream_id = %upstream.id,
-                        error = %error.message,
-                        "capability probe request reservation still rejected, skipping case"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "upstream capacity reservation rejected",
-                    ));
+                    match error.reason {
+                        crate::state::UpstreamAdmissionRejectionReason::RuntimeCoordinationUnavailable => {
+                            return Err(io::Error::other(RuntimeCoordinationError));
+                        }
+                        crate::state::UpstreamAdmissionRejectionReason::LocalConcurrency
+                        | crate::state::UpstreamAdmissionRejectionReason::HedgeMinuteQuota
+                        | crate::state::UpstreamAdmissionRejectionReason::HedgeWindowQuota => {
+                            if attempt < 2 {
+                                tracing::warn!(
+                                    upstream_id = %upstream.id,
+                                    error = %error.message,
+                                    "capability probe request reservation rejected, retrying"
+                                );
+                                tokio::time::sleep(delay).await;
+                                delay *= 2;
+                            } else {
+                                tracing::warn!(
+                                    upstream_id = %upstream.id,
+                                    error = %error.message,
+                                    "capability probe request reservation still rejected, skipping case"
+                                );
+                                return Err(io::Error::new(
+                                    io::ErrorKind::WouldBlock,
+                                    "upstream capacity reservation rejected",
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }

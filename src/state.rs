@@ -353,7 +353,7 @@ impl DownstreamConcurrencyLease {
 
 #[derive(Clone)]
 pub struct UpstreamRequestLease {
-    upstream_id: String,
+    account: AccountConcurrencyKey,
     lease_id: String,
     release_state: Arc<AtomicU8>,
 }
@@ -362,14 +362,14 @@ impl std::fmt::Debug for UpstreamRequestLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("UpstreamRequestLease")
-            .field("upstream_id", &self.upstream_id)
+            .field("upstream_id", &self.account.upstream_id)
             .finish_non_exhaustive()
     }
 }
 
 impl UpstreamRequestLease {
     pub fn upstream_id(&self) -> &str {
-        &self.upstream_id
+        &self.account.upstream_id
     }
 }
 
@@ -2439,17 +2439,30 @@ impl AppState {
     pub async fn try_reserve_upstream_request(
         &self,
         upstream: &UpstreamConfig,
+        model: &str,
+    ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
+        let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+        self.try_reserve_upstream_account_request(upstream, &key_fingerprint, model)
+            .await
+    }
+
+    pub async fn try_reserve_upstream_account_request(
+        &self,
+        upstream: &UpstreamConfig,
+        key_fingerprint: &str,
         _model: &str,
     ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
         // Upstream model-weighted request costs were removed; every request
         // consumes a flat 1.0 quota unit.
         let request_cost = 1.0_f64;
+        let account = AccountConcurrencyKey::new(upstream.id.clone(), key_fingerprint);
 
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let lease_id = Uuid::new_v4().to_string();
             coordinator
                 .reserve_upstream_request(
                     upstream,
+                    &account,
                     request_cost,
                     &Uuid::new_v4().to_string(),
                     &lease_id,
@@ -2457,7 +2470,7 @@ impl AppState {
                 )
                 .await?;
             return Ok(UpstreamRequestLease {
-                upstream_id: upstream.id.clone(),
+                account,
                 lease_id,
                 release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
@@ -2476,14 +2489,21 @@ impl AppState {
             upstream.request_quota_window_seconds(),
         );
 
-        if state.active_leases.len() >= upstream.max_concurrency.max(1) as usize {
+        if state.active_leases.get(&account).map_or(0, HashSet::len)
+            >= upstream.max_concurrency.max(1) as usize
+        {
             return Err(UpstreamAdmissionError::new(
+                UpstreamAdmissionRejectionReason::LocalConcurrency,
                 "upstream request concurrency capacity is full".into(),
                 1,
             ));
         }
         let lease_id = Uuid::new_v4().to_string();
-        state.active_leases.insert(lease_id.clone());
+        state
+            .active_leases
+            .entry(account.clone())
+            .or_default()
+            .insert(lease_id.clone());
         state.minute_events.push_back(QuotaEvent {
             created_at: now,
             cost: request_cost,
@@ -2493,7 +2513,7 @@ impl AppState {
             cost: request_cost,
         });
         Ok(UpstreamRequestLease {
-            upstream_id: upstream.id.clone(),
+            account,
             lease_id,
             release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
         })
@@ -2502,17 +2522,30 @@ impl AppState {
     pub async fn try_reserve_upstream_hedge(
         &self,
         upstream: &UpstreamConfig,
+        model: &str,
+    ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
+        let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+        self.try_reserve_upstream_account_hedge(upstream, &key_fingerprint, model)
+            .await
+    }
+
+    pub async fn try_reserve_upstream_account_hedge(
+        &self,
+        upstream: &UpstreamConfig,
+        key_fingerprint: &str,
         _model: &str,
     ) -> Result<UpstreamRequestLease, UpstreamAdmissionError> {
         // Upstream model-weighted request costs were removed; every request
         // consumes a flat 1.0 quota unit.
         let request_cost = 1.0_f64;
+        let account = AccountConcurrencyKey::new(upstream.id.clone(), key_fingerprint);
 
         if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
             let lease_id = Uuid::new_v4().to_string();
             coordinator
                 .reserve_upstream_request(
                     upstream,
+                    &account,
                     request_cost,
                     &Uuid::new_v4().to_string(),
                     &lease_id,
@@ -2520,7 +2553,7 @@ impl AppState {
                 )
                 .await?;
             return Ok(UpstreamRequestLease {
-                upstream_id: upstream.id.clone(),
+                account,
                 lease_id,
                 release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
             });
@@ -2538,8 +2571,11 @@ impl AppState {
             upstream.request_quota_window_seconds(),
         );
 
-        if state.active_leases.len() >= upstream.max_concurrency.max(1) as usize {
+        if state.active_leases.get(&account).map_or(0, HashSet::len)
+            >= upstream.max_concurrency.max(1) as usize
+        {
             return Err(UpstreamAdmissionError::new(
+                UpstreamAdmissionRejectionReason::LocalConcurrency,
                 "upstream hedge concurrency capacity is full".into(),
                 1,
             ));
@@ -2549,6 +2585,7 @@ impl AppState {
             && minute_cost + request_cost > f64::from(upstream.requests_per_minute)
         {
             return Err(UpstreamAdmissionError::new(
+                UpstreamAdmissionRejectionReason::HedgeMinuteQuota,
                 "upstream hedge minute quota is exhausted".into(),
                 1,
             ));
@@ -2558,19 +2595,27 @@ impl AppState {
             && window_cost + request_cost > f64::from(upstream.request_quota_requests)
         {
             return Err(UpstreamAdmissionError::new(
+                UpstreamAdmissionRejectionReason::HedgeWindowQuota,
                 "upstream hedge request quota is exhausted".into(),
                 1,
             ));
         }
 
-        if state.active_leases.len() >= upstream.max_concurrency.max(1) as usize {
+        if state.active_leases.get(&account).map_or(0, HashSet::len)
+            >= upstream.max_concurrency.max(1) as usize
+        {
             return Err(UpstreamAdmissionError::new(
+                UpstreamAdmissionRejectionReason::LocalConcurrency,
                 "upstream request concurrency capacity is full".into(),
                 1,
             ));
         }
         let lease_id = Uuid::new_v4().to_string();
-        state.active_leases.insert(lease_id.clone());
+        state
+            .active_leases
+            .entry(account.clone())
+            .or_default()
+            .insert(lease_id.clone());
         state.minute_events.push_back(QuotaEvent {
             created_at: now,
             cost: request_cost,
@@ -2580,7 +2625,7 @@ impl AppState {
             cost: request_cost,
         });
         Ok(UpstreamRequestLease {
-            upstream_id: upstream.id.clone(),
+            account,
             lease_id,
             release_state: Arc::new(AtomicU8::new(LEASE_RELEASE_ACTIVE)),
         })
@@ -2635,7 +2680,7 @@ impl AppState {
                 (
                     upstream_id.clone(),
                     UpstreamRuntimeSnapshot {
-                        in_flight: state.active_leases.len() as u32,
+                        in_flight: active_upstream_lease_count(state),
                         minute_cost: quota_event_cost(&state.minute_events),
                         five_hour_cost: quota_event_cost(&state.five_hour_events),
                         cooldown_until: state.cooldown_until,
@@ -2655,12 +2700,17 @@ impl AppState {
         let result =
             if let RuntimeCoordinationBackend::Redis(coordinator) = &self.runtime_coordination {
                 coordinator
-                    .release_upstream_lease(&lease.upstream_id, &lease.lease_id)
+                    .release_upstream_lease(&lease.account, &lease.lease_id)
                     .await
             } else {
                 let mut runtime_state = self.upstream_runtime_state.lock().await;
-                if let Some(state) = runtime_state.get_mut(&lease.upstream_id) {
-                    state.active_leases.remove(&lease.lease_id);
+                if let Some(state) = runtime_state.get_mut(&lease.account.upstream_id) {
+                    if let Some(account_leases) = state.active_leases.get_mut(&lease.account) {
+                        account_leases.remove(&lease.lease_id);
+                        if account_leases.is_empty() {
+                            state.active_leases.remove(&lease.account);
+                        }
+                    }
                 }
                 Ok(())
             };
@@ -2807,7 +2857,7 @@ impl AppState {
                 let five_hour_cost = state.five_hour_events.iter().map(|event| event.cost).sum();
 
                 let snapshot = UpstreamRuntimeSnapshotWithFeedback {
-                    in_flight: state.active_leases.len() as u32,
+                    in_flight: active_upstream_lease_count(state),
                     minute_cost,
                     five_hour_cost,
                     cooldown_until: state.cooldown_until,
@@ -5004,12 +5054,21 @@ fn truncate_active_request_user_agent(user_agent: String) -> String {
 
 #[derive(Debug, Clone, Default)]
 struct UpstreamRuntimeState {
-    active_leases: HashSet<String>,
+    active_leases: HashMap<AccountConcurrencyKey, HashSet<String>>,
     minute_events: VecDeque<QuotaEvent>,
     five_hour_events: VecDeque<QuotaEvent>,
     cooldown_until: u64,
     last_feedback_type: Option<String>,
     last_retry_after_seconds: Option<u64>,
+}
+
+fn active_upstream_lease_count(state: &UpstreamRuntimeState) -> u32 {
+    state
+        .active_leases
+        .values()
+        .map(HashSet::len)
+        .sum::<usize>()
+        .min(u32::MAX as usize) as u32
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -5158,19 +5217,31 @@ impl DownstreamAdmissionRejection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamAdmissionRejectionReason {
+    LocalConcurrency,
+    HedgeMinuteQuota,
+    HedgeWindowQuota,
+    RuntimeCoordinationUnavailable,
+}
+
 #[derive(Debug, Clone)]
 pub struct UpstreamAdmissionError {
     pub message: String,
     pub retry_after_seconds: u64,
-    runtime_coordination_unavailable: bool,
+    pub reason: UpstreamAdmissionRejectionReason,
 }
 
 impl UpstreamAdmissionError {
-    pub fn new(message: String, retry_after_seconds: u64) -> Self {
+    pub fn new(
+        reason: UpstreamAdmissionRejectionReason,
+        message: String,
+        retry_after_seconds: u64,
+    ) -> Self {
         Self {
             message,
             retry_after_seconds: retry_after_seconds.max(1),
-            runtime_coordination_unavailable: false,
+            reason,
         }
     }
 
@@ -5178,12 +5249,12 @@ impl UpstreamAdmissionError {
         Self {
             message: "runtime coordination unavailable".into(),
             retry_after_seconds: 1,
-            runtime_coordination_unavailable: true,
+            reason: UpstreamAdmissionRejectionReason::RuntimeCoordinationUnavailable,
         }
     }
 
     pub fn is_runtime_coordination_unavailable(&self) -> bool {
-        self.runtime_coordination_unavailable
+        self.reason == UpstreamAdmissionRejectionReason::RuntimeCoordinationUnavailable
     }
 }
 

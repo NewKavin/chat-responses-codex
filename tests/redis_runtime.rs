@@ -391,6 +391,10 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let token_values_key = format!("{}:replay:token-values", config.redis_key_prefix);
     let downstream_lease_key = format!("{}:replay:downstream-leases", config.redis_key_prefix);
     let upstream_lease_key = format!("{}:replay:upstream-leases", config.redis_key_prefix);
+    let upstream_aggregate_lease_key = format!(
+        "{}:replay:upstream-aggregate-leases",
+        config.redis_key_prefix
+    );
     let upstream_event_key = format!("{}:replay:upstream-events", config.redis_key_prefix);
     let upstream_cost_key = format!("{}:replay:upstream-costs", config.redis_key_prefix);
 
@@ -442,8 +446,9 @@ async fn redis_reserve_replays_preserve_original_scores_and_costs() {
     let upstream_args = vec![
         "EVAL".into(),
         include_str!("../src/state/redis_runtime/upstream_reserve.lua").into(),
-        "3".into(),
+        "4".into(),
         upstream_lease_key.clone(),
+        upstream_aggregate_lease_key,
         upstream_event_key.clone(),
         upstream_cost_key.clone(),
         "upstream-event-id".into(),
@@ -2203,6 +2208,47 @@ async fn redis_main_upstream_request_respects_max_concurrency() {
         .await
         .unwrap();
     second.release_upstream_request(retry).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_upstream_concurrency_is_scoped_per_account() {
+    let config = redis_test_config();
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let mut upstream = redis_test_upstream("redis-per-account-concurrency");
+    upstream.max_concurrency = 1;
+    first.insert_upstream(upstream.clone()).await.unwrap();
+    second.insert_upstream(upstream.clone()).await.unwrap();
+    let fingerprint_a = upstream_key_fingerprint(&upstream.id, "account-a");
+    let fingerprint_b = upstream_key_fingerprint(&upstream.id, "account-b");
+
+    let lease_a = first
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_a, "model-a")
+        .await
+        .expect("account A should reserve its first Redis slot");
+    let lease_b = second
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_b, "model-a")
+        .await
+        .expect("account B should have an independent Redis slot");
+    let same_account_rejection = second
+        .try_reserve_upstream_account_request(&upstream, &fingerprint_a, "model-a")
+        .await
+        .expect_err("a second request on account A must exceed its Redis limit");
+
+    assert_eq!(same_account_rejection.retry_after_seconds, 1);
+    assert_eq!(
+        first
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .expect("shared Redis upstream runtime snapshot")
+            .in_flight,
+        2,
+    );
+
+    first.release_upstream_request(lease_a).await.unwrap();
+    second.release_upstream_request(lease_b).await.unwrap();
 }
 
 #[tokio::test]

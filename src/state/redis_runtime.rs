@@ -1120,19 +1120,24 @@ impl RedisRuntimeCoordinator {
     pub(super) async fn reserve_upstream_request(
         &self,
         upstream: &UpstreamConfig,
+        account: &AccountConcurrencyKey,
         request_cost: f64,
         event_id: &str,
         lease_id: &str,
         hedge: bool,
     ) -> Result<(), UpstreamAdmissionError> {
-        let identity = stable_identity(&upstream.id);
-        let lease_key = self.upstream_key(&identity, "leases");
-        let event_key = self.upstream_key(&identity, "events");
-        let cost_key = self.upstream_key(&identity, "event_costs");
+        let upstream_identity = stable_identity(&upstream.id);
+        let account_identity = account_identity(account);
+        let account_lease_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "leases");
+        let aggregate_lease_key = self.upstream_key(&upstream_identity, "leases");
+        let event_key = self.upstream_key(&upstream_identity, "events");
+        let cost_key = self.upstream_key(&upstream_identity, "event_costs");
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
-                let lease_key = lease_key.clone();
+                let account_lease_key = account_lease_key.clone();
+                let aggregate_lease_key = aggregate_lease_key.clone();
                 let event_key = event_key.clone();
                 let cost_key = cost_key.clone();
                 let event_id = event_id.to_string();
@@ -1142,7 +1147,8 @@ impl RedisRuntimeCoordinator {
                         redis::Script::new(include_str!("redis_runtime/upstream_reserve.lua"));
                     let mut invocation = script.prepare_invoke();
                     invocation
-                        .key(lease_key)
+                        .key(account_lease_key)
+                        .key(aggregate_lease_key)
                         .key(event_key)
                         .key(cost_key)
                         .arg(event_id)
@@ -1201,19 +1207,26 @@ impl RedisRuntimeCoordinator {
 
     pub(super) async fn release_upstream_lease(
         &self,
-        upstream_id: &str,
+        account: &AccountConcurrencyKey,
         lease_id: &str,
     ) -> Result<(), RuntimeCoordinationError> {
-        let identity = stable_identity(upstream_id);
-        let lease_key = self.upstream_key(&identity, "leases");
+        let upstream_identity = stable_identity(&account.upstream_id);
+        let account_identity = account_identity(account);
+        let account_lease_key =
+            self.upstream_account_key(&upstream_identity, &account_identity, "leases");
+        let aggregate_lease_key = self.upstream_key(&upstream_identity, "leases");
         self.retry_coordination_once(|| {
             let mut connection = self.connection();
-            let lease_key = lease_key.clone();
+            let account_lease_key = account_lease_key.clone();
+            let aggregate_lease_key = aggregate_lease_key.clone();
             let lease_id = lease_id.to_string();
             async move {
                 let script = redis::Script::new(include_str!("redis_runtime/lease_release.lua"));
                 let mut invocation = script.prepare_invoke();
-                invocation.key(lease_key).arg(lease_id);
+                invocation
+                    .key(account_lease_key)
+                    .key(aggregate_lease_key)
+                    .arg(lease_id);
                 timeout_coordination(invocation.invoke_async::<i64>(&mut connection))
                     .await
                     .map(|_| ())
@@ -1357,7 +1370,11 @@ impl RedisRuntimeCoordinator {
             .arg(&lease.route.key_fingerprint)
             .arg(&lease.route.runtime_model_slug)
             .arg(wire_protocol_name(lease.route.protocol))
-            .arg(upstream_status.map(|status| status.to_string()).unwrap_or_default())
+            .arg(
+                upstream_status
+                    .map(|status| status.to_string())
+                    .unwrap_or_default(),
+            )
             .arg(route_schedule.len() as u64);
         for cooldown_ms in route_schedule {
             invocation.arg(cooldown_ms);
@@ -1524,7 +1541,11 @@ impl RedisRuntimeCoordinator {
             .arg(model_slug)
             .arg(protocol)
             .arg(if exact_retry { 1 } else { 0 })
-            .arg(upstream_status.map(|status| status.to_string()).unwrap_or_default())
+            .arg(
+                upstream_status
+                    .map(|status| status.to_string())
+                    .unwrap_or_default(),
+            )
             .arg(schedule.len() as u64);
         for cooldown_ms in schedule {
             invocation.arg(*cooldown_ms);
@@ -1909,6 +1930,18 @@ impl RedisRuntimeCoordinator {
         format!("{}:v1:upstream:{{{identity}}}:{suffix}", self.key_prefix)
     }
 
+    fn upstream_account_key(
+        &self,
+        upstream_identity: &str,
+        account_identity: &str,
+        suffix: &str,
+    ) -> String {
+        format!(
+            "{}:v1:upstream:{{{upstream_identity}}}:account:{account_identity}:{suffix}",
+            self.key_prefix
+        )
+    }
+
     fn account_key(&self, identity: &str, suffix: &str) -> String {
         format!("{}:v1:account:{{{identity}}}:{suffix}", self.key_prefix)
     }
@@ -2232,9 +2265,7 @@ fn health_snapshot_recovery(snapshot: &HealthStateSnapshot) -> Option<RouteRecov
     }
 }
 
-fn parse_optional_status(
-    value: Option<&String>,
-) -> Result<Option<u16>, RuntimeCoordinationError> {
+fn parse_optional_status(value: Option<&String>) -> Result<Option<u16>, RuntimeCoordinationError> {
     match value.map(String::as_str) {
         None | Some("") => Ok(None),
         Some(value) => value
@@ -2299,9 +2330,12 @@ fn route_outcome_parts(
             upstream_status,
         ),
         RouteOutcome::KeyFailure(class) => ("key_failure", Some(class), None, None),
-        RouteOutcome::KeyFailureWithRetry { class, retry_after } => {
-            ("key_failure_with_retry", Some(class), Some(retry_after), None)
-        }
+        RouteOutcome::KeyFailureWithRetry { class, retry_after } => (
+            "key_failure_with_retry",
+            Some(class),
+            Some(retry_after),
+            None,
+        ),
         RouteOutcome::UncertainRouteFailure(class) => {
             ("uncertain_route_failure", Some(class), None, None)
         }
@@ -2408,9 +2442,24 @@ mod tests {
             ],
             vec!["1".into(), "transient_server".into()],
             vec!["1".into(), "transient_server".into(), "1000".into()],
-            vec!["1".into(), "not_a_class".into(), "1000".into(), "503".into()],
-            vec!["1".into(), "transient_server".into(), "invalid".into(), "503".into()],
-            vec!["1".into(), "transient_server".into(), "1000".into(), "65536".into()],
+            vec![
+                "1".into(),
+                "not_a_class".into(),
+                "1000".into(),
+                "503".into(),
+            ],
+            vec![
+                "1".into(),
+                "transient_server".into(),
+                "invalid".into(),
+                "503".into(),
+            ],
+            vec![
+                "1".into(),
+                "transient_server".into(),
+                "1000".into(),
+                "65536".into(),
+            ],
         ] {
             assert!(parse_route_health_reservation(reply, &route, &key, "lease").is_err());
         }
@@ -2559,16 +2608,19 @@ fn parse_upstream_reservation(result: Vec<String>) -> Result<(), UpstreamAdmissi
         .unwrap_or(1)
         .max(1);
     match result.first().map(String::as_str) {
-        Some("0") => Ok(()),
-        Some("1") => Err(UpstreamAdmissionError::new(
+        Some("0") if result.len() == 1 => Ok(()),
+        Some("1") if result.len() == 2 => Err(UpstreamAdmissionError::new(
+            super::UpstreamAdmissionRejectionReason::LocalConcurrency,
             "upstream hedge concurrency capacity is full".into(),
             retry_after_seconds,
         )),
-        Some("2") => Err(UpstreamAdmissionError::new(
+        Some("2") if result.len() == 2 => Err(UpstreamAdmissionError::new(
+            super::UpstreamAdmissionRejectionReason::HedgeMinuteQuota,
             "upstream hedge minute quota is exhausted".into(),
             retry_after_seconds,
         )),
-        Some("3") => Err(UpstreamAdmissionError::new(
+        Some("3") if result.len() == 2 => Err(UpstreamAdmissionError::new(
+            super::UpstreamAdmissionRejectionReason::HedgeWindowQuota,
             "upstream hedge request quota is exhausted".into(),
             retry_after_seconds,
         )),

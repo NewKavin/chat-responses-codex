@@ -721,20 +721,29 @@ fn send_route_hedge_attempt(
         };
         let upstream_request_lease = match context
             .state
-            .try_reserve_upstream_hedge(&candidate.upstream, &context.model)
+            .try_reserve_upstream_account_hedge(
+                &candidate.upstream,
+                &candidate.key_fingerprint,
+                &context.model,
+            )
             .await
         {
             Ok(lease) => lease,
             Err(error) => {
                 super::finish_route_health_permit(&route_health_permit, RouteOutcome::Cancelled)
                     .await?;
-                return Err(if error.is_runtime_coordination_unavailable() {
-                    super::runtime_coordination_unavailable_gateway_error()
-                } else {
-                    GatewayError::upstream_temporary_unavailable(
+                return Err(match error.reason {
+                    crate::state::UpstreamAdmissionRejectionReason::RuntimeCoordinationUnavailable => {
+                        super::runtime_coordination_unavailable_gateway_error()
+                    }
+                    crate::state::UpstreamAdmissionRejectionReason::LocalConcurrency
+                    | crate::state::UpstreamAdmissionRejectionReason::HedgeMinuteQuota
+                    | crate::state::UpstreamAdmissionRejectionReason::HedgeWindowQuota => {
+                        GatewayError::upstream_temporary_unavailable(
                         error.message,
                         "upstream_hedge_capacity_unavailable",
-                    )
+                        )
+                    }
                 });
             }
         };
@@ -885,12 +894,15 @@ async fn send_hedge_stream_attempt(
         ));
     }
     let upstream_request_lease = state
-        .try_reserve_upstream_hedge(&upstream, &request_model)
+        .try_reserve_upstream_account_hedge(&upstream, &account.key_fingerprint, &request_model)
         .await
-        .map_err(|error| {
-            if error.is_runtime_coordination_unavailable() {
+        .map_err(|error| match error.reason {
+            crate::state::UpstreamAdmissionRejectionReason::RuntimeCoordinationUnavailable => {
                 super::runtime_coordination_unavailable_gateway_error()
-            } else {
+            }
+            crate::state::UpstreamAdmissionRejectionReason::LocalConcurrency
+            | crate::state::UpstreamAdmissionRejectionReason::HedgeMinuteQuota
+            | crate::state::UpstreamAdmissionRejectionReason::HedgeWindowQuota => {
                 GatewayError::upstream_temporary_unavailable(
                     error.message,
                     "upstream_hedge_capacity_unavailable",
@@ -1923,7 +1935,7 @@ pub(super) async fn send_to_upstream(
                     dialect_retry_attempted = true;
                     dialect_retry_count = 1;
                     upstream_request_guard
-                        .reserve_next(state, upstream, model)
+                        .reserve_next(state, upstream, &key_fingerprint, model)
                         .await?;
                     continue;
                 }
@@ -2043,7 +2055,7 @@ pub(super) async fn send_to_upstream(
                         "context limit hit; retrying once with reduced output token cap"
                     );
                     upstream_request_guard
-                        .reserve_next(state, upstream, model)
+                        .reserve_next(state, upstream, &key_fingerprint, model)
                         .await?;
                     continue;
                 }
