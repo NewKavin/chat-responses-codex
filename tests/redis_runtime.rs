@@ -239,6 +239,21 @@ fn redis_route_health_key(config: &AppConfig, suffix: &str) -> String {
     )
 }
 
+fn redis_route_health_route_state_key(config: &AppConfig, route: &RouteHealthKey) -> String {
+    assert_eq!(route.protocol, WireProtocol::Responses);
+    let identity = format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "{}\0{}\0{}\0responses",
+                route.upstream_id, route.key_fingerprint, route.runtime_model_slug
+            )
+            .as_bytes()
+        )
+    );
+    redis_route_health_key(config, &format!("route:{identity}"))
+}
+
 fn redis_account_key(config: &AppConfig, account: &AccountConcurrencyKey, suffix: &str) -> String {
     let identity = format!(
         "{:x}",
@@ -2445,6 +2460,112 @@ async fn redis_route_health_cooldown_and_half_open_owner_are_shared() {
         second.reserve_route_health(&route, &key).await.unwrap(),
         RouteAvailability::Ready(permit) if !permit.is_half_open()
     ));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn route_reservation_self_heals_only_legacy_local_admission_cooldown() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let upstream_id = "legacy-local-admission-upstream";
+    let fingerprint = "fingerprint-a";
+    let key = redis_test_health_key(upstream_id, fingerprint);
+    let legacy_route = redis_test_health_route(upstream_id, fingerprint, "legacy-local");
+
+    state
+        .observe_route_failure(
+            &legacy_route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(86_000_000)),
+        )
+        .await
+        .unwrap();
+
+    let controls = [
+        (
+            "provider-concurrency",
+            RouteFailureClass::ConcurrencySaturated,
+            Some("503"),
+            86_000_000_u64,
+        ),
+        (
+            "short-concurrency",
+            RouteFailureClass::ConcurrencySaturated,
+            None,
+            2_000_u64,
+        ),
+        (
+            "transient",
+            RouteFailureClass::TransientServer,
+            None,
+            86_000_000_u64,
+        ),
+    ];
+    let mut control_routes = Vec::new();
+    for (model, class, status, cooldown_ms) in controls {
+        let route = redis_test_health_route(upstream_id, fingerprint, model);
+        state
+            .observe_route_failure(&route, class, Some(Duration::from_millis(cooldown_ms)))
+            .await
+            .unwrap();
+        if let Some(status) = status {
+            let response = redis_test_command(
+                &config,
+                &[
+                    "HSET".into(),
+                    redis_route_health_route_state_key(&config, &route),
+                    "failure_status".into(),
+                    status.into(),
+                ],
+            )
+            .await;
+            assert!(response.starts_with(':'));
+        }
+        control_routes.push((route, class));
+    }
+
+    let permit = match state
+        .reserve_route_health(&legacy_route, &key)
+        .await
+        .unwrap()
+    {
+        RouteAvailability::Ready(permit) => permit,
+        other => panic!("legacy local-admission cooldown must self-heal, got {other:?}"),
+    };
+    assert!(!permit.is_half_open());
+    assert_eq!(
+        redis_integer(
+            &redis_test_command(
+                &config,
+                &[
+                    "EXISTS".into(),
+                    redis_route_health_route_state_key(&config, &legacy_route),
+                ],
+            )
+            .await,
+        ),
+        0
+    );
+
+    for (route, expected_class) in control_routes {
+        assert!(matches!(
+            state.reserve_route_health(&route, &key).await.unwrap(),
+            RouteAvailability::Cooling { class, .. } if class == expected_class
+        ));
+        assert_eq!(
+            redis_integer(
+                &redis_test_command(
+                    &config,
+                    &[
+                        "EXISTS".into(),
+                        redis_route_health_route_state_key(&config, &route),
+                    ],
+                )
+                .await,
+            ),
+            1
+        );
+    }
 }
 
 #[tokio::test]

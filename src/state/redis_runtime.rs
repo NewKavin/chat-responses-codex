@@ -29,6 +29,7 @@ const REDIS_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const ROUTE_HEALTH_MIN_TTL_SECONDS: u64 = 2 * 60 * 60;
 const ROUTE_HEALTH_TTL_GRACE_SECONDS: u64 = 60;
 const ROUTE_HEALTH_FAILURE_STREAK_RESET_MS: u64 = 10 * 60 * 1_000;
+const LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("runtime coordination unavailable")]
@@ -1298,13 +1299,25 @@ impl RedisRuntimeCoordinator {
             .key(self.health_global_index_key("routes"))
             .arg(lease_id)
             .arg(self.route_health_ttl_seconds)
-            .arg(self.route_health_half_open_ttl_ms);
+            .arg(self.route_health_half_open_ttl_ms)
+            .arg(self.legacy_local_admission_cooldown_threshold_ms());
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
         if result.is_err() {
             let _ = self.refresh_manager().await;
         }
         parse_route_health_reservation(result?, route, key, lease_id)
+    }
+
+    fn legacy_local_admission_cooldown_threshold_ms(&self) -> u64 {
+        self.concurrency_probe_delays
+            .iter()
+            .max()
+            .copied()
+            .unwrap_or(Duration::from_secs(1))
+            .saturating_add(LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64
     }
 
     pub(super) async fn finish_route_health(

@@ -3,6 +3,7 @@ local now_ms = (time[1] * 1000) + math.floor(time[2] / 1000)
 local lease_id = ARGV[1]
 local ttl_seconds = tonumber(ARGV[2])
 local lease_duration_ms = tonumber(ARGV[3])
+local legacy_threshold_ms = tonumber(ARGV[4])
 
 local function state_value(key, field)
   return redis.call('HGET', key, field)
@@ -37,6 +38,23 @@ local function refresh_indexes(state_key, upstream_index, global_index)
   redis.call('EXPIRE', upstream_index, ttl_seconds)
   redis.call('EXPIRE', global_index, ttl_seconds)
 end
+
+local function clear_legacy_local_admission(key, upstream_index, global_index)
+  local class = redis.call('HGET', key, 'failure_class')
+  local status = redis.call('HGET', key, 'failure_status')
+  local cooldown_until = tonumber(redis.call('HGET', key, 'cooldown_until_ms') or '0')
+  if class == 'concurrency_saturated'
+      and (not status or status == '')
+      and cooldown_until - now_ms > legacy_threshold_ms then
+    redis.call('DEL', key)
+    redis.call('ZREM', upstream_index, key)
+    redis.call('ZREM', global_index, key)
+    return true
+  end
+  return false
+end
+
+clear_legacy_local_admission(KEYS[2], KEYS[4], KEYS[6])
 
 local key_blocked = blocked(KEYS[1])
 if key_blocked then
