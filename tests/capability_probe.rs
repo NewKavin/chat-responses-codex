@@ -1413,6 +1413,107 @@ async fn stream_rejection_does_not_overwrite_supported_text_input() {
 }
 
 #[tokio::test]
+async fn chat_probe_prompt_is_meaningful_arithmetic_question() {
+    let mock = ProbeMock::chat(|_| text_response("391")).await;
+
+    let outcome = run_probe_against(
+        &mock,
+        CapabilityProbePlan {
+            protocol: WireProtocol::ChatCompletions,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false }],
+            output_token_cap: 16,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        outcome.capability(Capability::TextInput),
+        EvidenceState::Supported
+    );
+    let requests = mock.requests();
+    assert!(!requests.is_empty(), "probe should send at least one request");
+    let content = requests[0]["messages"][0]["content"]
+        .as_str()
+        .expect("probe messages content must be a string");
+    // The probe prompt must be a concrete, answerable question (not a
+    // greeting or placeholder) so upstreams engage real inference paths.
+    assert!(
+        content.contains("计算") || content.contains('×') || content.contains('*'),
+        "probe prompt should be a concrete arithmetic question, got: {content:?}"
+    );
+    for greeting in ["hi", "hello", "你好"] {
+        assert!(
+            !content.to_lowercase().contains(greeting),
+            "probe prompt must not be a greeting, got: {content:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn responses_probe_input_is_meaningful_arithmetic_question() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let capture: std::sync::Arc<std::sync::Mutex<Vec<Value>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture_clone = capture.clone();
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let capture = capture_clone.clone();
+            async move {
+                let (_, body) = request.into_parts();
+                let payload: Value =
+                    serde_json::from_slice(&to_bytes(body, usize::MAX).await.unwrap()).unwrap();
+                capture.lock().unwrap().push(payload);
+                axum::Json(json!({
+                    "id": "resp-probe",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "391"}]}]
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let outcome = run_probe_plan_for_model_for_test(
+        &format!("http://{address}"),
+        "probe-secret",
+        "opaque/responses-model",
+        CapabilityProbePlan {
+            protocol: WireProtocol::Responses,
+            cases: vec![chat_responses_codex::server::CoreProbeCase::MinimalText { stream: false }],
+            output_token_cap: 16,
+        },
+        5,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.capability(Capability::TextInput),
+        EvidenceState::Supported
+    );
+    let requests = capture.lock().unwrap();
+    assert!(!requests.is_empty(), "probe should send at least one request");
+    let input = requests[0]["input"]
+        .as_str()
+        .expect("responses probe input must be a string");
+    assert!(
+        input.contains("计算") || input.contains('×') || input.contains('*'),
+        "probe input should be a concrete arithmetic question, got: {input:?}"
+    );
+    for greeting in ["hi", "hello", "你好"] {
+        assert!(
+            !input.to_lowercase().contains(greeting),
+            "probe input must not be a greeting, got: {input:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn stream_only_chat_route_rejects_nonstream_without_losing_text_input() {
     let mock = ProbeMock::responding(|request| {
         if request["stream"] == true {

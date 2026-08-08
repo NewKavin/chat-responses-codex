@@ -28,6 +28,12 @@ use crate::state::{
     UpstreamRequestLease,
 };
 
+/// User-turn prompt sent by core capability probes (minimal text, token
+/// limit, reasoning control, declarative cases). A concrete arithmetic
+/// question yields a deterministic text answer and engages real
+/// inference/reasoning paths, unlike a greeting or placeholder.
+pub const PROBE_INPUT_PROMPT: &str = "请计算 17 乘以 23，并给出最终答案。";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReasoningTrigger {
     pub field: String,
@@ -787,7 +793,7 @@ impl ProbeExecutor {
                 if self.protocol() == WireProtocol::Responses {
                     let body = json!({
                         "model": &self.runtime_model_slug,
-                        "input": "compat probe",
+                        "input": PROBE_INPUT_PROMPT,
                         "stream": stream,
                     });
                     if *stream {
@@ -841,7 +847,7 @@ impl ProbeExecutor {
                 }
                 let mut body = json!({
                     "model": &self.runtime_model_slug,
-                    "messages": [{"role": "user", "content": "compat probe"}],
+                    "messages": [{"role": "user", "content": PROBE_INPUT_PROMPT}],
                     "stream": stream,
                 });
                 if *stream {
@@ -1388,7 +1394,7 @@ with the exact result as the nonce string.";
                     let response = self
                         .post_responses_stream(json!({
                             "model": &self.runtime_model_slug,
-                            "input": "compat probe",
+                            "input": PROBE_INPUT_PROMPT,
                             "stream": true,
                         }))
                         .await?;
@@ -1409,7 +1415,7 @@ with the exact result as the nonce string.";
                 let response = self
                     .post_chat_stream(json!({
                         "model": &self.runtime_model_slug,
-                        "messages": [{"role": "user", "content": "compat probe"}],
+                        "messages": [{"role": "user", "content": PROBE_INPUT_PROMPT}],
                         "stream": true,
                         "stream_options": {"include_usage": true},
                     }))
@@ -1637,13 +1643,13 @@ with the exact result as the nonce string.";
                 let mut body = if self.protocol() == WireProtocol::Responses {
                     json!({
                         "model": &self.runtime_model_slug,
-                        "input": "compat probe",
+                        "input": PROBE_INPUT_PROMPT,
                         "stream": false,
                     })
                 } else {
                     json!({
                         "model": &self.runtime_model_slug,
-                        "messages": [{"role": "user", "content": "compat probe"}],
+                        "messages": [{"role": "user", "content": PROBE_INPUT_PROMPT}],
                         "stream": false,
                     })
                 };
@@ -1666,13 +1672,13 @@ with the exact result as the nonce string.";
                 let mut body = if self.protocol() == WireProtocol::Responses {
                     json!({
                         "model": &self.runtime_model_slug,
-                        "input": "compat probe",
+                        "input": PROBE_INPUT_PROMPT,
                         "stream": false,
                     })
                 } else {
                     json!({
                         "model": &self.runtime_model_slug,
-                        "messages": [{"role": "user", "content": "compat probe"}],
+                        "messages": [{"role": "user", "content": PROBE_INPUT_PROMPT}],
                         "stream": false,
                     })
                 };
@@ -1697,13 +1703,13 @@ with the exact result as the nonce string.";
                 let mut body = if self.protocol() == WireProtocol::Responses {
                     json!({
                         "model": &self.runtime_model_slug,
-                        "input": "compat probe",
+                        "input": PROBE_INPUT_PROMPT,
                         "stream": false,
                     })
                 } else {
                     json!({
                         "model": &self.runtime_model_slug,
-                        "messages": [{"role": "user", "content": "compat probe"}],
+                        "messages": [{"role": "user", "content": PROBE_INPUT_PROMPT}],
                         "stream": false,
                     })
                 };
