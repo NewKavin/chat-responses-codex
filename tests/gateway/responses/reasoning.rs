@@ -327,7 +327,75 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
     assert_eq!(request_body["messages"][2]["tool_call_id"], "call_1");
 }
 
-async fn run_compatible_continuation_failover_case(verify_preferred_profile_update: bool) {
+#[derive(Clone, Copy)]
+enum CompatibleContinuationCase {
+    FailoverOnly,
+    PreferredProfileUpdate,
+    ContractMismatches,
+    PostOutput(SemanticOutputCase),
+}
+
+#[derive(Clone, Copy)]
+enum SemanticOutputCase {
+    Text,
+    Reasoning,
+    ToolIdentity,
+    PartialArguments,
+}
+
+impl SemanticOutputCase {
+    fn event(self) -> Value {
+        match self {
+            Self::Text => json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp-semantic",
+                "item_id": "msg-semantic",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "semantic-text"
+            }),
+            Self::Reasoning => json!({
+                "type": "response.reasoning_summary_text.delta",
+                "response_id": "resp-semantic",
+                "item_id": "reasoning-semantic",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "semantic-reasoning"
+            }),
+            Self::ToolIdentity => json!({
+                "type": "response.output_item.added",
+                "response_id": "resp-semantic",
+                "output_index": 0,
+                "item": {
+                    "id": "function-semantic",
+                    "type": "function_call",
+                    "call_id": "call_semantic",
+                    "name": "exec_command",
+                    "arguments": "",
+                    "status": "in_progress"
+                }
+            }),
+            Self::PartialArguments => json!({
+                "type": "response.function_call_arguments.delta",
+                "response_id": "resp-semantic",
+                "item_id": "function-semantic",
+                "output_index": 0,
+                "delta": "{"
+            }),
+        }
+    }
+
+    fn event_type(self) -> &'static str {
+        match self {
+            Self::Text => "response.output_text.delta",
+            Self::Reasoning => "response.reasoning_summary_text.delta",
+            Self::ToolIdentity => "response.output_item.added",
+            Self::PartialArguments => "response.function_call_arguments.delta",
+        }
+    }
+}
+
+async fn run_compatible_continuation_failover_case(case: CompatibleContinuationCase) {
     let exact_hits = Arc::new(AtomicUsize::new(0));
     let alternative_hits = Arc::new(AtomicUsize::new(0));
     let captured_alternative = Arc::new(Mutex::new(None::<Value>));
@@ -336,6 +404,10 @@ async fn run_compatible_continuation_failover_case(verify_preferred_profile_upda
     let exact_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let exact_address = exact_listener.local_addr().unwrap();
     let exact_hits_clone = exact_hits.clone();
+    let semantic_output_case = match case {
+        CompatibleContinuationCase::PostOutput(case) => Some(case),
+        _ => None,
+    };
     let exact_app = Router::new().route(
         "/v1/responses",
         post(move |_request: Request<Body>| {
@@ -364,6 +436,22 @@ async fn run_compatible_continuation_failover_case(verify_preferred_profile_upda
                                 "status": "completed"
                             }]
                         })),
+                    )
+                        .into_response()
+                } else if let Some(semantic_output_case) = semantic_output_case {
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        format!(
+                            "data: {}\n\ndata: {}\n\n",
+                            semantic_output_case.event(),
+                            json!({
+                                "error": {
+                                    "code": "concurrency_limit_exceeded",
+                                    "message": "concurrency limit exceeded after output"
+                                }
+                            })
+                        ),
                     )
                         .into_response()
                 } else {
@@ -519,6 +607,9 @@ async fn run_compatible_continuation_failover_case(verify_preferred_profile_upda
             Capability::ToolContinuation,
             Capability::ReasoningOutput,
             Capability::ReasoningReplay,
+            Capability::TextStream,
+            Capability::ReasoningStream,
+            Capability::IndexedToolArgumentStream,
         ] {
             profile
                 .capabilities
@@ -575,6 +666,165 @@ async fn run_compatible_continuation_failover_case(verify_preferred_profile_upda
     let expected_preferred_profile = serde_json::to_value(&alternative_profile.key).unwrap();
     let expected_configuration_fingerprint = alternative_profile.configuration_fingerprint.clone();
 
+    if matches!(case, CompatibleContinuationCase::ContractMismatches) {
+        let mutations: [(&str, fn(&mut Value)); 9] = [
+            ("provider_group", |contract| {
+                contract["provider_group"] = json!("mismatched-provider-group");
+            }),
+            ("runtime_model_slug", |contract| {
+                contract["runtime_model_slug"] = json!("mismatched-runtime-model");
+            }),
+            ("protocol_transition", |contract| {
+                contract["protocol_transition"]["upstream_protocol"] = json!("chat_completions");
+            }),
+            ("required_capabilities", |contract| {
+                contract["required_capabilities"]
+                    .as_array_mut()
+                    .expect("required capabilities must be an array")
+                    .push(json!("hosted_tools"));
+            }),
+            ("reasoning_carrier", |contract| {
+                contract["reasoning_carrier"] = json!("reasoning_content");
+            }),
+            ("effort_map", |contract| {
+                contract["effort_map"]["high"] = json!("mismatched-effort");
+            }),
+            ("correction_rules", |contract| {
+                contract["correction_rules"]
+                    .as_array_mut()
+                    .expect("correction rules must be an array")
+                    .push(json!({
+                        "kind": "remove_optional_field",
+                        "field": "service_tier"
+                    }));
+            }),
+            ("tool_registry_version", |contract| {
+                contract["tool_registry_version"] = json!(999);
+            }),
+            ("probe_schema_version", |contract| {
+                let version = contract["probe_schema_version"]
+                    .as_u64()
+                    .expect("probe schema version must be numeric");
+                contract["probe_schema_version"] = json!(version + 1);
+            }),
+        ];
+
+        for (name, mutate) in mutations {
+            let response_id = format!("resp-contract-mismatch-{name}");
+            let mut request_state = original_history.request_state.clone();
+            let contract = request_state
+                .get_mut("_gateway_continuation")
+                .and_then(|continuation| continuation.get_mut("compatibility_contract"))
+                .expect("V2 continuation must contain a compatibility contract");
+            mutate(contract);
+            state.store_response_history(
+                response_id.clone(),
+                original_history.items.clone(),
+                request_state,
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/responses")
+                        .header(
+                            header::AUTHORIZATION,
+                            HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext))
+                                .unwrap(),
+                        )
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "model": model,
+                                "previous_response_id": response_id,
+                                "input": [{
+                                    "type": "function_call_output",
+                                    "call_id": "call_1",
+                                    "output": "result"
+                                }]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let payload: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                payload["error"]["code"], "gateway_protocol_capability_unsupported",
+                "{name}: {payload}"
+            );
+            assert_eq!(exact_hits.load(Ordering::SeqCst), 1, "{name}");
+            assert_eq!(alternative_hits.load(Ordering::SeqCst), 0, "{name}");
+        }
+        return;
+    }
+
+    if let CompatibleContinuationCase::PostOutput(semantic_output_case) = case {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext))
+                            .unwrap(),
+                    )
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": model,
+                            "previous_response_id": "resp-exact-profile",
+                            "stream": true,
+                            "input": [{
+                                "type": "function_call_output",
+                                "call_id": "call_1",
+                                "output": "result"
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let terminal_events = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|payload| *payload != "[DONE]")
+            .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+            .filter(|event| {
+                matches!(
+                    event.get("type").and_then(Value::as_str),
+                    Some("response.completed" | "response.incomplete" | "response.failed")
+                )
+            })
+            .count();
+        assert!(body.contains(semantic_output_case.event_type()), "{body}");
+        assert!(body.contains("response.failed"), "{body}");
+        assert!(!body.contains("compatible route"), "{body}");
+        assert_eq!(terminal_events, 1, "{body}");
+        assert_eq!(body.matches("data: [DONE]").count(), 1, "{body}");
+        assert_eq!(
+            body.matches("call_semantic").count(),
+            usize::from(matches!(
+                semantic_output_case,
+                SemanticOutputCase::ToolIdentity
+            ))
+        );
+        assert_eq!(exact_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
+        return;
+    }
+
     let continuation_response = app
         .clone()
         .oneshot(
@@ -615,7 +865,7 @@ async fn run_compatible_continuation_failover_case(verify_preferred_profile_upda
     assert!(replayed_input.contains("exact-thought"));
     assert!(replayed_input.contains("call_1"));
     assert!(replayed_input.contains("result"));
-    if !verify_preferred_profile_update {
+    if matches!(case, CompatibleContinuationCase::FailoverOnly) {
         return;
     }
 
@@ -668,12 +918,33 @@ async fn run_compatible_continuation_failover_case(verify_preferred_profile_upda
 
 #[tokio::test]
 async fn responses_continuation_503_fails_over_to_compatible_account() {
-    run_compatible_continuation_failover_case(false).await;
+    run_compatible_continuation_failover_case(CompatibleContinuationCase::FailoverOnly).await;
 }
 
 #[tokio::test]
 async fn successful_continuation_failover_updates_preferred_profile() {
-    run_compatible_continuation_failover_case(true).await;
+    run_compatible_continuation_failover_case(CompatibleContinuationCase::PreferredProfileUpdate)
+        .await;
+}
+
+#[tokio::test]
+async fn responses_continuation_rejects_each_contract_mismatch() {
+    run_compatible_continuation_failover_case(CompatibleContinuationCase::ContractMismatches).await;
+}
+
+#[tokio::test]
+async fn responses_continuation_after_semantic_output_never_replays() {
+    for semantic_output_case in [
+        SemanticOutputCase::Text,
+        SemanticOutputCase::Reasoning,
+        SemanticOutputCase::ToolIdentity,
+        SemanticOutputCase::PartialArguments,
+    ] {
+        run_compatible_continuation_failover_case(CompatibleContinuationCase::PostOutput(
+            semantic_output_case,
+        ))
+        .await;
+    }
 }
 
 #[tokio::test]

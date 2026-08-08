@@ -182,13 +182,15 @@ impl GatewayContinuationState {
         if self.reasoning_carrier.is_some() {
             return;
         }
-        self.reasoning_carrier = Some(
-            match self.adapter_identity.protocol_transition.upstream_protocol {
-                WireProtocol::ChatCompletions => ReasoningCarrier::ReasoningContent,
-                WireProtocol::Responses => ReasoningCarrier::ResponsesReasoningItem,
-                WireProtocol::Messages => ReasoningCarrier::MessagesThinking,
-            },
-        );
+        let reasoning_carrier = match self.adapter_identity.protocol_transition.upstream_protocol {
+            WireProtocol::ChatCompletions => ReasoningCarrier::ReasoningContent,
+            WireProtocol::Responses => ReasoningCarrier::ResponsesReasoningItem,
+            WireProtocol::Messages => ReasoningCarrier::MessagesThinking,
+        };
+        self.reasoning_carrier = Some(reasoning_carrier);
+        if let Some(contract) = self.compatibility_contract.as_mut() {
+            contract.reasoning_carrier = Some(reasoning_carrier);
+        }
     }
 
     pub(super) fn has_protocol_transition(

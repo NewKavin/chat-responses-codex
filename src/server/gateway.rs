@@ -4497,10 +4497,10 @@ async fn process_gateway_request_inner(
                     &runtime_model_slug,
                     WireProtocol::from(endpoint.native_protocol()),
                     WireProtocol::from(protocol),
-                    &contract.required_capabilities,
+                    continuation.required_capabilities(),
                     resolved,
                     profile,
-                    contract.tool_registry_version,
+                    continuation.tool_registry_version(),
                 )
                 .as_ref()
                     == Some(contract);
