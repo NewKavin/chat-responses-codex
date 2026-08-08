@@ -178,6 +178,14 @@
             placeholder="例如: 共享账号、区域或维护说明"
           />
         </el-form-item>
+        <el-form-item label="续传兼容组">
+          <el-input
+            v-model="form.continuation_provider_group"
+            clearable
+            maxlength="128"
+            placeholder="留空时按 Base URL 和模型自动分组"
+          />
+        </el-form-item>
         <el-form-item label="Base URL" prop="base_url">
           <el-input v-model="form.base_url" placeholder="https://api.openai.com" />
         </el-form-item>
@@ -379,6 +387,7 @@ const form = ref<Partial<UpstreamConfig>>({
   id: '',
   name: '',
   remark: '',
+  continuation_provider_group: '',
   base_url: '',
   api_key: '',
   protocol: 'ChatCompletions',
@@ -581,6 +590,7 @@ const handleCreate = () => {
     id: '',
     name: '',
     remark: '',
+    continuation_provider_group: '',
     base_url: '',
     api_key: '',
     protocol: 'ChatCompletions',
@@ -614,6 +624,7 @@ const handleCopy = (row: UpstreamConfig) => {
     id: '',
     name: row.name + ' (副本)',
     remark: row.remark || '',
+    continuation_provider_group: row.continuation_provider_group || '',
     base_url: row.base_url,
     api_key: '',
     protocol: protocols[0] as UpstreamConfig['protocol'],
@@ -648,6 +659,7 @@ const handleEdit = (row: UpstreamConfig) => {
     .filter((v, i, a) => a.indexOf(v) === i)
   form.value = {
     ...row,
+    continuation_provider_group: row.continuation_provider_group || '',
     api_key: allKeys.join('\n'),
     api_keys: [...(row.api_keys || [])],
     api_key_models: (row.api_key_models || []).map((item: ApiKeyModelConfig) => ({
@@ -681,6 +693,8 @@ const handleSubmit = async () => {
       ...form.value
     }
     submitData.remark = String(form.value.remark || '').trim()
+    submitData.continuation_provider_group =
+      String(form.value.continuation_provider_group || '').trim() || null
     delete submitData.requests_per_minute
     delete submitData.request_quota_window_hours
     delete submitData.request_quota_requests
@@ -763,6 +777,7 @@ const handleSubmit = async () => {
         const batchPayload: BatchCreateUpstreamPayload = {
           name: form.value.name!,
           remark: String(form.value.remark || '').trim(),
+          continuation_provider_group: submitData.continuation_provider_group,
           base_url: form.value.base_url!,
           keys: submittedKeys,
           supported_models: submitData.supported_models || [],

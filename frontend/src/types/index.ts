@@ -80,6 +80,7 @@ export interface UpstreamConfig {
   id: string
   name: string
   remark: string
+  continuation_provider_group?: string | null
   base_url: string
   api_key: string
   api_keys?: string[]

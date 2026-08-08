@@ -1170,6 +1170,108 @@ async fn upstream_remark_round_trips_through_admin_create_and_update() {
 }
 
 #[tokio::test]
+async fn continuation_provider_group_is_normalized_and_persisted() {
+    let state = create_test_state();
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "id": "continuation-group-upstream",
+                        "name": "Continuation Group Upstream",
+                        "base_url": "https://api.example.invalid",
+                        "api_key": "test-secret",
+                        "protocol": "Responses",
+                        "supported_models": ["deepseek-v4-flash"],
+                        "active": true,
+                        "continuation_provider_group": " internal-deepseek "
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created["continuation_provider_group"], "internal-deepseek");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/continuation-group-upstream")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"continuation_provider_group": "   "}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cleared: Value = serde_json::from_slice(&body).unwrap();
+    assert!(cleared["continuation_provider_group"].is_null());
+
+    for invalid in ["x".repeat(129), "internal\ngroup".to_string()] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/admin/upstreams/continuation-group-upstream")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"continuation_provider_group": invalid}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let upstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    assert!(upstreams
+        .iter()
+        .find(|item| item["id"] == "continuation-group-upstream")
+        .unwrap()["continuation_provider_group"]
+        .is_null());
+}
+
+#[tokio::test]
 async fn test_upstreams_create_preserves_raw_model_names() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state.clone());

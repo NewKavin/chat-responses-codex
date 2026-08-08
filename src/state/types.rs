@@ -238,8 +238,7 @@ impl Default for AppConfig {
                 DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
             upstream_transient_route_cooldown_max_seconds:
                 DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
-            upstream_route_health_half_open_ttl_seconds:
-                DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+            upstream_route_health_half_open_ttl_seconds: DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
             upstream_route_exhaustion_retry_enabled:
                 DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
             upstream_route_exhaustion_retry_max_wait_ms:
@@ -265,6 +264,8 @@ pub struct UpstreamConfig {
     pub name: String,
     #[serde(default)]
     pub remark: String,
+    #[serde(default)]
+    pub continuation_provider_group: Option<String>,
     pub base_url: String,
     pub api_key: String,
     #[serde(default)]
@@ -337,6 +338,7 @@ impl Default for UpstreamConfig {
             id: String::new(),
             name: String::new(),
             remark: String::new(),
+            continuation_provider_group: None,
             base_url: String::new(),
             api_key: String::new(),
             api_keys: Vec::new(),

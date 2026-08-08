@@ -71,7 +71,7 @@ impl PostgresStateStore {
                  requests_per_minute, max_concurrency, priority, premium_only, \
                  protect_premium_quota, active, failure_count, \
                  auto_managed, managed_source, last_synced_at, api_keys, api_key_models, \
-                 strip_nonstandard_chat_fields, COALESCE(remark, '') \
+                 strip_nonstandard_chat_fields, COALESCE(remark, ''), continuation_provider_group \
                  FROM upstreams ORDER BY id",
                 &[],
             )
@@ -116,6 +116,7 @@ impl PostgresStateStore {
                 last_synced_at: row.get::<_, i64>(19) as u64,
                 strip_nonstandard_chat_fields: row.get::<_, bool>(22),
                 remark: row.get::<_, String>(23),
+                continuation_provider_group: row.get::<_, Option<String>>(24),
             });
         }
 
@@ -1007,6 +1008,7 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
             &api_key_models_json,
             &upstream.strip_nonstandard_chat_fields,
             &upstream.remark,
+            &upstream.continuation_provider_group,
         ];
         tx.execute(
             "INSERT INTO upstreams (
@@ -1015,12 +1017,12 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 requests_per_minute, max_concurrency, priority, premium_only,
                 protect_premium_quota, active, failure_count,
                 auto_managed, managed_source, last_synced_at, api_keys, api_key_models,
-                strip_nonstandard_chat_fields, remark
+                strip_nonstandard_chat_fields, remark, continuation_provider_group
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10,
                 $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
             )
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1046,7 +1048,8 @@ async fn sync_upstreams(tx: &Transaction<'_>, upstreams: &[UpstreamConfig]) -> i
                 api_keys = EXCLUDED.api_keys,
                 api_key_models = EXCLUDED.api_key_models,
                 strip_nonstandard_chat_fields = EXCLUDED.strip_nonstandard_chat_fields,
-                remark = EXCLUDED.remark",
+                remark = EXCLUDED.remark,
+                continuation_provider_group = EXCLUDED.continuation_provider_group",
             params,
         )
         .await
@@ -1623,6 +1626,8 @@ ALTER TABLE upstreams
     DROP COLUMN IF EXISTS concurrency_status_enabled;
 ALTER TABLE upstreams
     ADD COLUMN IF NOT EXISTS remark TEXT NOT NULL DEFAULT '';
+ALTER TABLE upstreams
+    ADD COLUMN IF NOT EXISTS continuation_provider_group TEXT NULL;
 
 CREATE TABLE IF NOT EXISTS downstreams (
     id TEXT PRIMARY KEY,

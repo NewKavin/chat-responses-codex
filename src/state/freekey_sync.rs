@@ -398,6 +398,23 @@ impl AppState {
                     if let Some(remark) = updates.get("remark").and_then(|v| v.as_str()) {
                         upstream.remark = remark.to_string();
                     }
+                    if let Some(group) = updates.get("continuation_provider_group") {
+                        upstream.continuation_provider_group = if group.is_null() {
+                            None
+                        } else {
+                            Some(
+                                group
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        UpstreamMutationError::InvalidInput(
+                                            "continuation_provider_group must be a string or null"
+                                                .into(),
+                                        )
+                                    })?
+                                    .to_string(),
+                            )
+                        };
+                    }
                     if let Some(base_url) = updates.get("base_url").and_then(|v| v.as_str()) {
                         upstream.base_url = base_url.to_string();
                     }

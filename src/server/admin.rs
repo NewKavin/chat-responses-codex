@@ -935,6 +935,8 @@ pub(super) struct BatchCreateUpstreamPayload {
     name: String,
     #[serde(default)]
     remark: String,
+    #[serde(default)]
+    continuation_provider_group: Option<String>,
     base_url: String,
     keys: Vec<String>,
     #[serde(default)]
@@ -1399,6 +1401,7 @@ pub(super) async fn admin_create_upstreams_batch(
         id: Uuid::new_v4().to_string(),
         name: payload.name.trim().to_string(),
         remark: payload.remark.clone(),
+        continuation_provider_group: payload.continuation_provider_group.clone(),
         base_url: payload.base_url.trim().to_string(),
         api_key: primary_key.clone(),
         api_keys: current_keys.clone(),

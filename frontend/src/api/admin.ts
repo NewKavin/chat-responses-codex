@@ -30,6 +30,7 @@ import type {
 export interface BatchCreateUpstreamPayload {
   name: string
   remark?: string
+  continuation_provider_group?: string | null
   base_url: string
   keys: string[]
   supported_models: string[]

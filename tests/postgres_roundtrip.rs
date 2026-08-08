@@ -30,10 +30,11 @@ fn persisted_state_json_roundtrip_preserves_api_key_model_mapping() {
     let state_json = json!({
         "upstreams": [
             {
-                "id": "up-1",
-                "name": "primary",
-                "remark": "",
-                "base_url": "https://upstream.example",
+        "id": "up-1",
+        "name": "primary",
+        "remark": "",
+        "continuation_provider_group": null,
+        "base_url": "https://upstream.example",
                 "api_key": "upstream-secret-a",
                 "api_keys": ["upstream-secret-b"],
                 "api_key_models": [
@@ -130,6 +131,68 @@ async fn upstream_remark_round_trips_through_postgres() {
         .cloned()
         .unwrap();
     assert_eq!(persisted.remark, "shared team account");
+}
+
+#[tokio::test]
+async fn continuation_provider_group_round_trips_through_postgres() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!(
+            "skipping postgres continuation provider group roundtrip test: \
+             PG_TEST_DATABASE_URL is not set"
+        );
+        return;
+    };
+    reset_test_database_async(&database_url).await;
+
+    let state = AppState::load_from_database_url(&database_url, AppConfig::default())
+        .await
+        .expect("should connect to the PostgreSQL test database");
+    attach_capability_probe_sink(&state);
+    for (id, continuation_provider_group) in [
+        ("grouped-postgres", Some(" internal-deepseek ".to_string())),
+        ("automatic-postgres", None),
+    ] {
+        state
+            .insert_upstream(UpstreamConfig {
+                id: id.into(),
+                name: id.into(),
+                base_url: "https://upstream.example".into(),
+                api_key: format!("{id}-secret"),
+                protocol: UpstreamProtocol::Responses,
+                protocols: vec![UpstreamProtocol::Responses],
+                supported_models: vec!["deepseek-v4-flash".into()],
+                continuation_provider_group,
+                active: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    let reloaded = AppState::load_from_database_url(&database_url, AppConfig::default())
+        .await
+        .unwrap();
+    let snapshot = reloaded.routing_snapshot().await;
+    assert_eq!(
+        snapshot
+            .upstreams
+            .iter()
+            .find(|item| item.id == "grouped-postgres")
+            .unwrap()
+            .continuation_provider_group
+            .as_deref(),
+        Some("internal-deepseek")
+    );
+    assert_eq!(
+        snapshot
+            .upstreams
+            .iter()
+            .find(|item| item.id == "automatic-postgres")
+            .unwrap()
+            .continuation_provider_group,
+        None
+    );
 }
 
 #[tokio::test]

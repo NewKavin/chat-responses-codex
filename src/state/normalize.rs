@@ -244,6 +244,11 @@ impl UpstreamConfig {
             .copied()
             .unwrap_or(UpstreamProtocol::ChatCompletions);
         self.remark = self.remark.trim().to_string();
+        self.continuation_provider_group = self
+            .continuation_provider_group
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         self.api_key = self.api_key.trim().to_string();
         self.api_keys = normalized_string_list(std::mem::take(&mut self.api_keys));
         let current_keys = normalized_current_keys(&self.api_key, &self.api_keys);
@@ -262,6 +267,15 @@ impl UpstreamConfig {
     }
 
     pub fn validate_configuration(&self) -> Result<(), String> {
+        if self
+            .continuation_provider_group
+            .as_ref()
+            .is_some_and(|value| value.len() > 128 || value.chars().any(char::is_control))
+        {
+            return Err(
+                "continuation provider group must be 1-128 printable characters".to_string(),
+            );
+        }
         if self.premium_models.is_empty() {
             return Ok(());
         }
