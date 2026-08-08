@@ -2268,6 +2268,114 @@ async fn redis_upstream_concurrency_is_scoped_per_account() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn redis_gateway_local_capacity_release_is_immediately_schedulable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let hits = upstream_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Json(json!({
+                    "id": "chatcmpl-capacity-release",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "model-a",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let mut config = redis_test_config();
+    config.upstream_stream_max_duration_seconds = 86_400;
+    config.upstream_concurrency_recovery_max_wait_ms = 0;
+    config.upstream_route_exhaustion_retry_max_wait_ms = 0;
+    let (state_a, state_b, _directory) = redis_test_states(&config).await;
+    let api_key = "capacity-release-account";
+    let upstream = UpstreamConfig {
+        id: "redis-gateway-capacity-release".into(),
+        name: "Redis gateway capacity release".into(),
+        base_url: format!("http://{address}"),
+        api_key: api_key.into(),
+        protocol: UpstreamProtocol::ChatCompletions,
+        protocols: vec![UpstreamProtocol::ChatCompletions],
+        supported_models: vec!["model-a".into()],
+        max_concurrency: 1,
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    state_b.insert_upstream(upstream.clone()).await.unwrap();
+
+    let downstream_key = generate_downstream_key("redis-capacity-release");
+    let mut downstream = redis_test_downstream("redis-capacity-release-downstream");
+    downstream.hash = downstream_key.hash;
+    downstream.model_allowlist = vec!["model-a".into()];
+    downstream.rate_limit_enabled = false;
+    downstream.max_concurrency = 10;
+    state_b.insert_downstream(downstream).await.unwrap();
+
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+    let held = state_a
+        .try_reserve_upstream_account_request(&upstream, &key_fingerprint, "model-a")
+        .await
+        .unwrap();
+    let route = redis_test_health_route(&upstream.id, &key_fingerprint, "model-a");
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", downstream_key.plaintext),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "model-a",
+                    "messages": [{"role": "user", "content": "hello"}]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let app = build_router(state_b.clone());
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(first.headers()[header::RETRY_AFTER], "1");
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
+    assert!(state_a
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(state_b
+        .route_health_snapshot(&route)
+        .await
+        .unwrap()
+        .is_none());
+
+    state_a.release_upstream_request(held).await.unwrap();
+    let second = app.oneshot(request()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_upstream_snapshot_counts_flat_request_cost() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;
