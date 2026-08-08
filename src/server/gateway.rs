@@ -24,7 +24,6 @@ use crate::state::{
     RouteSetAggregateKey, RuntimeCoordinationError, StreamDiagnostics, UpstreamConfig,
     UpstreamRequestLease, UsageLog,
 };
-use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
@@ -2954,6 +2953,7 @@ impl ResponseHistoryContext {
                 object.get("upstream_id").or_else(|| {
                     object
                         .get("profile_key")
+                        .or_else(|| object.get("preferred_profile"))
                         .and_then(Value::as_object)
                         .and_then(|profile| profile.get("upstream_id"))
                 })
@@ -4444,16 +4444,64 @@ async fn process_gateway_request_inner(
         };
     let continuation_profile_key = exact_continuation
         .as_ref()
-        .map(|continuation| continuation.profile_key().clone())
+        .map(|continuation| continuation.preferred_profile().clone())
         .or(legacy_continuation_profile);
     let route_profile_constraint_active = continuation_profile_key.is_some();
     let route_matches_profile_constraint =
         |upstream: &UpstreamConfig, key_fingerprint: &str, protocol: UpstreamProtocol| {
-            let Some(profile_key) = continuation_profile_key.as_ref() else {
-                return true;
-            };
             let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                 return false;
+            };
+            if let Some(continuation) = exact_continuation.as_ref() {
+                let Some(contract) = continuation.contract() else {
+                    return false;
+                };
+                let Some(evaluation) = route_capability(upstream, key_fingerprint, protocol) else {
+                    return false;
+                };
+                let Some(resolved) = evaluation.resolved.as_ref() else {
+                    return false;
+                };
+                let candidate_key = DialectProfileKey::for_key(
+                    upstream.id.clone(),
+                    key_fingerprint,
+                    runtime_model_slug.clone(),
+                    WireProtocol::from(protocol),
+                );
+                let Some(profile) = capability_snapshot.profiles.get(&candidate_key) else {
+                    return false;
+                };
+                let Ok(configuration_fingerprint) =
+                    AppState::route_configuration_fingerprint_with_snapshot(
+                        &capability_snapshot,
+                        upstream,
+                        key_fingerprint,
+                        model,
+                        &runtime_model_slug,
+                        protocol,
+                    )
+                else {
+                    return false;
+                };
+                if profile.configuration_fingerprint != configuration_fingerprint {
+                    return false;
+                }
+                return continuation_contract_for_route(
+                    upstream,
+                    &runtime_model_slug,
+                    WireProtocol::from(endpoint.native_protocol()),
+                    WireProtocol::from(protocol),
+                    &contract.required_capabilities,
+                    resolved,
+                    profile,
+                    contract.tool_registry_version,
+                )
+                .as_ref()
+                    == Some(contract);
+            }
+
+            let Some(profile_key) = continuation_profile_key.as_ref() else {
+                return true;
             };
             let candidate_key = DialectProfileKey::for_key(
                 upstream.id.clone(),
@@ -5080,7 +5128,7 @@ async fn process_gateway_request_inner(
                 let Some(runtime_model_slug) = upstream.resolved_model_name(model) else {
                     continue;
                 };
-                let candidate_keys = route_api_keys(&upstream, &runtime_model_slug)
+                let mut candidate_keys = route_api_keys(&upstream, &runtime_model_slug)
                     .into_iter()
                     .filter(|api_key| {
                         let key_fingerprint = route_key_fingerprint(&upstream, api_key);
@@ -5098,6 +5146,19 @@ async fn process_gateway_request_inner(
                             })
                     })
                     .collect::<Vec<_>>();
+                if let Some(preferred_profile) = exact_continuation
+                    .as_ref()
+                    .map(GatewayContinuationState::preferred_profile)
+                    .filter(|profile| profile.upstream_id == upstream.id)
+                {
+                    candidate_keys.sort_by_key(|api_key| {
+                        let fingerprint = route_key_fingerprint(&upstream, api_key);
+                        (
+                            fingerprint != preferred_profile.key_fingerprint,
+                            fingerprint,
+                        )
+                    });
+                }
                 if candidate_keys.is_empty() {
                     tracing::debug!(
                         request_id = %request_id,

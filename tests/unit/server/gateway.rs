@@ -4,6 +4,7 @@ use crate::capabilities::{
     RequestedFeatures, RuntimeCapabilityHints, UpstreamDialectProfile, WireProtocol,
 };
 use crate::state::PersistedState;
+use crate::upstream_feedback::UpstreamFeedbackClassification;
 use axum::body::to_bytes;
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicUsize;

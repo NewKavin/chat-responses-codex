@@ -5,6 +5,7 @@ use chat_responses_codex::capabilities::{
     DialectProfileState, EvidenceState, ReasoningCarrier, RouteCapabilityOverride, SemanticPolicy,
     UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
+use chat_responses_codex::state::RouteHealthKey;
 
 #[tokio::test]
 async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_history_for_chat_upstream(
@@ -327,9 +328,10 @@ async fn downstream_responses_previous_response_id_replays_reasoning_and_tool_hi
 }
 
 #[tokio::test]
-async fn responses_continuation_operational_failure_does_not_try_a_different_profile() {
+async fn responses_continuation_503_fails_over_to_compatible_account() {
     let exact_hits = Arc::new(AtomicUsize::new(0));
     let alternative_hits = Arc::new(AtomicUsize::new(0));
+    let captured_alternative = Arc::new(Mutex::new(None::<Value>));
     let tempdir = tempdir().unwrap();
 
     let exact_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -387,16 +389,21 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
     let alternative_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let alternative_address = alternative_listener.local_addr().unwrap();
     let alternative_hits_clone = alternative_hits.clone();
+    let captured_alternative_clone = captured_alternative.clone();
     let alternative_app = Router::new().route(
         "/v1/responses",
-        post(move |_request: Request<Body>| {
+        post(move |request: Request<Body>| {
             let alternative_hits = alternative_hits_clone.clone();
+            let captured_alternative = captured_alternative_clone.clone();
             async move {
                 alternative_hits.fetch_add(1, Ordering::SeqCst);
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                *captured_alternative.lock().unwrap() =
+                    Some(serde_json::from_slice(&body).unwrap());
                 (
                     StatusCode::OK,
                     axum::Json(json!({
-                        "id": "resp-wrong-profile",
+                        "id": "resp-compatible-profile",
                         "object": "response",
                         "output": [{
                             "id": "message-1",
@@ -404,7 +411,7 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
                             "role": "assistant",
                             "content": [{
                                 "type": "output_text",
-                                "text": "wrong route",
+                                "text": "compatible route",
                                 "annotations": []
                             }]
                         }]
@@ -429,6 +436,7 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
                     name: "exact-route".into(),
                     base_url: format!("http://{exact_address}"),
                     api_key: "exact-secret".into(),
+                    continuation_provider_group: Some("internal-responses".into()),
                     protocol: UpstreamProtocol::Responses,
                     protocols: vec![UpstreamProtocol::Responses],
                     supported_models: vec![model.into()],
@@ -441,6 +449,7 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
                     name: "alternative-route".into(),
                     base_url: format!("http://{alternative_address}"),
                     api_key: "alternative-secret".into(),
+                    continuation_provider_group: Some("internal-responses".into()),
                     protocol: UpstreamProtocol::Responses,
                     protocols: vec![UpstreamProtocol::Responses],
                     supported_models: vec![model.into()],
@@ -579,9 +588,226 @@ async fn responses_continuation_operational_failure_does_not_try_a_different_pro
         .await
         .unwrap();
 
-    assert!(continuation_response.status().is_server_error());
-    assert_eq!(exact_hits.load(Ordering::SeqCst), 3);
-    assert_eq!(alternative_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(continuation_response.status(), StatusCode::OK);
+    assert!(exact_hits.load(Ordering::SeqCst) >= 2);
+    assert_eq!(alternative_hits.load(Ordering::SeqCst), 1);
+    let captured_alternative = captured_alternative
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("compatible account must receive the resumed request");
+    let replayed_input = captured_alternative["input"].to_string();
+    assert!(replayed_input.contains("exact-thought"));
+    assert!(replayed_input.contains("call_1"));
+    assert!(replayed_input.contains("result"));
+}
+
+#[tokio::test]
+async fn responses_continuation_local_saturation_uses_compatible_account() {
+    let exact_hits = Arc::new(AtomicUsize::new(0));
+    let alternative_hits = Arc::new(AtomicUsize::new(0));
+    let exact_hits_for_server = exact_hits.clone();
+    let alternative_hits_for_server = alternative_hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |headers: HeaderMap| {
+            let exact_hits = exact_hits_for_server.clone();
+            let alternative_hits = alternative_hits_for_server.clone();
+            async move {
+                let authorization = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                let (hits, id, text) = if authorization == "Bearer exact-saturation-secret" {
+                    (
+                        &exact_hits,
+                        "resp-unexpected-exact",
+                        "unexpected exact route",
+                    )
+                } else {
+                    (
+                        &alternative_hits,
+                        "resp-compatible-saturation",
+                        "compatible account",
+                    )
+                };
+                hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": id,
+                        "object": "response",
+                        "output": [{
+                            "id": "message-saturation",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": text,
+                                "annotations": []
+                            }]
+                        }]
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let model = "deepseek-v4-flash";
+    let exact = UpstreamConfig {
+        id: "exact-saturation-route".into(),
+        name: "exact saturation route".into(),
+        base_url: format!("http://{address}"),
+        api_key: "exact-saturation-secret".into(),
+        continuation_provider_group: Some("internal-deepseek".into()),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec![model.into()],
+        priority: 100,
+        max_concurrency: 1,
+        active: true,
+        ..Default::default()
+    };
+    let alternative = UpstreamConfig {
+        id: "alternative-saturation-route".into(),
+        name: "alternative saturation route".into(),
+        base_url: format!("http://{address}"),
+        api_key: "alternative-saturation-secret".into(),
+        continuation_provider_group: Some("internal-deepseek".into()),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec![model.into()],
+        priority: 1,
+        max_concurrency: 1,
+        active: true,
+        ..Default::default()
+    };
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![exact.clone(), alternative.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-saturation-continuation".into(),
+                name: "saturation continuation client".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+
+    let mut exact_profile = None;
+    for upstream in [&exact, &alternative] {
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: upstream_model_key_fingerprint(upstream, model),
+            upstream_id: upstream.id.clone(),
+            runtime_model_slug: model.into(),
+            protocol: WireProtocol::Responses,
+        });
+        profile.state = DialectProfileState::Verified;
+        for capability in [Capability::TextInput, Capability::NonStreamingResponse] {
+            profile
+                .capabilities
+                .insert(capability, EvidenceState::Supported);
+        }
+        stamp_current_dialect_profile(&state, model, &mut profile).await;
+        state.upsert_dialect_profile(profile.clone()).await.unwrap();
+        if upstream.id == exact.id {
+            exact_profile = Some(profile);
+        }
+    }
+    let exact_profile = exact_profile.unwrap();
+    state.store_response_history(
+        "resp-saturation-history",
+        vec![],
+        serde_json::Map::from_iter([(
+            "_gateway_continuation".to_string(),
+            json!({
+                "version": 1,
+                "profile_key": exact_profile.key,
+                "configuration_fingerprint": exact_profile.configuration_fingerprint,
+                "probe_schema_version": DIALECT_PROBE_SCHEMA_VERSION,
+                "reasoning_carrier": null,
+                "required_capabilities": [],
+                "adapter_identity": {
+                    "protocol_transition": {
+                        "schema_version": 1,
+                        "downstream_protocol": "responses",
+                        "upstream_protocol": "responses"
+                    },
+                    "tool_registry_version": null
+                }
+            }),
+        )]),
+    );
+    let held = state
+        .try_reserve_upstream_request(&exact, model)
+        .await
+        .unwrap();
+    let exact_route = RouteHealthKey {
+        upstream_id: exact.id.clone(),
+        key_fingerprint: upstream_model_key_fingerprint(&exact, model),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::Responses,
+    };
+
+    let response = build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "previous_response_id": "resp-saturation-history",
+                        "input": "continue",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(exact_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(alternative_hits.load(Ordering::SeqCst), 1);
+    assert!(state
+        .route_health_snapshot(&exact_route)
+        .await
+        .unwrap()
+        .is_none());
+    state.release_upstream_request(held).await.unwrap();
 }
 
 #[tokio::test]
