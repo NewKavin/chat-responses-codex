@@ -32,6 +32,7 @@ const MODEL_QUARANTINE_BASE: Duration = Duration::from_secs(15 * 60);
 const MODEL_QUARANTINE_MAX: Duration = Duration::from_secs(60 * 60);
 const FAILURE_STREAK_RESET: Duration = Duration::from_secs(10 * 60);
 const HALF_OPEN_BUSY_RETRY: Duration = Duration::from_secs(1);
+const LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN: Duration = Duration::from_secs(60);
 pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -501,7 +502,18 @@ impl RouteHealthRegistry {
 
     fn upstream_snapshot(&self, upstream: &UpstreamConfig, now: Instant) -> RouteHealthSnapshotDto {
         let routes = self.enumerable_routes(upstream);
-        summarize_route_health_routes(
+        let legacy_threshold =
+            legacy_local_admission_cooldown_threshold(&self.concurrency_probe_delays);
+        let legacy_local_admission_poisoned_routes = routes
+            .iter()
+            .filter_map(|route| self.routes.get(route))
+            .filter(|state| {
+                state.last_failure_class == Some(RouteFailureClass::ConcurrencySaturated)
+                    && state.last_failure_status.is_none()
+                    && state.retry_after(now) > legacy_threshold
+            })
+            .count();
+        let mut snapshot = summarize_route_health_routes(
             routes,
             |route| {
                 self.routes
@@ -509,7 +521,9 @@ impl RouteHealthRegistry {
                     .map(|state| health_snapshot(state, now))
             },
             |key| self.keys.get(key).map(|state| health_snapshot(state, now)),
-        )
+        );
+        snapshot.legacy_local_admission_poisoned_routes = legacy_local_admission_poisoned_routes;
+        snapshot
     }
 
     fn enumerable_routes(&self, upstream: &UpstreamConfig) -> HashSet<RouteHealthKey> {
@@ -1360,6 +1374,17 @@ pub fn normalize_concurrency_probe_delays(values: Vec<u64>) -> Vec<Duration> {
         values
     };
     values.into_iter().map(Duration::from_millis).collect()
+}
+
+pub(super) fn legacy_local_admission_cooldown_threshold(
+    concurrency_probe_delays: &[Duration],
+) -> Duration {
+    concurrency_probe_delays
+        .iter()
+        .max()
+        .copied()
+        .unwrap_or(Duration::from_secs(1))
+        .saturating_add(LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN)
 }
 
 pub(super) fn route_cooldown_schedule_ms(

@@ -1,15 +1,16 @@
 use super::route_health::{
     concurrency_probe_schedule_ms, enumerable_route_health_routes, key_cooldown_schedule_ms,
-    key_failure_has_cooldown, normalize_concurrency_probe_delays, route_cooldown_schedule_ms,
-    route_failure_has_cooldown, route_health_aggregate_is_current, route_health_key_is_current,
-    route_health_route_is_current, summarize_route_health_routes, RedisHealthLease,
+    key_failure_has_cooldown, legacy_local_admission_cooldown_threshold,
+    normalize_concurrency_probe_delays, route_cooldown_schedule_ms, route_failure_has_cooldown,
+    route_health_aggregate_is_current, route_health_key_is_current, route_health_route_is_current,
+    summarize_route_health_routes, RedisHealthLease,
 };
 use super::{
     AccountConcurrencyKey, AccountProbeLease, AccountProbeOutcome, AccountWaitTicket, AppConfig,
     DownstreamAdmissionRejection, DownstreamConfig, DownstreamRuntimeCounts, HealthStateSnapshot,
-    KeyHealthKey, ProbeDecision, RouteAvailability, RouteFailureClass, RouteHealthKey,
-    RouteHealthSnapshotDto, RouteOutcome, RouteRecovery, RouteSetAggregateKey,
-    UpstreamAdmissionError, UpstreamConfig, UpstreamRuntimeSnapshot,
+    KeyHealthKey, LegacyRouteHealthRepairReport, ProbeDecision, RouteAvailability,
+    RouteFailureClass, RouteHealthKey, RouteHealthSnapshotDto, RouteOutcome, RouteRecovery,
+    RouteSetAggregateKey, UpstreamAdmissionError, UpstreamConfig, UpstreamRuntimeSnapshot,
     UpstreamRuntimeSnapshotWithFeedback, ROUTE_HEALTH_GLOBAL_CAPACITY,
     ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
@@ -29,7 +30,6 @@ const REDIS_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const ROUTE_HEALTH_MIN_TTL_SECONDS: u64 = 2 * 60 * 60;
 const ROUTE_HEALTH_TTL_GRACE_SECONDS: u64 = 60;
 const ROUTE_HEALTH_FAILURE_STREAK_RESET_MS: u64 = 10 * 60 * 1_000;
-const LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("runtime coordination unavailable")]
@@ -1310,14 +1310,34 @@ impl RedisRuntimeCoordinator {
     }
 
     fn legacy_local_admission_cooldown_threshold_ms(&self) -> u64 {
-        self.concurrency_probe_delays
-            .iter()
-            .max()
-            .copied()
-            .unwrap_or(Duration::from_secs(1))
-            .saturating_add(LEGACY_LOCAL_ADMISSION_SAFETY_MARGIN)
+        legacy_local_admission_cooldown_threshold(&self.concurrency_probe_delays)
             .as_millis()
             .min(u128::from(u64::MAX)) as u64
+    }
+
+    pub(super) async fn repair_legacy_local_admission_route_health(
+        &self,
+    ) -> Result<LegacyRouteHealthRepairReport, RuntimeCoordinationError> {
+        let mut connection = self.connection();
+        let script = redis::Script::new(include_str!(
+            "redis_runtime/repair_legacy_local_admission.lua"
+        ));
+        let mut invocation = script.prepare_invoke();
+        invocation
+            .key(self.health_global_index_key("routes"))
+            .arg(self.legacy_local_admission_cooldown_threshold_ms());
+        let result =
+            timeout_coordination(invocation.invoke_async::<Vec<u64>>(&mut connection)).await;
+        if result.is_err() {
+            let _ = self.refresh_manager().await;
+        }
+        match result?.as_slice() {
+            [scanned_routes, repaired_routes] => Ok(LegacyRouteHealthRepairReport {
+                scanned_routes: *scanned_routes,
+                repaired_routes: *repaired_routes,
+            }),
+            _ => Err(RuntimeCoordinationError),
+        }
     }
 
     pub(super) async fn finish_route_health(
@@ -1690,9 +1710,10 @@ impl RedisRuntimeCoordinator {
         &self,
         upstreams: &[UpstreamConfig],
     ) -> Result<HashMap<String, RouteHealthSnapshotDto>, RuntimeCoordinationError> {
-        let (key_records, route_records) = tokio::try_join!(
+        let (key_records, route_records, poisoned_routes) = tokio::try_join!(
             self.indexed_health_state_records("keys"),
-            self.indexed_health_state_records("routes")
+            self.indexed_health_state_records("routes"),
+            self.legacy_local_admission_poisoned_routes_by_upstream()
         )?;
         let key_snapshots = key_records
             .into_iter()
@@ -1721,7 +1742,7 @@ impl RedisRuntimeCoordinator {
             .iter()
             .map(|upstream| {
                 let routes = enumerable_route_health_routes(upstream, &existing_routes);
-                let snapshot = summarize_route_health_routes(
+                let mut snapshot = summarize_route_health_routes(
                     routes,
                     |route| {
                         route_snapshots
@@ -1730,9 +1751,47 @@ impl RedisRuntimeCoordinator {
                     },
                     |key| key_snapshots.get(&self.key_health_state_key(key)).cloned(),
                 );
+                snapshot.legacy_local_admission_poisoned_routes = poisoned_routes
+                    .get(&upstream.id)
+                    .copied()
+                    .unwrap_or_default();
                 (upstream.id.clone(), snapshot)
             })
             .collect())
+    }
+
+    async fn legacy_local_admission_poisoned_routes_by_upstream(
+        &self,
+    ) -> Result<HashMap<String, usize>, RuntimeCoordinationError> {
+        let mut connection = self.connection();
+        let script = redis::Script::new(include_str!(
+            "redis_runtime/count_legacy_local_admission.lua"
+        ));
+        let mut invocation = script.prepare_invoke();
+        invocation
+            .key(self.health_global_index_key("routes"))
+            .arg(self.legacy_local_admission_cooldown_threshold_ms())
+            .arg(ROUTE_HEALTH_GLOBAL_CAPACITY);
+        let result =
+            timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
+        if result.is_err() {
+            let _ = self.refresh_manager().await;
+        }
+        let result = result?;
+        if result.len() % 2 != 0 {
+            return Err(RuntimeCoordinationError);
+        }
+        let mut counts = HashMap::with_capacity(result.len() / 2);
+        for pair in result.chunks_exact(2) {
+            let upstream_id = pair[0].clone();
+            let count = pair[1]
+                .parse::<usize>()
+                .map_err(|_| RuntimeCoordinationError)?;
+            if upstream_id.is_empty() || counts.insert(upstream_id, count).is_some() {
+                return Err(RuntimeCoordinationError);
+            }
+        }
+        Ok(counts)
     }
 
     pub(super) async fn reconcile_route_health(

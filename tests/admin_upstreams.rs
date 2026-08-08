@@ -891,6 +891,73 @@ async fn test_upstreams_list_route_health_is_aggregate_and_secret_free() {
 }
 
 #[tokio::test]
+async fn legacy_local_admission_invariant_is_bounded_and_secret_free() {
+    let api_key = "legacy-poison-secret";
+    let upstream_id = "legacy-poison-upstream";
+    let fingerprint = upstream_key_fingerprint(upstream_id, api_key);
+    let upstream = UpstreamConfig {
+        id: upstream_id.to_string(),
+        name: "Legacy Poison Invariant".to_string(),
+        base_url: "https://api.example.invalid".to_string(),
+        api_key: api_key.to_string(),
+        api_key_models: vec![ApiKeyModelConfig {
+            api_key: api_key.to_string(),
+            supported_models: vec!["glm-5.2".to_string()],
+        }],
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec!["glm-5.2".to_string()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = create_test_state_with_upstreams(vec![upstream]);
+    state
+        .observe_route_failure(
+            &RouteHealthKey {
+                upstream_id: upstream_id.to_string(),
+                key_fingerprint: fingerprint.clone(),
+                runtime_model_slug: "glm-5.2".to_string(),
+                protocol: WireProtocol::Responses,
+            },
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(86_000_000)),
+        )
+        .await
+        .expect("legacy local-admission route health observation");
+
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let upstreams: Vec<Value> = serde_json::from_slice(&body).unwrap();
+    let route_health = &upstreams[0]["route_health"];
+
+    assert_eq!(route_health["legacy_local_admission_poisoned_routes"], 1);
+    assert!(
+        route_health["legacy_local_admission_poisoned_routes"]
+            .as_u64()
+            .unwrap()
+            <= route_health["cooldown_routes"].as_u64().unwrap()
+    );
+    let serialized = route_health.to_string();
+    assert!(!serialized.contains(api_key));
+    assert!(!serialized.contains(&fingerprint));
+    assert!(!serialized.contains(upstream_id));
+}
+
+#[tokio::test]
 async fn test_upstreams_list_includes_active_and_inactive() {
     let state = create_test_state();
     let app = chat_responses_codex::server::build_router(state);

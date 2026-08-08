@@ -139,6 +139,12 @@ pub use usage::{
     TokenUsage,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LegacyRouteHealthRepairReport {
+    pub scanned_routes: u64,
+    pub repaired_routes: u64,
+}
+
 fn first_model_key_fingerprint(upstream: &UpstreamConfig, model: &str) -> Option<String> {
     upstream
         .keys_for_model(model)
@@ -1187,6 +1193,32 @@ impl AppState {
         self.runtime_coordination.healthcheck().await
     }
 
+    pub async fn repair_legacy_local_admission_route_health(
+        &self,
+    ) -> io::Result<LegacyRouteHealthRepairReport> {
+        match &self.runtime_coordination {
+            RuntimeCoordinationBackend::Local => Ok(LegacyRouteHealthRepairReport {
+                scanned_routes: 0,
+                repaired_routes: 0,
+            }),
+            RuntimeCoordinationBackend::Redis(coordinator) => coordinator
+                .repair_legacy_local_admission_route_health()
+                .await
+                .map_err(io::Error::other),
+        }
+    }
+
+    async fn repair_legacy_local_admission_route_health_at_startup(&self) -> io::Result<()> {
+        let report = self.repair_legacy_local_admission_route_health().await?;
+        tracing::info!(
+            redis_prefix = %self.config.redis_key_prefix,
+            scanned_routes = report.scanned_routes,
+            repaired_routes = report.repaired_routes,
+            "legacy local-admission route-health repair complete"
+        );
+        Ok(())
+    }
+
     /// Test-only seam: returns the coordination fault injector when the
     /// state uses the Redis runtime backend, so an integration test can arm
     /// a simulated outage or lost response without pausing the shared Redis.
@@ -2013,6 +2045,8 @@ impl AppState {
             runtime_coordination,
             deployment_calendar,
         );
+        app.repair_legacy_local_admission_route_health_at_startup()
+            .await?;
         let capability_state = app.config_store.load_capability_state().await?;
         app.initialize_capability_snapshot_from_store(capability_state)
             .await?;
@@ -2074,6 +2108,8 @@ impl AppState {
             deployment_calendar,
         )
         .await;
+        app.repair_legacy_local_admission_route_health_at_startup()
+            .await?;
         app.initialize_capability_snapshot_from_store(capability_state)
             .await?;
         Ok(app)

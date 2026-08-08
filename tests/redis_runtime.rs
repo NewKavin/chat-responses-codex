@@ -2570,6 +2570,256 @@ async fn route_reservation_self_heals_only_legacy_local_admission_cooldown() {
 
 #[tokio::test]
 #[ignore = "requires TEST_REDIS_URL"]
+async fn legacy_local_admission_route_health_is_repaired_selectively() {
+    let config = redis_test_config();
+    let (state, _second, _directory) = redis_test_states(&config).await;
+    let upstream_id = "startup-legacy-repair-upstream";
+    let api_key = "startup-legacy-repair-secret";
+    let fingerprint = upstream_key_fingerprint(upstream_id, api_key);
+    let legacy_route = redis_test_health_route(upstream_id, &fingerprint, "legacy-local");
+
+    state
+        .observe_route_failure(
+            &legacy_route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(86_000_000)),
+        )
+        .await
+        .unwrap();
+
+    let controls = [
+        (
+            "provider-concurrency",
+            RouteFailureClass::ConcurrencySaturated,
+            Some("503"),
+            86_000_000_u64,
+        ),
+        (
+            "short-concurrency",
+            RouteFailureClass::ConcurrencySaturated,
+            None,
+            2_000_u64,
+        ),
+        (
+            "transient",
+            RouteFailureClass::TransientServer,
+            None,
+            86_000_000_u64,
+        ),
+    ];
+    let mut control_state_keys = Vec::new();
+    for (model, class, status, cooldown_ms) in controls {
+        let route = redis_test_health_route(upstream_id, &fingerprint, model);
+        state
+            .observe_route_failure(&route, class, Some(Duration::from_millis(cooldown_ms)))
+            .await
+            .unwrap();
+        let state_key = redis_route_health_route_state_key(&config, &route);
+        if let Some(status) = status {
+            assert!(redis_test_command(
+                &config,
+                &[
+                    "HSET".into(),
+                    state_key.clone(),
+                    "failure_status".into(),
+                    status.into(),
+                ],
+            )
+            .await
+            .starts_with(':'));
+        }
+        control_state_keys.push(state_key);
+    }
+
+    let unrelated_route_health_key = redis_route_health_key(&config, "key:unrelated");
+    assert!(redis_test_command(
+        &config,
+        &[
+            "HSET".into(),
+            unrelated_route_health_key.clone(),
+            "failure_class".into(),
+            "transient_server".into(),
+        ],
+    )
+    .await
+    .starts_with(':'));
+    assert_eq!(
+        redis_integer(
+            &redis_test_command(
+                &config,
+                &[
+                    "ZADD".into(),
+                    redis_route_health_key(&config, "index:keys"),
+                    "1".into(),
+                    unrelated_route_health_key.clone(),
+                ],
+            )
+            .await,
+        ),
+        1
+    );
+
+    let unrelated = [
+        (
+            format!(
+                "{}:v1:upstream:{{unrelated}}:leases",
+                config.redis_key_prefix
+            ),
+            "lease-marker",
+        ),
+        (
+            format!(
+                "{}:v1:account:{{unrelated}}:waiter",
+                config.redis_key_prefix
+            ),
+            "waiter-marker",
+        ),
+        (
+            format!(
+                "{}:v1:upstream:{{unrelated}}:quota",
+                config.redis_key_prefix
+            ),
+            "quota-marker",
+        ),
+    ];
+    for (key, value) in &unrelated {
+        assert_eq!(
+            redis_test_command(&config, &["SET".into(), key.clone(), (*value).into()],).await,
+            "+OK\r\n"
+        );
+    }
+
+    let upstream = UpstreamConfig {
+        id: upstream_id.into(),
+        name: "Startup legacy repair".into(),
+        api_key: api_key.into(),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let before_repair = state
+        .route_health_snapshots(std::slice::from_ref(&upstream))
+        .await
+        .unwrap();
+    let before_repair = &before_repair[upstream_id];
+    assert_eq!(before_repair.legacy_local_admission_poisoned_routes, 1);
+    let serialized = serde_json::to_string(before_repair).unwrap();
+    assert!(!serialized.contains(api_key));
+    assert!(!serialized.contains(&fingerprint));
+
+    let report = state
+        .repair_legacy_local_admission_route_health()
+        .await
+        .unwrap();
+
+    assert_eq!(report.scanned_routes, 4);
+    assert_eq!(report.repaired_routes, 1);
+    assert_eq!(
+        state
+            .route_health_snapshots(std::slice::from_ref(&upstream))
+            .await
+            .unwrap()[upstream_id]
+            .legacy_local_admission_poisoned_routes,
+        0
+    );
+    assert_eq!(
+        redis_integer(
+            &redis_test_command(
+                &config,
+                &[
+                    "EXISTS".into(),
+                    redis_route_health_route_state_key(&config, &legacy_route),
+                ],
+            )
+            .await,
+        ),
+        0
+    );
+    for state_key in control_state_keys {
+        assert_eq!(
+            redis_integer(&redis_test_command(&config, &["EXISTS".into(), state_key]).await,),
+            1
+        );
+    }
+    assert_eq!(
+        redis_integer(
+            &redis_test_command(&config, &["EXISTS".into(), unrelated_route_health_key],).await,
+        ),
+        1
+    );
+    for (key, expected) in unrelated {
+        assert_eq!(
+            redis_bulk_string(&redis_test_command(&config, &["GET".into(), key]).await),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn app_state_load_repairs_legacy_local_admission_route_health() {
+    let config = redis_test_config();
+    let (state, _second, directory) = redis_test_states(&config).await;
+    let upstream_id = "startup-load-legacy-repair-upstream";
+    let fingerprint = "fingerprint-a";
+    let legacy_route = redis_test_health_route(upstream_id, fingerprint, "legacy-local");
+    let provider_route = redis_test_health_route(upstream_id, fingerprint, "provider-503");
+
+    state
+        .observe_route_failure(
+            &legacy_route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(86_000_000)),
+        )
+        .await
+        .unwrap();
+    state
+        .observe_route_failure(
+            &provider_route,
+            RouteFailureClass::ConcurrencySaturated,
+            Some(Duration::from_millis(86_000_000)),
+        )
+        .await
+        .unwrap();
+    let provider_state_key = redis_route_health_route_state_key(&config, &provider_route);
+    assert!(redis_test_command(
+        &config,
+        &[
+            "HSET".into(),
+            provider_state_key.clone(),
+            "failure_status".into(),
+            "503".into(),
+        ],
+    )
+    .await
+    .starts_with(':'));
+
+    AppState::load_from_path(directory.path().join("startup.json"), config.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        redis_integer(
+            &redis_test_command(
+                &config,
+                &[
+                    "EXISTS".into(),
+                    redis_route_health_route_state_key(&config, &legacy_route),
+                ],
+            )
+            .await,
+        ),
+        0
+    );
+    assert_eq!(
+        redis_integer(&redis_test_command(&config, &["EXISTS".into(), provider_state_key]).await,),
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
 async fn redis_earliest_route_recovery_uses_shared_health() {
     let config = redis_test_config();
     let (first, second, _directory) = redis_test_states(&config).await;

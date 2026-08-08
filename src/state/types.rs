@@ -11,6 +11,7 @@ pub struct RouteHealthSnapshotDto {
     pub healthy_routes: usize,
     pub cooldown_routes: usize,
     pub half_open_routes: usize,
+    pub legacy_local_admission_poisoned_routes: usize,
     pub earliest_retry_after_seconds: Option<u64>,
     pub failure_classes: BTreeMap<String, usize>,
 }
