@@ -187,6 +187,174 @@ async fn committed_account_budget_preserves_provider_retry_after_details() {
 }
 
 #[tokio::test]
+async fn explicit_concurrency_5xx_uses_account_recovery_and_healthy_routes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let failing_hits = Arc::new(AtomicUsize::new(0));
+    let healthy_hits = Arc::new(AtomicUsize::new(0));
+    let failing_hits_for_server = failing_hits.clone();
+    let healthy_hits_for_server = healthy_hits.clone();
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: HeaderMap, _body: String| {
+            let failing_hits = failing_hits_for_server.clone();
+            let healthy_hits = healthy_hits_for_server.clone();
+            async move {
+                let authorization = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                let failing_account =
+                    authorization.ends_with("account-1") || authorization.ends_with("account-2");
+                let mut response_headers = HeaderMap::new();
+                response_headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                if failing_account {
+                    failing_hits.fetch_add(1, Ordering::SeqCst);
+                    response_headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        response_headers,
+                        axum::Json(json!({
+                            "error": {
+                                "code": "concurrency_limit_exceeded",
+                                "message": "并发数过高"
+                            }
+                        })),
+                    )
+                } else {
+                    healthy_hits.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::OK,
+                        response_headers,
+                        axum::Json(json!({
+                            "id": "chatcmpl-account-failover",
+                            "object": "chat.completion",
+                            "created": 1,
+                            "model": "gpt-4",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "ok"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })),
+                    )
+                }
+            }
+        }),
+    );
+    let upstream_server = tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let account_keys = (1..=8)
+        .map(|index| format!("account-{index}"))
+        .collect::<Vec<_>>();
+    let downstream_key = generate_downstream_key("gw");
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![UpstreamConfig {
+                id: "eight-account-upstream".into(),
+                name: "eight account upstream".into(),
+                base_url: format!("http://{address}"),
+                api_key: account_keys[0].clone(),
+                api_keys: account_keys[1..].to_vec(),
+                api_key_models: account_keys
+                    .iter()
+                    .map(|api_key| chat_responses_codex::state::ApiKeyModelConfig {
+                        api_key: api_key.clone(),
+                        supported_models: vec!["gpt-4".into()],
+                    })
+                    .collect(),
+                protocol: UpstreamProtocol::ChatCompletions,
+                protocols: vec![UpstreamProtocol::ChatCompletions],
+                supported_models: vec!["gpt-4".into()],
+                requests_per_minute: 100,
+                request_quota_requests: 1_000,
+                max_concurrency: 4,
+                active: true,
+                ..UpstreamConfig::default()
+            }]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-eight-accounts".into(),
+                name: "eight account test".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec!["gpt-4".into()],
+                rate_limit_enabled: false,
+                per_minute_limit: 60,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            usage_logs: vec![],
+            announcement: None,
+            global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        },
+        directory.path().join("state.json"),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_same_route_retry_enabled: false,
+            upstream_concurrency_recovery_max_wait_ms: 2_000,
+            upstream_concurrency_recovery_max_rounds: 16,
+            upstream_route_exhaustion_retry_max_wait_ms: 0,
+            ..AppConfig::default()
+        },
+    );
+    let app = build_router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", downstream_key.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"model": "gpt-4", "input": "Hello", "stream": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(failing_hits.load(Ordering::SeqCst) >= 1);
+    assert!(healthy_hits.load(Ordering::SeqCst) >= 1);
+    assert_eq!(
+        state
+            .usage_logs()
+            .await
+            .iter()
+            .filter(|row| row.status_code >= 400)
+            .count(),
+        0
+    );
+
+    upstream_server.abort();
+}
+
+#[tokio::test]
 async fn local_upstream_concurrency_config_does_not_hard_reject_request() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");

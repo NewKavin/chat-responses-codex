@@ -511,6 +511,7 @@ impl AccountRecoverySession {
         GatewayError::ConcurrencyFull {
             message: "upstream account concurrency recovery budget exhausted".to_string(),
             retry_after: Some(self.recovery_retry_after()),
+            upstream_status: None,
         }
     }
 

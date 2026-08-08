@@ -504,15 +504,16 @@ fn duration_seconds_ceil(duration: Duration) -> u64 {
 fn route_health_outcome(error: &GatewayError) -> RouteOutcome {
     let retry_after = error.retry_after();
     if matches!(error, GatewayError::ConcurrencyFull { .. }) {
+        let upstream_status = error.upstream_status();
         return retry_after
             .map(|retry_after| RouteOutcome::RouteFailureWithRetry {
                 class: FailureClass::ConcurrencySaturated,
                 retry_after,
-                upstream_status: None,
+                upstream_status,
             })
             .unwrap_or(RouteOutcome::RouteFailure {
                 class: FailureClass::ConcurrencySaturated,
-                upstream_status: None,
+                upstream_status,
             });
     }
     let upstream_status = error.upstream_status();
@@ -5199,6 +5200,7 @@ async fn process_gateway_request_inner(
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream account is waiting for recovery".into(),
                                     retry_after: Some(retry_after),
+                                    upstream_status: None,
                                 });
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -5283,6 +5285,7 @@ async fn process_gateway_request_inner(
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message: "upstream request concurrency capacity is full".into(),
                                     retry_after: Some(retry_after),
+                                    upstream_status: None,
                                 });
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -5964,6 +5967,7 @@ async fn process_gateway_request_inner(
                             Err(GatewayError::ConcurrencyFull {
                                 message,
                                 retry_after,
+                                upstream_status,
                             }) => {
                                 if stream_only_recovery_leader.is_some()
                                     || stream_only_recovery.consumed
@@ -6010,6 +6014,7 @@ async fn process_gateway_request_inner(
                                 last_error = Some(GatewayError::ConcurrencyFull {
                                     message,
                                     retry_after,
+                                    upstream_status,
                                 });
                                 last_failure_upstream =
                                     Some((upstream.id.clone(), Some(upstream.name.clone())));
@@ -6019,6 +6024,7 @@ async fn process_gateway_request_inner(
                                     &GatewayError::ConcurrencyFull {
                                         message: String::new(),
                                         retry_after,
+                                        upstream_status,
                                     },
                                 )
                                 .await?;
@@ -6036,12 +6042,12 @@ async fn process_gateway_request_inner(
                                                 RouteOutcome::RouteFailureWithRetry {
                                                     class: FailureClass::ConcurrencySaturated,
                                                     retry_after,
-                                                    upstream_status: None,
+                                                    upstream_status,
                                                 }
                                             })
                                             .unwrap_or(RouteOutcome::RouteFailure {
                                                 class: FailureClass::ConcurrencySaturated,
-                                                upstream_status: None,
+                                                upstream_status,
                                             })
                                     },
                                 )

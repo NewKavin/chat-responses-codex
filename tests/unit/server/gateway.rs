@@ -349,6 +349,7 @@ fn concurrency_error_keeps_public_capacity_class_and_specific_route_health() {
     let error = GatewayError::ConcurrencyFull {
         message: "concurrency limit exceeded".into(),
         retry_after: None,
+        upstream_status: None,
     };
 
     assert_eq!(
@@ -1524,6 +1525,28 @@ fn route_attempts_converts_classified_upstream_feedback_before_aggregation() {
         error.route_failure_class(),
         Some(FailureClass::ModelUnsupported)
     );
+}
+
+#[test]
+fn explicit_concurrency_5xx_maps_to_account_recovery_with_provider_status() {
+    let error = GatewayError::from_classified_upstream_failure(
+        crate::upstream_feedback::ClassifiedUpstreamFailure {
+            class: FailureClass::CapacityUnavailable,
+            semantic: crate::upstream_feedback::UpstreamResponseSemantic::ExplicitConcurrency,
+            upstream_status: Some(502),
+            retry_after: Some(Duration::from_secs(3)),
+        },
+        "provider concurrency rejection",
+    );
+
+    assert!(matches!(
+        error,
+        GatewayError::ConcurrencyFull {
+            retry_after: Some(retry_after),
+            ..
+        } if retry_after == Duration::from_secs(3)
+    ));
+    assert_eq!(error.upstream_status(), Some(502));
 }
 
 fn resolved_stream_capabilities(

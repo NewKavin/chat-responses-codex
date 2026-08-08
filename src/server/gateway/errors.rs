@@ -2,6 +2,7 @@ use super::route_attempts::{AttemptLedger, FailureClassSummary, TerminalFailure}
 use crate::state::{DownstreamAdmissionRejection, RouteRecovery};
 use crate::upstream_feedback::{
     ClassifiedUpstreamFailure, FailureClass, UpstreamFeedbackClassification,
+    UpstreamResponseSemantic,
 };
 use axum::extract::Json;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -284,6 +285,7 @@ pub(super) enum GatewayError {
     ConcurrencyFull {
         message: String,
         retry_after: Option<Duration>,
+        upstream_status: Option<u16>,
     },
     Upstream(String),
     GatewayTimeout(String),
@@ -386,16 +388,19 @@ impl GatewayError {
             Value::Object(details)
         };
 
+        if failure.semantic == UpstreamResponseSemantic::ExplicitConcurrency {
+            return Self::ConcurrencyFull {
+                message,
+                retry_after,
+                upstream_status,
+            };
+        }
+
         match failure.class {
-            FailureClass::CapacityUnavailable if upstream_status == Some(429) => {
-                Self::ConcurrencyFull {
-                    message,
-                    retry_after,
-                }
-            }
             FailureClass::ConcurrencySaturated => Self::ConcurrencyFull {
                 message,
                 retry_after,
+                upstream_status,
             },
             FailureClass::CapacityUnavailable => Self::classified_with_retry_after(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -708,9 +713,10 @@ impl GatewayError {
     }
     pub(super) fn upstream_status(&self) -> Option<u16> {
         match self {
-            GatewayError::TooManyRequests { .. } | GatewayError::ConcurrencyFull { .. } => {
-                Some(StatusCode::TOO_MANY_REQUESTS.as_u16())
-            }
+            GatewayError::TooManyRequests { .. } => Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+            GatewayError::ConcurrencyFull {
+                upstream_status, ..
+            } => *upstream_status,
             GatewayError::Unauthorized(_) => Some(StatusCode::UNAUTHORIZED.as_u16()),
             GatewayError::Forbidden(_) => Some(StatusCode::FORBIDDEN.as_u16()),
             GatewayError::BadRequest(_) => Some(StatusCode::BAD_REQUEST.as_u16()),
