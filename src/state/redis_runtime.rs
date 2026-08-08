@@ -173,6 +173,10 @@ impl RuntimeCoordinationBackend {
                 route_health_ttl_seconds: route_health_retention_ttl_seconds(Duration::from_secs(
                     config.upstream_transient_route_cooldown_max_seconds,
                 )),
+                route_health_half_open_ttl_ms: config
+                    .upstream_route_health_half_open_ttl_seconds
+                    .max(1)
+                    .saturating_mul(1_000),
                 concurrency_probe_delays: normalize_concurrency_probe_delays(
                     config.upstream_concurrency_probe_delays_ms.clone(),
                 ),
@@ -216,6 +220,7 @@ pub struct RedisRuntimeCoordinator {
     account_waiter_ttl_ms: u64,
     account_probe_ttl_ms: u64,
     route_health_ttl_seconds: u64,
+    route_health_half_open_ttl_ms: u64,
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
@@ -1280,7 +1285,7 @@ impl RedisRuntimeCoordinator {
             .key(self.health_global_index_key("routes"))
             .arg(lease_id)
             .arg(self.route_health_ttl_seconds)
-            .arg(self.lease_duration_ms);
+            .arg(self.route_health_half_open_ttl_ms);
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
         if result.is_err() {
@@ -2106,7 +2111,7 @@ fn parse_health_state_snapshot(
 ) -> Result<Option<HealthStateSnapshot>, RuntimeCoordinationError> {
     match result.first().map(String::as_str) {
         Some("0") if result.len() == 1 => Ok(None),
-        Some("1") if result.len() == 9 => {
+        Some("1") if result.len() == 10 => {
             let consecutive_failures = result[1]
                 .parse::<u32>()
                 .map_err(|_| RuntimeCoordinationError)?;
@@ -2125,11 +2130,17 @@ fn parse_health_state_snapshot(
                 "1" => true,
                 _ => return Err(RuntimeCoordinationError),
             };
+            let half_open_remaining = Duration::from_millis(
+                result[5]
+                    .parse::<u64>()
+                    .map_err(|_| RuntimeCoordinationError)?,
+            );
             Ok(Some(HealthStateSnapshot {
                 consecutive_failures,
                 last_failure_class,
                 cooldown_remaining,
                 half_open,
+                half_open_remaining,
             }))
         }
         _ => Err(RuntimeCoordinationError),
@@ -2148,11 +2159,11 @@ struct RedisHealthStateRecord {
 fn parse_health_state_records(
     result: Vec<String>,
 ) -> Result<Vec<RedisHealthStateRecord>, RuntimeCoordinationError> {
-    if result.len() % 9 != 0 {
+    if result.len() % 10 != 0 {
         return Err(RuntimeCoordinationError);
     }
     result
-        .chunks_exact(9)
+        .chunks_exact(10)
         .map(|record| {
             let consecutive_failures = record[1]
                 .parse::<u32>()
@@ -2172,10 +2183,15 @@ fn parse_health_state_records(
                 "1" => true,
                 _ => return Err(RuntimeCoordinationError),
             };
-            let protocol = if record[8].is_empty() {
+            let half_open_remaining = Duration::from_millis(
+                record[5]
+                    .parse::<u64>()
+                    .map_err(|_| RuntimeCoordinationError)?,
+            );
+            let protocol = if record[9].is_empty() {
                 None
             } else {
-                Some(parse_wire_protocol(&record[8]).ok_or(RuntimeCoordinationError)?)
+                Some(parse_wire_protocol(&record[9]).ok_or(RuntimeCoordinationError)?)
             };
             Ok(RedisHealthStateRecord {
                 state_key: record[0].clone(),
@@ -2184,10 +2200,11 @@ fn parse_health_state_records(
                     last_failure_class,
                     cooldown_remaining,
                     half_open,
+                    half_open_remaining,
                 },
-                upstream_id: record[5].clone(),
-                key_fingerprint: record[6].clone(),
-                model_slug: record[7].clone(),
+                upstream_id: record[6].clone(),
+                key_fingerprint: record[7].clone(),
+                model_slug: record[8].clone(),
                 protocol,
             })
         })
@@ -2195,14 +2212,24 @@ fn parse_health_state_records(
 }
 
 fn health_snapshot_recovery(snapshot: &HealthStateSnapshot) -> Option<RouteRecovery> {
-    Some(RouteRecovery {
-        class: snapshot.last_failure_class?,
-        retry_after: if snapshot.half_open {
-            snapshot.cooldown_remaining.max(Duration::from_secs(1))
-        } else {
-            snapshot.cooldown_remaining
-        },
-    })
+    let class = snapshot.last_failure_class?;
+    if snapshot.half_open {
+        let remaining = snapshot
+            .half_open_remaining
+            .max(snapshot.cooldown_remaining)
+            .max(Duration::from_secs(1));
+        Some(RouteRecovery {
+            class,
+            retry_after: Duration::from_secs(1),
+            half_open_remaining: Some(remaining),
+        })
+    } else {
+        Some(RouteRecovery {
+            class,
+            retry_after: snapshot.cooldown_remaining,
+            half_open_remaining: None,
+        })
+    }
 }
 
 fn parse_optional_status(

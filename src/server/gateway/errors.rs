@@ -101,7 +101,7 @@ pub(super) fn terminal_route_failure_error(
             // health registry's live earliest recovery so clients wait long
             // enough to actually succeed on their next attempt.
             let retry_after = live_recovery
-                .map(|recovery| recovery.retry_after)
+                .map(|recovery| recovery.half_open_remaining.unwrap_or(recovery.retry_after))
                 .unwrap_or(retry_after);
             let retry_after_seconds = duration_seconds_ceil(retry_after);
             details.insert(

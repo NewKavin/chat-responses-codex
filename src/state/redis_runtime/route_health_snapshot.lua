@@ -8,12 +8,18 @@ local function state_values(key)
   end
   local cooldown_until = tonumber(redis.call('HGET', key, 'cooldown_until_ms') or '0')
   local active = redis.call('HGET', key, 'half_open_lease')
+  local half_open_expires_at = tonumber(redis.call('HGET', key, 'half_open_expires_at_ms') or '0')
+  local half_open_remaining = 0
+  if active and active ~= '' and half_open_expires_at > now_ms then
+    half_open_remaining = half_open_expires_at - now_ms
+  end
   return {
     key,
     redis.call('HGET', key, 'failure_count') or '0',
     redis.call('HGET', key, 'failure_class') or '',
     tostring(math.max(0, cooldown_until - now_ms)),
     active and active ~= '' and '1' or '0',
+    tostring(half_open_remaining),
     redis.call('HGET', key, 'upstream_id') or '',
     redis.call('HGET', key, 'key_fingerprint') or '',
     redis.call('HGET', key, 'model_slug') or '',

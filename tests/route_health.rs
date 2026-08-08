@@ -122,7 +122,7 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
         RouteFailureClass::Transport,
     ] {
         let mut registry =
-            RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4);
+            RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
         let route = route(class.as_str(), "glm-5.2");
 
         registry.observe_route_failure(&route, class, None);
@@ -140,7 +140,7 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
 
 #[tokio::test(start_paused = true)]
 async fn transient_route_cooldown_config_does_not_change_other_classes() {
-    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4);
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
     let concurrency_route = route("concurrency-config-isolation", "glm-5.2");
 
     registry.observe_route_failure(
@@ -717,6 +717,134 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
 
     assert!(matches!(
         state.reserve_route_health(&route, &key).await.unwrap(),
+        RouteAvailability::Ready(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_route_half_open_lease_releases_for_next_caller() {
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        300,
+    );
+    let route = route("fingerprint-expired-lease", "glm-5.2");
+    let key = key("fingerprint-expired-lease");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    tokio::time::advance(Duration::from_secs(12)).await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    // 超过半开租约 TTL：旧租约过期，下一个调用者必须能拿到新租约
+    tokio::time::advance(Duration::from_secs(301)).await;
+    match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(new_lease) => {
+            assert!(new_lease.is_half_open());
+            // 旧租约迟到 finish 不得破坏新租约
+            registry.finish(lease, RouteOutcome::Cancelled);
+            registry.finish(new_lease, RouteOutcome::Success);
+        }
+        other => panic!("expired half-open lease must release for next caller, got {other:?}"),
+    }
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_key_half_open_lease_releases_for_next_caller() {
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        300,
+    );
+    let key = key("fingerprint-expired-key-lease");
+    let route = route("fingerprint-expired-key-lease", "glm-5.2");
+
+    registry.observe_key_failure(&key, RouteFailureClass::KeyQuota, None);
+    tokio::time::advance(Duration::from_secs(40)).await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open key permit, got {other:?}"),
+    };
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::HalfOpenBusy { .. }
+    ));
+
+    tokio::time::advance(Duration::from_secs(301)).await;
+    match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(new_lease) => {
+            registry.finish(lease, RouteOutcome::Cancelled);
+            registry.finish(new_lease, RouteOutcome::Success);
+        }
+        other => panic!("expired key half-open lease must release, got {other:?}"),
+    }
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Ready(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn half_open_busy_reports_remaining_lease_time() {
+    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
+        16,
+        16,
+        vec![100, 200],
+        3,
+        4,
+        300,
+    );
+    let route = route("fingerprint-busy-recovery", "glm-5.2");
+    let key = key("fingerprint-busy-recovery");
+
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    tokio::time::advance(Duration::from_secs(12)).await;
+    let lease = match registry.reserve(&route, &key) {
+        RouteAvailability::Ready(lease) if lease.is_half_open() => lease,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+
+    let busy = match registry.reserve(&route, &key) {
+        RouteAvailability::HalfOpenBusy { retry_after, .. } => retry_after,
+        other => panic!("expected half-open busy, got {other:?}"),
+    };
+    // 调度语义：busy 时乐观轮询 1s，探针通常在数秒内完成
+    assert_eq!(busy, Duration::from_secs(1));
+
+    tokio::time::advance(Duration::from_secs(100)).await;
+    let recovery = registry
+        .earliest_temporary_recovery(std::slice::from_ref(&route))
+        .expect("active half-open route is temporarily busy");
+    assert_eq!(recovery.retry_after, Duration::from_secs(1), "gateway must poll optimistically");
+    // 诚实剩余租约：TTL 300s，已过 100s，剩余约 200s
+    assert!(
+        recovery
+            .half_open_remaining
+            .is_some_and(|remaining| remaining > Duration::from_secs(100)
+                && remaining <= Duration::from_secs(200)),
+        "terminal message must report the honest remaining lease, got {:?}",
+        recovery.half_open_remaining
+    );
+
+    registry.finish(lease, RouteOutcome::Cancelled);
+    assert!(matches!(
+        registry.reserve(&route, &key),
         RouteAvailability::Ready(_)
     ));
 }

@@ -329,6 +329,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
         1,
         Duration::ZERO,
         Some(RouteRecovery {
+            half_open_remaining: None,
             class: FailureClass::RateLimited,
             retry_after: Duration::from_secs(27),
         }),
@@ -2218,6 +2219,7 @@ async fn preparation_stage_cancel_after_reservation_emits_one_499_and_releases_s
                     format!("Bearer {}", downstream_key.plaintext),
                 )
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("x-gateway-test-pre-header-gate", "1")
                 .body(Body::from(
                     json!({
                         "model": "gpt-4",

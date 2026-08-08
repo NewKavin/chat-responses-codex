@@ -8,6 +8,7 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS, DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
+    DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
 };
@@ -58,6 +59,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             transient_route_cooldown_base_seconds,
             transient_route_cooldown_max_seconds,
         )?;
+    let route_health_half_open_ttl_seconds = env_positive_u64(
+        "UPSTREAM_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS",
+        DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+    )?
+    .max(1);
     let config = AppConfig {
         admin_username: env_or("ADMIN_USERNAME", "admin"),
         admin_password: env_or("ADMIN_PASSWORD", "admin"),
@@ -184,6 +190,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
         upstream_transient_route_cooldown_base_seconds: transient_route_cooldown_base_seconds,
         upstream_transient_route_cooldown_max_seconds: transient_route_cooldown_max_seconds,
+        upstream_route_health_half_open_ttl_seconds: route_health_half_open_ttl_seconds,
         upstream_route_exhaustion_retry_enabled: env_bool(
             "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED",
             DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED,
@@ -249,6 +256,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         same_route_retry_enabled = config.upstream_same_route_retry_enabled,
         transient_route_cooldown_base_seconds = config.upstream_transient_route_cooldown_base_seconds,
         transient_route_cooldown_max_seconds = config.upstream_transient_route_cooldown_max_seconds,
+        route_health_half_open_ttl_seconds = config.upstream_route_health_half_open_ttl_seconds,
         route_exhaustion_retry_enabled = config.upstream_route_exhaustion_retry_enabled,
         route_exhaustion_retry_max_wait_ms = config.upstream_route_exhaustion_retry_max_wait_ms,
         route_exhaustion_retry_max_rounds = config.upstream_route_exhaustion_retry_max_rounds,

@@ -3426,3 +3426,51 @@ async fn redis_downstream_admission_concurrency_rejection_records_nothing() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_REDIS_URL"]
+async fn redis_half_open_busy_reports_remaining_dedicated_lease() {
+    let mut config = redis_test_config();
+    config.upstream_transient_route_cooldown_base_seconds = 1;
+    config.upstream_transient_route_cooldown_max_seconds = 1;
+    config.upstream_route_health_half_open_ttl_seconds = 2;
+    config.upstream_stream_max_duration_seconds = 86_400; // 24h stream lease must NOT apply to half-open
+    let (first, second, _directory) = redis_test_states(&config).await;
+    let key = redis_test_health_key("half-open-ttl-upstream", "fingerprint-a");
+    let route = redis_test_health_route("half-open-ttl-upstream", "fingerprint-a", "model-a");
+
+    first
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let permit = match first.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::Ready(permit) if permit.is_half_open() => permit,
+        other => panic!("expected half-open permit, got {other:?}"),
+    };
+
+    match second.reserve_route_health(&route, &key).await.unwrap() {
+        RouteAvailability::HalfOpenBusy { retry_after, .. } => {
+            // 调度语义：busy 时乐观轮询 1s（探针通常数秒内完成）
+            assert_eq!(retry_after, Duration::from_secs(1));
+        }
+        other => panic!("expected half-open busy, got {other:?}"),
+    }
+
+    let recovery = second
+        .earliest_temporary_route_recovery(std::slice::from_ref(&route))
+        .await
+        .unwrap()
+        .expect("shared half-open recovery must be visible");
+    // 调度用乐观 1s 轮询；真实剩余租约在 half_open_remaining 中诚实上报
+    assert_eq!(recovery.retry_after, Duration::from_secs(1));
+    assert!(
+        recovery.half_open_remaining.is_some_and(|remaining| {
+            remaining > Duration::from_secs(1) && remaining <= Duration::from_secs(2)
+        }),
+        "shared recovery must report remaining half-open lease, got {:?}",
+        recovery.half_open_remaining
+    );
+
+    permit.finish(RouteOutcome::Success).await.unwrap();
+}

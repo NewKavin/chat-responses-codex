@@ -253,6 +253,7 @@ mod tests {
         let recovery = RouteRecovery {
             class: RouteFailureClass::RateLimited,
             retry_after: Duration::from_secs(7),
+            half_open_remaining: None,
         };
 
         let wait = policy
@@ -285,10 +286,12 @@ mod tests {
         let concurrency = RouteRecovery {
             class: RouteFailureClass::ConcurrencySaturated,
             retry_after: Duration::from_millis(100),
+            half_open_remaining: None,
         };
         let ordinary = RouteRecovery {
             class: RouteFailureClass::TransientServer,
             retry_after: Duration::from_millis(100),
+            half_open_remaining: None,
         };
         let mut budget = RouteRetryBudget::default();
 

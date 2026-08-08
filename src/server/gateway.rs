@@ -2811,6 +2811,9 @@ struct PreHeaderPreparationTestGate {
 }
 
 #[cfg(test)]
+const PRE_HEADER_PREPARATION_TEST_GATE_HEADER: &str = "x-gateway-test-pre-header-gate";
+
+#[cfg(test)]
 static PRE_HEADER_PREPARATION_TEST_GATE: Mutex<Option<PreHeaderPreparationTestGate>> =
     Mutex::new(None);
 
@@ -2860,7 +2863,10 @@ fn take_upstream_reservation_failure_test_hook(upstream_id: &str) -> bool {
 }
 
 #[cfg(test)]
-async fn wait_on_pre_header_preparation_test_gate() {
+async fn wait_on_pre_header_preparation_test_gate(gated: bool) {
+    if !gated {
+        return;
+    }
     let gate = PRE_HEADER_PREPARATION_TEST_GATE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5336,7 +5342,10 @@ async fn process_gateway_request_inner(
                             );
                         }
                         #[cfg(test)]
-                        wait_on_pre_header_preparation_test_gate().await;
+                        wait_on_pre_header_preparation_test_gate(
+                            headers.contains_key(PRE_HEADER_PREPARATION_TEST_GATE_HEADER),
+                        )
+                        .await;
                         let global_context_profile = state
                             .global_context_profile_for_upstream_base_url(&upstream.base_url)
                             .await;

@@ -32,6 +32,7 @@ const MODEL_QUARANTINE_BASE: Duration = Duration::from_secs(15 * 60);
 const MODEL_QUARANTINE_MAX: Duration = Duration::from_secs(60 * 60);
 const FAILURE_STREAK_RESET: Duration = Duration::from_secs(10 * 60);
 const HALF_OPEN_BUSY_RETRY: Duration = Duration::from_secs(1);
+pub const DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS: u64 = 300;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct KeyHealthKey {
@@ -72,7 +73,14 @@ pub enum RouteAvailability<T> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteRecovery {
     pub class: RouteFailureClass,
+    /// Scheduling delay: for a half-open-busy route this is an optimistic
+    /// poll interval (the probe usually finishes within seconds), for a
+    /// cooling route it is the remaining cooldown.
     pub retry_after: Duration,
+    /// True remaining half-open lease when the route is busy probing; used
+    /// for the terminal error message so clients get an honest wait time
+    /// instead of the optimistic poll interval.
+    pub half_open_remaining: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -247,6 +255,7 @@ struct HealthState {
     last_failure_at: Option<Instant>,
     cooldown_until: Option<Instant>,
     half_open_generation: Option<u64>,
+    half_open_expires_at: Option<Instant>,
     state_generation: u64,
     last_access: Instant,
 }
@@ -260,13 +269,17 @@ impl HealthState {
             last_failure_at: None,
             cooldown_until: None,
             half_open_generation: None,
+            half_open_expires_at: None,
             state_generation: 0,
             last_access: now,
         }
     }
 
-    fn is_active(&self) -> bool {
+    fn is_active(&self, now: Instant) -> bool {
         self.half_open_generation.is_some()
+            && self
+                .half_open_expires_at
+                .is_some_and(|expires_at| expires_at > now)
     }
 
     fn is_cooling(&self, now: Instant) -> bool {
@@ -286,14 +299,22 @@ impl HealthState {
         self.last_failure_at = None;
         self.cooldown_until = None;
         self.half_open_generation = None;
+        self.half_open_expires_at = None;
         self.last_access = now;
     }
 
     fn release_half_open(&mut self, generation: Option<u64>, now: Instant) {
         if generation.is_some() && self.half_open_generation == generation {
             self.half_open_generation = None;
+            self.half_open_expires_at = None;
         }
         self.last_access = now;
+    }
+
+    fn half_open_remaining(&self, now: Instant) -> Duration {
+        self.half_open_expires_at
+            .map(|expires_at| expires_at.saturating_duration_since(now))
+            .unwrap_or_default()
     }
 }
 
@@ -307,6 +328,7 @@ pub struct RouteHealthRegistry {
     concurrency_probe_delays: Vec<Duration>,
     transient_route_cooldown_base: Duration,
     transient_route_cooldown_max: Duration,
+    half_open_ttl: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -324,6 +346,7 @@ pub struct HealthStateSnapshot {
     pub last_failure_class: Option<RouteFailureClass>,
     pub cooldown_remaining: Duration,
     pub half_open: bool,
+    pub half_open_remaining: Duration,
 }
 
 impl std::fmt::Debug for RouteHealthRegistry {
@@ -367,6 +390,7 @@ impl RouteHealthRegistry {
             concurrency_probe_delays_ms,
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
             DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+            DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
         )
     }
 
@@ -376,6 +400,7 @@ impl RouteHealthRegistry {
         concurrency_probe_delays_ms: Vec<u64>,
         transient_route_cooldown_base_seconds: u64,
         transient_route_cooldown_max_seconds: u64,
+        half_open_ttl_seconds: u64,
     ) -> Self {
         let transient_route_cooldown_base_seconds = transient_route_cooldown_base_seconds.max(1);
         let transient_route_cooldown_max_seconds =
@@ -394,6 +419,7 @@ impl RouteHealthRegistry {
                 transient_route_cooldown_base_seconds,
             ),
             transient_route_cooldown_max: Duration::from_secs(transient_route_cooldown_max_seconds),
+            half_open_ttl: Duration::from_secs(half_open_ttl_seconds.max(1)),
         }
     }
 
@@ -457,6 +483,7 @@ impl RouteHealthRegistry {
                     .map(|until| until.saturating_duration_since(now))
                     .unwrap_or_default(),
                 half_open: false,
+                half_open_remaining: Duration::ZERO,
             }
         })
     }
@@ -536,13 +563,23 @@ impl RouteHealthRegistry {
                 };
             }
             if state.half_open_generation.is_some() {
-                return RouteAvailability::HalfOpenBusy {
-                    class: state
-                        .last_failure_class
-                        .expect("half-open key health must retain its failure class"),
-                    retry_after: state.retry_after(now).max(HALF_OPEN_BUSY_RETRY),
-                    upstream_status: state.last_failure_status,
-                };
+                if state
+                    .half_open_expires_at
+                    .is_none_or(|expires_at| expires_at <= now)
+                {
+                    state.half_open_generation = None;
+                    state.half_open_expires_at = None;
+                } else {
+                    return RouteAvailability::HalfOpenBusy {
+                        class: state
+                            .last_failure_class
+                            .expect("half-open key health must retain its failure class"),
+                        // 乐观轮询间隔：探针通常在数秒内完成；诚实剩余租约由
+                        // RouteRecovery::half_open_remaining 上报给终端错误消息。
+                        retry_after: HALF_OPEN_BUSY_RETRY,
+                        upstream_status: state.last_failure_status,
+                    };
+                }
             }
         }
         if let Some(state) = self.routes.get_mut(route) {
@@ -557,13 +594,21 @@ impl RouteHealthRegistry {
                 };
             }
             if state.half_open_generation.is_some() {
-                return RouteAvailability::HalfOpenBusy {
-                    class: state
-                        .last_failure_class
-                        .expect("half-open route health must retain its failure class"),
-                    retry_after: state.retry_after(now).max(HALF_OPEN_BUSY_RETRY),
-                    upstream_status: state.last_failure_status,
-                };
+                if state
+                    .half_open_expires_at
+                    .is_none_or(|expires_at| expires_at <= now)
+                {
+                    state.half_open_generation = None;
+                    state.half_open_expires_at = None;
+                } else {
+                    return RouteAvailability::HalfOpenBusy {
+                        class: state
+                            .last_failure_class
+                            .expect("half-open route health must retain its failure class"),
+                        retry_after: HALF_OPEN_BUSY_RETRY,
+                        upstream_status: state.last_failure_status,
+                    };
+                }
             }
         }
 
@@ -581,10 +626,13 @@ impl RouteHealthRegistry {
     }
 
     fn reserve_expired_half_open_key(&mut self, key: &KeyHealthKey, now: Instant) -> Option<u64> {
-        let can_reserve = self.keys.get(key).is_some_and(|state| {
+        let can_reserve = self.keys.get_mut(key).is_some_and(|state| {
             state.last_failure_class.is_some()
                 && state.cooldown_until.is_some_and(|until| until <= now)
-                && state.half_open_generation.is_none()
+                && (state.half_open_generation.is_none()
+                    || state
+                        .half_open_expires_at
+                        .is_none_or(|expires_at| expires_at <= now))
         });
         if !can_reserve {
             return None;
@@ -592,6 +640,7 @@ impl RouteHealthRegistry {
         let generation = self.next_generation();
         let state = self.keys.get_mut(key)?;
         state.half_open_generation = Some(generation);
+        state.half_open_expires_at = Some(now + self.half_open_ttl);
         state.last_access = now;
         Some(generation)
     }
@@ -601,10 +650,13 @@ impl RouteHealthRegistry {
         route: &RouteHealthKey,
         now: Instant,
     ) -> Option<u64> {
-        let can_reserve = self.routes.get(route).is_some_and(|state| {
+        let can_reserve = self.routes.get_mut(route).is_some_and(|state| {
             state.last_failure_class.is_some()
                 && state.cooldown_until.is_some_and(|until| until <= now)
-                && state.half_open_generation.is_none()
+                && (state.half_open_generation.is_none()
+                    || state
+                        .half_open_expires_at
+                        .is_none_or(|expires_at| expires_at <= now))
         });
         if !can_reserve {
             return None;
@@ -612,6 +664,7 @@ impl RouteHealthRegistry {
         let generation = self.next_generation();
         let state = self.routes.get_mut(route)?;
         state.half_open_generation = Some(generation);
+        state.half_open_expires_at = Some(now + self.half_open_ttl);
         state.last_access = now;
         Some(generation)
     }
@@ -775,6 +828,7 @@ impl RouteHealthRegistry {
         state.last_failure_status = upstream_status;
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
+        state.half_open_expires_at = None;
         state.last_access = now;
         let local = route_cooldown_with_concurrency_delays(
             class,
@@ -815,6 +869,7 @@ impl RouteHealthRegistry {
         state.last_failure_class = Some(class);
         state.last_failure_at = Some(now);
         state.half_open_generation = None;
+        state.half_open_expires_at = None;
         state.last_access = now;
         let max = if class == RouteFailureClass::Credentials {
             KEY_COOLDOWN_MAX
@@ -864,6 +919,7 @@ impl RouteHealthRegistry {
             return false;
         }
         state.half_open_generation = None;
+        state.half_open_expires_at = None;
         state.cooldown_until = Some(now + delay);
         state.last_access = now;
         true
@@ -910,7 +966,7 @@ impl RouteHealthRegistry {
             .keys
             .iter()
             .filter(|(existing, _)| !upstream_full || existing.upstream_id == key.upstream_id)
-            .filter(|(_, state)| !state.is_active())
+            .filter(|(_, state)| !state.is_active(now))
             .min_by_key(|(_, state)| (state.is_cooling(now), state.last_access))
             .map(|(key, _)| key.clone())
         {
@@ -936,7 +992,7 @@ impl RouteHealthRegistry {
                 .routes
                 .iter()
                 .filter(|(existing, _)| !upstream_full || existing.upstream_id == route.upstream_id)
-                .filter(|(_, state)| !state.is_active())
+                .filter(|(_, state)| !state.is_active(now))
                 .filter(|(_, state)| !state.is_cooling(now))
                 .min_by_key(|(_, state)| state.last_access)
                 .or_else(|| {
@@ -945,7 +1001,7 @@ impl RouteHealthRegistry {
                         .filter(|(existing, _)| {
                             !upstream_full || existing.upstream_id == route.upstream_id
                         })
-                        .filter(|(_, state)| !state.is_active())
+                        .filter(|(_, state)| !state.is_active(now))
                         .min_by_key(|(_, state)| state.last_access)
                 })
                 .map(|(route, _)| route.clone());
@@ -968,10 +1024,11 @@ impl RouteHealthRegistry {
         G: FnMut(&KeyHealthKey) -> bool,
         H: FnMut(&RouteSetAggregateKey) -> bool,
     {
+        let now = Instant::now();
         self.routes
-            .retain(|route, state| route_is_current(route) || state.is_active());
+            .retain(|route, state| route_is_current(route) || state.is_active(now));
         self.keys
-            .retain(|key, state| key_is_current(key) || state.is_active());
+            .retain(|key, state| key_is_current(key) || state.is_active(now));
         self.aggregates
             .retain(|aggregate, _| aggregate_is_current(aggregate));
     }
@@ -1183,23 +1240,41 @@ impl Default for RouteHealthRegistry {
 }
 
 fn health_snapshot(state: &HealthState, now: Instant) -> HealthStateSnapshot {
+    let half_open = state.half_open_generation.is_some()
+        && state
+            .half_open_expires_at
+            .is_some_and(|expires_at| expires_at > now);
     HealthStateSnapshot {
         consecutive_failures: state.consecutive_failures,
         last_failure_class: state.last_failure_class,
         cooldown_remaining: state.retry_after(now),
-        half_open: state.half_open_generation.is_some(),
+        half_open,
+        half_open_remaining: if half_open {
+            state.half_open_remaining(now)
+        } else {
+            Duration::ZERO
+        },
     }
 }
 
 fn health_state_recovery(state: &HealthState, now: Instant) -> Option<RouteRecovery> {
     let class = state.last_failure_class?;
     state.cooldown_until?;
-    let retry_after = if state.is_active() {
-        state.retry_after(now).max(HALF_OPEN_BUSY_RETRY)
+    if state.is_active(now) {
+        Some(RouteRecovery {
+            class,
+            retry_after: HALF_OPEN_BUSY_RETRY,
+            half_open_remaining: Some(
+                state.half_open_remaining(now).max(HALF_OPEN_BUSY_RETRY),
+            ),
+        })
     } else {
-        state.retry_after(now)
-    };
-    Some(RouteRecovery { class, retry_after })
+        Some(RouteRecovery {
+            class,
+            retry_after: state.retry_after(now),
+            half_open_remaining: None,
+        })
+    }
 }
 
 pub(super) fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {

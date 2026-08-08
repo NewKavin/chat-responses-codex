@@ -113,8 +113,8 @@ pub use model_qualification::{
 pub use route_health::{
     normalize_concurrency_probe_delays, HealthLease, HealthStateSnapshot, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteHealthRegistry, RouteOutcome,
-    RouteRecovery, RouteSetAggregateKey, ROUTE_HEALTH_GLOBAL_CAPACITY,
-    ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+    RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
+    ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
@@ -459,6 +459,7 @@ fn route_health_registry_from_config(config: &AppConfig) -> Arc<Mutex<RouteHealt
         config.upstream_concurrency_probe_delays_ms.clone(),
         config.upstream_transient_route_cooldown_base_seconds,
         config.upstream_transient_route_cooldown_max_seconds,
+        config.upstream_route_health_half_open_ttl_seconds,
     )))
 }
 
