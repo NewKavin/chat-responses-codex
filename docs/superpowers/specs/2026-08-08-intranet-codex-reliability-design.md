@@ -48,19 +48,24 @@ unavailable over time.
 
 The confirmed failure chain is:
 
-1. Redis gives every upstream request lease a stale-owner recovery deadline of
+1. The eight accounts are configured as eight keys on one upstream. Both the
+   local runtime and Redis currently key request leases only by `upstream.id`,
+   so `max_concurrency = 4` is enforced across the whole upstream instead of
+   independently for each account. The intended 32-slot pool is therefore
+   reduced to four slots before any provider call occurs.
+2. Redis gives every upstream request lease a stale-owner recovery deadline of
    `UPSTREAM_STREAM_MAX_DURATION_SECONDS + 60 seconds`. The internal profile is
    86,400 seconds plus 60 seconds.
-2. When four slots are occupied, `upstream_reserve.lua` currently calculates
+3. When four slots are occupied, `upstream_reserve.lua` currently calculates
    the fifth request's `retry_after` from the oldest lease expiry. That value is
    about 24 hours even though a normal completion will release the lease much
    earlier.
-3. The gateway records the local rejection as a route
+4. The gateway records the local rejection as a route
    `ConcurrencySaturated` failure with that exact retry duration.
-4. Redis then contains a healthy route cooled for roughly 24 hours. Later
+5. Redis then contains a healthy route cooled for roughly 24 hours. Later
    requests show `physical_attempt_count=0`, proving the provider was not
    contacted.
-5. Restarting the Redis-backed deployment removes or resets this runtime state,
+6. Restarting the Redis-backed deployment removes or resets this runtime state,
    which explains temporary recovery.
 
 The deployed database also contains repeated terminal messages ending in
@@ -87,7 +92,8 @@ appear to repair the issue.
 
 1. Ten simultaneous downstream Codex requests must use eight four-slot
    accounts without any gateway-generated 429, 502, or 503 caused by local
-   concurrency scheduling.
+   concurrency scheduling. `max_concurrency` is an exact-account limit even
+   when several accounts are keys on one upstream.
 2. Local admission saturation must try other compatible accounts and then wait
    fairly within the configured recovery budget without poisoning route
    health.
@@ -152,24 +158,50 @@ topology.
    evidence.
 2. Lease TTL is a stale-owner recovery bound, not a prediction of normal slot
    availability.
-3. Request-local scheduling hints never become persistent route cooldown.
-4. A route is excluded for a requested reasoning level only by current exact
+3. Local concurrency is scoped by `(upstream_id, key_fingerprint)`; upstream
+   request-cost windows and runtime snapshots remain upstream-wide.
+4. Request-local scheduling hints never become persistent route cooldown.
+5. A route is excluded for a requested reasoning level only by current exact
    capability evidence or a bounded runtime hint, not another route's probe
    failure.
-5. Resume failover is allowed only before semantic output and only between
+6. Resume failover is allowed only before semantic output and only between
    routes satisfying an explicit compatibility contract.
-6. Generic 5xx, explicit concurrency, explicit context overflow, route
+7. Generic 5xx, explicit concurrency, explicit context overflow, route
    capacity, key quota, credentials, and request rejection remain distinct
    classes.
-7. One logical downstream request creates one terminal usage outcome even when
+8. One logical downstream request creates one terminal usage outcome even when
    it performs several internal attempts.
-8. Runtime recovery never changes the persistent model catalog.
-9. An upgrade must self-heal runtime state written by the defective version;
+9. Runtime recovery never changes the persistent model catalog.
+10. An upgrade must self-heal runtime state written by the defective version;
    restarting every client is not an acceptable migration.
 
 ## Architecture
 
 ### 1. Local upstream admission becomes request-local deferral
+
+Every physical account is identified internally by:
+
+```rust
+AccountConcurrencyKey {
+    upstream_id,
+    key_fingerprint,
+}
+```
+
+All primary, hedge, capability-probe, correction-retry, and context-retry
+reservation paths must pass the exact key fingerprint selected for the
+physical request. `UpstreamRequestLease` retains that account identity so
+release cannot remove a slot from a different key.
+
+The local backend counts active leases per `AccountConcurrencyKey`, while its
+upstream runtime snapshot reports the sum across accounts. The Redis backend
+uses an account-specific lease sorted set for admission, retains the existing
+upstream-wide lease sorted set for aggregate runtime snapshots, and retains
+the existing upstream-wide event/cost sets for request quota accounting. The
+reservation script inserts the same opaque lease ID into both lease sets, and
+release removes it from both. Every key passed to the script uses the
+upstream's Redis hash slot; key fingerprints are hashed identities and never
+appear in public keys, responses, logs, or evidence.
 
 The Redis reservation script keeps the existing success and rejection tags,
 but a full local concurrency set returns an optimistic one-second scheduling
@@ -469,6 +501,9 @@ behaviorally equivalent.
 
 ### Local and Redis admission
 
+- two keys on one upstream with `max_concurrency = 1` can each hold one lease
+  concurrently, a second lease on either same key is rejected, and the
+  upstream runtime snapshot reports two aggregate in-flight requests;
 - local full admission returns a request-local one-second hint and creates no
   route-health snapshot;
 - Redis with a 24-hour stream lease also returns one second, not about 86,460
@@ -542,8 +577,8 @@ behaviorally equivalent.
 
 1. With eight mock accounts, each locally limited to four, 1,000 requests at
    downstream concurrency ten complete with zero gateway-generated 429/502/503,
-   no account exceeds four physical in-flight requests, and no local admission
-   event creates route cooldown.
+   aggregate physical in-flight reaches ten, no account exceeds four physical
+   in-flight requests, and no local admission event creates route cooldown.
 2. If two accounts return explicit concurrency 502 while six are healthy, all
    pre-output requests complete through recovery or failover without exposing
    those 502 responses to Codex.
