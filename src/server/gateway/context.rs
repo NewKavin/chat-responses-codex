@@ -126,18 +126,37 @@ impl ToolEntryReferences {
             self.malformed = true;
         }
     }
+
+    fn require_string_payload(&mut self, payload: Option<&Value>) {
+        if !payload
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            self.malformed = true;
+        }
+    }
+
+    fn require_object_payload(&mut self, payload: Option<&Value>) {
+        if !payload.is_some_and(Value::is_object) {
+            self.malformed = true;
+        }
+    }
 }
 
 fn tool_call_references(entry: &Value) -> ToolEntryReferences {
     let mut references = ToolEntryReferences::default();
     if entry_type(entry) == Some("function_call") {
         references.record_id(entry.get("call_id"));
+        references.require_string_payload(entry.get("arguments"));
     }
     if let Some(tool_calls) = entry.get("tool_calls").filter(|value| !value.is_null()) {
         match tool_calls.as_array() {
             Some(tool_calls) => {
                 for call in tool_calls {
                     references.record_id(call.get("id"));
+                    let function = call.get("function");
+                    references
+                        .require_string_payload(function.and_then(|value| value.get("arguments")));
                 }
             }
             None => {
@@ -150,6 +169,7 @@ fn tool_call_references(entry: &Value) -> ToolEntryReferences {
         for block in blocks {
             if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                 references.record_id(block.get("id"));
+                references.require_object_payload(block.get("input"));
             }
         }
     }
@@ -666,6 +686,40 @@ pub(super) fn apply_context_budget_controls(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ContextOverflowRetryReport {
+    pub(super) changed: bool,
+    pub(super) protected_minimum_tokens: u64,
+    pub(super) compacted_items: u32,
+}
+
+pub(super) fn compact_for_context_overflow_retry(
+    payload: &mut Value,
+    budget: &ContextBudgetReport,
+) -> ContextOverflowRetryReport {
+    let target = budget.allowed_input_tokens.saturating_mul(9) / 10;
+    let baseline_tokens = estimate_payload_baseline_tokens(payload);
+    let protection = context_protection(payload);
+    let protected_minimum_tokens =
+        baseline_tokens.saturating_add(estimate_context_minimum_tokens(payload, &protection));
+    if protected_minimum_tokens > target {
+        return ContextOverflowRetryReport {
+            changed: false,
+            protected_minimum_tokens,
+            compacted_items: 0,
+        };
+    }
+
+    let target_entry_tokens = target.saturating_sub(baseline_tokens);
+    let stats = trim_context_entries_with_protection(payload, target_entry_tokens, &protection);
+    let generation_changed = halve_generation_cap_for_context_retry(payload).is_some();
+    ContextOverflowRetryReport {
+        changed: generation_changed || stats.compacted_entries > 0 || stats.truncated_blocks > 0,
+        protected_minimum_tokens,
+        compacted_items: stats.compacted_entries,
+    }
+}
+
 pub(super) fn halve_generation_cap_for_context_retry(
     payload: &mut Value,
 ) -> Option<(&'static str, u64, u64)> {
@@ -783,6 +837,46 @@ mod tests {
             "type": "function_call_output",
             "call_id": "payloadless-call"
         });
+        let responses_call_without_arguments = json!({
+            "type": "function_call",
+            "call_id": "responses-call-without-arguments",
+            "name": "read_file"
+        });
+        let responses_result_for_payloadless_call = json!({
+            "type": "function_call_output",
+            "call_id": "responses-call-without-arguments",
+            "output": "RESPONSES_RESULT ".repeat(500)
+        });
+        let chat_call_with_null_arguments = json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "chat-call-without-arguments",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": null}
+            }]
+        });
+        let chat_result_for_payloadless_call = json!({
+            "role": "tool",
+            "tool_call_id": "chat-call-without-arguments",
+            "content": "CHAT_RESULT ".repeat(500)
+        });
+        let messages_call_with_invalid_input = json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "messages-call-without-input",
+                "name": "read_file",
+                "input": "not-an-object"
+            }]
+        });
+        let messages_result_for_payloadless_call = json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "messages-call-without-input",
+                "content": "MESSAGES_RESULT ".repeat(500)
+            }]
+        });
         let mut payload = json!({
             "messages": [
                 {"role": "system", "content": "system invariant"},
@@ -803,6 +897,12 @@ mod tests {
                     "arguments": "{}"
                 },
                 payloadless_result,
+                responses_call_without_arguments,
+                responses_result_for_payloadless_call,
+                chat_call_with_null_arguments,
+                chat_result_for_payloadless_call,
+                messages_call_with_invalid_input,
+                messages_result_for_payloadless_call,
                 {"role": "assistant", "content": "recent assistant 1"},
                 {"role": "user", "content": "recent user 1"},
                 {"role": "assistant", "content": "recent assistant 2"},
@@ -817,7 +917,7 @@ mod tests {
 
         trim_context_entries(&mut payload, 0);
 
-        for index in [1, 2, 3, 5, 7] {
+        for index in [1, 2, 3, 5, 7, 9, 11, 13] {
             assert_eq!(payload["messages"][index], original["messages"][index]);
         }
         assert!(payload["messages"][7].get("content").is_none());

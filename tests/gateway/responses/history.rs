@@ -759,6 +759,264 @@ async fn context_compaction_preserves_unresolved_tool_pairs_and_recent_reasoning
         .contains("[gateway-summary history_message"));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn codex_responses_overflow_compacts_once_for_chat_upstream() {
+    with_proxy_env_cleared(|| async move {
+        let tempdir = tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_bodies_for_server = seen_bodies.clone();
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let seen_bodies = seen_bodies_for_server.clone();
+                async move {
+                    let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    let compacted = payload["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|message| {
+                            message["role"] == "tool" && message["tool_call_id"] == "closed-call"
+                        })
+                        .and_then(|message| message["content"].as_str())
+                        .is_some_and(|content| content.contains("[gateway-summary tool_result"));
+                    let attempt = {
+                        let mut seen = seen_bodies.lock().unwrap();
+                        let attempt = seen.len();
+                        seen.push(payload);
+                        attempt
+                    };
+
+                    if attempt == 0 || !compacted {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(json!({
+                                "error": {
+                                    "code": "context_length_exceeded",
+                                    "message": "maximum context length exceeded"
+                                }
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-codex-context-recovered",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "deepseek-v4-flash",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Recovered"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let upstream_server = tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let model = "deepseek-v4-flash";
+        let downstream_key = generate_downstream_key("gw");
+        let upstream = UpstreamConfig {
+            id: "codex-context-overflow".into(),
+            name: "codex context overflow".into(),
+            base_url: format!("http://{address}"),
+            api_key: "codex-context-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![model.into()],
+            model_contexts: vec![ModelContextConfig {
+                slug: model.into(),
+                context_limit: 2_750,
+                output_reserve: 200,
+                max_output_tokens: 0,
+                context_group: String::new(),
+            }],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                    id: "down-codex-context-overflow".into(),
+                    name: "codex context overflow".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec![model.into()],
+                    rate_limit_enabled: false,
+                    per_minute_limit: 60,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    input_token_price_per_million_cents: None,
+                    output_token_price_per_million_cents: None,
+                    daily_cost_limit_cents: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                    billing_mode: "request".into(),
+                }]),
+                ..PersistedState::default()
+            },
+            tempdir.path().join("state.json"),
+            AppConfig {
+                upstream_same_route_retry_enabled: false,
+                upstream_route_exhaustion_retry_max_wait_ms: 0,
+                ..AppConfig::default()
+            },
+        );
+        let route = chat_responses_codex::state::RouteHealthKey {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
+            runtime_model_slug: model.into(),
+            protocol: WireProtocol::ChatCompletions,
+        };
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: route.key_fingerprint.clone(),
+            upstream_id: upstream.id.clone(),
+            runtime_model_slug: model.into(),
+            protocol: WireProtocol::ChatCompletions,
+        });
+        profile.state = DialectProfileState::Verified;
+        for capability in [
+            Capability::TextInput,
+            Capability::NonStreamingResponse,
+            Capability::FunctionTools,
+            Capability::ToolContinuation,
+        ] {
+            profile
+                .capabilities
+                .insert(capability, EvidenceState::Supported);
+        }
+        stamp_current_dialect_profile(&state, model, &mut profile).await;
+        state.upsert_dialect_profile(profile).await.unwrap();
+
+        let closed_output = "TOOL_RESULT_BLOCK ".repeat(330);
+        let open_arguments = "{\"path\":\"important.txt\"}";
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": model,
+                            "instructions": "system invariant",
+                            "max_output_tokens": 200,
+                            "input": [
+                                {
+                                    "type": "function_call",
+                                    "call_id": "closed-call",
+                                    "name": "lookup",
+                                    "arguments": "{}"
+                                },
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": "closed-call",
+                                    "output": closed_output
+                                },
+                                {
+                                    "type": "function_call",
+                                    "call_id": "open-call",
+                                    "name": "read_file",
+                                    "arguments": open_arguments
+                                },
+                                {"role": "user", "content": "OLD_HISTORY ".repeat(200)},
+                                {"role": "user", "content": "recent user 1"},
+                                {"role": "assistant", "content": "recent assistant 1"},
+                                {"role": "user", "content": "recent user 2"},
+                                {"role": "assistant", "content": "recent assistant 2"},
+                                {"role": "user", "content": "recent user 3"},
+                                {"role": "assistant", "content": "recent assistant 3"},
+                                {"role": "assistant", "content": "recent assistant 4"},
+                                {"role": "user", "content": "current input"}
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response_status = response.status();
+        let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            response_status,
+            StatusCode::OK,
+            "unexpected response: {}",
+            String::from_utf8_lossy(&response_body)
+        );
+        let seen = seen_bodies.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for (attempt, body) in seen.iter().enumerate() {
+            let messages = body["messages"].as_array().unwrap();
+            assert!(messages.iter().any(|message| {
+                message["role"] == "system" && message["content"] == "system invariant"
+            }));
+            let closed_result = messages
+                .iter()
+                .find(|message| {
+                    message["role"] == "tool" && message["tool_call_id"] == "closed-call"
+                })
+                .unwrap();
+            let open_call = messages
+                .iter()
+                .find(|message| {
+                    message["tool_calls"]
+                        .as_array()
+                        .is_some_and(|calls| calls.iter().any(|call| call["id"] == "open-call"))
+                })
+                .unwrap();
+            assert_eq!(
+                open_call["tool_calls"][0]["function"]["arguments"],
+                open_arguments
+            );
+            assert!(messages.iter().any(|message| {
+                message["role"] == "user" && message["content"] == "current input"
+            }));
+            assert!(!messages.iter().any(|message| {
+                message["role"] == "tool" && message["tool_call_id"] == "open-call"
+            }));
+            assert_eq!(
+                closed_result["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("[gateway-summary tool_result"),
+                attempt == 1
+            );
+        }
+        assert_eq!(seen[0]["max_tokens"], 200);
+        assert_eq!(seen[1]["max_tokens"], 100);
+        assert!(state.route_health_snapshot(&route).await.unwrap().is_none());
+
+        upstream_server.abort();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn exact_continuation_fails_closed_before_context_fallback_changes_runtime_model() {
     let dispatched_models = Arc::new(Mutex::new(Vec::<String>::new()));

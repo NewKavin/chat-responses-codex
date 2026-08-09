@@ -1,7 +1,8 @@
 use super::*;
 use chat_responses_codex::capabilities::{
     Capability, CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, DialectProfileKey,
-    DialectProfileState, EvidenceState, SemanticPolicy, UpstreamDialectProfile, WireProtocol,
+    DialectProfileState, EvidenceState, ReasoningCarrier, SemanticPolicy, UpstreamDialectProfile,
+    WireProtocol,
 };
 use std::collections::BTreeMap;
 
@@ -267,7 +268,17 @@ async fn explicit_context_wrappers_do_not_cool_route() {
             StatusCode::PAYLOAD_TOO_LARGE,
             StatusCode::BAD_GATEWAY,
             StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
         ] {
+            let retryable_wrapper = matches!(
+                status,
+                StatusCode::BAD_REQUEST
+                    | StatusCode::PAYLOAD_TOO_LARGE
+                    | StatusCode::BAD_GATEWAY
+                    | StatusCode::SERVICE_UNAVAILABLE
+            );
             let directory = tempdir().unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -275,19 +286,45 @@ async fn explicit_context_wrappers_do_not_cool_route() {
             let attempts_for_server = attempts.clone();
             let upstream_app = Router::new().route(
                 "/v1/chat/completions",
-                post(move || {
+                post(move |request: Request<Body>| {
                     let attempts = attempts_for_server.clone();
                     async move {
-                        attempts.fetch_add(1, Ordering::SeqCst);
-                        (
-                            status,
-                            axum::Json(json!({
-                                "error": {
-                                    "code": "context_length_exceeded",
-                                    "message": "maximum context length exceeded"
-                                }
-                            })),
-                        )
+                        let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                        let payload: Value = serde_json::from_slice(&body).unwrap();
+                        let compacted = payload["messages"][2]["content"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("[gateway-summary tool_result");
+                        let protected_entries_unchanged = payload["messages"][0]["content"]
+                            == "system invariant"
+                            && payload["messages"][12]["content"] == "current input";
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 || !compacted || !protected_entries_unchanged {
+                            (
+                                status,
+                                axum::Json(json!({
+                                    "error": {
+                                        "code": "context_length_exceeded",
+                                        "message": "maximum context length exceeded"
+                                    }
+                                })),
+                            )
+                        } else {
+                            (
+                                StatusCode::OK,
+                                axum::Json(json!({
+                                    "id": "chatcmpl-wrapper-recovered",
+                                    "object": "chat.completion",
+                                    "created": 1,
+                                    "model": "gpt-4.1-mini",
+                                    "choices": [{
+                                        "index": 0,
+                                        "message": {"role": "assistant", "content": "Recovered"},
+                                        "finish_reason": "stop"
+                                    }]
+                                })),
+                            )
+                        }
                     }
                 }),
             );
@@ -304,6 +341,13 @@ async fn explicit_context_wrappers_do_not_cool_route() {
                 protocol: UpstreamProtocol::ChatCompletions,
                 protocols: vec![UpstreamProtocol::ChatCompletions],
                 supported_models: vec!["gpt-4.1-mini".into()],
+                model_contexts: vec![ModelContextConfig {
+                    slug: "gpt-4.1-mini".into(),
+                    context_limit: 2_750,
+                    output_reserve: 200,
+                    max_output_tokens: 0,
+                    context_group: String::new(),
+                }],
                 active: true,
                 ..UpstreamConfig::default()
             };
@@ -349,6 +393,7 @@ async fn explicit_context_wrappers_do_not_cool_route() {
                 runtime_model_slug: "gpt-4.1-mini".into(),
                 protocol: WireProtocol::ChatCompletions,
             };
+            let closed_output = "TOOL_RESULT_BLOCK ".repeat(330);
             let response = build_router(state.clone())
                 .oneshot(
                     Request::builder()
@@ -362,8 +407,30 @@ async fn explicit_context_wrappers_do_not_cool_route() {
                         .body(Body::from(
                             json!({
                                 "model": "gpt-4.1-mini",
-                                "max_tokens": 120,
-                                "messages": [{"role": "user", "content": "Hello"}]
+                                "max_tokens": 200,
+                                "messages": [
+                                    {"role": "system", "content": "system invariant"},
+                                    {
+                                        "role": "assistant",
+                                        "content": null,
+                                        "tool_calls": [{
+                                            "id": "closed-call",
+                                            "type": "function",
+                                            "function": {"name": "lookup", "arguments": "{}"}
+                                        }]
+                                    },
+                                    {"role": "tool", "tool_call_id": "closed-call", "content": closed_output},
+                                    {"role": "user", "content": "OLD_HISTORY ".repeat(250)},
+                                    {"role": "assistant", "content": "old assistant"},
+                                    {"role": "user", "content": "recent user 1"},
+                                    {"role": "assistant", "content": "recent assistant 1"},
+                                    {"role": "user", "content": "recent user 2"},
+                                    {"role": "assistant", "content": "recent assistant 2"},
+                                    {"role": "user", "content": "recent user 3"},
+                                    {"role": "assistant", "content": "recent assistant 3"},
+                                    {"role": "assistant", "content": "recent assistant 4"},
+                                    {"role": "user", "content": "current input"}
+                                ]
                             })
                             .to_string(),
                         ))
@@ -374,16 +441,18 @@ async fn explicit_context_wrappers_do_not_cool_route() {
 
             assert_eq!(
                 response.status(),
-                StatusCode::BAD_REQUEST,
+                if retryable_wrapper {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
                 "status={status}"
             );
-            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            let error: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
-                error["error"]["code"], "upstream_context_limit",
+                attempts.load(Ordering::SeqCst),
+                if retryable_wrapper { 2 } else { 1 },
                 "status={status}"
             );
-            assert!(attempts.load(Ordering::SeqCst) <= 2, "status={status}");
             assert!(
                 state.route_health_snapshot(&route).await.unwrap().is_none(),
                 "status={status}"
@@ -396,7 +465,379 @@ async fn explicit_context_wrappers_do_not_cool_route() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn generic_503_remains_bounded_transient_failure() {
+async fn context_overflow_503_compacts_once_without_cooling_route() {
+    with_proxy_env_cleared(|| async move {
+        let directory = tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen_bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen_bodies_for_server = seen_bodies.clone();
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |request: Request<Body>| {
+                let seen_bodies = seen_bodies_for_server.clone();
+                async move {
+                    let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    let compacted = payload["messages"][2]["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("[gateway-summary tool_result");
+                    let attempt = {
+                        let mut seen = seen_bodies.lock().unwrap();
+                        let attempt = seen.len();
+                        seen.push(payload);
+                        attempt
+                    };
+                    if attempt == 0 || !compacted {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            axum::Json(json!({
+                                "error": {
+                                    "code": "context_length_exceeded",
+                                    "message": "maximum context length exceeded"
+                                }
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::OK,
+                            axum::Json(json!({
+                                "id": "chatcmpl-context-recovered",
+                                "object": "chat.completion",
+                                "created": 1,
+                                "model": "gpt-4.1-mini",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "Recovered"},
+                                    "finish_reason": "stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 1,
+                                    "completion_tokens": 1,
+                                    "total_tokens": 2
+                                }
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let upstream_server = tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let upstream = UpstreamConfig {
+            id: "context-overflow-503".into(),
+            name: "context overflow 503".into(),
+            base_url: format!("http://{address}"),
+            api_key: "context-overflow-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["gpt-4.1-mini".into()],
+            model_contexts: vec![ModelContextConfig {
+                slug: "gpt-4.1-mini".into(),
+                context_limit: 2_750,
+                output_reserve: 200,
+                max_output_tokens: 0,
+                context_group: String::new(),
+            }],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                    id: "down-context-overflow-503".into(),
+                    name: "context overflow 503".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    rate_limit_enabled: false,
+                    per_minute_limit: 60,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    input_token_price_per_million_cents: None,
+                    output_token_price_per_million_cents: None,
+                    daily_cost_limit_cents: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                    billing_mode: "request".into(),
+                }]),
+                ..PersistedState::default()
+            },
+            directory.path().join("state.json"),
+            AppConfig {
+                upstream_same_route_retry_enabled: false,
+                upstream_route_exhaustion_retry_max_wait_ms: 0,
+                ..AppConfig::default()
+            },
+        );
+        let route = chat_responses_codex::state::RouteHealthKey {
+            upstream_id: upstream.id.clone(),
+            key_fingerprint: upstream_model_key_fingerprint(&upstream, "gpt-4.1-mini"),
+            runtime_model_slug: "gpt-4.1-mini".into(),
+            protocol: WireProtocol::ChatCompletions,
+        };
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+            key_fingerprint: route.key_fingerprint.clone(),
+            upstream_id: upstream.id.clone(),
+            runtime_model_slug: "gpt-4.1-mini".into(),
+            protocol: WireProtocol::ChatCompletions,
+        });
+        profile.state = DialectProfileState::Verified;
+        profile.reasoning_carrier = Some(ReasoningCarrier::ReasoningContent);
+        for capability in [
+            Capability::TextInput,
+            Capability::NonStreamingResponse,
+            Capability::FunctionTools,
+            Capability::ToolContinuation,
+            Capability::ReasoningOutput,
+            Capability::ReasoningReplay,
+        ] {
+            profile
+                .capabilities
+                .insert(capability, EvidenceState::Supported);
+        }
+        stamp_current_dialect_profile(&state, "gpt-4.1-mini", &mut profile).await;
+        state.upsert_dialect_profile(profile).await.unwrap();
+        let closed_output = "TOOL_RESULT_BLOCK ".repeat(330);
+        let open_arguments = "{\"path\":\"important.txt\"}";
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "gpt-4.1-mini",
+                            "max_tokens": 200,
+                            "messages": [
+                                {"role": "system", "content": "system invariant"},
+                                {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "closed-call",
+                                        "type": "function",
+                                        "function": {"name": "lookup", "arguments": "{}"}
+                                    }]
+                                },
+                                {"role": "tool", "tool_call_id": "closed-call", "content": closed_output},
+                                {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "open-call",
+                                        "type": "function",
+                                        "function": {"name": "read_file", "arguments": open_arguments}
+                                    }]
+                                },
+                                {"role": "assistant", "content": null, "reasoning_content": "recent reasoning"},
+                                {"role": "user", "content": "OLD_HISTORY ".repeat(200)},
+                                {"role": "user", "content": "recent user 1"},
+                                {"role": "assistant", "content": "recent assistant 1"},
+                                {"role": "user", "content": "recent user 2"},
+                                {"role": "assistant", "content": "recent assistant 2"},
+                                {"role": "user", "content": "recent user 3"},
+                                {"role": "assistant", "content": "recent assistant 3"},
+                                {"role": "assistant", "content": "recent assistant 4"},
+                                {"role": "user", "content": "current input"}
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let seen = seen_bodies.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(!seen[0]["messages"][2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("gateway-summary"));
+        assert!(seen[1]["messages"][2]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[gateway-summary tool_result"));
+        for body in seen.iter() {
+            assert_eq!(body["messages"][0]["content"], "system invariant");
+            assert_eq!(
+                body["messages"][3]["tool_calls"][0]["function"]["arguments"],
+                open_arguments
+            );
+            assert_eq!(
+                body["messages"][4]["reasoning_content"],
+                "recent reasoning"
+            );
+            assert_eq!(body["messages"][13]["content"], "current input");
+            assert!(!body["messages"].as_array().unwrap().iter().any(|message| {
+                message["role"] == "tool" && message["tool_call_id"] == "open-call"
+            }));
+        }
+        assert_eq!(seen[0]["max_tokens"], 200);
+        assert_eq!(seen[1]["max_tokens"], 100);
+        assert!(state.route_health_snapshot(&route).await.unwrap().is_none());
+
+        upstream_server.abort();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn protected_context_minimum_returns_stable_context_error() {
+    with_proxy_env_cleared(|| async move {
+        let directory = tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_server = attempts.clone();
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let attempts = attempts_for_server.clone();
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(json!({
+                            "error": {
+                                "code": "context_length_exceeded",
+                                "message": "maximum context length exceeded"
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
+        let upstream_server = tokio::spawn(async move {
+            axum::serve(listener, upstream_app).await.unwrap();
+        });
+
+        let downstream_key = generate_downstream_key("gw");
+        let upstream = UpstreamConfig {
+            id: "protected-minimum-route".into(),
+            name: "protected minimum route".into(),
+            base_url: format!("http://{address}"),
+            api_key: "protected-minimum-secret".into(),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec!["gpt-4.1-mini".into()],
+            model_contexts: vec![ModelContextConfig {
+                slug: "gpt-4.1-mini".into(),
+                context_limit: 500,
+                output_reserve: 100,
+                max_output_tokens: 0,
+                context_group: String::new(),
+            }],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let state = AppState::new(
+            PersistedState {
+                upstreams: std::sync::Arc::new(vec![upstream]),
+                downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                    id: "down-protected-minimum".into(),
+                    name: "protected minimum test".into(),
+                    hash: downstream_key.hash.clone(),
+                    plaintext_key: Some(downstream_key.plaintext.clone()),
+                    plaintext_key_prefix: None,
+                    model_allowlist: vec!["gpt-4.1-mini".into()],
+                    rate_limit_enabled: false,
+                    per_minute_limit: 60,
+                    max_concurrency: 10,
+                    daily_token_limit: None,
+                    monthly_token_limit: None,
+                    input_token_price_per_million_cents: None,
+                    output_token_price_per_million_cents: None,
+                    daily_cost_limit_cents: None,
+                    request_quota_window_hours: None,
+                    request_quota_requests: None,
+                    ip_allowlist: vec![],
+                    expires_at: None,
+                    active: true,
+                    billing_mode: "request".into(),
+                }]),
+                ..PersistedState::default()
+            },
+            directory.path().join("state.json"),
+            AppConfig {
+                upstream_same_route_retry_enabled: false,
+                upstream_route_exhaustion_retry_max_wait_ms: 0,
+                ..AppConfig::default()
+            },
+        );
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "gpt-4.1-mini",
+                            "max_tokens": 100,
+                            "messages": [
+                                {"role": "system", "content": "SYSTEM_INVARIANT ".repeat(300)},
+                                {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "open-call",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": "OPEN_ARGUMENTS ".repeat(400)
+                                        }
+                                    }]
+                                },
+                                {"role": "assistant", "content": null, "reasoning_content": "RECENT_REASONING ".repeat(300)},
+                                {"role": "user", "content": "CURRENT_INPUT ".repeat(300)}
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"]["code"], "upstream_context_limit");
+        assert!(error["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("protected minimum"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        upstream_server.abort();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generic_503_does_not_compact_history() {
     with_proxy_env_cleared(|| async move {
         let directory = tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -436,6 +877,13 @@ async fn generic_503_remains_bounded_transient_failure() {
                     protocol: UpstreamProtocol::ChatCompletions,
                     protocols: vec![UpstreamProtocol::ChatCompletions],
                     supported_models: vec!["gpt-4.1-mini".into()],
+                    model_contexts: vec![ModelContextConfig {
+                        slug: "gpt-4.1-mini".into(),
+                        context_limit: 2_750,
+                        output_reserve: 200,
+                        max_output_tokens: 0,
+                        context_group: String::new(),
+                    }],
                     active: true,
                     ..UpstreamConfig::default()
                 }]),
@@ -472,6 +920,7 @@ async fn generic_503_remains_bounded_transient_failure() {
                 ..AppConfig::default()
             },
         );
+        let closed_output = "TOOL_RESULT_BLOCK ".repeat(330);
         let response = build_router(state)
             .oneshot(
                 Request::builder()
@@ -485,8 +934,30 @@ async fn generic_503_remains_bounded_transient_failure() {
                     .body(Body::from(
                         json!({
                             "model": "gpt-4.1-mini",
-                            "max_tokens": 120,
-                            "messages": [{"role": "user", "content": "Hello"}]
+                            "max_tokens": 200,
+                            "messages": [
+                                {"role": "system", "content": "system invariant"},
+                                {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "closed-call",
+                                        "type": "function",
+                                        "function": {"name": "lookup", "arguments": "{}"}
+                                    }]
+                                },
+                                {"role": "tool", "tool_call_id": "closed-call", "content": closed_output},
+                                {"role": "user", "content": "OLD_HISTORY ".repeat(200)},
+                                {"role": "assistant", "content": "old assistant"},
+                                {"role": "user", "content": "recent user 1"},
+                                {"role": "assistant", "content": "recent assistant 1"},
+                                {"role": "user", "content": "recent user 2"},
+                                {"role": "assistant", "content": "recent assistant 2"},
+                                {"role": "user", "content": "recent user 3"},
+                                {"role": "assistant", "content": "recent assistant 3"},
+                                {"role": "assistant", "content": "recent assistant 4"},
+                                {"role": "user", "content": "current input"}
+                            ]
                         })
                         .to_string(),
                     ))
@@ -506,7 +977,13 @@ async fn generic_503_remains_bounded_transient_failure() {
         assert!(!seen.is_empty());
         assert!(seen.len() <= 2);
         assert!(seen.iter().all(|body| body == &seen[0]));
-        assert!(seen.iter().all(|body| body["max_tokens"] == 120));
+        assert!(seen.iter().all(|body| body["max_tokens"] == 200));
+        assert!(seen.iter().all(|body| {
+            !body["messages"][2]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("gateway-summary")
+        }));
 
         upstream_server.abort();
     })

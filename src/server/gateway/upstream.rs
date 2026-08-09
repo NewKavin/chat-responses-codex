@@ -2052,11 +2052,36 @@ pub(super) async fn send_to_upstream(
         }
 
         if classified_feedback.semantic == UpstreamResponseSemantic::ExplicitContextOverflow {
-            if !stream_only_recovery.consumed && !context_retry_attempted {
-                if let Some((cap_field, current_cap, reduced_cap)) =
+            let retryable_wrapper_status = matches!(status.as_u16(), 400 | 413 | 502 | 503);
+            if retryable_wrapper_status
+                && !stream_only_recovery.consumed
+                && !context_retry_attempted
+            {
+                context_retry_attempted = true;
+                if let Some(budget) = context_budget_report.as_ref() {
+                    let retry = compact_for_context_overflow_retry(&mut upstream_body, budget);
+                    if retry.changed {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            downstream_key_id = %downstream_key_id,
+                            path = %endpoint.path(),
+                            original_model = %model,
+                            normalized_model = %normalized_model,
+                            selected_upstream_id = %upstream.id,
+                            selected_upstream_name = %upstream.name,
+                            selected_upstream_protocol = ?upstream_protocol,
+                            protected_minimum_tokens = retry.protected_minimum_tokens,
+                            compacted_items = retry.compacted_items,
+                            "context limit hit; retrying once after safe context compaction"
+                        );
+                        upstream_request_guard
+                            .reserve_next(state, upstream, &key_fingerprint, model)
+                            .await?;
+                        continue;
+                    }
+                } else if let Some((cap_field, current_cap, reduced_cap)) =
                     halve_generation_cap_for_context_retry(&mut upstream_body)
                 {
-                    context_retry_attempted = true;
                     tracing::warn!(
                         request_id = %request_id,
                         downstream_key_id = %downstream_key_id,
@@ -2077,11 +2102,22 @@ pub(super) async fn send_to_upstream(
                     continue;
                 }
             }
+            let protected_minimum = context_budget_report
+                .as_ref()
+                .map(|budget| {
+                    format!(
+                        ", protected minimum tokens={}",
+                        budget.protected_minimum_tokens
+                    )
+                })
+                .unwrap_or_default();
             let error = GatewayError::upstream_context_limit(format!(
-                "upstream request exceeded the model context window; reduce prompt size or use a model with a larger context window (model={final_upstream_model}, upstream={}, status={}, detail={})",
+                "upstream request exceeded the model context window; reduce prompt size or use a model with a larger context window (model={final_upstream_model}, upstream={}, status={}, detail={}{}{})",
                 upstream.name,
                 status.as_u16(),
-                error_excerpt
+                error_excerpt,
+                protected_minimum,
+                if context_retry_attempted { ", context retry exhausted" } else { "" }
             ), status);
             send_account_attempt_feedback(
                 &mut account_attempt_feedback,
