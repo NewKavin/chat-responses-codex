@@ -1,7 +1,7 @@
 use super::*;
 use chat_responses_codex::capabilities::{
-    Capability, DialectProfileKey, DialectProfileState, EvidenceState, UpstreamDialectProfile,
-    WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
+    Capability, DialectProfileKey, DialectProfileState, EvidenceState, ReasoningCarrier,
+    UpstreamDialectProfile, WireProtocol, DIALECT_PROBE_SCHEMA_VERSION,
 };
 
 async fn run_versioned_v1_continuation_case(duplicate_exact_route: bool) -> (StatusCode, usize) {
@@ -552,6 +552,211 @@ async fn responses_private_continuation_keys_are_stripped_before_upstream_dispat
     let captured = captured.lock().unwrap().clone().expect("upstream request");
     assert!(captured.get("_gateway_continuation").is_none());
     assert!(captured.get("gateway_tool_registry").is_none());
+}
+
+#[tokio::test]
+async fn context_compaction_preserves_unresolved_tool_pairs_and_recent_reasoning() {
+    let captured = Arc::new(Mutex::new(None::<Value>));
+    let tempdir = tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured_clone = captured.clone();
+    let upstream_app = Router::new().route(
+        "/v1/responses",
+        post(move |request: Request<Body>| {
+            let captured = captured_clone.clone();
+            async move {
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                *captured.lock().unwrap() = Some(serde_json::from_slice(&body).unwrap());
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "resp-context-protection",
+                        "object": "response",
+                        "output": [{
+                            "id": "message-context-protection",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "ok",
+                                "annotations": []
+                            }]
+                        }]
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream_app).await.unwrap();
+    });
+
+    let model = "gpt-context-protection";
+    let upstream = UpstreamConfig {
+        id: "context-protection-route".into(),
+        name: "context-protection-route".into(),
+        base_url: format!("http://{address}"),
+        api_key: "upstream-secret".into(),
+        protocol: UpstreamProtocol::Responses,
+        protocols: vec![UpstreamProtocol::Responses],
+        supported_models: vec![model.into()],
+        model_contexts: vec![ModelContextConfig {
+            slug: model.into(),
+            context_limit: 700,
+            output_reserve: 80,
+            max_output_tokens: 0,
+            context_group: String::new(),
+        }],
+        active: true,
+        ..Default::default()
+    };
+    let downstream_key = generate_downstream_key("gw");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            downstreams: std::sync::Arc::new(vec![DownstreamConfig {
+                id: "down-context-protection".into(),
+                name: "down-context-protection".into(),
+                hash: downstream_key.hash.clone(),
+                plaintext_key: Some(downstream_key.plaintext.clone()),
+                plaintext_key_prefix: None,
+                model_allowlist: vec![model.into()],
+                per_minute_limit: 60,
+                rate_limit_enabled: true,
+                max_concurrency: 10,
+                daily_token_limit: None,
+                monthly_token_limit: None,
+                input_token_price_per_million_cents: None,
+                output_token_price_per_million_cents: None,
+                daily_cost_limit_cents: None,
+                request_quota_window_hours: None,
+                request_quota_requests: None,
+                ip_allowlist: vec![],
+                expires_at: None,
+                active: true,
+                billing_mode: "request".into(),
+            }]),
+            ..PersistedState::default()
+        },
+        tempdir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey {
+        key_fingerprint: upstream_model_key_fingerprint(&upstream, model),
+        upstream_id: upstream.id.clone(),
+        runtime_model_slug: model.into(),
+        protocol: WireProtocol::Responses,
+    });
+    profile.state = DialectProfileState::Verified;
+    profile.reasoning_carrier = Some(ReasoningCarrier::ResponsesReasoningItem);
+    for capability in [
+        Capability::TextInput,
+        Capability::NonStreamingResponse,
+        Capability::FunctionTools,
+        Capability::ToolContinuation,
+        Capability::ReasoningOutput,
+        Capability::ReasoningReplay,
+    ] {
+        profile
+            .capabilities
+            .insert(capability, EvidenceState::Supported);
+    }
+    stamp_current_dialect_profile(&state, model, &mut profile).await;
+    state.upsert_dialect_profile(profile).await.unwrap();
+
+    let closed_output = "CLOSED_TOOL_OUTPUT ".repeat(900);
+    let open_arguments = format!("{{\"path\":\"{}\"}}", "OPEN_ARGUMENT ".repeat(600));
+    let recent_reasoning = json!([{
+        "type": "reasoning_text",
+        "text": "RECENT_REASONING ".repeat(600)
+    }]);
+    let current_input = "CURRENT_INPUT ".repeat(300);
+    let response = build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", downstream_key.plaintext)).unwrap(),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": model,
+                        "max_output_tokens": 80,
+                        "input": [
+                            {"role": "system", "content": "system invariant"},
+                            {"role": "developer", "content": "developer invariant"},
+                            {
+                                "type": "function_call",
+                                "call_id": "closed-call",
+                                "name": "lookup",
+                                "arguments": "{\"query\":\"closed\"}"
+                            },
+                            {
+                                "type": "function_call_output",
+                                "call_id": "closed-call",
+                                "output": closed_output
+                            },
+                            {
+                                "type": "function_call",
+                                "call_id": "open-call",
+                                "name": "read_file",
+                                "arguments": open_arguments
+                            },
+                            {
+                                "id": "reasoning-current",
+                                "type": "reasoning",
+                                "summary": [],
+                                "content": recent_reasoning
+                            },
+                            {"role": "user", "content": "OLD_USER ".repeat(600)},
+                            {"role": "assistant", "content": "OLD_ASSISTANT ".repeat(600)},
+                            {"role": "user", "content": "recent user 1"},
+                            {"role": "assistant", "content": "recent assistant 1"},
+                            {"role": "user", "content": "recent user 2"},
+                            {"role": "assistant", "content": "recent assistant 2"},
+                            {"role": "user", "content": "recent user 3"},
+                            {"role": "assistant", "content": "recent assistant 3"},
+                            {"role": "assistant", "content": "recent assistant 4"},
+                            {"role": "user", "content": current_input}
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response_status = response.status();
+    let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        response_status,
+        StatusCode::OK,
+        "unexpected response: {}",
+        String::from_utf8_lossy(&response_body)
+    );
+    let trimmed = captured.lock().unwrap().clone().expect("upstream request");
+    let input = trimmed["input"].as_array().unwrap();
+    assert_eq!(input[0]["content"], "system invariant");
+    assert_eq!(input[1]["content"], "developer invariant");
+    assert_eq!(input[4]["arguments"], open_arguments);
+    assert!(!input
+        .iter()
+        .any(|item| { item["type"] == "function_call_output" && item["call_id"] == "open-call" }));
+    assert_eq!(input[5]["content"], recent_reasoning);
+    assert_eq!(input[15]["content"], current_input);
+    assert!(input[3]["output"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("[gateway-summary tool_result"));
+    assert!(input[6]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("[gateway-summary history_message"));
 }
 
 #[tokio::test]

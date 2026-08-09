@@ -1,6 +1,6 @@
 use crate::state::{GlobalContextProfile, UpstreamConfig};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const CONTEXT_KEEP_RECENT_ITEMS: usize = 8;
 const CONTEXT_TOOL_RESULT_TRUNCATE_CHARS: usize = 1200;
@@ -17,6 +17,8 @@ pub(super) struct ContextTrimStats {
 pub(super) struct ContextBudgetReport {
     pub(super) estimated_input_tokens: u64,
     pub(super) estimated_input_tokens_after_trim: u64,
+    pub(super) protected_minimum_tokens: u64,
+    pub(super) compacted_items: u32,
     pub(super) requested_output_tokens: u64,
     pub(super) allowed_input_tokens: u64,
     pub(super) context_limit: u32,
@@ -97,12 +99,182 @@ fn entry_is_system(entry: &Value) -> bool {
     matches!(entry_role(entry), Some("system" | "developer"))
 }
 
-fn entry_is_tool_result(entry: &Value) -> bool {
-    matches!(entry_role(entry), Some("tool" | "function"))
-        || matches!(
-            entry_type(entry),
-            Some("function_call_output" | "tool_result")
-        )
+#[derive(Default)]
+struct ContextProtection {
+    protected: HashSet<usize>,
+    compactable_tool_results: HashSet<usize>,
+}
+
+#[derive(Default)]
+struct ToolEntryReferences {
+    ids: Vec<String>,
+    present: bool,
+    malformed: bool,
+}
+
+impl ToolEntryReferences {
+    fn record_id(&mut self, id: Option<&Value>) {
+        self.present = true;
+        match id.and_then(Value::as_str) {
+            Some(id) if !id.trim().is_empty() => self.ids.push(id.to_owned()),
+            _ => self.malformed = true,
+        }
+    }
+
+    fn require_payload(&mut self, payload: Option<&Value>) {
+        if !payload.is_some_and(|value| !value.is_null()) {
+            self.malformed = true;
+        }
+    }
+}
+
+fn tool_call_references(entry: &Value) -> ToolEntryReferences {
+    let mut references = ToolEntryReferences::default();
+    if entry_type(entry) == Some("function_call") {
+        references.record_id(entry.get("call_id"));
+    }
+    if let Some(tool_calls) = entry.get("tool_calls").filter(|value| !value.is_null()) {
+        match tool_calls.as_array() {
+            Some(tool_calls) => {
+                for call in tool_calls {
+                    references.record_id(call.get("id"));
+                }
+            }
+            None => {
+                references.present = true;
+                references.malformed = true;
+            }
+        }
+    }
+    if let Some(blocks) = entry.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                references.record_id(block.get("id"));
+            }
+        }
+    }
+    references
+}
+
+fn tool_result_references(entry: &Value) -> ToolEntryReferences {
+    let mut references = ToolEntryReferences::default();
+    if entry_type(entry) == Some("function_call_output") {
+        references.record_id(entry.get("call_id"));
+        references.require_payload(entry.get("output"));
+    }
+    if entry_role(entry) == Some("tool") {
+        references.record_id(entry.get("tool_call_id"));
+        references.require_payload(entry.get("content"));
+    }
+    if entry_type(entry) == Some("tool_result") {
+        references.record_id(entry.get("tool_use_id"));
+        references.require_payload(entry.get("content"));
+    }
+    if let Some(blocks) = entry.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+                references.record_id(block.get("tool_use_id"));
+                references.require_payload(block.get("content"));
+            }
+        }
+    }
+    references
+}
+
+fn entry_contains_reasoning(entry: &Value) -> bool {
+    matches!(
+        entry_type(entry),
+        Some("reasoning" | "thinking" | "redacted_thinking")
+    ) || entry.get("reasoning_content").is_some()
+        || entry
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    matches!(
+                        block.get("type").and_then(Value::as_str),
+                        Some("reasoning" | "thinking" | "redacted_thinking")
+                    )
+                })
+            })
+}
+
+fn entry_is_plain_conversation(entry: &Value) -> bool {
+    let calls = tool_call_references(entry);
+    let results = tool_result_references(entry);
+    (matches!(entry_role(entry), Some("user" | "assistant"))
+        || entry_type(entry) == Some("message"))
+        && !calls.present
+        && !results.present
+        && !entry_contains_reasoning(entry)
+}
+
+fn analyze_context_entries(entries: &[Value]) -> ContextProtection {
+    let mut protection = ContextProtection::default();
+    let recent_start = entries.len().saturating_sub(CONTEXT_KEEP_RECENT_ITEMS);
+    protection.protected.extend(recent_start..entries.len());
+
+    let call_references = entries.iter().map(tool_call_references).collect::<Vec<_>>();
+    let result_references = entries
+        .iter()
+        .map(tool_result_references)
+        .collect::<Vec<_>>();
+    let mut calls = HashMap::<String, Vec<usize>>::new();
+    let mut results = HashMap::<String, Vec<usize>>::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if entry_is_system(entry) || entry_contains_reasoning(entry) {
+            protection.protected.insert(index);
+        }
+        if call_references[index].present {
+            protection.protected.insert(index);
+        }
+        for call_id in &call_references[index].ids {
+            calls.entry(call_id.clone()).or_default().push(index);
+        }
+        for result_id in &result_references[index].ids {
+            results.entry(result_id.clone()).or_default().push(index);
+        }
+    }
+
+    if let Some(current_input) = entries
+        .iter()
+        .rposition(|entry| entry_role(entry) == Some("user"))
+    {
+        protection.protected.insert(current_input);
+    }
+
+    for (index, references) in result_references.iter().enumerate() {
+        if !references.present {
+            continue;
+        }
+        let uniquely_completed = !references.malformed
+            && references.ids.iter().all(|call_id| {
+                let Some(call_indices) = calls.get(call_id) else {
+                    return false;
+                };
+                let Some(result_indices) = results.get(call_id) else {
+                    return false;
+                };
+                call_indices.len() == 1
+                    && result_indices.len() == 1
+                    && call_indices[0] < index
+                    && !call_references[call_indices[0]].malformed
+            });
+        if uniquely_completed && !protection.protected.contains(&index) {
+            protection.compactable_tool_results.insert(index);
+        } else {
+            protection.protected.insert(index);
+        }
+    }
+
+    for (index, entry) in entries.iter().enumerate() {
+        if !protection.compactable_tool_results.contains(&index)
+            && !entry_is_plain_conversation(entry)
+        {
+            protection.protected.insert(index);
+        }
+    }
+    protection
 }
 
 fn summarize_text(text: &str, max_chars: usize, label: &str) -> String {
@@ -144,14 +316,50 @@ fn truncate_value_field(value: &mut Value, max_chars: usize, label: &str) -> boo
     if text.chars().count() <= max_chars {
         return false;
     }
-    *value = Value::String(summarize_text(&text, max_chars, label));
+    replace_if_smaller(
+        value,
+        Value::String(summarize_text(&text, max_chars, label)),
+    )
+}
+
+fn replace_if_smaller(value: &mut Value, replacement: Value) -> bool {
+    if replacement == *value
+        || estimate_tokens_from_value(&replacement) >= estimate_tokens_from_value(value)
+    {
+        return false;
+    }
+    *value = replacement;
     true
 }
 
-fn truncate_entry_content(entry: &mut Value, max_chars: usize, label: &str) -> bool {
+fn truncate_entry_content(
+    entry: &mut Value,
+    max_chars: usize,
+    label: &str,
+    tool_result: bool,
+) -> bool {
     let Some(object) = entry.as_object_mut() else {
         return truncate_value_field(entry, max_chars, label);
     };
+
+    if tool_result {
+        if let Some(blocks) = object.get_mut("content").and_then(Value::as_array_mut) {
+            let mut found_nested_result = false;
+            let mut changed = false;
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                found_nested_result = true;
+                if let Some(content) = block.get_mut("content") {
+                    changed |= truncate_value_field(content, max_chars, label);
+                }
+            }
+            if found_nested_result {
+                return changed;
+            }
+        }
+    }
 
     if let Some(content) = object.get_mut("content") {
         if truncate_value_field(content, max_chars, label) {
@@ -160,11 +368,6 @@ fn truncate_entry_content(entry: &mut Value, max_chars: usize, label: &str) -> b
     }
     if let Some(output) = object.get_mut("output") {
         if truncate_value_field(output, max_chars, label) {
-            return true;
-        }
-    }
-    if let Some(arguments) = object.get_mut("arguments") {
-        if truncate_value_field(arguments, max_chars, label) {
             return true;
         }
     }
@@ -180,54 +383,64 @@ fn compact_entry(entry: &mut Value, tool_result: bool) -> bool {
     let summary = format!("[gateway-summary {label} omitted]");
 
     let Some(object) = entry.as_object_mut() else {
-        *entry = Value::String(summary);
-        return true;
+        return replace_if_smaller(entry, Value::String(summary));
     };
 
     if tool_result {
         if let Some(output) = object.get_mut("output") {
-            *output = Value::String(summary);
-            return true;
+            return replace_if_smaller(output, Value::String(summary));
+        }
+        if let Some(blocks) = object.get_mut("content").and_then(Value::as_array_mut) {
+            let mut found_nested_result = false;
+            let mut changed = false;
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                found_nested_result = true;
+                if let Some(content) = block.get_mut("content") {
+                    changed |= replace_if_smaller(content, Value::String(summary.clone()));
+                }
+            }
+            if found_nested_result {
+                return changed;
+            }
         }
     }
     if let Some(content) = object.get_mut("content") {
-        *content = Value::String(summary);
-        return true;
+        return replace_if_smaller(content, Value::String(summary));
     }
     if let Some(output) = object.get_mut("output") {
-        *output = Value::String(summary);
-        return true;
+        return replace_if_smaller(output, Value::String(summary));
     }
-
-    object.insert("content".into(), Value::String(summary));
-    true
+    false
 }
 
 fn estimate_entries_tokens(entries: &[Value]) -> u64 {
     entries.iter().map(estimate_tokens_from_value).sum()
 }
 
-fn trim_entries_to_budget(entries: &mut [Value], target_tokens: u64) -> ContextTrimStats {
+fn trim_entries_to_budget(
+    entries: &mut [Value],
+    target_tokens: u64,
+    protection: &ContextProtection,
+) -> ContextTrimStats {
     let mut stats = ContextTrimStats::default();
     if entries.is_empty() {
         return stats;
     }
 
-    let keep_recent_start = entries.len().saturating_sub(CONTEXT_KEEP_RECENT_ITEMS);
-    let mut protected = HashSet::new();
-    for index in keep_recent_start..entries.len() {
-        protected.insert(index);
-    }
-    for (index, entry) in entries.iter().enumerate() {
-        if entry_is_system(entry) {
-            protected.insert(index);
-        }
-    }
-
-    let mut candidates = (0..entries.len())
-        .filter(|index| !protected.contains(index))
+    let mut candidates = protection
+        .compactable_tool_results
+        .iter()
+        .copied()
         .collect::<Vec<_>>();
-    candidates.sort_by_key(|index| (!entry_is_tool_result(&entries[*index]), *index));
+    candidates.sort_unstable();
+    candidates.extend((0..entries.len()).filter(|index| {
+        !protection.protected.contains(index)
+            && !protection.compactable_tool_results.contains(index)
+            && entry_is_plain_conversation(&entries[*index])
+    }));
 
     let mut current_tokens = estimate_entries_tokens(entries);
 
@@ -235,7 +448,7 @@ fn trim_entries_to_budget(entries: &mut [Value], target_tokens: u64) -> ContextT
         if current_tokens <= target_tokens {
             break;
         }
-        let tool_result = entry_is_tool_result(&entries[*index]);
+        let tool_result = protection.compactable_tool_results.contains(index);
         let max_chars = if tool_result {
             CONTEXT_TOOL_RESULT_TRUNCATE_CHARS
         } else {
@@ -246,7 +459,7 @@ fn trim_entries_to_budget(entries: &mut [Value], target_tokens: u64) -> ContextT
         } else {
             "message"
         };
-        if truncate_entry_content(&mut entries[*index], max_chars, label) {
+        if truncate_entry_content(&mut entries[*index], max_chars, label, tool_result) {
             stats.truncated_blocks = stats.truncated_blocks.saturating_add(1);
             if tool_result {
                 stats.tool_result_blocks = stats.tool_result_blocks.saturating_add(1);
@@ -259,7 +472,7 @@ fn trim_entries_to_budget(entries: &mut [Value], target_tokens: u64) -> ContextT
         if current_tokens <= target_tokens {
             break;
         }
-        let tool_result = entry_is_tool_result(&entries[*index]);
+        let tool_result = protection.compactable_tool_results.contains(index);
         if compact_entry(&mut entries[*index], tool_result) {
             stats.compacted_entries = stats.compacted_entries.saturating_add(1);
             if tool_result {
@@ -272,16 +485,64 @@ fn trim_entries_to_budget(entries: &mut [Value], target_tokens: u64) -> ContextT
     stats
 }
 
-fn trim_context_entries(payload: &mut Value, target_tokens: u64) -> ContextTrimStats {
+fn context_entries(payload: &Value) -> Option<&[Value]> {
+    payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .or_else(|| {
+            payload
+                .get("input")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+        })
+}
+
+fn context_protection(payload: &Value) -> ContextProtection {
+    context_entries(payload)
+        .map(analyze_context_entries)
+        .unwrap_or_default()
+}
+
+fn estimate_context_minimum_tokens(payload: &Value, protection: &ContextProtection) -> u64 {
+    context_entries(payload)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            if protection.protected.contains(&index) {
+                return estimate_tokens_from_value(entry);
+            }
+            let original_tokens = estimate_tokens_from_value(entry);
+            let mut minimum = entry.clone();
+            let tool_result = protection.compactable_tool_results.contains(&index);
+            if tool_result || entry_is_plain_conversation(entry) {
+                compact_entry(&mut minimum, tool_result);
+            }
+            original_tokens.min(estimate_tokens_from_value(&minimum))
+        })
+        .sum()
+}
+
+fn trim_context_entries_with_protection(
+    payload: &mut Value,
+    target_tokens: u64,
+    protection: &ContextProtection,
+) -> ContextTrimStats {
     if let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) {
-        return trim_entries_to_budget(messages, target_tokens);
+        return trim_entries_to_budget(messages, target_tokens, protection);
     }
 
     if let Some(input) = payload.get_mut("input").and_then(Value::as_array_mut) {
-        return trim_entries_to_budget(input, target_tokens);
+        return trim_entries_to_budget(input, target_tokens, protection);
     }
 
     ContextTrimStats::default()
+}
+
+fn trim_context_entries(payload: &mut Value, target_tokens: u64) -> ContextTrimStats {
+    let protection = context_protection(payload);
+    trim_context_entries_with_protection(payload, target_tokens, &protection)
 }
 
 pub(super) fn apply_context_budget_controls(
@@ -385,9 +646,15 @@ pub(super) fn apply_context_budget_controls(
         }
     }
 
+    let protection = context_protection(payload);
+    let protected_minimum_tokens = estimate_payload_baseline_tokens(payload)
+        .saturating_add(estimate_context_minimum_tokens(payload, &protection));
+
     Some(ContextBudgetReport {
         estimated_input_tokens,
         estimated_input_tokens_after_trim: estimated_after_trim,
+        protected_minimum_tokens,
+        compacted_items: trim_stats.compacted_entries,
         requested_output_tokens,
         allowed_input_tokens: allowed,
         context_limit,
@@ -415,4 +682,199 @@ pub(super) fn halve_generation_cap_for_context_retry(
         return Some((key, current, reduced));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn messages_tool_result_compaction_preserves_pairing_identity() {
+        let tool_input = json!({"path": "important.txt"});
+        let mut payload = json!({
+            "messages": [
+                {"role": "system", "content": "system invariant"},
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu-closed",
+                        "name": "read_file",
+                        "input": tool_input
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu-closed",
+                        "content": "TOOL_OUTPUT ".repeat(900)
+                    }]
+                },
+                {"role": "user", "content": "OLD_USER ".repeat(500)},
+                {"role": "assistant", "content": "recent assistant 1"},
+                {"role": "user", "content": "recent user 1"},
+                {"role": "assistant", "content": "recent assistant 2"},
+                {"role": "user", "content": "recent user 2"},
+                {"role": "assistant", "content": "recent assistant 3"},
+                {"role": "user", "content": "recent user 3"},
+                {"role": "assistant", "content": "recent assistant 4"},
+                {"role": "user", "content": "current input"}
+            ]
+        });
+
+        trim_context_entries(&mut payload, 0);
+
+        assert_eq!(payload["messages"][1]["content"][0]["input"], tool_input);
+        assert_eq!(
+            payload["messages"][2]["content"][0]["tool_use_id"],
+            "toolu-closed"
+        );
+        assert!(payload["messages"][2]["content"][0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[gateway-summary tool_result"));
+    }
+
+    #[test]
+    fn malformed_or_payloadless_tool_entries_remain_unchanged() {
+        let malformed_missing_id = json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "name": "read_file",
+                "input": {"path": "MISSING_ID ".repeat(500)}
+            }]
+        });
+        let malformed_non_string_id = json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": 7,
+                "name": "read_file",
+                "input": {"path": "NON_STRING_ID ".repeat(500)}
+            }]
+        });
+        let malformed_empty_id = json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "",
+                "name": "read_file",
+                "input": {"path": "EMPTY_ID ".repeat(500)}
+            }]
+        });
+        let mixed_results = json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "closed-call",
+                    "content": "VALID_RESULT ".repeat(500)
+                },
+                {
+                    "type": "tool_result",
+                    "content": "MISSING_RESULT_ID ".repeat(500)
+                }
+            ]
+        });
+        let payloadless_result = json!({
+            "type": "function_call_output",
+            "call_id": "payloadless-call"
+        });
+        let mut payload = json!({
+            "messages": [
+                {"role": "system", "content": "system invariant"},
+                malformed_missing_id,
+                malformed_non_string_id,
+                malformed_empty_id,
+                {
+                    "type": "function_call",
+                    "call_id": "closed-call",
+                    "name": "read_file",
+                    "arguments": "{}"
+                },
+                mixed_results,
+                {
+                    "type": "function_call",
+                    "call_id": "payloadless-call",
+                    "name": "read_file",
+                    "arguments": "{}"
+                },
+                payloadless_result,
+                {"role": "assistant", "content": "recent assistant 1"},
+                {"role": "user", "content": "recent user 1"},
+                {"role": "assistant", "content": "recent assistant 2"},
+                {"role": "user", "content": "recent user 2"},
+                {"role": "assistant", "content": "recent assistant 3"},
+                {"role": "user", "content": "recent user 3"},
+                {"role": "assistant", "content": "recent assistant 4"},
+                {"role": "user", "content": "current input"}
+            ]
+        });
+        let original = payload.clone();
+
+        trim_context_entries(&mut payload, 0);
+
+        for index in [1, 2, 3, 5, 7] {
+            assert_eq!(payload["messages"][index], original["messages"][index]);
+        }
+        assert!(payload["messages"][7].get("content").is_none());
+    }
+
+    #[test]
+    fn duplicate_tool_ids_keep_all_results_uncompacted() {
+        let mut payload = json!({
+            "input": [
+                {"role": "system", "content": "system invariant"},
+                {"type": "function_call", "call_id": "duplicate-call", "name": "a", "arguments": "{}"},
+                {"type": "function_call", "call_id": "duplicate-call", "name": "b", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "duplicate-call", "output": "AMBIGUOUS ".repeat(500)},
+                {"type": "function_call", "call_id": "duplicate-result", "name": "c", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "duplicate-result", "output": "FIRST_RESULT ".repeat(500)},
+                {"type": "function_call_output", "call_id": "duplicate-result", "output": "SECOND_RESULT ".repeat(500)},
+                {"role": "assistant", "content": "recent assistant 1"},
+                {"role": "user", "content": "recent user 1"},
+                {"role": "assistant", "content": "recent assistant 2"},
+                {"role": "user", "content": "recent user 2"},
+                {"role": "assistant", "content": "recent assistant 3"},
+                {"role": "user", "content": "recent user 3"},
+                {"role": "assistant", "content": "recent assistant 4"},
+                {"role": "user", "content": "current input"}
+            ]
+        });
+        let original = payload.clone();
+
+        trim_context_entries(&mut payload, 0);
+
+        for index in [3, 5, 6] {
+            assert_eq!(payload["input"][index], original["input"][index]);
+        }
+    }
+
+    #[test]
+    fn context_minimum_never_inflates_short_candidates() {
+        let payload = json!({
+            "messages": [
+                {"role": "system", "content": "system invariant"},
+                {"role": "user", "content": "x"},
+                {"role": "assistant", "content": "y"},
+                {"role": "assistant", "content": "recent assistant 1"},
+                {"role": "user", "content": "recent user 1"},
+                {"role": "assistant", "content": "recent assistant 2"},
+                {"role": "user", "content": "recent user 2"},
+                {"role": "assistant", "content": "recent assistant 3"},
+                {"role": "user", "content": "recent user 3"},
+                {"role": "assistant", "content": "recent assistant 4"},
+                {"role": "user", "content": "current input"}
+            ]
+        });
+        let protection = context_protection(&payload);
+
+        assert!(
+            estimate_context_minimum_tokens(&payload, &protection)
+                <= estimate_context_entry_tokens(&payload)
+        );
+    }
 }

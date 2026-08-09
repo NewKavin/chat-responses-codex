@@ -1483,6 +1483,8 @@ pub(super) async fn send_to_upstream(
             output_reserve = report.output_reserve,
             estimated_input_tokens = report.estimated_input_tokens,
             estimated_input_tokens_after_trim = report.estimated_input_tokens_after_trim,
+            protected_minimum_tokens = report.protected_minimum_tokens,
+            compacted_items = report.compacted_items,
             requested_output_tokens = report.requested_output_tokens,
             allowed_input_tokens = report.allowed_input_tokens,
             trimmed_blocks = report.trim_stats.truncated_blocks,

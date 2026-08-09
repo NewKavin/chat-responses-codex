@@ -637,6 +637,15 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
                                 {"role": "system", "content": "Keep this system prompt"},
                                 {"role": "user", "content": "old user 1"},
                                 {"role": "assistant", "content": "old assistant 1"},
+                                {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "call-old",
+                                        "type": "function",
+                                        "function": {"name": "lookup", "arguments": "{}"}
+                                    }]
+                                },
                                 {"role": "tool", "tool_call_id": "call-old", "content": oversized_tool_result},
                                 {"role": "user", "content": "old user 2"},
                                 {"role": "assistant", "content": "old assistant 2"},
@@ -659,9 +668,9 @@ async fn context_budget_trims_old_tool_result_blocks_before_upstream_dispatch() 
         let captured = capture.lock().unwrap().clone();
         let request_body = captured.request_body.unwrap();
         assert_eq!(request_body["messages"][0]["content"], "Keep this system prompt");
-        assert_eq!(request_body["messages"][11]["content"], "recent assistant 2");
+        assert_eq!(request_body["messages"][12]["content"], "recent assistant 2");
         assert!(
-            request_body["messages"][3]["content"]
+            request_body["messages"][4]["content"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("[gateway-summary tool_result")
@@ -1018,6 +1027,15 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
                                 {"role": "system", "content": "Keep this system prompt"},
                                 {"role": "user", "content": "old user 1"},
                                 {"role": "assistant", "content": "old assistant 1"},
+                                {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "call-old",
+                                        "type": "function",
+                                        "function": {"name": "lookup", "arguments": "{}"}
+                                    }]
+                                },
                                 {"role": "tool", "tool_call_id": "call-old", "content": oversized_tool_result},
                                 {"role": "user", "content": "old user 2"},
                                 {"role": "assistant", "content": "old assistant 2"},
@@ -1041,9 +1059,9 @@ async fn context_budget_compacts_payload_before_retrying_upstream() {
         let request_body = captured.request_body.unwrap();
         let messages = request_body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["content"], "Keep this system prompt");
-        assert_eq!(messages[11]["content"], "recent assistant 2");
+        assert_eq!(messages[12]["content"], "recent assistant 2");
         assert!(
-            messages[3]["content"]
+            messages[4]["content"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("[gateway-summary tool_result")
