@@ -42,6 +42,8 @@ mod model_qualification;
 mod normalize;
 #[path = "state/route_health.rs"]
 mod route_health;
+#[path = "state/runtime_settings.rs"]
+mod runtime_settings;
 #[path = "state/types.rs"]
 mod types;
 #[path = "state/usage.rs"]
@@ -115,6 +117,11 @@ pub use route_health::{
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteHealthRegistry, RouteOutcome,
     RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
+};
+pub use runtime_settings::{
+    RuntimeSettings, RuntimeSettingsDocument, RuntimeSettingsValidationError,
+    IMMEDIATE_RUNTIME_SETTING_FIELDS, RESTART_RUNTIME_SETTING_FIELDS,
+    RUNTIME_SETTINGS_SCHEMA_VERSION,
 };
 pub use types::{
     default_model_context_output_reserve, default_upstream_max_concurrency,
