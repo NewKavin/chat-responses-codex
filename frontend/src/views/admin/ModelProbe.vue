@@ -215,7 +215,6 @@
             :image-size="64"
             description="暂无思考档位探测结果"
           />
-
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -250,7 +249,6 @@ import {
 type ProbeTab = 'status' | 'reasoning'
 
 const activeProbeTab = ref<ProbeTab>('status')
-
 const loading = ref(false)
 const qualifying = ref(false)
 const probingCapabilities = ref(false)
@@ -545,6 +543,41 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+.model-probe-tabs,
+.model-probe-tab-panel {
+  min-width: 0;
+}
+
+.model-probe-tabs :deep(.el-tabs__header) {
+  margin: 0;
+}
+
+.model-probe-tabs :deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
+  background-color: var(--crc-border);
+}
+
+.model-probe-tabs :deep(.el-tabs__item) {
+  height: 42px;
+  color: var(--crc-text-muted);
+  font-weight: 600;
+}
+
+.model-probe-tabs :deep(.el-tabs__item.is-active) {
+  color: var(--crc-accent);
+}
+
+.model-probe-tabs :deep(.el-tabs__content) {
+  padding-top: 16px;
+  overflow: visible;
+}
+
+.model-probe-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .qualification-result {
   padding: 18px;
   border: 1px solid var(--crc-border);
@@ -638,6 +671,10 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+.capability-probe-empty {
+  min-height: 240px;
+}
+
 .capability-probe-results__header {
   display: flex;
   align-items: center;
@@ -680,44 +717,4 @@ onUnmounted(() => {
   font-family: var(--crc-font-mono);
   font-size: 12px;
 }
-
-.model-probe-tabs,
-.model-probe-tab-panel {
-  min-width: 0;
-}
-
-.model-probe-tabs :deep(.el-tabs__header) {
-  margin: 0;
-}
-
-.model-probe-tabs :deep(.el-tabs__nav-wrap::after) {
-  height: 1px;
-  background-color: var(--crc-border);
-}
-
-.model-probe-tabs :deep(.el-tabs__item) {
-  height: 42px;
-  color: var(--crc-text-muted);
-  font-weight: 600;
-}
-
-.model-probe-tabs :deep(.el-tabs__item.is-active) {
-  color: var(--crc-accent);
-}
-
-.model-probe-tabs :deep(.el-tabs__content) {
-  padding-top: 16px;
-  overflow: visible;
-}
-
-.model-probe-tab-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.capability-probe-empty {
-  min-height: 240px;
-}
-
 </style>
