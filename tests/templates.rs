@@ -529,6 +529,41 @@ fn deployment_policies_externalize_semantics_and_probe_candidates() {
 }
 
 #[test]
+fn deployment_context_limits_are_conservative_until_qualified() {
+    let configuration = deployment_capabilities();
+    let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+    let deployment_words = deployment.split_whitespace().collect::<Vec<_>>().join(" ");
+    let context_window = |policy_id: &str| {
+        configuration
+            .policies
+            .iter()
+            .find(|policy| policy.id == policy_id)
+            .unwrap_or_else(|| panic!("missing policy {policy_id}"))
+            .semantic
+            .context_window
+            .unwrap_or_else(|| panic!("missing context window for {policy_id}"))
+    };
+
+    assert_eq!(context_window("glm-5.2"), 131_072);
+    assert_eq!(context_window("deepseek-v4-flash"), 131_072);
+    assert!(context_window("glm-5.2") < 1_000_000);
+    assert!(context_window("deepseek-v4-flash") < 142_000);
+    for requirement in [
+        "32k, 64k, 128k, and the configured maximum",
+        "text, reasoning, and read-only tool",
+        "three consecutive times",
+        "largest passing tier",
+        "A failed 32k tier blocks model qualification",
+        "Normal traffic never auto-learns a higher context limit",
+    ] {
+        assert!(
+            deployment_words.contains(requirement),
+            "deployment context qualification rule is missing: {requirement}"
+        );
+    }
+}
+
+#[test]
 fn deployment_policies_cover_domestic_reasoning_families_with_verified_efforts_only() {
     use chat_responses_codex::capabilities::{RouteIdentity, WireProtocol};
 

@@ -459,6 +459,15 @@ Import through the authenticated admin API or use `--import` with `BASE_URL` and
 
 Policy semantics do not prove relay syntax. Exact `(upstream_id, runtime_model_slug, protocol)` probe evidence controls wire capability, and probes never run on the normal request path. A normal request makes one healthy dispatch attempt, except for the single bounded pre-stream dialect correction defined by a verified profile.
 
+Treat every configured context window as a qualified deployment limit, not a
+vendor-advertised maximum. Qualify each exact route and protocol serially at
+32k, 64k, 128k, and the configured maximum. At every tier, the text, reasoning,
+and read-only tool flows must each pass three consecutive times. Stop at the
+first failed tier. A failed 32k tier blocks model qualification. Only the
+largest passing tier may be imported as a new explicit capability revision.
+Normal traffic never auto-learns a higher context limit, and an ordinary
+successful request must not promote deployment data.
+
 After importing the deployment data, run the semantic matrix and installed clients:
 
 ```bash
