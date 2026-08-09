@@ -5,6 +5,7 @@ import type {
   ActiveGatewayRequestsResponse,
   CompatibilityMatrixRunRequest,
   CompatibilityMatrixRunResponse,
+  CapabilityDiscoveryResponse,
   CapabilityConfigurationDocument,
   DashboardAnalyticsRange,
   DashboardData,
@@ -15,6 +16,8 @@ import type {
   LoginResponse,
   LogsResponse,
   ModelProbeResponse,
+  ProbeAllCapabilitiesRequest,
+  ProbeAllCapabilitiesResponse,
   QualifyModelsRequest,
   QualifyModelsResponse,
   ResolvedCapabilitiesResponse,
@@ -384,6 +387,14 @@ export const adminApi = {
     adminHttp.get<ResolvedCapabilitiesResponse>('/admin/capabilities/resolved', { params }),
   queueDialectProbe: (data: QueueDialectProbeRequest) =>
     adminHttp.post<QueueDialectProbeResponse>('/admin/capabilities/probe', data),
+  probeAllCapabilities: (data: ProbeAllCapabilitiesRequest = {}) =>
+    adminHttp.post<ProbeAllCapabilitiesResponse>('/admin/capabilities/probe-all', data),
+  getCapabilityDiscovery: (timeoutMs?: number) =>
+    timeoutMs === undefined
+      ? adminHttp.get<CapabilityDiscoveryResponse>('/admin/capabilities/discovery')
+      : adminHttp.get<CapabilityDiscoveryResponse>('/admin/capabilities/discovery', {
+        timeout: timeoutMs
+      }),
 
   // Announcements
   getAnnouncement: () => adminHttp.get<AnnouncementResponse>('/admin/announcement'),

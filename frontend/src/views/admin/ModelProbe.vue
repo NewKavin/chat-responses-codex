@@ -28,11 +28,11 @@
           type="primary"
           plain
           :loading="probingCapabilities"
-          :disabled="loading || capabilityProbeCandidateCount === 0"
+          :disabled="loading || probingCapabilities"
           @click="runCapabilityProbe"
         >
           <Radar :size="15" :stroke-width="1.8" style="margin-right: 6px" />
-          {{ capabilityProbeCandidateCount > 0 ? `一键探测思考档位 (${capabilityProbeCandidateCount})` : '一键探测思考档位' }}
+          一键探测思考档位
         </el-button>
       </el-tooltip>
     </div>
@@ -43,36 +43,31 @@
         :stroke-width="4"
         :show-text="false"
       />
-      <span>能力探测进行中…</span>
+      <span>能力探测进行中 {{ capabilityProbeCompleted }}/{{ capabilityProbeTotal }}</span>
     </div>
 
-    <section v-if="probeResults.length > 0" class="capability-probe-results" aria-live="polite">
+    <section
+      v-if="capabilityModelResults.length > 0 || capabilityRouteResults.length > 0"
+      class="capability-probe-results"
+      aria-live="polite"
+    >
       <div class="capability-probe-results__header">
-        <h3>探测结果 / Probe Results</h3>
+        <h3>模型汇总</h3>
         <el-tag type="success" effect="plain">
-          {{ probeResults.filter(r => r.levels.length > 0).length }} 个探测出思考档位
+          {{ capabilityModelResults.filter(row => row.levels.length > 0).length }} 个模型已验证
         </el-tag>
-        <el-tag v-if="probeResults.some(r => r.state === 'unknown' || r.operational_code)" type="danger" effect="plain">
-          {{ probeResults.filter(r => r.state === 'unknown' || r.operational_code).length }} 个失败
+        <el-tag
+          v-if="capabilityRouteResults.some(row => row.outcome === 'operational_failure' || row.outcome === 'deferred')"
+          type="warning"
+          effect="plain"
+        >
+          {{ capabilityRouteResults.filter(row => row.outcome === 'operational_failure' || row.outcome === 'deferred').length }} 条路由暂不可用
         </el-tag>
       </div>
       <div class="crc-table-shell">
-        <el-table :data="probeResults" size="small" empty-text="无探测结果">
-          <el-table-column prop="runtime_model_slug" label="模型" min-width="200" show-overflow-tooltip />
-          <el-table-column label="状态" width="110">
-            <template #default="{ row }">
-              <el-tag :type="probeStateMeta(row.state).type" effect="plain" size="small">
-                {{ probeStateMeta(row.state).label }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="HTTP" width="80" align="center">
-            <template #default="{ row }">
-              <span v-if="row.http_status">{{ row.http_status }}</span>
-              <span v-else>-</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="思考档位" min-width="220">
+        <el-table :data="capabilityModelResults" size="small" empty-text="无模型探测结果">
+          <el-table-column prop="exposed_model_slug" label="模型" min-width="175" show-overflow-tooltip />
+          <el-table-column label="思考档位" min-width="145">
             <template #default="{ row }">
               <template v-if="row.levels.length > 0">
                 <el-tag
@@ -88,12 +83,56 @@
               <span v-else class="capability-probe-results__none">无</span>
             </template>
           </el-table-column>
-          <el-table-column label="说明" min-width="160">
+        </el-table>
+      </div>
+
+      <div class="capability-probe-results__subheader">
+        <h4>精确路由</h4>
+        <span>{{ capabilityRouteResults.length }} 条</span>
+      </div>
+      <div class="crc-table-shell">
+        <el-table :data="capabilityRouteResults" size="small" empty-text="无路由诊断">
+          <el-table-column prop="exposed_model_slug" label="模型" min-width="190" show-overflow-tooltip />
+          <el-table-column prop="upstream_id" label="上游" min-width="140" show-overflow-tooltip />
+          <el-table-column label="路由" min-width="160" show-overflow-tooltip>
             <template #default="{ row }">
-              <span v-if="row.operational_code" class="capability-probe-results__err">{{ row.operational_code }}</span>
-              <span v-else-if="row.http_status === 200">探测成功</span>
-              <span v-else>待确认</span>
+              <span class="capability-probe-results__route">{{ row.route_id }}</span>
             </template>
+          </el-table-column>
+          <el-table-column label="协议" width="140">
+            <template #default="{ row }">{{ capabilityProtocolLabel(row.protocol) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="130">
+            <template #default="{ row }">
+              <el-tag :type="routeStatusTagType(row)" effect="plain" size="small">
+                {{ routeStatusLabel(row) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="HTTP" width="80" align="center">
+            <template #default="{ row }">{{ row.http_status ?? '-' }}</template>
+          </el-table-column>
+          <el-table-column label="已验证档位" min-width="180">
+            <template #default="{ row }">
+              <template v-if="row.accepted_reasoning_levels.length > 0">
+                <el-tag
+                  v-for="level in row.accepted_reasoning_levels"
+                  :key="level"
+                  size="small"
+                  effect="plain"
+                  class="capability-probe-results__level"
+                >
+                  {{ level }}
+                </el-tag>
+              </template>
+              <span v-else class="capability-probe-results__none">无</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="operational_code" label="诊断" min-width="170" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.operational_code || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="下次重试" width="110">
+            <template #default="{ row }">{{ formatProbeRetry(row.next_probe_at) }}</template>
           </el-table-column>
         </el-table>
       </div>
@@ -172,12 +211,19 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { adminApi } from '@/api/admin'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
 import type {
-  DialectProfileSummary,
+  CapabilityDiscoveryResponse,
+  CapabilityWireProtocol,
   ModelProbeResponse,
   ModelQualificationCategory,
   ModelQualificationLevel,
+  ProbeAllCapabilitiesResponse,
   QualifyModelsResponse
 } from '@/types'
+import {
+  pollCapabilityDiscovery,
+  routeStatusLabel,
+  routeStatusTagType
+} from '@/utils/capabilityDiscovery'
 import {
   DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS,
   getModelProbeRefreshDelayMs
@@ -202,186 +248,110 @@ const probeData = ref<ModelProbeResponse>({
   channels: [],
   models: []
 })
-
-const capabilityProbeCandidates = computed(() =>
-  (probeData.value.channels ?? []).flatMap(channel =>
-    (channel.models ?? []).map(model => ({
-      upstream_id: channel.upstream_id,
-      runtime_model_slug: model,
-      protocol: 'chat_completions' as const
+const capabilityDiscovery = ref<CapabilityDiscoveryResponse>({ models: [] })
+const capabilityProbeProgress = ref(0)
+const capabilityProbeCompleted = ref(0)
+const capabilityProbeTotal = ref(0)
+const capabilityModelResults = computed(() =>
+  capabilityDiscovery.value.models.map(model => ({
+    exposed_model_slug: model.exposed_model_slug,
+    levels: model.verified_reasoning_levels
+  }))
+)
+const capabilityRouteResults = computed(() =>
+  capabilityDiscovery.value.models.flatMap(model =>
+    model.routes.map(route => ({
+      ...route,
+      exposed_model_slug: model.exposed_model_slug
     }))
   )
 )
-const capabilityProbeCandidateCount = computed(() => capabilityProbeCandidates.value.length)
-const capabilityProbeProgress = ref(0)
 
-const runWithConcurrency = async <T>(
-  items: T[],
-  limit: number,
-  worker: (item: T) => Promise<void>,
-  onProgress?: (done: number, total: number) => void
+const fetchCapabilityDiscovery = async (
+  timeoutMs?: number
+): Promise<CapabilityDiscoveryResponse> => {
+  const { data } = await adminApi.getCapabilityDiscovery(timeoutMs)
+  return data
+}
+
+const refreshCapabilityDiscovery = async (): Promise<CapabilityDiscoveryResponse> => {
+  const data = await fetchCapabilityDiscovery()
+  if (!isUnmounted) {
+    capabilityDiscovery.value = data
+  }
+  return data
+}
+
+const waitForProbesToSettle = async (
+  receipt: ProbeAllCapabilitiesResponse
 ) => {
-  let cursor = 0
-  const results: Promise<void>[] = []
-  const runNext = async () => {
-    while (cursor < items.length) {
-      const index = cursor++
-      await worker(items[index])
-      onProgress?.(index + 1, items.length)
-    }
-  }
-  for (let i = 0; i < Math.min(limit, items.length); i++) {
-    results.push(runNext())
-  }
-  await Promise.allSettled(results)
-}
-
-interface CapabilityProbeCandidate {
-  upstream_id: string
-  route_id?: string
-  runtime_model_slug: string
-  protocol: 'chat_completions' | 'responses'
-}
-
-interface CapabilityProbeResult {
-  upstream_id: string
-  runtime_model_slug: string
-  state: string
-  http_status: number | null
-  operational_code: string | null
-  levels: string[]
-  probed: boolean
-}
-
-const probeResults = ref<CapabilityProbeResult[]>([])
-
-const waitForProbesToSettle = async (candidates: CapabilityProbeCandidate[]) => {
-  // Poll the profiles endpoint until every candidate has a fresh probe result,
-  // or a hard timeout is reached. Returns the latest profiles snapshot.
-  const deadline = Date.now() + 90_000
-  const keyed = new Map(
-    candidates.map(candidate => [
-      `${candidate.upstream_id}/${candidate.runtime_model_slug}/${candidate.protocol}`,
-      candidate
-    ])
-  )
-  const seen = new Map<string, number>()
-  let latest: DialectProfileSummary[] = []
-  while (Date.now() < deadline) {
-    const { data } = await adminApi.getDialectProfiles()
-    latest = data.profiles
-    for (const profile of data.profiles) {
-      const key = `${profile.upstream_id}/${profile.runtime_model_slug}/${profile.protocol}`
-      if (keyed.has(key) && profile.age_seconds !== null && profile.age_seconds < 5) {
-        seen.set(key, Math.max(seen.get(key) ?? 0, 1))
-      }
-    }
-    // All candidates have a fresh profile (age < 5s means recently probed).
-    if (Array.from(keyed.keys()).every(key => seen.has(key))) {
-      return latest
-    }
-    await new Promise(resolve => setTimeout(resolve, 2500))
-  }
-  return latest
-}
-
-const buildProbeResults = (
-  candidates: CapabilityProbeCandidate[],
-  profiles: DialectProfileSummary[]
-): CapabilityProbeResult[] => {
-  const byKey = new Map(
-    profiles.map(profile => [
-      `${profile.upstream_id}/${profile.runtime_model_slug}/${profile.protocol}`,
-      profile
-    ])
-  )
-  return candidates.map(candidate => {
-    const key = `${candidate.upstream_id}/${candidate.runtime_model_slug}/${candidate.protocol}`
-    const profile = byKey.get(key)
-    if (!profile) {
-      return {
-        upstream_id: candidate.upstream_id,
-        runtime_model_slug: candidate.runtime_model_slug,
-        state: 'unknown',
-        http_status: null,
-        operational_code: '未探测到结果',
-        levels: [],
-        probed: false
-      }
-    }
-    const effortField = Object.keys(profile.reasoning?.controls ?? {}).find(field =>
-      field.includes('effort')
-    )
-    const levels = effortField ? (profile.reasoning?.controls?.[effortField] ?? []) : []
-    return {
-      upstream_id: candidate.upstream_id,
-      runtime_model_slug: candidate.runtime_model_slug,
-      state: profile.state,
-      http_status: profile.status_summary?.http_status ?? null,
-      operational_code: profile.status_summary?.operational_code ?? null,
-      levels,
-      probed: true
+  const result = await pollCapabilityDiscovery({
+    receipt,
+    initial: capabilityDiscovery.value,
+    fetchDiscovery: fetchCapabilityDiscovery,
+    cancelled: () => isUnmounted,
+    onProgress: progress => {
+      if (isUnmounted) return
+      capabilityProbeCompleted.value = progress.completed
+      capabilityProbeTotal.value = progress.total
+      capabilityProbeProgress.value = progress.total === 0
+        ? 100
+        : Math.round((progress.completed / progress.total) * 100)
     }
   })
+  if (!result.cancelled) {
+    capabilityDiscovery.value = result.discovery
+  }
+  return result
 }
 
-const probeStateMeta = (state: string) => {
-  if (state === 'verified') return { label: '已验证', type: 'success' as const }
-  if (state === 'partial') return { label: '部分支持', type: 'warning' as const }
-  if (state === 'unknown') return { label: '未确认', type: 'info' as const }
-  if (state === 'unsupported') return { label: '不支持', type: 'danger' as const }
-  return { label: state, type: 'info' as const }
+const capabilityProtocolLabel = (protocol: CapabilityWireProtocol) =>
+  protocol === 'responses' ? 'Responses' : 'Chat Completions'
+
+const formatProbeRetry = (nextProbeAt: number | null) => {
+  if (nextProbeAt === null) return '-'
+  return new Date(nextProbeAt * 1000).toLocaleTimeString('zh-CN', { hour12: false })
 }
 
 const runCapabilityProbe = async () => {
-  if (capabilityProbeCandidates.value.length === 0) {
-    ElMessage.warning('没有可探测的模型通道')
-    return
-  }
   probingCapabilities.value = true
   capabilityProbeProgress.value = 0
-  probeResults.value = []
+  capabilityProbeCompleted.value = 0
+  capabilityProbeTotal.value = 0
   try {
-    const candidates: CapabilityProbeCandidate[] = capabilityProbeCandidates.value
-    let queued = 0
-    let failed = 0
-    await runWithConcurrency(
-      candidates,
-      4,
-      async candidate => {
-        try {
-          await adminApi.queueDialectProbe(candidate)
-          queued++
-        } catch {
-          failed++
-        }
-      },
-      (done, total) => {
-        capabilityProbeProgress.value = Math.round((done / total) * 100)
-      }
-    )
-    if (queued === 0) {
-      ElMessage.error('能力探测排队失败，请检查上游通道状态')
-      return
-    }
-    ElMessage.success(`已排队 ${queued} 个能力探测请求${failed > 0 ? `，${failed} 个失败` : ''}，正在等待探测完成…`)
-    const profiles = await waitForProbesToSettle(candidates)
-    probeResults.value = buildProbeResults(candidates, profiles)
-    capabilityProbeProgress.value = 100
-    await loadData()
-    const withLevels = probeResults.value.filter(result => result.levels.length > 0).length
-    const failedProbes = probeResults.value.filter(
-      result => result.state === 'unknown' || result.operational_code
+    const { data: receipt } = await adminApi.probeAllCapabilities()
+    if (isUnmounted) return
+    capabilityProbeTotal.value = receipt.queued_routes
+    ElMessage.success(`已排队 ${receipt.queued_routes} 条精确路由，正在等待探测完成`)
+    const polling = await waitForProbesToSettle(receipt)
+    if (polling.cancelled || isUnmounted) return
+    const latest = polling.discovery
+    const progress = polling.progress
+    const routes = latest.models.flatMap(model => model.routes)
+    const unavailable = routes.filter(route =>
+      route.outcome === 'operational_failure' || route.outcome === 'deferred'
     ).length
-    ElMessage.success(
-      `能力探测完成：${probeResults.value.length} 个通道，${withLevels} 个探测出思考档位${failedProbes > 0 ? `，${failedProbes} 个失败` : ''}，已刷新`
-    )
+    const modelsWithLevels = latest.models.filter(
+      model => model.verified_reasoning_levels.length > 0
+    ).length
+    const pending = progress.total - progress.completed
+    await loadData()
+    if (isUnmounted) return
+    const summary = `能力探测结束：${modelsWithLevels} 个模型已验证思考档位`
+    if (unavailable > 0 || pending > 0) {
+      ElMessage.warning(`${summary}，${unavailable} 条路由暂不可用，${pending} 条仍在等待`)
+    } else {
+      ElMessage.success(summary)
+    }
   } catch (error: any) {
+    if (isUnmounted) return
     const errorMsg = error?.response?.data?.error?.message || '能力探测排队失败'
     ElMessage.error(errorMsg)
   } finally {
-    probingCapabilities.value = false
-    capabilityProbeProgress.value = 0
+    if (!isUnmounted) {
+      probingCapabilities.value = false
+      capabilityProbeProgress.value = 0
+    }
   }
 }
 
@@ -503,6 +473,7 @@ const runQualification = async () => {
 
 onMounted(() => {
   void loadData()
+  void refreshCapabilityDiscovery().catch(() => undefined)
 })
 
 onUnmounted(() => {
@@ -661,6 +632,22 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
+.capability-probe-results__subheader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 16px 0 8px;
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
+.capability-probe-results__subheader h4 {
+  margin: 0;
+  color: var(--crc-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .capability-probe-results__level {
   margin-right: 4px;
 }
@@ -670,8 +657,8 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-.capability-probe-results__err {
-  color: var(--crc-danger, #f56c6c);
+.capability-probe-results__route {
+  font-family: var(--crc-font-mono);
   font-size: 12px;
 }
 </style>

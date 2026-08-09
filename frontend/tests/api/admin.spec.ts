@@ -106,6 +106,28 @@ describe('admin api auth behavior', () => {
     )
   })
 
+  it('queues and polls server-owned capability discovery routes', async () => {
+    const post = vi.spyOn(adminHttp, 'post').mockResolvedValue({
+      data: {
+        configuration_revision: 7,
+        started_at: 1_000,
+        queued_routes: 1,
+        candidates: []
+      }
+    } as never)
+    const get = vi.spyOn(adminHttp, 'get').mockResolvedValue({
+      data: { models: [] }
+    } as never)
+
+    await adminApi.probeAllCapabilities({ models: ['deepseek-v4-flash'] })
+    await adminApi.getCapabilityDiscovery(2500)
+
+    expect(post).toHaveBeenCalledWith('/admin/capabilities/probe-all', {
+      models: ['deepseek-v4-flash']
+    })
+    expect(get).toHaveBeenCalledWith('/admin/capabilities/discovery', { timeout: 2500 })
+  })
+
   it('addresses model discovery results by stable key index', async () => {
     const discovery: DiscoverUpstreamModelsResult = {
       models: ['glm-5.2'],

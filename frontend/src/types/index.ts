@@ -616,8 +616,59 @@ export interface CompatibilityMatrixRunResponse {
 export type EvidenceState = 'supported' | 'rejected' | 'unobserved'
 export type CapabilitySource = 'override' | 'probe' | 'policy' | 'baseline'
 export type ProfileCurrentness = 'current' | 'stale' | 'missing'
+export type CapabilityWireProtocol = 'chat_completions' | 'responses'
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
+
+export interface ProbeAllCapabilitiesRequest {
+  upstream_ids?: string[]
+  models?: string[]
+}
+
+export interface CapabilityProbeCandidateSummary {
+  upstream_id: string
+  route_id: string
+  exposed_model_slug: string
+  runtime_model_slug: string
+  protocol: CapabilityWireProtocol
+}
+
+export interface ProbeAllCapabilitiesResponse {
+  configuration_revision: number
+  started_at: number
+  queued_routes: number
+  candidates: CapabilityProbeCandidateSummary[]
+}
+
+export type CapabilityRouteProbeOutcome =
+  | 'accepted'
+  | 'rejected'
+  | 'operational_failure'
+  | 'deferred'
+  | 'pending'
+
+export interface CapabilityRouteDiscoverySummary {
+  upstream_id: string
+  route_id: string
+  runtime_model_slug: string
+  protocol: CapabilityWireProtocol
+  outcome: CapabilityRouteProbeOutcome
+  accepted_reasoning_levels: string[]
+  http_status: number | null
+  operational_code: string | null
+  last_attempt_at: number | null
+  next_probe_at: number | null
+}
+
+export interface CapabilityModelDiscoverySummary {
+  exposed_model_slug: string
+  verified_reasoning_levels: string[]
+  routes: CapabilityRouteDiscoverySummary[]
+}
+
+export interface CapabilityDiscoveryResponse {
+  models: CapabilityModelDiscoverySummary[]
+}
 
 export interface CapabilityConfigurationDocument {
   schema_version: number
