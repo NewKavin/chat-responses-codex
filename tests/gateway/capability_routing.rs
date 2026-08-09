@@ -1,5 +1,6 @@
 use super::common::*;
 use chat_responses_codex::capabilities::*;
+use chat_responses_codex::state::ApiKeyModelConfig;
 
 #[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
@@ -814,6 +815,113 @@ async fn codex_catalog_advertises_only_verified_reasoning_levels() {
             {"effort": "high", "description": "Use high reasoning effort"},
             {"effort": "xhigh", "description": "Use xhigh reasoning effort"},
             {"effort": "max", "description": "Use max reasoning effort"}
+        ])
+    );
+    assert_eq!(model["default_reasoning_level"], "high");
+}
+
+#[tokio::test]
+async fn codex_catalog_unions_current_verified_route_levels() {
+    let model = "deepseek-v4-flash";
+    let mut upstream = catalog_upstream("multi-account-reasoning", &[model]);
+    upstream.api_key = "key-a".into();
+    upstream.api_keys = vec!["key-b".into(), "key-c".into()];
+    upstream.api_key_models = ["key-a", "key-b", "key-c"]
+        .into_iter()
+        .map(|api_key| ApiKeyModelConfig {
+            api_key: api_key.into(),
+            supported_models: vec![model.into()],
+        })
+        .collect();
+    let (_tempdir, state, secret) = catalog_state(vec![upstream.clone()], vec![model.into()]);
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            policies: vec![CapabilityPolicy {
+                id: "multi-account-effort-map".into(),
+                selector: CapabilitySelector {
+                    upstream_id: Some(upstream.id.clone()),
+                    exposed_model: Some(model.into()),
+                    runtime_model: Some(model.into()),
+                    protocol: Some(WireProtocol::ChatCompletions),
+                    ..CapabilitySelector::default()
+                },
+                semantic: SemanticPolicy {
+                    effort_map: std::collections::BTreeMap::from([
+                        ("low".into(), "provider-low".into()),
+                        ("medium".into(), "provider-medium".into()),
+                        ("high".into(), "provider-high".into()),
+                        ("xhigh".into(), "provider-xhigh".into()),
+                        ("max".into(), "provider-max".into()),
+                    ]),
+                    ..SemanticPolicy::default()
+                },
+                ..CapabilityPolicy::default()
+            }],
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+
+    for (api_key, accepted_levels) in [
+        ("key-a", vec!["provider-low", "provider-medium"]),
+        ("key-b", vec!["provider-high"]),
+        ("key-c", Vec::new()),
+    ] {
+        let key_fingerprint =
+            chat_responses_codex::keys::upstream_key_fingerprint(&upstream.id, api_key);
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            model,
+            WireProtocol::ChatCompletions,
+        ));
+        profile.configuration_fingerprint = state
+            .route_configuration_fingerprint(
+                &upstream,
+                &key_fingerprint,
+                model,
+                model,
+                UpstreamProtocol::ChatCompletions,
+            )
+            .unwrap();
+        if accepted_levels.is_empty() {
+            profile.last_probe_outcome = Some(ProbeProfileOutcome::OperationalFailure);
+            profile.last_operational_failure = Some("minimal_text_failed".into());
+            profile.http_status = Some(503);
+        } else {
+            profile.state = DialectProfileState::Verified;
+            for capability in [
+                Capability::FunctionTools,
+                Capability::ToolContinuation,
+                Capability::ReasoningOutput,
+            ] {
+                profile
+                    .capabilities
+                    .insert(capability, EvidenceState::Supported);
+            }
+            profile.reasoning_controls.insert(
+                "reasoning_effort".into(),
+                accepted_levels.into_iter().map(str::to_owned).collect(),
+            );
+            profile.last_probe_outcome = Some(ProbeProfileOutcome::Accepted);
+        }
+        state.upsert_dialect_profile(profile).await.unwrap();
+    }
+
+    let catalog = get_models(state, &secret, true).await;
+    let model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["slug"] == model)
+        .unwrap();
+    assert_eq!(
+        model["supported_reasoning_levels"],
+        json!([
+            {"effort": "low", "description": "Use low reasoning effort"},
+            {"effort": "medium", "description": "Use medium reasoning effort"},
+            {"effort": "high", "description": "Use high reasoning effort"}
         ])
     );
     assert_eq!(model["default_reasoning_level"], "high");

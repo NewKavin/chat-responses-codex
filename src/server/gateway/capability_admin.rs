@@ -1,11 +1,12 @@
 use super::*;
 use crate::capabilities::{
-    Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey, ProbeReason,
-    RequestedFeatures, ResolutionInput, RouteIdentity, UpstreamDialectProfile, WireProtocol,
+    Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey,
+    ProbeProfileOutcome, ProbeReason, RequestedFeatures, ResolutionInput, RouteIdentity,
+    UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use axum::extract::{Path, Query};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +38,27 @@ pub(super) struct ManualProbeRequest {
 pub(super) struct ProbeAllRequest {
     upstream_ids: Vec<String>,
     models: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct CapabilityModelDiscoverySummary {
+    exposed_model_slug: String,
+    verified_reasoning_levels: Vec<String>,
+    routes: Vec<CapabilityRouteDiscoverySummary>,
+}
+
+#[derive(Serialize)]
+pub(super) struct CapabilityRouteDiscoverySummary {
+    upstream_id: String,
+    route_id: String,
+    runtime_model_slug: String,
+    protocol: WireProtocol,
+    outcome: &'static str,
+    accepted_reasoning_levels: Vec<String>,
+    http_status: Option<u16>,
+    operational_code: Option<String>,
+    last_attempt_at: Option<u64>,
+    next_probe_at: Option<u64>,
 }
 
 pub(super) async fn admin_capabilities_export(State(state): State<AppState>) -> Response {
@@ -89,6 +111,14 @@ pub(super) async fn admin_capability_profiles(State(state): State<AppState>) -> 
         })
         .collect::<Vec<_>>();
     Json(json!({"profiles": profiles})).into_response()
+}
+
+pub(super) async fn admin_capability_discovery(State(state): State<AppState>) -> Response {
+    let routing = state.routing_snapshot().await;
+    Json(json!({
+        "models": capability_discovery_summaries(&state, &routing.upstreams),
+    }))
+    .into_response()
 }
 
 pub(super) async fn admin_capabilities_resolved(
@@ -523,6 +553,168 @@ fn profile_is_current_for_any_route(
                 )
             })
         })
+}
+
+pub(super) fn capability_discovery_summaries(
+    state: &AppState,
+    upstreams: &[crate::state::UpstreamConfig],
+) -> Vec<CapabilityModelDiscoverySummary> {
+    let snapshot = state.capability_snapshot();
+    let mut models =
+        BTreeMap::<String, (BTreeSet<String>, Vec<CapabilityRouteDiscoverySummary>)>::new();
+    for upstream in upstreams.iter().filter(|upstream| upstream.active) {
+        for exposed_model_slug in upstream.route_models() {
+            let Some(runtime_model_slug) = upstream.resolved_model_name(&exposed_model_slug) else {
+                continue;
+            };
+            for api_key in upstream.keys_for_model(&runtime_model_slug) {
+                let key_fingerprint = upstream_key_fingerprint(&upstream.id, &api_key);
+                for protocol in upstream.supported_protocols() {
+                    let wire_protocol = WireProtocol::from(protocol);
+                    let key = DialectProfileKey::for_key(
+                        upstream.id.clone(),
+                        key_fingerprint.clone(),
+                        runtime_model_slug.clone(),
+                        wire_protocol,
+                    );
+                    let profile = AppState::route_configuration_fingerprint_with_snapshot(
+                        &snapshot,
+                        upstream,
+                        &key_fingerprint,
+                        &exposed_model_slug,
+                        &runtime_model_slug,
+                        protocol,
+                    )
+                    .ok()
+                    .and_then(|fingerprint| {
+                        snapshot.profiles.get(&key).filter(|profile| {
+                            profile_is_current_for_route(
+                                &snapshot,
+                                upstream,
+                                &exposed_model_slug,
+                                &runtime_model_slug,
+                                protocol,
+                                profile,
+                                &fingerprint,
+                            )
+                        })
+                    });
+                    let mut accepted_reasoning_levels = resolve_route_capabilities_with_snapshot(
+                        &snapshot,
+                        upstream,
+                        &key_fingerprint,
+                        &exposed_model_slug,
+                        &runtime_model_slug,
+                        protocol,
+                        &RequestedFeatures::default(),
+                    )
+                    .filter(|resolved| resolved.supports(Capability::ReasoningOutput))
+                    .map(|resolved| resolved.effort_map.into_keys().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                    sort_canonical_reasoning_levels(&mut accepted_reasoning_levels);
+
+                    let model = models.entry(exposed_model_slug.clone()).or_default();
+                    model.0.extend(accepted_reasoning_levels.iter().cloned());
+                    model.1.push(CapabilityRouteDiscoverySummary {
+                        upstream_id: upstream.id.clone(),
+                        route_id: anonymous_route_id(
+                            &upstream.id,
+                            &key_fingerprint,
+                            &runtime_model_slug,
+                            wire_protocol,
+                        ),
+                        runtime_model_slug: runtime_model_slug.clone(),
+                        protocol: wire_protocol,
+                        outcome: capability_probe_outcome_label(profile),
+                        accepted_reasoning_levels,
+                        http_status: profile.and_then(|profile| {
+                            profile
+                                .http_status
+                                .filter(|status| (100..=599).contains(status))
+                        }),
+                        operational_code: profile.and_then(|profile| {
+                            profile
+                                .last_operational_failure
+                                .as_deref()
+                                .map(sanitize_identifier)
+                        }),
+                        last_attempt_at: profile.and_then(|profile| profile.last_attempt_at),
+                        next_probe_at: profile.and_then(|profile| profile.next_probe_at),
+                    });
+                }
+            }
+        }
+    }
+
+    models
+        .into_iter()
+        .map(|(exposed_model_slug, (verified_levels, mut routes))| {
+            routes.sort_by(|left, right| {
+                left.upstream_id
+                    .cmp(&right.upstream_id)
+                    .then_with(|| left.route_id.cmp(&right.route_id))
+                    .then_with(|| left.runtime_model_slug.cmp(&right.runtime_model_slug))
+                    .then_with(|| left.protocol.cmp(&right.protocol))
+            });
+            let mut verified_reasoning_levels = verified_levels.into_iter().collect::<Vec<_>>();
+            sort_canonical_reasoning_levels(&mut verified_reasoning_levels);
+            CapabilityModelDiscoverySummary {
+                exposed_model_slug,
+                verified_reasoning_levels,
+                routes,
+            }
+        })
+        .collect()
+}
+
+pub(super) fn capability_verified_reasoning_levels_by_model(
+    state: &AppState,
+    upstreams: &[crate::state::UpstreamConfig],
+) -> BTreeMap<String, Vec<String>> {
+    capability_discovery_summaries(state, upstreams)
+        .into_iter()
+        .map(|summary| {
+            (
+                summary.exposed_model_slug,
+                summary.verified_reasoning_levels,
+            )
+        })
+        .collect()
+}
+
+fn sort_canonical_reasoning_levels(levels: &mut Vec<String>) {
+    const ORDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+    levels.retain(|level| ORDER.contains(&level.as_str()));
+    levels.sort_by(|left, right| {
+        ORDER
+            .iter()
+            .position(|candidate| candidate == left)
+            .cmp(&ORDER.iter().position(|candidate| candidate == right))
+            .then_with(|| left.cmp(right))
+    });
+    levels.dedup();
+}
+
+fn capability_probe_outcome_label(profile: Option<&UpstreamDialectProfile>) -> &'static str {
+    let Some(profile) = profile else {
+        return "pending";
+    };
+    match profile.last_probe_outcome {
+        Some(ProbeProfileOutcome::Accepted) => "accepted",
+        Some(ProbeProfileOutcome::Rejected) => "rejected",
+        Some(ProbeProfileOutcome::OperationalFailure) => "operational_failure",
+        Some(ProbeProfileOutcome::Deferred) => "deferred",
+        None if profile.last_operational_failure.is_some() => "operational_failure",
+        None if profile.state == crate::capabilities::DialectProfileState::Unsupported => {
+            "rejected"
+        }
+        None if profile.state != crate::capabilities::DialectProfileState::Unknown
+            && (!profile.capabilities.is_empty() || !profile.reasoning_controls.is_empty()) =>
+        {
+            "accepted"
+        }
+        None => "pending",
+    }
 }
 
 fn profile_is_current_for_route(

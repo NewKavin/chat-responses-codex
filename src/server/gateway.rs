@@ -1668,6 +1668,13 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/capabilities/discovery",
+            get(admin_capability_discovery).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
             "/api/admin/capabilities/resolved",
             get(admin_capabilities_resolved).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -2040,25 +2047,9 @@ fn codex_reasoning_description(effort: &str) -> String {
     format!("Use {effort} reasoning effort")
 }
 
-fn codex_reasoning_metadata(resolved: &ResolvedCapabilities) -> CodexReasoningMetadata {
-    let verified_control = resolved.supports(Capability::ReasoningOutput)
-        && resolved.reasoning_control_field.is_some()
-        && !resolved.effort_map.is_empty();
-
-    if !verified_control {
-        return CodexReasoningMetadata {
-            supported_levels: vec![json!({
-                "effort": "none",
-                "description": "Do not request a configurable reasoning effort"
-            })],
-            default_level: Value::String("none".into()),
-            supports_summaries: false,
-        };
-    }
-
-    let mut efforts = resolved
-        .effort_map
-        .keys()
+fn codex_reasoning_metadata(verified_levels: &[String]) -> CodexReasoningMetadata {
+    let mut efforts = verified_levels
+        .iter()
         .filter(|effort| CODEX_REASONING_EFFORT_ORDER.contains(&effort.as_str()))
         .cloned()
         .collect::<Vec<_>>();
@@ -2173,6 +2164,8 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
         return GatewayError::Unauthorized("invalid downstream key".into()).into_response();
     };
     let snapshot = state.routing_snapshot().await;
+    let verified_reasoning_levels =
+        capability_verified_reasoning_levels_by_model(state, &snapshot.upstreams);
 
     let model_infos = codex_exposed_models(&snapshot.upstreams, &downstream.model_allowlist)
         .into_iter()
@@ -2186,8 +2179,9 @@ async fn list_models_codex_format(state: &AppState, secret: &str) -> Response {
                         .and_then(|limit| i64::try_from(limit).ok())
                 })
                 .or_else(|| codex_catalog_context_window(&snapshot.upstreams, &slug));
-            let reasoning = capabilities
-                .map(codex_reasoning_metadata)
+            let reasoning = verified_reasoning_levels
+                .get(&slug)
+                .map(|levels| codex_reasoning_metadata(levels))
                 .unwrap_or_else(codex_conservative_reasoning_metadata);
             let supports_custom_tools = capabilities
                 .is_some_and(|capabilities| capabilities.supports(Capability::CustomTools));

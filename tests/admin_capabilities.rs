@@ -2,9 +2,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use chat_responses_codex::auth::generate_admin_token;
 use chat_responses_codex::capabilities::{
-    Capability, CapabilityConfiguration, CapabilitySelector, DialectProfileKey,
-    DialectProfileState, EvidenceState, RouteCapabilityOverride, UpstreamDialectProfile,
-    WireProtocol,
+    Capability, CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, DialectProfileKey,
+    DialectProfileState, EvidenceState, ProbeProfileOutcome, RouteCapabilityOverride,
+    SemanticPolicy, UpstreamDialectProfile, WireProtocol,
 };
 use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
 use chat_responses_codex::server::{build_router, CapabilityProbeService};
@@ -379,6 +379,130 @@ async fn capability_probe_all_builds_every_exact_key_and_protocol() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn capability_discovery_unions_successful_routes_and_keeps_failures() {
+    let fixture =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    let model = "deepseek-v4-flash";
+    let mut upstream = fixture.state.upstreams().await.into_iter().next().unwrap();
+    upstream.api_key = "key-a".into();
+    upstream.api_keys = vec!["key-b".into(), "key-c".into()];
+    upstream.supported_models = vec![model.into()];
+    upstream.api_key_models = ["key-a", "key-b", "key-c"]
+        .into_iter()
+        .map(|api_key| ApiKeyModelConfig {
+            api_key: api_key.into(),
+            supported_models: vec![model.into()],
+        })
+        .collect();
+    fixture
+        .state
+        .update_upstream("up-1", upstream.clone())
+        .await
+        .unwrap();
+    fixture
+        .state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            policies: vec![CapabilityPolicy {
+                id: "deepseek-effort-map".into(),
+                selector: CapabilitySelector {
+                    upstream_id: Some(upstream.id.clone()),
+                    exposed_model: Some(model.into()),
+                    runtime_model: Some(model.into()),
+                    protocol: Some(WireProtocol::ChatCompletions),
+                    ..CapabilitySelector::default()
+                },
+                semantic: SemanticPolicy {
+                    effort_map: BTreeMap::from([
+                        ("low".into(), "provider-low".into()),
+                        ("medium".into(), "provider-medium".into()),
+                        ("high".into(), "provider-high".into()),
+                        ("xhigh".into(), "provider-xhigh".into()),
+                        ("max".into(), "provider-max".into()),
+                    ]),
+                    ..SemanticPolicy::default()
+                },
+                ..CapabilityPolicy::default()
+            }],
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+
+    for (api_key, accepted_levels) in [
+        ("key-a", vec!["provider-low", "provider-medium"]),
+        ("key-b", vec!["provider-high"]),
+        ("key-c", Vec::new()),
+    ] {
+        let key_fingerprint = upstream_key_fingerprint(&upstream.id, api_key);
+        let mut profile = UpstreamDialectProfile::unknown(DialectProfileKey::for_key(
+            upstream.id.clone(),
+            key_fingerprint.clone(),
+            model,
+            WireProtocol::ChatCompletions,
+        ));
+        profile.configuration_fingerprint = fixture
+            .state
+            .route_configuration_fingerprint(
+                &upstream,
+                &key_fingerprint,
+                model,
+                model,
+                chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+            )
+            .unwrap();
+        if accepted_levels.is_empty() {
+            profile.last_probe_outcome = Some(ProbeProfileOutcome::OperationalFailure);
+            profile.last_operational_failure = Some("minimal_text_failed".into());
+            profile.http_status = Some(503);
+            profile.last_attempt_at = Some(1_000);
+            profile.next_probe_at = Some(1_005);
+        } else {
+            profile.state = DialectProfileState::Verified;
+            profile
+                .capabilities
+                .insert(Capability::ReasoningOutput, EvidenceState::Supported);
+            profile.reasoning_controls.insert(
+                "reasoning_effort".into(),
+                accepted_levels.into_iter().map(str::to_owned).collect(),
+            );
+            profile.last_probe_outcome = Some(ProbeProfileOutcome::Accepted);
+            profile.last_success_at = Some(999);
+        }
+        fixture.state.upsert_dialect_profile(profile).await.unwrap();
+    }
+
+    let response = fixture.get("/api/admin/capabilities/discovery").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let model_summary = body["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|summary| summary["exposed_model_slug"] == model)
+        .unwrap();
+    assert_eq!(
+        model_summary["verified_reasoning_levels"],
+        json!(["low", "medium", "high"])
+    );
+    assert_eq!(model_summary["routes"].as_array().unwrap().len(), 3);
+    let failed = model_summary["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|route| route["outcome"] == "operational_failure")
+        .unwrap();
+    assert_eq!(failed["http_status"], 503);
+    assert_eq!(failed["operational_code"], "minimal_text_failed");
+    assert!(!body.to_string().contains("key_fingerprint"));
+    for api_key in ["key-a", "key-b", "key-c"] {
+        assert!(!body
+            .to_string()
+            .contains(&upstream_key_fingerprint(&upstream.id, api_key)));
+    }
 }
 
 #[tokio::test]
