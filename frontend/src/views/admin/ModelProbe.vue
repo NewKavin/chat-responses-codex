@@ -37,170 +37,188 @@
       </el-tooltip>
     </div>
 
-    <div v-if="probingCapabilities" class="capability-probe-progress">
-      <el-progress
-        :percentage="capabilityProbeProgress"
-        :stroke-width="4"
-        :show-text="false"
-      />
-      <span>能力探测进行中 {{ capabilityProbeCompleted }}/{{ capabilityProbeTotal }}</span>
-    </div>
+    <el-tabs v-model="activeProbeTab" class="model-probe-tabs">
+      <el-tab-pane label="模型状态" name="status">
+        <div class="model-probe-tab-panel">
+          <ModelProbeBoard
+            tone="admin"
+            scope-label="管理员视图"
+            title="模型探测"
+            subtitle="自动轮询模型列表与通道状态；此刷新不发送推理请求。"
+            :data="probeData"
+            :loading="loading"
+            :error-message="loadError"
+            :on-retry="loadData"
+          />
 
-    <section
-      v-if="capabilityModelResults.length > 0 || capabilityRouteResults.length > 0"
-      class="capability-probe-results"
-      aria-live="polite"
-    >
-      <div class="capability-probe-results__header">
-        <h3>模型汇总</h3>
-        <el-tag type="success" effect="plain">
-          {{ capabilityModelResults.filter(row => row.levels.length > 0).length }} 个模型已验证
-        </el-tag>
-        <el-tag
-          v-if="capabilityRouteResults.some(row => row.outcome === 'operational_failure' || row.outcome === 'deferred')"
-          type="warning"
-          effect="plain"
-        >
-          {{ capabilityRouteResults.filter(row => row.outcome === 'operational_failure' || row.outcome === 'deferred').length }} 条路由暂不可用
-        </el-tag>
-      </div>
-      <div class="crc-table-shell">
-        <el-table :data="capabilityModelResults" size="small" empty-text="无模型探测结果">
-          <el-table-column prop="exposed_model_slug" label="模型" min-width="175" show-overflow-tooltip />
-          <el-table-column label="思考档位" min-width="145">
-            <template #default="{ row }">
-              <template v-if="row.levels.length > 0">
-                <el-tag
-                  v-for="level in row.levels"
-                  :key="level"
-                  size="small"
-                  effect="plain"
-                  class="capability-probe-results__level"
-                >
-                  {{ level }}
-                </el-tag>
-              </template>
-              <span v-else class="capability-probe-results__none">无</span>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-
-      <div class="capability-probe-results__subheader">
-        <h4>精确路由</h4>
-        <span>{{ capabilityRouteResults.length }} 条</span>
-      </div>
-      <div class="crc-table-shell">
-        <el-table :data="capabilityRouteResults" size="small" empty-text="无路由诊断">
-          <el-table-column prop="exposed_model_slug" label="模型" min-width="190" show-overflow-tooltip />
-          <el-table-column prop="upstream_id" label="上游" min-width="140" show-overflow-tooltip />
-          <el-table-column label="路由" min-width="160" show-overflow-tooltip>
-            <template #default="{ row }">
-              <span class="capability-probe-results__route">{{ row.route_id }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="协议" width="140">
-            <template #default="{ row }">{{ capabilityProtocolLabel(row.protocol) }}</template>
-          </el-table-column>
-          <el-table-column label="状态" width="130">
-            <template #default="{ row }">
-              <el-tag :type="routeStatusTagType(row)" effect="plain" size="small">
-                {{ routeStatusLabel(row) }}
+          <section v-if="qualificationResult" class="qualification-result" aria-live="polite">
+            <div class="qualification-result-header">
+              <h2>资格结果</h2>
+              <el-tag :type="qualificationResult.applied ? 'success' : 'info'" effect="plain">
+                {{ qualificationResult.applied ? '已应用' : '仅预览' }}
               </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="HTTP" width="80" align="center">
-            <template #default="{ row }">{{ row.http_status ?? '-' }}</template>
-          </el-table-column>
-          <el-table-column label="已验证档位" min-width="180">
-            <template #default="{ row }">
-              <template v-if="row.accepted_reasoning_levels.length > 0">
-                <el-tag
-                  v-for="level in row.accepted_reasoning_levels"
-                  :key="level"
-                  size="small"
-                  effect="plain"
-                  class="capability-probe-results__level"
-                >
-                  {{ level }}
-                </el-tag>
-              </template>
-              <span v-else class="capability-probe-results__none">无</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="operational_code" label="诊断" min-width="170" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.operational_code || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="下次重试" width="110">
-            <template #default="{ row }">{{ formatProbeRetry(row.next_probe_at) }}</template>
-          </el-table-column>
-        </el-table>
-      </div>
-    </section>
+            </div>
 
-    <ModelProbeBoard
-      tone="admin"
-      scope-label="管理员视图"
-      title="模型探测"
-      subtitle="自动轮询模型列表与通道状态；此刷新不发送推理请求。"
-      :data="probeData"
-      :loading="loading"
-      :error-message="loadError"
-      :on-retry="loadData"
-    />
+            <div class="qualification-metrics">
+              <div class="qualification-metric">
+                <strong>{{ qualificationResult.summary.retained_models }}</strong>
+                <span>保留</span>
+              </div>
+              <div class="qualification-metric">
+                <strong>{{ qualificationResult.summary.full_models }}</strong>
+                <span>完整</span>
+              </div>
+              <div class="qualification-metric">
+                <strong>{{ qualificationResult.summary.adapted_models }}</strong>
+                <span>适配</span>
+              </div>
+              <div class="qualification-metric">
+                <strong>{{ qualificationResult.summary.removed_models }}</strong>
+                <span>移除</span>
+              </div>
+              <div class="qualification-metric">
+                <strong>{{ qualificationResult.summary.operational_failures }}</strong>
+                <span>运行故障</span>
+              </div>
+            </div>
 
-    <section v-if="qualificationResult" class="qualification-result" aria-live="polite">
-      <div class="qualification-result-header">
-        <h2>资格结果</h2>
-        <el-tag :type="qualificationResult.applied ? 'success' : 'info'" effect="plain">
-          {{ qualificationResult.applied ? '已应用' : '仅预览' }}
-        </el-tag>
-      </div>
+            <div class="crc-table-shell">
+              <el-table :data="qualificationRows" size="small" empty-text="无资格证据">
+                <el-table-column prop="upstreamId" label="上游" min-width="150" />
+                <el-table-column prop="model" label="模型" min-width="190" show-overflow-tooltip />
+                <el-table-column label="协议" width="130">
+                  <template #default="{ row }">{{ protocolLabel(row.protocol) }}</template>
+                </el-table-column>
+                <el-table-column label="级别" width="110">
+                  <template #default="{ row }">
+                    <el-tag :type="levelTagType(row.level)" effect="plain" size="small">
+                      {{ levelLabel(row.level) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="类别" min-width="150">
+                  <template #default="{ row }">{{ categoryLabel(row.category) }}</template>
+                </el-table-column>
+                <el-table-column prop="latencyMs" label="耗时 (ms)" width="110" align="right" />
+              </el-table>
+            </div>
+          </section>
+        </div>
+      </el-tab-pane>
 
-      <div class="qualification-metrics">
-        <div class="qualification-metric">
-          <strong>{{ qualificationResult.summary.retained_models }}</strong>
-          <span>保留</span>
-        </div>
-        <div class="qualification-metric">
-          <strong>{{ qualificationResult.summary.full_models }}</strong>
-          <span>完整</span>
-        </div>
-        <div class="qualification-metric">
-          <strong>{{ qualificationResult.summary.adapted_models }}</strong>
-          <span>适配</span>
-        </div>
-        <div class="qualification-metric">
-          <strong>{{ qualificationResult.summary.removed_models }}</strong>
-          <span>移除</span>
-        </div>
-        <div class="qualification-metric">
-          <strong>{{ qualificationResult.summary.operational_failures }}</strong>
-          <span>运行故障</span>
-        </div>
-      </div>
+      <el-tab-pane label="思考档位" name="reasoning">
+        <div class="model-probe-tab-panel reasoning-probe-panel">
+          <div v-if="probingCapabilities" class="capability-probe-progress">
+            <el-progress
+              :percentage="capabilityProbeProgress"
+              :stroke-width="4"
+              :show-text="false"
+            />
+            <span>能力探测进行中 {{ capabilityProbeCompleted }}/{{ capabilityProbeTotal }}</span>
+          </div>
 
-      <div class="crc-table-shell">
-        <el-table :data="qualificationRows" size="small" empty-text="无资格证据">
-          <el-table-column prop="upstreamId" label="上游" min-width="150" />
-          <el-table-column prop="model" label="模型" min-width="190" show-overflow-tooltip />
-          <el-table-column label="协议" width="130">
-            <template #default="{ row }">{{ protocolLabel(row.protocol) }}</template>
-          </el-table-column>
-          <el-table-column label="级别" width="110">
-            <template #default="{ row }">
-              <el-tag :type="levelTagType(row.level)" effect="plain" size="small">
-                {{ levelLabel(row.level) }}
+          <section
+            v-if="capabilityModelResults.length > 0 || capabilityRouteResults.length > 0"
+            class="capability-probe-results"
+            aria-live="polite"
+          >
+            <div class="capability-probe-results__header">
+              <h3>模型汇总</h3>
+              <el-tag type="success" effect="plain">
+                {{ capabilityModelResults.filter(row => row.levels.length > 0).length }} 个模型已验证
               </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="类别" min-width="150">
-            <template #default="{ row }">{{ categoryLabel(row.category) }}</template>
-          </el-table-column>
-          <el-table-column prop="latencyMs" label="耗时 (ms)" width="110" align="right" />
-        </el-table>
-      </div>
-    </section>
+              <el-tag
+                v-if="capabilityRouteResults.some(row => row.outcome === 'operational_failure' || row.outcome === 'deferred')"
+                type="warning"
+                effect="plain"
+              >
+                {{ capabilityRouteResults.filter(row => row.outcome === 'operational_failure' || row.outcome === 'deferred').length }} 条路由暂不可用
+              </el-tag>
+            </div>
+            <div class="crc-table-shell">
+              <el-table :data="capabilityModelResults" size="small" empty-text="无模型探测结果">
+                <el-table-column prop="exposed_model_slug" label="模型" min-width="175" show-overflow-tooltip />
+                <el-table-column label="思考档位" min-width="145">
+                  <template #default="{ row }">
+                    <template v-if="row.levels.length > 0">
+                      <el-tag
+                        v-for="level in row.levels"
+                        :key="level"
+                        size="small"
+                        effect="plain"
+                        class="capability-probe-results__level"
+                      >
+                        {{ level }}
+                      </el-tag>
+                    </template>
+                    <span v-else class="capability-probe-results__none">无</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+
+            <div class="capability-probe-results__subheader">
+              <h4>精确路由</h4>
+              <span>{{ capabilityRouteResults.length }} 条</span>
+            </div>
+            <div class="crc-table-shell">
+              <el-table :data="capabilityRouteResults" size="small" empty-text="无路由诊断">
+                <el-table-column prop="exposed_model_slug" label="模型" min-width="190" show-overflow-tooltip />
+                <el-table-column prop="upstream_id" label="上游" min-width="140" show-overflow-tooltip />
+                <el-table-column label="路由" min-width="160" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <span class="capability-probe-results__route">{{ row.route_id }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="协议" width="140">
+                  <template #default="{ row }">{{ capabilityProtocolLabel(row.protocol) }}</template>
+                </el-table-column>
+                <el-table-column label="状态" width="130">
+                  <template #default="{ row }">
+                    <el-tag :type="routeStatusTagType(row)" effect="plain" size="small">
+                      {{ routeStatusLabel(row) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="HTTP" width="80" align="center">
+                  <template #default="{ row }">{{ row.http_status ?? '-' }}</template>
+                </el-table-column>
+                <el-table-column label="已验证档位" min-width="180">
+                  <template #default="{ row }">
+                    <template v-if="row.accepted_reasoning_levels.length > 0">
+                      <el-tag
+                        v-for="level in row.accepted_reasoning_levels"
+                        :key="level"
+                        size="small"
+                        effect="plain"
+                        class="capability-probe-results__level"
+                      >
+                        {{ level }}
+                      </el-tag>
+                    </template>
+                    <span v-else class="capability-probe-results__none">无</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="operational_code" label="诊断" min-width="170" show-overflow-tooltip>
+                  <template #default="{ row }">{{ row.operational_code || '-' }}</template>
+                </el-table-column>
+                <el-table-column label="下次重试" width="110">
+                  <template #default="{ row }">{{ formatProbeRetry(row.next_probe_at) }}</template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </section>
+
+          <el-empty
+            v-else-if="!probingCapabilities"
+            class="capability-probe-empty"
+            :image-size="64"
+            description="暂无思考档位探测结果"
+          />
+
+        </div>
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -228,6 +246,10 @@ import {
   DEFAULT_MODEL_PROBE_REFRESH_INTERVAL_SECONDS,
   getModelProbeRefreshDelayMs
 } from '@/utils/modelProbePolling'
+
+type ProbeTab = 'status' | 'reasoning'
+
+const activeProbeTab = ref<ProbeTab>('status')
 
 const loading = ref(false)
 const qualifying = ref(false)
@@ -314,6 +336,7 @@ const formatProbeRetry = (nextProbeAt: number | null) => {
 }
 
 const runCapabilityProbe = async () => {
+  activeProbeTab.value = 'reasoning'
   probingCapabilities.value = true
   capabilityProbeProgress.value = 0
   capabilityProbeCompleted.value = 0
@@ -602,7 +625,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 12px 0;
+  margin: 0;
   color: var(--crc-text-muted);
   font-size: 12px;
 }
@@ -612,11 +635,7 @@ onUnmounted(() => {
 }
 
 .capability-probe-results {
-  margin: 12px 0 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--crc-border-color, #e4e7ed);
-  border-radius: 8px;
-  background: var(--crc-bg-subtle, #fafafa);
+  min-width: 0;
 }
 
 .capability-probe-results__header {
@@ -661,4 +680,44 @@ onUnmounted(() => {
   font-family: var(--crc-font-mono);
   font-size: 12px;
 }
+
+.model-probe-tabs,
+.model-probe-tab-panel {
+  min-width: 0;
+}
+
+.model-probe-tabs :deep(.el-tabs__header) {
+  margin: 0;
+}
+
+.model-probe-tabs :deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
+  background-color: var(--crc-border);
+}
+
+.model-probe-tabs :deep(.el-tabs__item) {
+  height: 42px;
+  color: var(--crc-text-muted);
+  font-weight: 600;
+}
+
+.model-probe-tabs :deep(.el-tabs__item.is-active) {
+  color: var(--crc-accent);
+}
+
+.model-probe-tabs :deep(.el-tabs__content) {
+  padding-top: 16px;
+  overflow: visible;
+}
+
+.model-probe-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.capability-probe-empty {
+  min-height: 240px;
+}
+
 </style>
