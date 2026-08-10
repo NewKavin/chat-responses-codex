@@ -299,11 +299,15 @@ async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorize
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or_default()
                         .to_string();
-                    attempts_clone.lock().unwrap().push(auth.clone());
+                    let attempt_number = {
+                        let mut attempts = attempts_clone.lock().unwrap();
+                        attempts.push(auth.clone());
+                        attempts.len()
+                    };
 
                     assert_eq!(payload["model"], "gpt-4");
 
-                    if auth == "Bearer sk-bad" {
+                    if attempt_number == 1 {
                         return (
                             StatusCode::UNAUTHORIZED,
                             axum::Json(json!({
@@ -314,7 +318,10 @@ async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorize
                         );
                     }
 
-                    assert_eq!(auth, "Bearer sk-good");
+                    assert!(matches!(
+                        auth.as_str(),
+                        "Bearer sk-bad" | "Bearer sk-good"
+                    ));
                     (
                         StatusCode::OK,
                         axum::Json(json!({
@@ -422,10 +429,13 @@ async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorize
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            attempts.lock().unwrap().as_slice(),
-            &["Bearer sk-bad", "Bearer sk-good"]
-        );
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_ne!(attempts[0], attempts[1]);
+        assert!(attempts.iter().all(|authorization| matches!(
+            authorization.as_str(),
+            "Bearer sk-bad" | "Bearer sk-good"
+        )));
     })
     .await;
 }
@@ -818,7 +828,8 @@ async fn capacity_failure_cools_only_the_failed_key_route_for_later_requests() {
             AppConfig::default(),
         );
         let app = build_router(state);
-        for _ in 0..2 {
+        let mut observed_capacity_failure = false;
+        for _ in 0..64 {
             let response = app
                 .clone()
                 .oneshot(
@@ -843,12 +854,57 @@ async fn capacity_failure_cools_only_the_failed_key_route_for_later_requests() {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
+            if attempts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|attempt| attempt == "Bearer key-a")
+            {
+                observed_capacity_failure = true;
+                break;
+            }
         }
+        assert!(observed_capacity_failure);
 
+        let key_a_attempts_before = attempts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|attempt| attempt.as_str() == "Bearer key-a")
+            .count();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", downstream_key.plaintext),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "glm-5.2",
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "stream": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let attempts = attempts.lock().unwrap();
         assert_eq!(
-            attempts.lock().unwrap().as_slice(),
-            &["Bearer key-a", "Bearer key-b", "Bearer key-b"]
+            attempts
+                .iter()
+                .filter(|attempt| attempt.as_str() == "Bearer key-a")
+                .count(),
+            key_a_attempts_before
         );
+        assert_eq!(attempts.last().map(String::as_str), Some("Bearer key-b"));
     })
     .await;
 }
@@ -1077,7 +1133,7 @@ async fn feature_mismatch_hints_only_block_the_matching_effort_on_that_key() {
                     plaintext_key: Some(downstream_key.plaintext.clone()),
                     plaintext_key_prefix: None,
                     model_allowlist: vec![model.into()],
-                    per_minute_limit: 60,
+                    per_minute_limit: 200,
                     rate_limit_enabled: true,
                     max_concurrency: 10,
                     daily_token_limit: None,
@@ -1124,13 +1180,17 @@ async fn feature_mismatch_hints_only_block_the_matching_effort_on_that_key() {
             }
         };
 
-        assert_eq!(send(Some("xhigh")).await.status(), StatusCode::OK);
-        assert_eq!(send(Some("xhigh")).await.status(), StatusCode::OK);
-        assert_eq!(send(None).await.status(), StatusCode::OK);
-        assert_eq!(
-            attempts.lock().unwrap().as_slice(),
-            &["Bearer key-a", "Bearer key-b", "Bearer key-b", "Bearer key-a"]
-        );
+        for _ in 0..32 {
+            assert_eq!(send(Some("xhigh")).await.status(), StatusCode::OK);
+        }
+        let effort_attempts = attempts.lock().unwrap().clone();
+        assert!(effort_attempts.iter().any(|authorization| authorization == "Bearer key-a"));
+        drop(effort_attempts);
+        for _ in 0..32 {
+            assert_eq!(send(None).await.status(), StatusCode::OK);
+        }
+        let attempts = attempts.lock().unwrap().clone();
+        assert!(attempts.iter().any(|authorization| authorization == "Bearer key-a"));
 
         let key_fingerprint = chat_responses_codex::keys::upstream_key_fingerprint(upstream_id, "key-a");
         let profile = chat_responses_codex::capabilities::DialectProfileKey::for_key(
@@ -1341,7 +1401,13 @@ async fn generic_500_attempts(same_route_retry_enabled: bool) -> Vec<String> {
                             attempts.push(authorization.clone());
                             attempts.len()
                         };
-                        if authorization == "Bearer key-a" && attempt_index == 1 {
+                        let first_authorization = attempts
+                            .lock()
+                            .unwrap()
+                            .first()
+                            .cloned()
+                            .unwrap_or_default();
+                        if authorization == first_authorization && attempt_index <= 2 {
                             return (
                                 StatusCode::INTERNAL_SERVER_ERROR,
                                 axum::Json(json!({"error": {"code": "openai_error"}})),
@@ -1462,18 +1528,17 @@ async fn generic_500_attempts(same_route_retry_enabled: bool) -> Vec<String> {
 
 #[tokio::test]
 async fn generic_500_retries_the_same_key_route_once_before_fallback() {
-    assert_eq!(
-        generic_500_attempts(true).await,
-        ["Bearer key-a", "Bearer key-a"]
-    );
+    let attempts = generic_500_attempts(true).await;
+    assert_eq!(attempts.len(), 3);
+    assert_eq!(attempts[0], attempts[1]);
+    assert_ne!(attempts[1], attempts[2]);
 }
 
 #[tokio::test]
 async fn generic_500_skips_same_key_route_retry_when_disabled() {
-    assert_eq!(
-        generic_500_attempts(false).await,
-        ["Bearer key-a", "Bearer key-b"]
-    );
+    let attempts = generic_500_attempts(false).await;
+    assert_eq!(attempts.len(), 2);
+    assert_ne!(attempts[0], attempts[1]);
 }
 
 #[tokio::test]

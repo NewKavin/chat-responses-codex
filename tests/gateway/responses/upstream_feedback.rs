@@ -193,26 +193,37 @@ async fn explicit_concurrency_5xx_uses_account_recovery_and_healthy_routes() {
     let address = listener.local_addr().unwrap();
     let failing_hits = Arc::new(AtomicUsize::new(0));
     let healthy_hits = Arc::new(AtomicUsize::new(0));
+    let failing_account = Arc::new(Mutex::new(None::<String>));
     let failing_hits_for_server = failing_hits.clone();
     let healthy_hits_for_server = healthy_hits.clone();
+    let failing_account_for_server = failing_account.clone();
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
         post(move |headers: HeaderMap, _body: String| {
             let failing_hits = failing_hits_for_server.clone();
             let healthy_hits = healthy_hits_for_server.clone();
+            let failing_account = failing_account_for_server.clone();
             async move {
                 let authorization = headers
                     .get(header::AUTHORIZATION)
                     .and_then(|value| value.to_str().ok())
-                    .unwrap_or_default();
-                let failing_account =
-                    authorization.ends_with("account-1") || authorization.ends_with("account-2");
+                    .unwrap_or_default()
+                    .to_string();
+                let should_fail = {
+                    let mut selected = failing_account.lock().unwrap();
+                    if let Some(selected) = selected.as_ref() {
+                        selected == &authorization
+                    } else {
+                        *selected = Some(authorization.clone());
+                        true
+                    }
+                };
                 let mut response_headers = HeaderMap::new();
                 response_headers.insert(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
                 );
-                if failing_account {
+                if should_fail {
                     failing_hits.fetch_add(1, Ordering::SeqCst);
                     response_headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
                     (

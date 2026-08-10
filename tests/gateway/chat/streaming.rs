@@ -1165,24 +1165,31 @@ async fn full_cross_upstream_hedge_falls_through_to_the_next_key() {
     let slow_hits = Arc::new(AtomicUsize::new(0));
     let fallback_hits = Arc::new(AtomicUsize::new(0));
     let full_candidate_hits = Arc::new(AtomicUsize::new(0));
+    let primary_attempts = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let slow_hits_for_handler = slow_hits.clone();
     let fallback_hits_for_handler = fallback_hits.clone();
     let full_candidate_hits_for_handler = full_candidate_hits.clone();
+    let primary_attempts_for_handler = primary_attempts.clone();
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
         post(move |request: Request<Body>| {
             let slow_hits = slow_hits_for_handler.clone();
             let fallback_hits = fallback_hits_for_handler.clone();
             let full_candidate_hits = full_candidate_hits_for_handler.clone();
+            let primary_attempts = primary_attempts_for_handler.clone();
             async move {
                 let authorization = request
                     .headers()
                     .get(header::AUTHORIZATION)
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or_default();
-                if authorization == "Bearer slow-key" {
+                if authorization == "Bearer full-key" {
+                    full_candidate_hits.fetch_add(1, Ordering::SeqCst);
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                if primary_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     slow_hits.fetch_add(1, Ordering::SeqCst);
                     let lifecycle = Bytes::from_static(
                         b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
@@ -1198,23 +1205,19 @@ async fn full_cross_upstream_hedge_falls_through_to_the_next_key() {
                     )
                         .into_response();
                 }
-                if authorization == "Bearer fallback-key" {
-                    fallback_hits.fetch_add(1, Ordering::SeqCst);
-                    return (
-                        StatusCode::OK,
-                        [(header::CONTENT_TYPE, "text/event-stream")],
-                        concat!(
-                            "data: {\"id\":\"chatcmpl-fallback\",",
-                            "\"object\":\"chat.completion.chunk\",\"created\":1,",
-                            "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
-                            "\"delta\":{\"content\":\"fallback key winner\"}}]}\n\n",
-                            "data: [DONE]\n\n"
-                        ),
-                    )
-                        .into_response();
-                }
-                full_candidate_hits.fetch_add(1, Ordering::SeqCst);
-                StatusCode::NO_CONTENT.into_response()
+                fallback_hits.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"id\":\"chatcmpl-fallback\",",
+                        "\"object\":\"chat.completion.chunk\",\"created\":1,",
+                        "\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,",
+                        "\"delta\":{\"content\":\"fallback key winner\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+                    .into_response()
             }
         }),
     );

@@ -1265,8 +1265,11 @@ async fn upstream_concurrency_full_switches_keys_without_retrying_in_place() {
     assert_eq!(response.status(), StatusCode::OK);
     let auth_headers = auth_headers.lock().unwrap().clone();
     assert_eq!(auth_headers.len(), 2);
-    assert_eq!(auth_headers[0], "Bearer primary-secret");
-    assert_eq!(auth_headers[1], "Bearer backup-secret");
+    assert_ne!(auth_headers[0], auth_headers[1]);
+    assert!(auth_headers.iter().all(|authorization| matches!(
+        authorization.as_str(),
+        "Bearer primary-secret" | "Bearer backup-secret"
+    )));
 }
 
 #[tokio::test]

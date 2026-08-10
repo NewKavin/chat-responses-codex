@@ -35,6 +35,7 @@ use futures_util::{stream as futures_stream, FutureExt, StreamExt};
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -224,6 +225,51 @@ fn route_api_keys(upstream: &UpstreamConfig, model: &str) -> Vec<String> {
         vec![upstream.api_key.clone()]
     } else {
         keys
+    }
+}
+
+fn rotate_route_keys_for_request(
+    candidate_keys: &mut [String],
+    request_id: &str,
+    upstream_id: &str,
+    runtime_model_slug: &str,
+    protocol: UpstreamProtocol,
+) {
+    if candidate_keys.len() <= 1 {
+        return;
+    }
+
+    let mut hasher = Sha256::new();
+    for part in [request_id, upstream_id, runtime_model_slug] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.update([match protocol {
+        UpstreamProtocol::ChatCompletions => 0,
+        UpstreamProtocol::Responses => 1,
+    }]);
+    let digest = hasher.finalize();
+    let value = u64::from_le_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix must contain eight bytes"),
+    );
+    candidate_keys.rotate_left(value as usize % candidate_keys.len());
+}
+
+fn promote_preferred_route_key(
+    upstream: &UpstreamConfig,
+    candidate_keys: &mut Vec<String>,
+    preferred_fingerprint: &str,
+) {
+    let Some(position) = candidate_keys.iter().position(|api_key| {
+        route_key_fingerprint(upstream, api_key) == preferred_fingerprint
+    }) else {
+        return;
+    };
+    if position > 0 {
+        let preferred = candidate_keys.remove(position);
+        candidate_keys.insert(0, preferred);
     }
 }
 
@@ -5194,18 +5240,23 @@ async fn process_gateway_request_inner(
                             })
                     })
                     .collect::<Vec<_>>();
+                rotate_route_keys_for_request(
+                    &mut candidate_keys,
+                    &request_id,
+                    &upstream.id,
+                    &runtime_model_slug,
+                    protocol,
+                );
                 if let Some(preferred_profile) = exact_continuation
                     .as_ref()
                     .map(GatewayContinuationState::preferred_profile)
                     .filter(|profile| profile.upstream_id == upstream.id)
                 {
-                    candidate_keys.sort_by_key(|api_key| {
-                        let fingerprint = route_key_fingerprint(&upstream, api_key);
-                        (
-                            fingerprint != preferred_profile.key_fingerprint,
-                            fingerprint,
-                        )
-                    });
+                    promote_preferred_route_key(
+                        &upstream,
+                        &mut candidate_keys,
+                        &preferred_profile.key_fingerprint,
+                    );
                 }
                 if candidate_keys.is_empty() {
                     tracing::debug!(

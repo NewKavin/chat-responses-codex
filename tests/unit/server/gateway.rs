@@ -12,6 +12,80 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 #[test]
+fn route_key_rotation_is_stable_and_spreads_first_choice() {
+    let original = vec![
+        "key-a".to_string(),
+        "key-b".to_string(),
+        "key-c".to_string(),
+        "key-d".to_string(),
+    ];
+    let mut first = original.clone();
+    rotate_route_keys_for_request(
+        &mut first,
+        "request-a",
+        "upstream-a",
+        "glm-5",
+        UpstreamProtocol::ChatCompletions,
+    );
+    let mut repeated = original.clone();
+    rotate_route_keys_for_request(
+        &mut repeated,
+        "request-a",
+        "upstream-a",
+        "glm-5",
+        UpstreamProtocol::ChatCompletions,
+    );
+    assert_eq!(first, repeated);
+
+    let first_keys = (0..64)
+        .map(|index| {
+            let mut keys = original.clone();
+            rotate_route_keys_for_request(
+                &mut keys,
+                &format!("request-{index}"),
+                "upstream-a",
+                "glm-5",
+                UpstreamProtocol::ChatCompletions,
+            );
+            keys[0].clone()
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(first_keys.len() > 1);
+}
+
+#[test]
+fn exact_continuation_promotion_preserves_rotated_fallback_order() {
+    let upstream = UpstreamConfig {
+        id: "upstream-a".into(),
+        api_key: "key-a".into(),
+        api_keys: vec!["key-b".into(), "key-c".into(), "key-d".into()],
+        ..Default::default()
+    };
+    let mut keys = upstream.account_api_keys();
+    rotate_route_keys_for_request(
+        &mut keys,
+        "request-a",
+        &upstream.id,
+        "glm-5",
+        UpstreamProtocol::Responses,
+    );
+    let rotated = keys.clone();
+    let preferred = rotated[2].clone();
+    let preferred_fingerprint = route_key_fingerprint(&upstream, &preferred);
+
+    promote_preferred_route_key(&upstream, &mut keys, &preferred_fingerprint);
+
+    assert_eq!(keys[0], preferred);
+    assert_eq!(
+        keys[1..],
+        rotated
+            .into_iter()
+            .filter(|key| key != &preferred)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn stream_timeouts_use_runtime_idle_and_startup_transport_limits() {
     let config = AppConfig {
         upstream_stream_keepalive_interval_seconds: 11,
@@ -699,6 +773,58 @@ async fn local_upstream_concurrency_is_scoped_per_account() {
 
     state.release_upstream_request(lease_a).await.unwrap();
     state.release_upstream_request(lease_b).await.unwrap();
+}
+
+#[tokio::test]
+async fn configured_upstream_concurrency_applies_independently_to_eight_keys() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let configured_limit = 3_u32;
+    let upstream = UpstreamConfig {
+        id: "eight-key-upstream".into(),
+        max_concurrency: configured_limit,
+        active: true,
+        ..Default::default()
+    };
+    let fingerprints = (0..8)
+        .map(|index| {
+            crate::keys::upstream_key_fingerprint(&upstream.id, &format!("account-{index}"))
+        })
+        .collect::<Vec<_>>();
+    let mut leases = Vec::new();
+
+    for fingerprint in &fingerprints {
+        for _ in 0..configured_limit {
+            leases.push(
+                state
+                    .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+                    .await
+                    .expect("each key should reserve its configured slots"),
+            );
+        }
+        state
+            .try_reserve_upstream_account_request(&upstream, fingerprint, "model-a")
+            .await
+            .expect_err("each key must reject work above its configured limit");
+    }
+
+    assert_eq!(
+        state
+            .upstream_runtime_snapshots()
+            .await
+            .unwrap()
+            .get(&upstream.id)
+            .expect("shared upstream runtime snapshot")
+            .in_flight,
+        configured_limit * fingerprints.len() as u32
+    );
+    for lease in leases {
+        state.release_upstream_request(lease).await.unwrap();
+    }
 }
 
 #[tokio::test]

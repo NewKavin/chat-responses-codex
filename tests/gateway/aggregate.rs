@@ -215,7 +215,7 @@ impl AggregateHarness {
                             AggregateScript::Pending => pending_aggregate_response(pending_polled),
                             AggregateScript::Fixed(chunks) => fixed_aggregate_response(chunks),
                             AggregateScript::RetryThenPending
-                                if authorization == "Bearer key-first" =>
+                                if requests.lock().unwrap().len() == 1 =>
                             {
                                 fixed_aggregate_response(vec![
                                     Bytes::from(nonterminal_responses_sse()),
@@ -1173,8 +1173,11 @@ async fn aggregate_cancellation_rearms_after_retryable_first_key_error() {
     harness.wait_until_pending().await;
     let captured = harness.requests.lock().unwrap().clone();
     assert_eq!(captured.len(), 2);
-    assert_eq!(captured[0].0, "Bearer key-first");
-    assert_eq!(captured[1].0, "Bearer key-second");
+    assert_ne!(captured[0].0, captured[1].0);
+    assert!(captured.iter().all(|(authorization, _)| matches!(
+        authorization.as_str(),
+        "Bearer key-first" | "Bearer key-second"
+    )));
     assert!(captured
         .iter()
         .all(|(_, payload)| payload["stream"] == true));

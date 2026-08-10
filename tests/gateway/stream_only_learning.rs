@@ -856,7 +856,7 @@ async fn stream_only_learning_same_route_elects_one_detection_leader() {
 }
 
 #[tokio::test]
-async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
+async fn stream_only_learning_follower_429_has_one_final_exact_route_attempt() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let first_json_started = Arc::new(Notify::new());
@@ -927,8 +927,8 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
         id: UPSTREAM_ID.into(),
         name: "cold-stream-only".into(),
         base_url: format!("http://{address}"),
-        api_key: String::new(),
-        api_keys: vec!["key-first".into(), "key-second".into()],
+        api_key: "key-only".into(),
+        api_keys: Vec::new(),
         protocol: UpstreamProtocol::ChatCompletions,
         protocols: vec![UpstreamProtocol::ChatCompletions],
         supported_models: vec![MODEL.into()],
@@ -1035,13 +1035,14 @@ async fn stream_only_learning_follower_429_has_one_final_attempt_across_keys() {
         .unwrap();
     assert_eq!(follower_response.status(), StatusCode::TOO_MANY_REQUESTS);
 
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    assert!(requests
+        .iter()
+        .all(|(authorization, _)| authorization == &requests[0].0));
     assert_eq!(
-        requests.lock().unwrap().as_slice(),
-        [
-            ("Bearer key-first".to_string(), false),
-            ("Bearer key-first".to_string(), true),
-            ("Bearer key-first".to_string(), true),
-        ]
+        requests.iter().map(|(_, stream)| *stream).collect::<Vec<_>>(),
+        [false, true, true]
     );
     let snapshot = state.capability_snapshot();
     let profile = snapshot.profiles.get(&profile_key).unwrap();
@@ -1384,12 +1385,15 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let recovery_key = Arc::new(Mutex::new(None::<String>));
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
         post({
             let requests = requests.clone();
+            let recovery_key = recovery_key.clone();
             move |request: Request<Body>| {
                 let requests = requests.clone();
+                let recovery_key = recovery_key.clone();
                 async move {
                     let authorization = request
                         .headers()
@@ -1406,7 +1410,16 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
                         .unwrap()
                         .push((authorization.clone(), stream, runtime_model));
 
-                    if authorization == "Bearer key-first" {
+                    let is_recovery_key = {
+                        let mut selected = recovery_key.lock().unwrap();
+                        if let Some(selected) = selected.as_ref() {
+                            selected == &authorization
+                        } else {
+                            *selected = Some(authorization.clone());
+                            true
+                        }
+                    };
+                    if is_recovery_key {
                         if stream {
                             return (
                                 StatusCode::TOO_MANY_REQUESTS,
@@ -1577,26 +1590,17 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
     .expect("context fallback multi-key recovery must not hang")
     .unwrap();
 
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].0, requests[1].0);
+    assert_ne!(requests[1].0, requests[2].0);
     assert_eq!(
-        requests.lock().unwrap().as_slice(),
-        [
-            (
-                "Bearer key-first".to_string(),
-                false,
-                FALLBACK_MODEL.to_string(),
-            ),
-            (
-                "Bearer key-first".to_string(),
-                true,
-                FALLBACK_MODEL.to_string(),
-            ),
-            (
-                "Bearer key-second".to_string(),
-                false,
-                FALLBACK_MODEL.to_string(),
-            ),
-        ]
+        requests.iter().map(|(_, stream, _)| *stream).collect::<Vec<_>>(),
+        [false, true, false]
     );
+    assert!(requests
+        .iter()
+        .all(|(_, _, runtime_model)| runtime_model == FALLBACK_MODEL));
     assert_eq!(response.status(), StatusCode::OK);
     let snapshot = state.capability_snapshot();
     assert_eq!(
