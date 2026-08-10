@@ -37,7 +37,8 @@ import {
   Megaphone,
   Radar,
   SatelliteDish,
-  ScrollText
+  ScrollText,
+  Settings as SettingsIcon
 } from '@lucide/vue'
 import AppShell from '@/components/AppShell.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -67,7 +68,8 @@ const adminNavItems: AppNavItem[] = [
   { path: '/admin/upstreams', label: '上游管理', icon: SatelliteDish, group: '资源管理' },
   { path: '/admin/downstreams', label: '下游管理', icon: KeyRound, group: '资源管理' },
   { path: '/admin/logs', label: '运行日志', icon: ScrollText, group: '运维' },
-  { path: '/admin/announcement', label: '公告管理', icon: Megaphone, group: '运维' }
+  { path: '/admin/announcement', label: '公告管理', icon: Megaphone, group: '运维' },
+  { path: '/admin/settings', label: '网关设置', icon: SettingsIcon, group: '运维' }
 ]
 
 const isAdminShell = computed(() =>

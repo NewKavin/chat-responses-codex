@@ -780,6 +780,73 @@ export interface ResolvedCapabilitiesResponse {
 }
 
 // ============================================================================
+// Runtime Settings Types
+// ============================================================================
+
+export interface RuntimeSettings {
+  app_name: string
+  usage_log_archive_max_files: number
+  usage_log_retention_days: number
+  admin_logs_page_size_max: number
+  admin_upstream_timeout_seconds: number
+  troubleshooting_check_timeout_seconds: number
+  model_probe_refresh_interval_seconds: number
+  upstream_model_auto_discovery_enabled: boolean
+  upstream_model_key_sync_interval_seconds: number
+  capability_probe_queue_capacity: number
+  capability_probe_request_timeout_seconds: number
+  automatic_capability_probes_enabled: boolean
+  upstream_rate_limit_default_retry_seconds: number
+  routing_affinity_enabled: boolean
+  routing_affinity_ttl_seconds: number
+  routing_affinity_escape_pressure_ratio: number
+  upstream_hedge_enabled: boolean
+  upstream_hedge_delay_ms: number
+  upstream_hedge_interval_ms: number
+  upstream_hedge_max_extra_attempts: number
+  upstream_same_route_retry_enabled: boolean
+  upstream_transient_route_cooldown_base_seconds: number
+  upstream_transient_route_cooldown_max_seconds: number
+  upstream_route_health_half_open_ttl_seconds: number
+  upstream_route_exhaustion_retry_enabled: boolean
+  upstream_route_exhaustion_retry_max_wait_ms: number
+  upstream_route_exhaustion_retry_max_rounds: number
+  downstream_lease_ttl_seconds: number
+  upstream_concurrency_recovery_max_wait_ms: number
+  upstream_concurrency_recovery_max_rounds: number
+  upstream_concurrency_probe_delays_ms: number[]
+  upstream_http_pool_max_idle_per_host: number
+  upstream_user_agent: string
+  upstream_connect_timeout_seconds: number
+  upstream_response_header_timeout_seconds: number
+  upstream_stream_keepalive_interval_seconds: number
+  upstream_stream_idle_timeout_seconds: number
+  upstream_stream_max_duration_seconds: number
+  upstream_first_semantic_output_timeout_seconds: number
+}
+
+export type RuntimeSettingKey = keyof RuntimeSettings
+export type RuntimeSettingsSource = 'startup' | 'persisted'
+
+export interface RuntimeSettingsResponse {
+  schema_version: number
+  revision: number
+  source: RuntimeSettingsSource
+  settings: RuntimeSettings
+  restart_required: boolean
+  restart_required_fields: RuntimeSettingKey[]
+}
+
+export interface RuntimeSettingsUpdateResponse extends RuntimeSettingsResponse {
+  applied_immediately: RuntimeSettingKey[]
+}
+
+export interface UpdateRuntimeSettingsRequest {
+  expected_revision: number
+  settings: RuntimeSettings
+}
+
+// ============================================================================
 // Announcement Types
 // ============================================================================
 

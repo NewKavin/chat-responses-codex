@@ -21,8 +21,11 @@ import type {
   QualifyModelsRequest,
   QualifyModelsResponse,
   ResolvedCapabilitiesResponse,
+  RuntimeSettingsResponse,
+  RuntimeSettingsUpdateResponse,
   TroubleshootingRunRequest,
   TroubleshootingRunResponse,
+  UpdateRuntimeSettingsRequest,
   ApiKeyModelConfig,
   KeyModelDiscoveryResult,
   UpstreamConfig,
@@ -395,6 +398,12 @@ export const adminApi = {
       : adminHttp.get<CapabilityDiscoveryResponse>('/admin/capabilities/discovery', {
         timeout: timeoutMs
       }),
+
+  // Runtime settings
+  getRuntimeSettings: () =>
+    adminHttp.get<RuntimeSettingsResponse>('/admin/runtime-settings'),
+  updateRuntimeSettings: (data: UpdateRuntimeSettingsRequest) =>
+    adminHttp.put<RuntimeSettingsUpdateResponse>('/admin/runtime-settings', data),
 
   // Announcements
   getAnnouncement: () => adminHttp.get<AnnouncementResponse>('/admin/announcement'),

@@ -74,6 +74,12 @@ const router = createRouter({
       name: 'AdminAnnouncement',
       component: () => import('@/views/admin/Announcement.vue'),
       meta: { requiresAuth: true, title: '公告管理' }
+    },
+    {
+      path: '/admin/settings',
+      name: 'AdminSettings',
+      component: () => import('@/views/admin/Settings.vue'),
+      meta: { requiresAuth: true, title: '网关设置' }
     }
   ]
 })
