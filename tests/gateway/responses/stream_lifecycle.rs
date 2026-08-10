@@ -139,9 +139,9 @@ async fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream() 
             ..AppConfig::default()
         },
     );
-
-    let response = build_router(state.clone())
-        .oneshot(
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        build_router(state.clone()).oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/responses")
@@ -163,9 +163,17 @@ async fn slow_first_output_hedge_uses_responses_text_delta_from_next_upstream() 
                     .to_string(),
                 ))
                 .unwrap(),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "hedge dispatch timed out: slow_hits={} fast_hits={}",
+            slow_hits.load(Ordering::SeqCst),
+            fast_hits.load(Ordering::SeqCst)
         )
-        .await
-        .unwrap();
+    })
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(

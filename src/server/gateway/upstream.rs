@@ -1648,6 +1648,9 @@ pub(super) async fn send_to_upstream(
             }
         }
     }
+    // A route hedge must select its route from the pre-dispatch history state.
+    // The primary's newly selected V1 state otherwise looks like cached legacy history.
+    let route_hedge_response_history_context = response_history_context.clone();
     if let Some(context) = response_history_context.take() {
         let configuration_fingerprint = AppState::route_configuration_fingerprint_with_snapshot(
             &active_capability_snapshot,
@@ -2291,73 +2294,74 @@ pub(super) async fn send_to_upstream(
                 route_attempts: route_attempts.clone(),
                 first_token_latency: FirstTokenLatency::default(),
             };
-            let (reader, mut body_read_diagnostic_context) =
-                if attempt_mode == UpstreamAttemptMode::SsePassThrough {
-                    let route_hedge_context =
-                        stream_completion_context
-                            .as_ref()
-                            .map(|completion| RouteHedgeContext {
-                                state: state.clone(),
-                                runtime_settings: runtime_settings.clone(),
-                                capability_snapshot: capability_snapshot.clone(),
-                                requested_features: requested_features.clone(),
-                                body: body.clone(),
-                                endpoint,
-                                started,
-                                request_id: request_id.to_string(),
-                                model: model.to_string(),
-                                normalized_model: normalized_model.to_string(),
-                                downstream_key_id: downstream_key_id.to_string(),
-                                downstream_name: downstream_name.to_string(),
-                                inference_strength: inference_strength.map(str::to_string),
-                                user_agent: user_agent.map(str::to_string),
-                                downstream_concurrency_guard: completion
-                                    .downstream_concurrency_guard
-                                    .clone(),
-                                route_attempts: route_attempts.clone(),
-                                response_history_context: response_history_context.clone(),
-                                stream_only_recovery_request_safe,
-                                account_wait_ms,
-                            });
-                    let hedge_response_header_timeout =
-                        if let Some(deadline) = first_semantic_deadline {
-                            deadline.clip(response_header_timeout_limit)?
-                        } else {
-                            response_header_timeout_limit
-                        };
-                    match prefetch_stream_with_hedges(
-                        state,
-                        runtime_settings.as_ref(),
-                        upstream,
-                        reader,
-                        hedge_api_keys,
-                        route_hedge_candidates,
-                        route_hedge_context,
-                        &url,
-                        &upstream_body,
-                        request_model,
-                        &route_health_key.runtime_model_slug,
-                        upstream_protocol,
-                        endpoint,
-                        hedge_response_header_timeout,
-                        stream_timeouts,
-                        request_id,
-                        started,
-                        &route_attempts,
-                        primary_body_read_diagnostic_context,
-                        commit_tracker.clone(),
-                        first_semantic_deadline,
-                    )
-                    .await?
-                    {
-                        PrefetchedStreamWinner::Reader(ready) => {
-                            (ready.reader, ready.body_read_diagnostic_context)
-                        }
-                        PrefetchedStreamWinner::Dispatch(result) => return Ok(*result),
-                    }
+            let (reader, mut body_read_diagnostic_context) = if attempt_mode
+                == UpstreamAttemptMode::SsePassThrough
+            {
+                let route_hedge_context =
+                    stream_completion_context
+                        .as_ref()
+                        .map(|completion| RouteHedgeContext {
+                            state: state.clone(),
+                            runtime_settings: runtime_settings.clone(),
+                            capability_snapshot: capability_snapshot.clone(),
+                            requested_features: requested_features.clone(),
+                            body: body.clone(),
+                            endpoint,
+                            started,
+                            request_id: request_id.to_string(),
+                            model: model.to_string(),
+                            normalized_model: normalized_model.to_string(),
+                            downstream_key_id: downstream_key_id.to_string(),
+                            downstream_name: downstream_name.to_string(),
+                            inference_strength: inference_strength.map(str::to_string),
+                            user_agent: user_agent.map(str::to_string),
+                            downstream_concurrency_guard: completion
+                                .downstream_concurrency_guard
+                                .clone(),
+                            route_attempts: route_attempts.clone(),
+                            response_history_context: route_hedge_response_history_context.clone(),
+                            stream_only_recovery_request_safe,
+                            account_wait_ms,
+                        });
+                let hedge_response_header_timeout = if let Some(deadline) = first_semantic_deadline
+                {
+                    deadline.clip(response_header_timeout_limit)?
                 } else {
-                    (reader, primary_body_read_diagnostic_context)
+                    response_header_timeout_limit
                 };
+                match prefetch_stream_with_hedges(
+                    state,
+                    runtime_settings.as_ref(),
+                    upstream,
+                    reader,
+                    hedge_api_keys,
+                    route_hedge_candidates,
+                    route_hedge_context,
+                    &url,
+                    &upstream_body,
+                    request_model,
+                    &route_health_key.runtime_model_slug,
+                    upstream_protocol,
+                    endpoint,
+                    hedge_response_header_timeout,
+                    stream_timeouts,
+                    request_id,
+                    started,
+                    &route_attempts,
+                    primary_body_read_diagnostic_context,
+                    commit_tracker.clone(),
+                    first_semantic_deadline,
+                )
+                .await?
+                {
+                    PrefetchedStreamWinner::Reader(ready) => {
+                        (ready.reader, ready.body_read_diagnostic_context)
+                    }
+                    PrefetchedStreamWinner::Dispatch(result) => return Ok(*result),
+                }
+            } else {
+                (reader, primary_body_read_diagnostic_context)
+            };
             if upstream_protocol != endpoint.native_protocol() {
                 body_read_diagnostic_context.first_token_latency = FirstTokenLatency::default();
             }
