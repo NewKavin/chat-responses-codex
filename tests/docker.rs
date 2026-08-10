@@ -5,7 +5,8 @@ use chat_responses_codex::state::{
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS,
     DEFAULT_UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS, DEFAULT_UPSTREAM_SAME_ROUTE_RETRY_ENABLED,
     DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS,
-    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS,
+    DEFAULT_UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS, IMMEDIATE_RUNTIME_SETTING_FIELDS,
+    RESTART_RUNTIME_SETTING_FIELDS,
 };
 use std::fs;
 
@@ -94,7 +95,7 @@ fn deployment_exposes_custom_upstream_ca_directory() {
 }
 
 #[test]
-fn deployment_exposes_calendar_and_long_stream_configuration() {
+fn compose_retains_legacy_calendar_and_long_stream_configuration() {
     let compose = fs::read_to_string("docker-compose.yml").expect("compose should be readable");
     let dotenv = fs::read_to_string(".env.example").expect("env example should be readable");
 
@@ -106,15 +107,15 @@ fn deployment_exposes_calendar_and_long_stream_configuration() {
     ] {
         assert!(compose.contains(expected), "compose should contain {expected}");
     }
-    for expected in [
-        "TZ=Asia/Shanghai",
-        "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS=5",
-        "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS=3300",
-        "CODEX_STREAM_IDLE_TIMEOUT_MS=3600000",
+    assert!(dotenv.contains("TZ=Asia/Shanghai"));
+    for legacy_key in [
+        "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS",
+        "UPSTREAM_FIRST_SEMANTIC_OUTPUT_TIMEOUT_SECONDS",
+        "CODEX_STREAM_IDLE_TIMEOUT_MS",
     ] {
         assert!(
-            dotenv.contains(expected),
-            ".env.example should contain {expected}"
+            !dotenv.contains(legacy_key),
+            ".env.example should not advertise {legacy_key}"
         );
     }
 }
@@ -366,24 +367,15 @@ fn deployment_exposes_upstream_hedge_configuration() {
             "compose should contain {expected}"
         );
     }
-    for expected in [
-        format!("UPSTREAM_HEDGE_ENABLED={}", defaults.upstream_hedge_enabled),
-        format!(
-            "UPSTREAM_HEDGE_DELAY_MS={}",
-            defaults.upstream_hedge_delay_ms
-        ),
-        format!(
-            "UPSTREAM_HEDGE_INTERVAL_MS={}",
-            defaults.upstream_hedge_interval_ms
-        ),
-        format!(
-            "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS={}",
-            defaults.upstream_hedge_max_extra_attempts
-        ),
+    for key in [
+        "UPSTREAM_HEDGE_ENABLED",
+        "UPSTREAM_HEDGE_DELAY_MS",
+        "UPSTREAM_HEDGE_INTERVAL_MS",
+        "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS",
     ] {
         assert!(
-            env.contains(&expected),
-            ".env.example should contain {expected}"
+            !env.contains(key),
+            ".env.example should not advertise managed setting {key}"
         );
     }
 }
@@ -424,23 +416,14 @@ fn deployment_exposes_route_exhaustion_retry_configuration() {
             "compose should contain {expected}"
         );
     }
-    for expected in [
-        format!(
-            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED={}",
-            defaults.upstream_route_exhaustion_retry_enabled
-        ),
-        format!(
-            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS={}",
-            defaults.upstream_route_exhaustion_retry_max_wait_ms
-        ),
-        format!(
-            "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS={}",
-            defaults.upstream_route_exhaustion_retry_max_rounds
-        ),
+    for key in [
+        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED",
+        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS",
+        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS",
     ] {
         assert!(
-            env.contains(&expected),
-            ".env.example should contain {expected}"
+            !env.contains(key),
+            ".env.example should not advertise managed setting {key}"
         );
     }
 }
@@ -486,23 +469,14 @@ fn deployment_exposes_transient_route_retry_configuration() {
             "compose should contain {expected}"
         );
     }
-    for expected in [
-        format!(
-            "UPSTREAM_SAME_ROUTE_RETRY_ENABLED={}",
-            defaults.upstream_same_route_retry_enabled
-        ),
-        format!(
-            "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS={}",
-            defaults.upstream_transient_route_cooldown_base_seconds
-        ),
-        format!(
-            "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS={}",
-            defaults.upstream_transient_route_cooldown_max_seconds
-        ),
+    for key in [
+        "UPSTREAM_SAME_ROUTE_RETRY_ENABLED",
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS",
+        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS",
     ] {
         assert!(
-            env.contains(&expected),
-            ".env.example should contain {expected}"
+            !env.contains(key),
+            ".env.example should not advertise managed setting {key}"
         );
     }
 }
@@ -552,7 +526,85 @@ fn dotenv_example_documents_required_secrets() {
 }
 
 #[test]
-fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
+fn runtime_settings_leave_dotenv_bootstrap_only_and_compose_legacy_fallbacks() {
+    let dotenv = fs::read_to_string(".env.example").expect(".env.example should be readable");
+    let compose =
+        fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
+
+    for key in [
+        "BIND_ADDR",
+        "STATE_PATH",
+        "DATABASE_URL",
+        "POSTGRES_PASSWORD",
+        "LOG_PATH",
+        "RUST_LOG",
+        "TZ",
+        "POSTGRES_POOL_MAX_SIZE",
+        "ADMIN_USERNAME",
+        "ADMIN_PASSWORD",
+        "JWT_SECRET",
+        "REDIS_ENABLED",
+        "REDIS_URL",
+        "REDIS_KEY_PREFIX",
+        "UPSTREAM_CA_CERT_PATH",
+        "CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO",
+    ] {
+        assert!(
+            dotenv
+                .lines()
+                .any(|line| line.starts_with(&format!("{key}="))),
+            ".env.example should retain bootstrap or secret key {key}"
+        );
+    }
+
+    for field in IMMEDIATE_RUNTIME_SETTING_FIELDS
+        .iter()
+        .chain(RESTART_RUNTIME_SETTING_FIELDS)
+    {
+        let key = field.to_ascii_uppercase();
+        assert!(
+            !dotenv.contains(&key),
+            ".env.example should not advertise managed runtime setting {key}"
+        );
+    }
+
+    for key in [
+        "UPSTREAM_CONCURRENCY_STATUS_REFRESH_SECONDS",
+        "USAGE_LOG_ROTATION_MAX_BYTES",
+        "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS",
+        "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS",
+        "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS",
+        "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED",
+        "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT",
+        "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT",
+        "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES",
+        "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_RESPONSES",
+        "CONTEXT_RETRY_MAX_ATTEMPTS",
+        "CONTEXT_RETRY_MIN_OUTPUT_TOKENS",
+        "CODEX_STREAM_IDLE_TIMEOUT_MS",
+    ] {
+        assert!(
+            !dotenv.contains(key),
+            ".env.example should not advertise compatibility-only key {key}"
+        );
+    }
+
+    let precedence_comment = compose
+        .find("Saved values from Admin > Settings override legacy behavior environment variables.")
+        .expect("Compose should explain the persisted runtime-settings precedence");
+    let legacy_settings = compose
+        .find("APP_NAME: ${APP_NAME:-chat-responses-codex}")
+        .expect("Compose should retain legacy first-run behavior fallbacks");
+    assert!(
+        precedence_comment < legacy_settings,
+        "the Compose precedence comment should introduce the legacy behavior mappings"
+    );
+    assert!(compose.contains("Existing variables are used only until the first settings save."));
+    assert!(compose.contains("Bootstrap connections and credentials remain environment-only."));
+}
+
+#[test]
+fn dotenv_example_includes_bootstrap_parameters() {
     let dotenv = fs::read_to_string(".env.example").expect(".env.example should be readable");
 
     for key in [
@@ -560,58 +612,48 @@ fn dotenv_example_includes_recommended_runtime_tuning_parameters() {
         "STATE_PATH=",
         "DATABASE_URL=",
         "LOG_PATH=",
+        "RUST_LOG=",
         "TZ=",
         "ADMIN_USERNAME=",
-        "APP_NAME=",
-        "USAGE_LOG_ROTATION_MAX_BYTES=",
-        "USAGE_LOG_ARCHIVE_MAX_FILES=",
-        "USAGE_LOG_RETENTION_DAYS=",
-        "MODEL_PROBE_REFRESH_INTERVAL_SECONDS=",
-        "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=",
-        "AUTOMATIC_CAPABILITY_PROBES_ENABLED=",
-        "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS=",
-        "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS=",
-        "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=",
-        "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=",
-        "CONTEXT_RETRY_MAX_ATTEMPTS_CHAT=",
-        "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT=",
-        "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES=",
-        "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_RESPONSES=",
-        "ROUTING_AFFINITY_ENABLED=",
-        "ROUTING_AFFINITY_TTL_SECONDS=",
-        "ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO=",
-        "UPSTREAM_CONNECT_TIMEOUT_SECONDS=",
-        "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS=",
-        "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=",
+        "ADMIN_PASSWORD=",
+        "JWT_SECRET=",
         "POSTGRES_POOL_MAX_SIZE=",
-        "ADMIN_LOGS_PAGE_SIZE_MAX=",
-        "UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=",
+        "REDIS_ENABLED=",
+        "REDIS_URL=",
+        "REDIS_KEY_PREFIX=",
+        "UPSTREAM_CA_CERT_PATH=",
+        "CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=",
     ] {
         assert!(dotenv.contains(key), ".env.example should document {key}");
     }
 }
 
 #[test]
-fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
+fn docker_compose_retains_all_legacy_runtime_settings_fallbacks() {
     let compose =
         fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
+
+    for field in IMMEDIATE_RUNTIME_SETTING_FIELDS
+        .iter()
+        .chain(RESTART_RUNTIME_SETTING_FIELDS)
+    {
+        let key = field.to_ascii_uppercase();
+        let snippet = format!("{key}: ${{{key}:-");
+        assert!(
+            compose.contains(&snippet),
+            "docker-compose.yml should retain legacy fallback {snippet}"
+        );
+    }
 
     for snippet in [
         "BIND_ADDR: ${BIND_ADDR:-0.0.0.0:3001}",
         "STATE_PATH: ${STATE_PATH:-/data/state.json}",
         "DATABASE_URL: ${DATABASE_URL:-postgres://chat_responses_codex@postgres/chat_responses_codex}",
         "LOG_PATH: ${LOG_PATH:-/logs/chat-responses-codex.log}",
+        "RUST_LOG: ${RUST_LOG:-info}",
         "TZ: ${TZ:-Asia/Shanghai}",
         "ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}",
-        "APP_NAME: ${APP_NAME:-chat-responses-codex}",
         "USAGE_LOG_ROTATION_MAX_BYTES: ${USAGE_LOG_ROTATION_MAX_BYTES:-1048576}",
-        "USAGE_LOG_ARCHIVE_MAX_FILES: ${USAGE_LOG_ARCHIVE_MAX_FILES:-10}",
-        "USAGE_LOG_RETENTION_DAYS: ${USAGE_LOG_RETENTION_DAYS:-14}",
-        "MODEL_PROBE_REFRESH_INTERVAL_SECONDS: ${MODEL_PROBE_REFRESH_INTERVAL_SECONDS:-15}",
-        "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED: ${UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED:-false}",
-        "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}",
-        "AUTOMATIC_CAPABILITY_PROBES_ENABLED: ${AUTOMATIC_CAPABILITY_PROBES_ENABLED:-false}",
-        "UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS: ${UPSTREAM_RATE_LIMIT_DEFAULT_RETRY_SECONDS:-30}",
         "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS: ${UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS:-300}",
         "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS: ${UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS:-3}",
         "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS: ${UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS:-10}",
@@ -619,16 +661,7 @@ fn docker_compose_references_the_same_runtime_defaults_as_the_env_template() {
         "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT: ${CONTEXT_RETRY_MIN_OUTPUT_TOKENS_CHAT:-128}",
         "CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES: ${CONTEXT_RETRY_MAX_ATTEMPTS_RESPONSES:-3}",
         "CONTEXT_RETRY_MIN_OUTPUT_TOKENS_RESPONSES: ${CONTEXT_RETRY_MIN_OUTPUT_TOKENS_RESPONSES:-128}",
-        "ROUTING_AFFINITY_ENABLED: ${ROUTING_AFFINITY_ENABLED:-true}",
-        "ROUTING_AFFINITY_TTL_SECONDS: ${ROUTING_AFFINITY_TTL_SECONDS:-180}",
-        "ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO: ${ROUTING_AFFINITY_ESCAPE_PRESSURE_RATIO:-1.5}",
-        "UPSTREAM_USER_AGENT: ${UPSTREAM_USER_AGENT:-codex/0.144.6}",
-        "UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${UPSTREAM_CONNECT_TIMEOUT_SECONDS:-30}",
-        "UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS: ${UPSTREAM_RESPONSE_HEADER_TIMEOUT_SECONDS:-600}",
-        "UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: ${UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS:-1800}",
         "POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-16}",
-        "ADMIN_LOGS_PAGE_SIZE_MAX: ${ADMIN_LOGS_PAGE_SIZE_MAX:-200}",
-        "UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST: ${UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST:-32}",
     ] {
         assert!(
             compose.contains(snippet),
@@ -643,11 +676,19 @@ fn deployment_surfaces_document_model_key_sync_and_optional_redis_coordination()
     let compose =
         fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
     let deployment = fs::read_to_string("DEPLOYMENT.md").expect("DEPLOYMENT.md should be readable");
+    let deployment_words = deployment.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    assert!(dotenv.contains("UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0"));
-    assert!(dotenv.contains("UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED=false"));
-    assert!(dotenv.contains("UPSTREAM_USER_AGENT=codex/0.144.6"));
-    assert!(dotenv.contains("AUTOMATIC_CAPABILITY_PROBES_ENABLED=false"));
+    for key in [
+        "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
+        "UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED",
+        "UPSTREAM_USER_AGENT",
+        "AUTOMATIC_CAPABILITY_PROBES_ENABLED",
+    ] {
+        assert!(
+            !dotenv.contains(key),
+            ".env.example should not advertise managed setting {key}"
+        );
+    }
     assert!(compose.contains(
         "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS: ${UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS:-0}"
     ));
@@ -656,22 +697,30 @@ fn deployment_surfaces_document_model_key_sync_and_optional_redis_coordination()
     ));
     assert!(compose.contains("UPSTREAM_USER_AGENT: ${UPSTREAM_USER_AGENT:-codex/0.144.6}"));
 
-    for (name, surface) in [
-        (".env.example", dotenv.as_str()),
-        ("docker-compose.yml", compose.as_str()),
-        ("DEPLOYMENT.md", deployment.as_str()),
+    for marker in [
+        "Automatic upstream model discovery is disabled by default.",
+        "Manual model discovery remains available when automatic discovery is disabled.",
     ] {
-        for marker in [
-            "Automatic upstream model discovery is disabled by default.",
-            "Manual model discovery remains available when automatic discovery is disabled.",
-            "Set to 0 to disable background model-key synchronization.",
-            "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.",
-            "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.",
-            "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.",
-            "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.",
-        ] {
-            assert!(surface.contains(marker), "{name} should state `{marker}`");
-        }
+        assert!(compose.contains(marker), "Compose should state `{marker}`");
+    }
+    for marker in [
+        "Automatic upstream model discovery is disabled by default.",
+        "Manual model discovery remains available when automatic discovery is disabled",
+        "Set the background model-key synchronization interval to 0",
+    ] {
+        assert!(
+            deployment_words.contains(marker),
+            "DEPLOYMENT.md should state `{marker}`"
+        );
+    }
+
+    for marker in [
+        "UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.",
+        "UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.",
+        "UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.",
+        "UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.",
+    ] {
+        assert!(compose.contains(marker), "Compose should state `{marker}`");
     }
 
     for marker in [

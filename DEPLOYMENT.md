@@ -17,47 +17,51 @@ modes use PostgreSQL 15 as the durable source of truth.
 
 ## Required Environment
 
-The checked-in [.env.example](.env.example) now contains the full recommended runtime template. These are the key settings to review for a production-like run:
+The checked-in [.env.example](.env.example) contains only process bootstrap,
+credentials, and infrastructure settings. Review these values before a
+production-like run:
 
 - `BIND_ADDR=0.0.0.0:3001`
+- `STATE_PATH=/data/state.json` for file-backed compatibility mode only
 - `DATABASE_URL=postgres://chat_responses_codex@postgres/chat_responses_codex`
 - `POSTGRES_PASSWORD=<strong-secret>`
+- `POSTGRES_POOL_MAX_SIZE=16`
 - `LOG_PATH=/logs/chat-responses-codex.log`
+- `RUST_LOG=info`
+- `TZ=Asia/Shanghai`
 - `ADMIN_USERNAME=admin`
 - `ADMIN_PASSWORD=<strong-secret>`
 - `JWT_SECRET=<strong-secret-at-least-32-characters>`
-- `APP_NAME=chat-responses-codex`
 - `REDIS_ENABLED=false`
 - `REDIS_URL=redis://redis:6379`
 - `REDIS_KEY_PREFIX=chat2responses`
-- `USAGE_LOG_ROTATION_MAX_BYTES=1048576`
-- `USAGE_LOG_ARCHIVE_MAX_FILES=10`
-- `USAGE_LOG_RETENTION_DAYS=14`
-- `MODEL_PROBE_REFRESH_INTERVAL_SECONDS=15`
-- `UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED=false`
-- `UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS=0`
-- `AUTOMATIC_CAPABILITY_PROBES_ENABLED=false`
-- `CAPABILITY_PROBE_QUEUE_CAPACITY=256`
-- `POSTGRES_POOL_MAX_SIZE=16`
-- `ADMIN_LOGS_PAGE_SIZE_MAX=200`
-- `UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32`
-- `UPSTREAM_USER_AGENT=codex/0.144.6`
 - `UPSTREAM_CA_CERT_PATH=`
-- `UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3`
-- `UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10`
-- `UPSTREAM_SAME_ROUTE_RETRY_ENABLED=true`
-- `UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS=10`
-- `UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS=300`
-- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true`
-- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000`
-- `UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3`
-- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=30000`
-- `UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32`
-- `UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000`
-- `UPSTREAM_HEDGE_ENABLED=true`
-- `UPSTREAM_HEDGE_DELAY_MS=12000`
-- `UPSTREAM_HEDGE_INTERVAL_MS=12000`
-- `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=1`
+- `CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=true`
+
+Saved values from Admin > Settings override legacy behavior environment
+variables. Existing variables are used only until the first settings save.
+Bootstrap connections and credentials remain environment-only.
+
+The first save persists the complete settings document. Later starts use that
+document instead of legacy behavior variables, and the gateway never rewrites
+the operator's `.env`. The checked-in Compose file retains the old behavior
+pass-through mappings for one compatibility release so existing installations
+can migrate without changing every variable before the upgrade.
+
+Use `/admin/settings` for application identity, discovery, capability probes,
+routing, concurrency, HTTP, and log retention. Each field is marked either
+immediate or restart-required. Immediate changes apply only to operations that
+start after the save; restart-required changes remain pending until the gateway
+process restarts. Database and Redis connections, credentials, log bootstrap,
+and internal CA trust remain environment-only and never appear in this API.
+
+Recommended upgrade sequence:
+
+1. Preserve the existing operator `.env` and upgrade the gateway.
+2. Open `Admin > Settings` and review the effective values inherited at startup.
+3. Save once to establish the persisted document.
+4. Restart if the page reports pending restart-required fields.
+5. Remove legacy behavior variables from the operator `.env` when convenient.
 
 For HTTPS upstreams signed by an internal CA, place the CA certificates in the
 repository-local `certs/` directory and set `UPSTREAM_CA_CERT_PATH=/certs`.
@@ -68,125 +72,56 @@ are additive. The Compose mount is read-only, environment certificate files are
 ignored by Git, and the gateway must be restarted after certificate changes.
 Do not place server private keys in `certs/` and do not disable TLS verification.
 
-`CAPABILITY_PROBE_QUEUE_CAPACITY` limits pending atomic probe submission batches,
-not the number of routes inside a batch. Accepted batches are expanded immediately
-into the route-key-deduplicating probe scheduler.
-- `UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10`
-- `UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800`
-- `UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400`
+## Runtime Settings Operations
 
-Keep the keepalive interval below the idle timeout so the gateway can emit
-heartbeats before the idle watchdog fires.
+The settings page groups all managed behavior under General, Discovery,
+Routing, Concurrency, HTTP, and Logs. It validates relationships before saving;
+for example, stream keepalive must remain below the idle timeout, the transient
+cooldown base cannot exceed its maximum, and probe delays are normalized.
+
+The capability probe queue capacity limits pending atomic submission batches,
+not the number of routes inside a batch. Accepted batches expand immediately
+into the route-key-deduplicating scheduler. Automatic capability probes are
+disabled by default because they send real inference requests and consume
+model tokens; manual probes and “真实验证并应用” still consume tokens when an
+administrator explicitly runs them.
+
+Automatic upstream model discovery is disabled by default. Manual model
+discovery remains available when automatic discovery is disabled and persists
+only the models selected when the upstream is saved. Set the background
+model-key synchronization interval to 0 to disable background model-key
+synchronization.
 
 Real upstream 429 responses cool the exact route and switch immediately to
-another eligible candidate. After temporary all-route exhaustion, the gateway
-waits only when the earliest exact-route recovery plus jitter fits the remaining
-logical-request budget; it never probes before the provider recovery time. The
-route-health state preserves the full `Retry-After`; it is not capped before a
-terminal response is returned.
-Concurrency-specific 429 responses without `Retry-After` use
-`UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS`; the last delay repeats after the
-sequence is exhausted. An explicit provider `Retry-After` always takes
-precedence, and exact-route half-open admission allows only one probe at a time.
-UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS is deprecated for real upstream 429 responses.
-UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS is deprecated for route-health Retry-After.
-UPSTREAM_RATE_LIMIT_RETRY_WINDOW_SECONDS is parsed for backward compatibility only.
-UPSTREAM_RATE_LIMIT_FORCE_RETRY_ENABLED does not force in-request waiting.
-These rate-limit fields remain parsed for backward-compatible configuration only.
+another eligible candidate. An explicit provider `Retry-After` always takes
+precedence. Concurrency-specific 429 responses without that header use the
+configured probe-delay sequence, repeat its final delay, and allow only one
+half-open probe per exact route at a time.
 
-Generic Transport/5xx failures retry the same exact route once only when
-`UPSTREAM_SAME_ROUTE_RETRY_ENABLED=true`. The setting does not disable the
-initial routing round: Key and upstream fallback remains available. Their
-exact-route cooldown starts at
-`UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS`, grows exponentially with
-deterministic jitter, and is capped by
-`UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS`. Both values must be positive
-integer seconds and base must not exceed max; invalid values fail startup.
+Generic Transport/5xx failures may retry the same exact route once. Turning
+that option off does not disable the initial routing round: Key and upstream
+fallback remains available. The exact-route cooldown grows exponentially with
+deterministic jitter from the configured base to the configured maximum.
 
-`UPSTREAM_HEDGE_DELAY_MS` controls when a slow-first-output request launches its
-first extra attempt. `UPSTREAM_HEDGE_INTERVAL_MS` spaces later extra attempts,
-and `UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS` bounds their number. Set the maximum to
-`0` to disable extra attempts without rebuilding the service.
+The slow-first-output hedge delay controls the first extra attempt, the hedge
+interval spaces later attempts, and the maximum extra-attempt count bounds the
+fan-out. A high-utilization internal profile can use a 2-second delay and
+interval with two extra attempts. This permits at most three admitted attempts
+for one logical stream, and every attempt still requires normal upstream
+concurrency and quota admission.
 
-`UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=0` means zero disables waiting,
+For repeated Transport/5xx failures amplified by client retries, disable the
+fixed same-route retry and use a 3-second base with a 60-second cooldown cap.
+Codex owns SSE interruption retries under this profile. Keep
+`stream_max_retries = 2` in the generated Codex configuration; the gateway's
+initial Key/upstream fallback remains independent of that client retry budget.
+
+Setting the route-exhaustion wait budget to `0` means zero disables waiting,
 and total rounds include the initial round. The gateway preserves the full
 `Retry-After`; configured priority cannot make an unhealthy route eligible;
-output or tool calls are never replayed after delivery.
-
-Keep the checked-in hedge defaults at `true/12000/12000/1`. For the internal
-high-utilization GLM deployment, use this explicit profile:
-
-```dotenv
-UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true
-UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000
-UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3
-UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=30000
-UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32
-UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000
-UPSTREAM_HEDGE_ENABLED=true
-UPSTREAM_HEDGE_DELAY_MS=2000
-UPSTREAM_HEDGE_INTERVAL_MS=2000
-UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=2
-```
-
-This permits at most three admitted attempts for one logical stream. Every
-extra attempt still requires normal upstream concurrency and quota admission.
-
-For deployments where repeated Transport/5xx failures and Codex retries are
-amplifying long streams, use this retry-ownership profile:
-
-```dotenv
-UPSTREAM_SAME_ROUTE_RETRY_ENABLED=false
-UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS=3
-UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS=60
-```
-
-Codex owns SSE interruption retries under this profile. The gateway still
-tries other eligible Keys and upstreams in the initial routing round; only the
-fixed same-route retry is disabled. Keep the concurrency probe sequence
-separate because `ConcurrencySaturated` does not use the Transport/5xx cooldown.
-Use `stream_max_retries = 2` in the generated Codex configuration with this
-profile. Codex counts SSE interruption retries separately from the gateway's
-initial Key/upstream fallback, so a lower bounded value avoids multiplying
-long-lived interrupted streams while preserving route failover.
-
-Rollback uses:
-
-```dotenv
-UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=false
-UPSTREAM_HEDGE_DELAY_MS=12000
-UPSTREAM_HEDGE_INTERVAL_MS=12000
-UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=1
-```
-
-Optional for file-backed compatibility mode:
-
-- `STATE_PATH=/data/state.json`
-
-Optional but useful:
-
-- `RUST_LOG=info`
-- `TZ=Asia/Shanghai`
-`POSTGRES_POOL_MAX_SIZE` sets the maximum number of pooled PostgreSQL connections.
-`ADMIN_LOGS_PAGE_SIZE_MAX` is the intended ceiling for admin log pagination responses.
-`UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST` controls how many idle upstream HTTP connections
-the gateway keeps per host before opening new sockets.
-`MODEL_PROBE_REFRESH_INTERVAL_SECONDS` controls how often the browser asks for a
-fresh model-probe snapshot.
-`UPSTREAM_MODEL_AUTO_DISCOVERY_ENABLED` defaults to `false`. When `false`, batch
-creation, periodic synchronization, and targeted discovery cannot add or remove
-persisted model mappings. The administrator's "获取模型" action remains available and only loads candidates; selected models are persisted when the upstream is saved.
-Automatic upstream model discovery is disabled by default.
-Manual model discovery remains available when automatic discovery is disabled.
-
-`UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS` controls background model-key
-synchronization and defaults to `0`. Set to 0 to disable background model-key synchronization.
-Set a positive interval only when periodic `/v1/models` discovery is required.
-
-`AUTOMATIC_CAPABILITY_PROBES_ENABLED` defaults to `false`. Leave it disabled to
-prevent background Chat/Responses probe requests from consuming model tokens.
-Manual capability probes and the admin “真实验证并应用” action are explicit real
-inference requests and still consume model tokens when invoked.
+output or tool calls are never replayed after delivery. To roll back the
+multi-round behavior, disable route-exhaustion retry in `Admin > Settings` and
+save; restore the conservative hedge timings there if needed.
 
 ## Multi-Key Route Resilience And Upgrade
 
@@ -254,30 +189,11 @@ docker run -d \
   -e BIND_ADDR=0.0.0.0:3001 \
   -e STATE_PATH=/data/state.json \
   -e LOG_PATH=/logs/chat-responses-codex.log \
+  -e RUST_LOG=info \
+  -e TZ=Asia/Shanghai \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD='<admin_password>' \
-  -e APP_NAME=chat-responses-codex \
-  -e USAGE_LOG_ROTATION_MAX_BYTES=1048576 \
-  -e USAGE_LOG_ARCHIVE_MAX_FILES=10 \
-  -e USAGE_LOG_RETENTION_DAYS=14 \
-  -e POSTGRES_POOL_MAX_SIZE=16 \
-  -e ADMIN_LOGS_PAGE_SIZE_MAX=200 \
-  -e UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST=32 \
-  -e UPSTREAM_RATE_LIMIT_RETRY_ATTEMPTS=3 \
-  -e UPSTREAM_RATE_LIMIT_MAX_RETRY_AFTER_SECONDS=10 \
-  -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=true \
-  -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS=10000 \
-  -e UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS=3 \
-  -e UPSTREAM_CONCURRENCY_RECOVERY_MAX_WAIT_MS=30000 \
-  -e UPSTREAM_CONCURRENCY_RECOVERY_MAX_ROUNDS=32 \
-  -e UPSTREAM_CONCURRENCY_PROBE_DELAYS_MS=100,200,400,800,1000,2000 \
-  -e UPSTREAM_HEDGE_ENABLED=true \
-  -e UPSTREAM_HEDGE_DELAY_MS=12000 \
-  -e UPSTREAM_HEDGE_INTERVAL_MS=12000 \
-  -e UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=1 \
-  -e UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS=10 \
-  -e UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS=1800 \
-  -e UPSTREAM_STREAM_MAX_DURATION_SECONDS=86400 \
+  -e JWT_SECRET='<jwt_secret_at_least_32_characters>' \
   -v ./data:/data \
   -v ./logs:/logs \
   chat-responses-codex:latest
@@ -288,7 +204,9 @@ For PostgreSQL-backed deployments, use Compose or another orchestrator and provi
 
 ## Docker Compose
 
-Use this if you want a repeatable local or VM deployment. The checked-in `docker-compose.yml` is the source of truth for the full environment wiring and defaults.
+Use this if you want a repeatable local or VM deployment. The checked-in
+`docker-compose.yml` is the source of truth for bootstrap wiring and retains a
+one-release legacy behavior fallback until the first settings save.
 
 The default, single-instance mode does not start Redis:
 
@@ -360,21 +278,14 @@ services:
       DATABASE_URL: postgres://chat_responses_codex@postgres/chat_responses_codex
       PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your shell or .env file}
       LOG_PATH: /logs/chat-responses-codex.log
+      RUST_LOG: info
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in your shell or .env file}
-      APP_NAME: chat-responses-codex
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in your shell or .env file}
       REDIS_ENABLED: ${REDIS_ENABLED:-false}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-chat2responses}
-      USAGE_LOG_ROTATION_MAX_BYTES: "1048576"
-      USAGE_LOG_ARCHIVE_MAX_FILES: "10"
-      USAGE_LOG_RETENTION_DAYS: "14"
       POSTGRES_POOL_MAX_SIZE: "16"
-      ADMIN_LOGS_PAGE_SIZE_MAX: "200"
-      UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST: "32"
-      UPSTREAM_STREAM_IDLE_TIMEOUT_SECONDS: "1800"
-      UPSTREAM_STREAM_KEEPALIVE_INTERVAL_SECONDS: "10"
-      UPSTREAM_STREAM_MAX_DURATION_SECONDS: "86400"
     volumes:
       - ./logs:/logs
 
@@ -383,7 +294,9 @@ volumes:
   redis-data:
 ```
 
-If you use a `.env` file, copy [`.env.example`](.env.example) to `.env`, keep the recommended defaults, and rotate the secrets before first launch.
+If you use a `.env` file, copy [`.env.example`](.env.example) to `.env`, review
+the bootstrap values, and rotate the secrets before first launch. Configure
+behavior under `Admin > Settings` after login.
 
 For Codex client setup, copy [templates/codex/config.toml.example](templates/codex/config.toml.example) and [templates/codex/model-catalog.json](templates/codex/model-catalog.json) into `~/.codex/`, then create `~/.codex/agents/default.toml` from [templates/codex/agents/default.toml.example](templates/codex/agents/default.toml.example). The config template targets Codex CLI `0.146.0`, uses `model_catalog_json = "model-catalog.json"`, and includes `[agents].max_threads` plus `[agents].max_depth`; the catalog and config files must live side by side. The default agent profile must use exactly the same `model` and `model_reasoning_effort` from the same live catalog entry as the main config. Do not leave an older model or reasoning level in this file: Codex loads it independently when starting a subagent and can reject delegation before the gateway receives a request. Because `requires_openai_auth = true`, also run `codex login --with-api-key` and enter the downstream key interactively; the key must not be written into `config.toml`. Run `codex --strict-config doctor --summary` after copying them to validate the loaded configuration.
 
@@ -482,9 +395,8 @@ The matrix fails on semantic check failures and unpermitted downgrades. The inst
 
 ## Operational Notes
 
-- In file-backed compatibility mode, usage logs rotate into archive files next to `STATE_PATH` once the current state file grows beyond `USAGE_LOG_ROTATION_MAX_BYTES`.
-- Archive files are capped at `USAGE_LOG_ARCHIVE_MAX_FILES`.
-- Logs older than `USAGE_LOG_RETENTION_DAYS` are automatically pruned by a background task (hourly sweep; set to 0 to disable).
+- In file-backed compatibility mode, usage logs rotate into archive files next to `STATE_PATH`; archive count and retention are managed under `Admin > Settings`.
+- Logs older than the saved retention period are automatically pruned by a background task; setting retention to 0 disables pruning.
 - In PostgreSQL mode, usage logs stay in the database and do not rotate into local archive files.
 - Runtime logs are appended to `LOG_PATH` and can be mounted to the host with `./logs:/logs`.
 - The Docker image exposes a `HEALTHCHECK` that runs the binary's built-in healthcheck mode.

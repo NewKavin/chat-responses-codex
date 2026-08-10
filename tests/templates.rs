@@ -1,5 +1,7 @@
 use chat_responses_codex::capabilities::{CapabilityConfiguration, ReasoningMode};
-use chat_responses_codex::state::AppConfig;
+use chat_responses_codex::state::{
+    AppConfig, IMMEDIATE_RUNTIME_SETTING_FIELDS, RESTART_RUNTIME_SETTING_FIELDS,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
@@ -166,7 +168,7 @@ fn app_config_defaults_upstream_route_retry_policy() {
 }
 
 #[test]
-fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_settings() {
+fn compose_retains_legacy_stream_and_probe_fallbacks() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
@@ -183,27 +185,14 @@ fn deployment_templates_expose_configurable_stream_keepalive_and_hard_timeout_se
         "UPSTREAM_HEDGE_INTERVAL_MS",
         "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS",
     ] {
-        assert!(
-            env_example.contains(marker),
-            ".env.example should expose {marker}"
-        );
+        assert!(!env_example.contains(marker), ".env should omit {marker}");
         assert!(
             compose.contains(marker),
-            "docker-compose.yml should expose {marker}"
+            "docker-compose.yml should retain legacy fallback {marker}"
         );
         assert!(
-            deployment.contains(marker),
-            "DEPLOYMENT.md should document {marker}"
-        );
-    }
-
-    for marker in [
-        "MODEL_PROBE_REFRESH_INTERVAL_SECONDS",
-        "UPSTREAM_MODEL_KEY_SYNC_INTERVAL_SECONDS",
-    ] {
-        assert!(
-            deployment.contains(marker),
-            "DEPLOYMENT.md should document {marker}"
+            !deployment.contains(marker),
+            "DEPLOYMENT.md should point operators to Admin Settings instead of {marker}"
         );
     }
 }
@@ -237,7 +226,39 @@ fn deployment_templates_expose_optional_redis_runtime_coordination() {
 }
 
 #[test]
-fn route_exhaustion_retry_is_exposed_on_every_operator_surface() {
+fn runtime_settings_precedence_is_documented() {
+    const CONTRACT: &str = "Saved values from Admin > Settings override legacy behavior environment variables. Existing variables are used only until the first settings save. Bootstrap connections and credentials remain environment-only.";
+
+    let documents = [
+        ("README.md", fs::read_to_string("README.md").unwrap()),
+        (
+            "DEPLOYMENT.md",
+            fs::read_to_string("DEPLOYMENT.md").unwrap(),
+        ),
+    ];
+
+    for (path, contents) in &documents {
+        let normalized = contents.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains(CONTRACT),
+            "{path} should state the runtime-settings precedence contract"
+        );
+
+        for field in IMMEDIATE_RUNTIME_SETTING_FIELDS
+            .iter()
+            .chain(RESTART_RUNTIME_SETTING_FIELDS)
+        {
+            let key = field.to_ascii_uppercase();
+            assert!(
+                !contents.contains(&key),
+                "{path} should direct managed setting {key} to Admin Settings"
+            );
+        }
+    }
+}
+
+#[test]
+fn route_exhaustion_retry_moves_to_admin_settings_with_compose_fallback() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();
     let readme = fs::read_to_string("README.md").unwrap();
@@ -248,48 +269,50 @@ fn route_exhaustion_retry_is_exposed_on_every_operator_surface() {
         "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_WAIT_MS",
         "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS",
     ] {
-        for (path, contents) in [
-            (".env.example", env_example.as_str()),
-            ("docker-compose.yml", compose.as_str()),
-            ("README.md", readme.as_str()),
-            ("DEPLOYMENT.md", deployment.as_str()),
-        ] {
-            assert!(contents.contains(marker), "{path} should expose {marker}");
-        }
+        assert!(!env_example.contains(marker), ".env should omit {marker}");
+        assert!(compose.contains(marker), "Compose should retain {marker}");
+        assert!(!readme.contains(marker), "README should omit {marker}");
+        assert!(
+            !deployment.contains(marker),
+            "DEPLOYMENT should omit {marker}"
+        );
     }
+
+    assert!(readme.contains("Admin > Settings"));
+    assert!(deployment.contains("Admin > Settings"));
 }
 
 #[test]
-fn transient_route_retry_controls_are_exposed_on_every_operator_surface() {
+fn transient_route_retry_moves_to_admin_settings_with_compose_fallback() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();
     let readme = fs::read_to_string("README.md").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
+    let deployment_words = deployment.split_whitespace().collect::<Vec<_>>().join(" ");
 
     for marker in [
         "UPSTREAM_SAME_ROUTE_RETRY_ENABLED",
         "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS",
         "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS",
     ] {
-        for (path, contents) in [
-            (".env.example", env_example.as_str()),
-            ("docker-compose.yml", compose.as_str()),
-            ("README.md", readme.as_str()),
-            ("DEPLOYMENT.md", deployment.as_str()),
-        ] {
-            assert!(contents.contains(marker), "{path} should expose {marker}");
-        }
+        assert!(!env_example.contains(marker), ".env should omit {marker}");
+        assert!(compose.contains(marker), "Compose should retain {marker}");
+        assert!(!readme.contains(marker), "README should omit {marker}");
+        assert!(
+            !deployment.contains(marker),
+            "DEPLOYMENT should omit {marker}"
+        );
     }
 
     for contract in [
-        "UPSTREAM_SAME_ROUTE_RETRY_ENABLED=false",
-        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_BASE_SECONDS=3",
-        "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS=60",
+        "disable the fixed same-route retry",
+        "3-second base",
+        "60-second cooldown cap",
         "Codex owns SSE interruption retries",
         "Key and upstream fallback remains available",
     ] {
         assert!(
-            deployment.contains(contract),
+            deployment_words.contains(contract),
             "DEPLOYMENT.md should document `{contract}`"
         );
     }
@@ -304,6 +327,7 @@ fn route_exhaustion_docs_preserve_retry_and_replay_safety_contract() {
         ("README.md", readme.as_str()),
         ("DEPLOYMENT.md", deployment.as_str()),
     ] {
+        let normalized = contents.split_whitespace().collect::<Vec<_>>().join(" ");
         for contract in [
             "zero disables waiting",
             "total rounds include the initial round",
@@ -312,23 +336,22 @@ fn route_exhaustion_docs_preserve_retry_and_replay_safety_contract() {
             "output or tool calls are never replayed after delivery",
         ] {
             assert!(
-                contents.contains(contract),
+                normalized.contains(contract),
                 "{path} should document `{contract}`"
             );
         }
     }
 
+    let deployment_words = deployment.split_whitespace().collect::<Vec<_>>().join(" ");
     for profile in [
-        "UPSTREAM_HEDGE_ENABLED=true",
-        "UPSTREAM_HEDGE_DELAY_MS=2000",
-        "UPSTREAM_HEDGE_INTERVAL_MS=2000",
-        "UPSTREAM_HEDGE_MAX_EXTRA_ATTEMPTS=2",
+        "2-second delay",
+        "two extra attempts",
         "at most three admitted attempts",
         "concurrency and quota admission",
-        "UPSTREAM_ROUTE_EXHAUSTION_RETRY_ENABLED=false",
+        "disable route-exhaustion retry",
     ] {
         assert!(
-            deployment.contains(profile),
+            deployment_words.contains(profile),
             "DEPLOYMENT.md should document `{profile}`"
         );
     }
