@@ -6209,7 +6209,7 @@ async fn translated_stream_drop_after_done_is_logged_as_success() {
 }
 
 #[tokio::test]
-async fn stream_idle_timeout_interrupts_hung_stream() {
+async fn runtime_stream_idle_timeout_interrupts_later_hung_stream() {
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
 
@@ -6235,7 +6235,8 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
 
     let downstream_key = generate_downstream_key("gw");
     let mut config = AppConfig::default();
-    config.upstream_stream_idle_timeout_seconds = 1;
+    config.upstream_stream_keepalive_interval_seconds = 1;
+    config.upstream_stream_idle_timeout_seconds = 60;
     config.upstream_response_header_timeout_seconds = 1;
     config.upstream_connect_timeout_seconds = 1;
     let state = AppState::new(
@@ -6295,6 +6296,17 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
         config,
     );
 
+    let mut runtime_settings = state.runtime_settings().as_ref().clone();
+    runtime_settings.upstream_stream_idle_timeout_seconds = 2;
+    runtime_settings.upstream_same_route_retry_enabled = false;
+    runtime_settings.upstream_route_exhaustion_retry_enabled = false;
+    state
+        .update_runtime_settings(0, runtime_settings)
+        .await
+        .unwrap();
+    assert_eq!(state.config.upstream_stream_idle_timeout_seconds, 60);
+    let persisted_settings = std::fs::read(&state_path).unwrap();
+
     let app = build_router(state.clone());
 
     let response = app
@@ -6324,7 +6336,7 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = tokio::time::timeout(
-        Duration::from_secs(3),
+        Duration::from_secs(8),
         to_bytes(response.into_body(), usize::MAX),
     )
     .await
@@ -6361,9 +6373,10 @@ async fn stream_idle_timeout_interrupts_hung_stream() {
         "unexpected idle timeout message: {:?}",
         log.error_message
     );
-    assert!(
-        !state_path.exists(),
-        "stream failure must not persist legacy upstream health"
+    assert_eq!(
+        std::fs::read(&state_path).unwrap(),
+        persisted_settings,
+        "stream failure must not modify persisted settings or legacy upstream health"
     );
 }
 

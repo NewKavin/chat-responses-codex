@@ -615,6 +615,7 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         return Ok(());
     };
     let api_key = api_key.clone();
+    let runtime_settings = state.runtime_settings();
     let outcome = ProbeExecutor {
         client: state.client_for_url(&upstream.base_url),
         base_url: upstream.base_url.clone(),
@@ -624,7 +625,9 @@ async fn run_probe_job(state: &AppState, job: &ProbeJob) -> io::Result<()> {
         upstream: Some(upstream.clone()),
         runtime_model_slug: job.key.runtime_model_slug.clone(),
         request_timeout: Duration::from_secs(
-            state.config.capability_probe_request_timeout_seconds.max(1),
+            runtime_settings
+                .capability_probe_request_timeout_seconds
+                .max(1),
         ),
     }
     .run_plan(&job.key, plan)

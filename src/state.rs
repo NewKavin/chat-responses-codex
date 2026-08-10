@@ -1666,7 +1666,8 @@ impl AppState {
     }
 
     pub fn queue_capability_probe(&self, job: ProbeJob) -> bool {
-        if job.reason.is_automatic() && !self.config.automatic_capability_probes_enabled {
+        let runtime_settings = self.runtime_settings();
+        if job.reason.is_automatic() && !runtime_settings.automatic_capability_probes_enabled {
             return false;
         }
         if !self
@@ -3988,10 +3989,10 @@ impl AppState {
         downstream_id: &str,
         normalized_model: &str,
         upstream_id: &str,
+        ttl_seconds: u64,
     ) {
         let key = Self::routing_affinity_key(downstream_id, normalized_model);
-        let ttl_seconds = self.config.routing_affinity_ttl_seconds.max(1);
-        let expires_at = unix_seconds().saturating_add(ttl_seconds);
+        let expires_at = unix_seconds().saturating_add(ttl_seconds.max(1));
         let mut affinity = self
             .routing_affinity
             .lock()
@@ -4264,6 +4265,7 @@ impl AppState {
     }
 
     pub async fn reconcile_dialect_profiles(&self, now: u64) -> io::Result<Vec<ProbeJob>> {
+        let runtime_settings = self.runtime_settings();
         let routing = self.routing_snapshot().await;
         let snapshot = self.capability_snapshot();
         let stale_profile_keys = snapshot
@@ -4277,7 +4279,7 @@ impl AppState {
         }
 
         let snapshot = self.capability_snapshot();
-        if !self.config.automatic_capability_probes_enabled
+        if !runtime_settings.automatic_capability_probes_enabled
             || !snapshot.configuration.source().probe.enabled
         {
             return Ok(Vec::new());
@@ -4590,8 +4592,9 @@ impl AppState {
         jobs: BTreeMap<DialectProfileKey, BTreeSet<String>>,
         reason: ProbeReason,
     ) -> io::Result<()> {
+        let runtime_settings = self.runtime_settings();
         if jobs.is_empty()
-            || (reason.is_automatic() && !self.config.automatic_capability_probes_enabled)
+            || (reason.is_automatic() && !runtime_settings.automatic_capability_probes_enabled)
         {
             return Ok(());
         }
@@ -4904,6 +4907,7 @@ impl AppState {
             latency_ms: u64,
         }
 
+        let runtime_settings = self.runtime_settings();
         let selected = upstream_ids
             .iter()
             .map(|id| id.trim())
@@ -4916,7 +4920,7 @@ impl AppState {
             .source()
             .probe
             .refresh_interval_seconds;
-        let timeout_seconds = self.config.admin_upstream_timeout_seconds.max(1);
+        let timeout_seconds = runtime_settings.admin_upstream_timeout_seconds.max(1);
         let attempted_at = unix_seconds();
         let mut decisions = Vec::new();
 

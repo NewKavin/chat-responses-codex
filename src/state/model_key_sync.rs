@@ -454,6 +454,7 @@ impl AppState {
     }
 
     async fn process_targeted_model_discovery(&self, job: TargetedModelDiscoveryJob) {
+        let runtime_settings = self.runtime_settings();
         let mut pending = TargetedPendingGuard {
             state: self.clone(),
             key: job.key.clone(),
@@ -481,7 +482,7 @@ impl AppState {
             &self.client_for_url(&url),
             &upstream.base_url,
             &api_key,
-            self.config.admin_upstream_timeout_seconds.max(1),
+            runtime_settings.admin_upstream_timeout_seconds.max(1),
         )
         .await
         else {
@@ -634,9 +635,10 @@ impl AppState {
         &self,
         jitter_upstreams: bool,
     ) -> io::Result<ModelKeySyncSummary> {
+        let runtime_settings = self.runtime_settings();
         let _sync_guard = self.model_key_sync_lock.lock().await;
         let routing = self.routing_snapshot().await;
-        let timeout_seconds = self.config.admin_upstream_timeout_seconds.max(1);
+        let timeout_seconds = runtime_settings.admin_upstream_timeout_seconds.max(1);
         let mut summary = ModelKeySyncSummary::default();
         let mut discoveries = Vec::new();
 

@@ -109,6 +109,21 @@ impl SettingsHarness {
         )
         .await
     }
+
+    async fn get_path(&self, path: &str) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
 }
 
 async fn login(app: &axum::Router) -> String {
@@ -315,4 +330,48 @@ async fn runtime_settings_malformed_payload_uses_structured_bad_request() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
     assert_eq!(body["error"]["code"], "runtime_settings_request_invalid");
+}
+
+#[tokio::test]
+async fn runtime_app_name_is_used_by_later_dashboard_requests() {
+    let harness = SettingsHarness::new().await;
+    let mut settings = harness.get().await["settings"].clone();
+    settings["app_name"] = json!("Live Dashboard Name");
+    assert_eq!(harness.put(0, settings).await.status(), StatusCode::OK);
+
+    let response = harness.get_path("/api/admin/dashboard?range=7d").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(response).await["app_name"],
+        "Live Dashboard Name"
+    );
+}
+
+#[tokio::test]
+async fn runtime_probe_refresh_interval_is_used_by_later_probe_requests() {
+    let harness = SettingsHarness::new().await;
+    let mut settings = harness.get().await["settings"].clone();
+    settings["model_probe_refresh_interval_seconds"] = json!(777);
+    assert_eq!(harness.put(0, settings).await.status(), StatusCode::OK);
+
+    let response = harness.get_path("/api/admin/model-probe").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(response).await["refresh_interval_seconds"],
+        777
+    );
+}
+
+#[tokio::test]
+async fn runtime_admin_log_page_limit_caps_later_log_requests() {
+    let harness = SettingsHarness::new().await;
+    let mut settings = harness.get().await["settings"].clone();
+    settings["admin_logs_page_size_max"] = json!(250);
+    assert_eq!(harness.put(0, settings).await.status(), StatusCode::OK);
+
+    let response = harness
+        .get_path("/api/admin/logs?page=1&page_size=999")
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_json(response).await["page_size"], 250);
 }

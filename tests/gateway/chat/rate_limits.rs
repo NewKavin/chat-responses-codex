@@ -1829,7 +1829,7 @@ async fn spawn_retry_after_upstream(
 }
 
 #[tokio::test]
-async fn short_temporary_route_exhaustion_succeeds_in_second_round() {
+async fn runtime_settings_enable_route_exhaustion_retry_for_next_request() {
     let hits = Arc::new(AtomicUsize::new(0));
     let tempdir = tempdir().unwrap();
     let state_path = tempdir.path().join("state.json");
@@ -1856,10 +1856,19 @@ async fn short_temporary_route_exhaustion_succeeds_in_second_round() {
         AppConfig {
             // The first transient failure cools the route for 8-12s (jittered); a
             // fifteen-second budget guarantees the second round is always admitted.
+            upstream_route_exhaustion_retry_enabled: false,
             upstream_route_exhaustion_retry_max_wait_ms: 15_000,
             ..AppConfig::default()
         },
     );
+
+    let mut runtime_settings = state.runtime_settings().as_ref().clone();
+    runtime_settings.upstream_route_exhaustion_retry_enabled = true;
+    state
+        .update_runtime_settings(0, runtime_settings)
+        .await
+        .unwrap();
+    assert!(!state.config.upstream_route_exhaustion_retry_enabled);
 
     let app = build_router(state.clone());
     let response = tokio::time::timeout(

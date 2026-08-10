@@ -12,6 +12,26 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 #[test]
+fn stream_timeouts_use_runtime_idle_and_startup_transport_limits() {
+    let config = AppConfig {
+        upstream_stream_keepalive_interval_seconds: 11,
+        upstream_stream_idle_timeout_seconds: 22,
+        upstream_stream_max_duration_seconds: 33,
+        ..AppConfig::default()
+    };
+    let mut runtime_settings = RuntimeSettings::from_app_config(&config);
+    runtime_settings.upstream_stream_keepalive_interval_seconds = 44;
+    runtime_settings.upstream_stream_idle_timeout_seconds = 55;
+    runtime_settings.upstream_stream_max_duration_seconds = 66;
+
+    let timeouts = StreamTimeouts::from_sources(&config, &runtime_settings);
+
+    assert_eq!(timeouts.keepalive_interval, Duration::from_secs(11));
+    assert_eq!(timeouts.idle_timeout, Duration::from_secs(55));
+    assert_eq!(timeouts.max_duration, Duration::from_secs(33));
+}
+
+#[test]
 fn route_attempts_prefers_temporary_failures_and_shortest_retry() {
     let mut ledger = AttemptLedger::default();
     ledger.record(AttemptFailure {
@@ -1189,6 +1209,9 @@ async fn recovery_session_keeps_multi_account_tickets_and_selects_the_oldest() {
         "request-multi-account".into(),
         downstream_lease,
         tokio::time::Instant::now() + Duration::from_secs(2),
+        state
+            .runtime_settings()
+            .upstream_concurrency_recovery_max_rounds,
     );
 
     assert!(matches!(

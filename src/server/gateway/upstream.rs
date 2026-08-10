@@ -617,6 +617,7 @@ struct HedgeStreamAttempt {
 #[derive(Clone)]
 struct RouteHedgeContext {
     state: AppState,
+    runtime_settings: Arc<RuntimeSettings>,
     capability_snapshot: CapabilityRuntimeSnapshot,
     requested_features: RequestedFeatures,
     body: Value,
@@ -636,7 +637,7 @@ struct RouteHedgeContext {
     account_wait_ms: u64,
 }
 
-fn hedge_launch_delay(config: &AppConfig, launched_extra_attempts: usize) -> Duration {
+fn hedge_launch_delay(config: &RuntimeSettings, launched_extra_attempts: usize) -> Duration {
     let delay_ms = if launched_extra_attempts == 0 {
         config.upstream_hedge_delay_ms
     } else {
@@ -645,7 +646,7 @@ fn hedge_launch_delay(config: &AppConfig, launched_extra_attempts: usize) -> Dur
     Duration::from_millis(delay_ms.max(1))
 }
 
-fn hedge_extra_attempt_limit(config: &AppConfig, available_accounts: usize) -> usize {
+fn hedge_extra_attempt_limit(config: &RuntimeSettings, available_accounts: usize) -> usize {
     if !config.upstream_hedge_enabled {
         return 0;
     }
@@ -764,6 +765,7 @@ fn send_route_hedge_attempt(
         let mut stream_only_recovery_identity = None;
         let result = send_to_upstream(
             &context.state,
+            context.runtime_settings.clone(),
             &candidate.upstream,
             &candidate.api_key,
             &[],
@@ -957,6 +959,7 @@ async fn send_hedge_stream_attempt(
 #[allow(clippy::too_many_arguments)]
 async fn prefetch_stream_with_hedges(
     state: &AppState,
+    runtime_settings: &RuntimeSettings,
     upstream: &UpstreamConfig,
     primary_reader: UpstreamStreamReader,
     hedge_api_keys: &[String],
@@ -982,7 +985,7 @@ async fn prefetch_stream_with_hedges(
         .map(|_| route_hedge_candidates.len())
         .unwrap_or(0);
     let extra_candidate_count = route_hedge_count.saturating_add(hedge_api_keys.len());
-    let max_extra_attempts = hedge_extra_attempt_limit(&state.config, extra_candidate_count);
+    let max_extra_attempts = hedge_extra_attempt_limit(runtime_settings, extra_candidate_count);
     if max_extra_attempts == 0 {
         let reader = prefetch_first_usable_output(
             primary_reader,
@@ -1032,7 +1035,7 @@ async fn prefetch_stream_with_hedges(
     let mut launched_extra_attempts = 0usize;
     let mut next_candidate_index = 0usize;
     let mut next_attempt_index = 1u32;
-    let mut next_launch_at = TokioInstant::now() + hedge_launch_delay(&state.config, 0);
+    let mut next_launch_at = TokioInstant::now() + hedge_launch_delay(runtime_settings, 0);
     let mut primary_error = None;
     let mut last_error = None;
     let mut route_controls = Vec::<(u32, HedgeAttemptControl)>::new();
@@ -1071,7 +1074,7 @@ async fn prefetch_stream_with_hedges(
                                 }
                                 tracing::info!(
                                     request_id,
-                                    hedge_enabled = state.config.upstream_hedge_enabled,
+                                    hedge_enabled = runtime_settings.upstream_hedge_enabled,
                                     hedge_winner_upstream_id = %upstream.id,
                                     selected_upstream_id = %upstream.id,
                                     hedge_winner_attempt = attempt_index,
@@ -1086,7 +1089,7 @@ async fn prefetch_stream_with_hedges(
                             HedgeWinnerReady::Route(ready) => {
                                 tracing::info!(
                                     request_id,
-                                    hedge_enabled = state.config.upstream_hedge_enabled,
+                                    hedge_enabled = runtime_settings.upstream_hedge_enabled,
                                     hedge_winner_upstream_id = %ready.result.selected_upstream_id,
                                     selected_upstream_id = %ready.result.selected_upstream_id,
                                     route_id = %ready.route_id,
@@ -1233,7 +1236,7 @@ async fn prefetch_stream_with_hedges(
                     );
                 }
                 next_launch_at = TokioInstant::now()
-                    + hedge_launch_delay(&state.config, launched_extra_attempts);
+                    + hedge_launch_delay(runtime_settings, launched_extra_attempts);
             }
         }
     }
@@ -1242,6 +1245,7 @@ async fn prefetch_stream_with_hedges(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_to_upstream(
     state: &AppState,
+    runtime_settings: Arc<RuntimeSettings>,
     upstream: &UpstreamConfig,
     api_key: &str,
     hedge_api_keys: &[String],
@@ -2175,7 +2179,7 @@ pub(super) async fn send_to_upstream(
         let upstream_json = aggregate_upstream_sse_response(
             response,
             upstream_protocol,
-            StreamTimeouts::from_config(&state.config),
+            StreamTimeouts::from_sources(&state.config, runtime_settings.as_ref()),
             &diagnostic_context,
         )
         .await?;
@@ -2264,7 +2268,8 @@ pub(super) async fn send_to_upstream(
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let stream_timeouts = StreamTimeouts::from_config(&state.config);
+        let stream_timeouts =
+            StreamTimeouts::from_sources(&state.config, runtime_settings.as_ref());
         let commit_tracker = super::stream_commit::StreamCommitTracker::default();
         commit_tracker.commit_transport();
 
@@ -2293,6 +2298,7 @@ pub(super) async fn send_to_upstream(
                             .as_ref()
                             .map(|completion| RouteHedgeContext {
                                 state: state.clone(),
+                                runtime_settings: runtime_settings.clone(),
                                 capability_snapshot: capability_snapshot.clone(),
                                 requested_features: requested_features.clone(),
                                 body: body.clone(),
@@ -2321,6 +2327,7 @@ pub(super) async fn send_to_upstream(
                         };
                     match prefetch_stream_with_hedges(
                         state,
+                        runtime_settings.as_ref(),
                         upstream,
                         reader,
                         hedge_api_keys,
@@ -2667,11 +2674,9 @@ mod tests {
 
     #[test]
     fn hedge_schedule_uses_configured_initial_delay_and_interval() {
-        let config = AppConfig {
-            upstream_hedge_delay_ms: 25,
-            upstream_hedge_interval_ms: 80,
-            ..AppConfig::default()
-        };
+        let mut config = RuntimeSettings::from_app_config(&AppConfig::default());
+        config.upstream_hedge_delay_ms = 25;
+        config.upstream_hedge_interval_ms = 80;
 
         assert_eq!(hedge_launch_delay(&config, 0), Duration::from_millis(25));
         assert_eq!(hedge_launch_delay(&config, 1), Duration::from_millis(80));
@@ -2680,11 +2685,9 @@ mod tests {
 
     #[test]
     fn hedge_attempt_limit_respects_toggle_budget_and_available_accounts() {
-        let mut config = AppConfig {
-            upstream_hedge_enabled: true,
-            upstream_hedge_max_extra_attempts: 3,
-            ..AppConfig::default()
-        };
+        let mut config = RuntimeSettings::from_app_config(&AppConfig::default());
+        config.upstream_hedge_enabled = true;
+        config.upstream_hedge_max_extra_attempts = 3;
 
         assert_eq!(hedge_extra_attempt_limit(&config, 5), 3);
         assert_eq!(hedge_extra_attempt_limit(&config, 2), 2);

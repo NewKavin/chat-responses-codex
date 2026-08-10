@@ -1,5 +1,5 @@
 use super::TerminalFailure;
-use crate::state::{AppConfig, RouteRecovery};
+use crate::state::{AppConfig, RouteRecovery, RuntimeSettings};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -80,6 +80,16 @@ impl RouteRetryPolicy {
         }
     }
 
+    pub fn from_sources(config: &AppConfig, runtime_settings: &RuntimeSettings) -> Self {
+        Self::new_with_concurrency(
+            runtime_settings.upstream_route_exhaustion_retry_enabled,
+            Duration::from_millis(runtime_settings.upstream_route_exhaustion_retry_max_wait_ms),
+            runtime_settings.upstream_route_exhaustion_retry_max_rounds,
+            Duration::from_millis(config.upstream_concurrency_recovery_max_wait_ms),
+            runtime_settings.upstream_concurrency_recovery_max_rounds,
+        )
+    }
+
     pub fn decide(
         self,
         budget: &RouteRetryBudget,
@@ -125,18 +135,6 @@ impl RouteRetryPolicy {
     }
 }
 
-impl From<&AppConfig> for RouteRetryPolicy {
-    fn from(config: &AppConfig) -> Self {
-        Self::new_with_concurrency(
-            config.upstream_route_exhaustion_retry_enabled,
-            Duration::from_millis(config.upstream_route_exhaustion_retry_max_wait_ms),
-            config.upstream_route_exhaustion_retry_max_rounds,
-            Duration::from_millis(config.upstream_concurrency_recovery_max_wait_ms),
-            config.upstream_concurrency_recovery_max_rounds,
-        )
-    }
-}
-
 fn deterministic_jitter(request_id: &str, next_round: u32) -> Duration {
     let mut hasher = Sha256::new();
     hasher.update(request_id.as_bytes());
@@ -156,6 +154,26 @@ mod tests {
     use crate::server::gateway::TerminalFailure;
     use crate::state::{RouteFailureClass, RouteRecovery};
     use std::time::Duration;
+
+    #[test]
+    fn policy_uses_runtime_rounds_but_startup_concurrency_wait() {
+        let config = AppConfig {
+            upstream_concurrency_recovery_max_wait_ms: 111,
+            ..AppConfig::default()
+        };
+        let mut runtime_settings = RuntimeSettings::from_app_config(&config);
+        runtime_settings.upstream_route_exhaustion_retry_max_wait_ms = 222;
+        runtime_settings.upstream_route_exhaustion_retry_max_rounds = 5;
+        runtime_settings.upstream_concurrency_recovery_max_wait_ms = 999;
+        runtime_settings.upstream_concurrency_recovery_max_rounds = 7;
+
+        let policy = RouteRetryPolicy::from_sources(&config, &runtime_settings);
+
+        assert_eq!(policy.max_wait, Duration::from_millis(222));
+        assert_eq!(policy.max_rounds, 5);
+        assert_eq!(policy.concurrency_max_wait, Duration::from_millis(111));
+        assert_eq!(policy.concurrency_max_rounds, 7);
+    }
 
     #[test]
     fn temporary_exhaustion_schedules_bounded_deterministic_wait() {

@@ -256,6 +256,7 @@ pub(super) async fn admin_dashboard(
     State(state): State<AppState>,
     Query(query): Query<DashboardQuery>,
 ) -> impl IntoResponse {
+    let runtime_settings = state.runtime_settings();
     let range = match query.range.as_str() {
         "1d" | "24h" => "1d",
         "30d" => "30d",
@@ -462,7 +463,7 @@ pub(super) async fn admin_dashboard(
             .filter(|u| u.active && u.supports_protocol(UpstreamProtocol::Responses))
             .count(),
         admin_username: state.config.admin_username.clone(),
-        app_name: state.config.app_name.clone(),
+        app_name: runtime_settings.app_name.clone(),
         analytics,
     };
 
@@ -1126,8 +1127,9 @@ pub(super) async fn build_model_probe_response(
     state: &AppState,
     allowlist: Option<&[String]>,
 ) -> ModelProbeResponse {
+    let runtime_settings = state.runtime_settings();
     let snapshot = state.snapshot().await;
-    let timeout_seconds = state.config.admin_upstream_timeout_seconds.max(1);
+    let timeout_seconds = runtime_settings.admin_upstream_timeout_seconds.max(1);
     let refreshed_at = unix_seconds();
 
     let mut channels = Vec::new();
@@ -1224,7 +1226,7 @@ pub(super) async fn build_model_probe_response(
 
     ModelProbeResponse {
         refreshed_at,
-        refresh_interval_seconds: state.config.model_probe_refresh_interval_seconds,
+        refresh_interval_seconds: runtime_settings.model_probe_refresh_interval_seconds,
         summary: ModelProbeSummary {
             total_channels: channels.len(),
             healthy_channels,
@@ -1377,7 +1379,8 @@ pub(super) async fn admin_create_upstreams_batch(
     State(state): State<AppState>,
     Json(payload): Json<BatchCreateUpstreamPayload>,
 ) -> impl IntoResponse {
-    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
+    let runtime_settings = state.runtime_settings();
+    let admin_timeout = runtime_settings.admin_upstream_timeout_seconds.max(1);
     if payload.keys.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1539,7 +1542,8 @@ pub(super) async fn admin_discover_upstream_models(
     State(state): State<AppState>,
     Json(payload): Json<DiscoverUpstreamModelsPayload>,
 ) -> impl IntoResponse {
-    let admin_timeout = state.config.admin_upstream_timeout_seconds.max(1);
+    let runtime_settings = state.runtime_settings();
+    let admin_timeout = runtime_settings.admin_upstream_timeout_seconds.max(1);
     if payload.keys.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -2644,6 +2648,7 @@ pub(super) async fn admin_list_logs(
     State(state): State<AppState>,
     Query(query): Query<LogsQuery>,
 ) -> impl IntoResponse {
+    let runtime_settings = state.runtime_settings();
     // Flush pending logs before querying
     let _ = state.flush_usage_logs_for_test().await;
 
@@ -2706,7 +2711,7 @@ pub(super) async fn admin_list_logs(
             status_codes.clear();
             let page_size = query
                 .page_size
-                .clamp(1, state.config.admin_logs_page_size_max.max(1));
+                .clamp(1, runtime_settings.admin_logs_page_size_max.max(1));
             let page = query.page.max(1);
             return empty_admin_logs_response(page, page_size, &window);
         }
@@ -2735,7 +2740,7 @@ pub(super) async fn admin_list_logs(
             error_categories.clear();
             let page_size = query
                 .page_size
-                .clamp(1, state.config.admin_logs_page_size_max.max(1));
+                .clamp(1, runtime_settings.admin_logs_page_size_max.max(1));
             let page = query.page.max(1);
             return empty_admin_logs_response(page, page_size, &window);
         }
@@ -2747,23 +2752,26 @@ pub(super) async fn admin_list_logs(
     {
         let page_size = query
             .page_size
-            .clamp(1, state.config.admin_logs_page_size_max.max(1));
+            .clamp(1, runtime_settings.admin_logs_page_size_max.max(1));
         let page = query.page.max(1);
         return empty_admin_logs_response(page, page_size, &window);
     }
 
     let page = state
-        .query_usage_logs_page(UsageLogQuery {
-            page: query.page,
-            page_size: query.page_size,
-            status_codes,
-            error_categories,
-            model_substring: query.model.clone(),
-            downstream_id: query.downstream_id.clone(),
-            upstream_id: query.upstream_id.clone(),
-            start_time,
-            end_time,
-        })
+        .query_usage_logs_page_with_max_page_size(
+            UsageLogQuery {
+                page: query.page,
+                page_size: query.page_size,
+                status_codes,
+                error_categories,
+                model_substring: query.model.clone(),
+                downstream_id: query.downstream_id.clone(),
+                upstream_id: query.upstream_id.clone(),
+                start_time,
+                end_time,
+            },
+            runtime_settings.admin_logs_page_size_max,
+        )
         .await
         .map_err(|error| {
             (

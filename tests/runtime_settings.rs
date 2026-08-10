@@ -140,3 +140,60 @@ async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_
         9
     );
 }
+
+fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let (_, tail) = source
+        .split_once(start)
+        .unwrap_or_else(|| panic!("missing source marker: {start}"));
+    let (section, _) = tail
+        .split_once(end)
+        .unwrap_or_else(|| panic!("missing source marker: {end}"));
+    section
+}
+
+#[test]
+fn upstream_attempts_reuse_the_request_runtime_snapshot() {
+    let source = include_str!("../src/server/gateway/upstream.rs");
+    let send = source_between(
+        source,
+        "pub(super) async fn send_to_upstream(",
+        "#[cfg(test)]",
+    );
+
+    assert!(send.contains("runtime_settings: Arc<RuntimeSettings>"));
+    assert!(!send.contains("let runtime_settings = state.runtime_settings();"));
+}
+
+#[test]
+fn affinity_writes_use_the_request_runtime_ttl() {
+    let source = include_str!("../src/state.rs");
+    let setter = source_between(
+        source,
+        "pub fn set_affinity_upstream(",
+        "pub fn clear_affinity_upstream(",
+    );
+
+    assert!(setter.contains("ttl_seconds: u64"));
+    assert!(!setter.contains("runtime_settings()"));
+}
+
+#[test]
+fn admin_log_queries_use_the_handler_runtime_limit() {
+    let source = include_str!("../src/state/log_queries.rs");
+
+    assert!(source.contains("query_usage_logs_page_with_max_page_size"));
+    assert!(source.contains("page_size_max: usize"));
+}
+
+#[test]
+fn troubleshooting_checks_use_the_run_runtime_timeout() {
+    let source = include_str!("../src/server/gateway/troubleshooting.rs");
+    let check = source_between(
+        source,
+        "async fn run_internal_gateway_check(",
+        "let Some(secret) = plaintext_key",
+    );
+
+    assert!(check.contains("check_timeout: Duration"));
+    assert!(!check.contains("runtime_settings()"));
+}

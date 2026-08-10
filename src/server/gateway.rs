@@ -21,8 +21,8 @@ use crate::state::{
     AccountProbeOutcome, ActiveGatewayRequestStart, AppConfig, AppState,
     CompatibilityUsageMetadata, DownstreamConcurrencyLease, GlobalContextProfile, KeyHealthKey,
     RouteAvailability, RouteHealthKey, RouteHealthPermit, RouteOutcome, RouteRecovery,
-    RouteSetAggregateKey, RuntimeCoordinationError, StreamDiagnostics, UpstreamConfig,
-    UpstreamRequestLease, UsageLog,
+    RouteSetAggregateKey, RuntimeCoordinationError, RuntimeSettings, StreamDiagnostics,
+    UpstreamConfig, UpstreamRequestLease, UsageLog,
 };
 use axum::body::{Body, BodyDataStream};
 use axum::extract::{rejection::JsonRejection, ConnectInfo, Json, Query, State};
@@ -1163,12 +1163,14 @@ struct StreamTimeouts {
 }
 
 impl StreamTimeouts {
-    fn from_config(config: &AppConfig) -> Self {
+    fn from_sources(config: &AppConfig, runtime_settings: &RuntimeSettings) -> Self {
         Self {
             keepalive_interval: Duration::from_secs(
                 config.upstream_stream_keepalive_interval_seconds.max(1),
             ),
-            idle_timeout: Duration::from_secs(config.upstream_stream_idle_timeout_seconds.max(1)),
+            idle_timeout: Duration::from_secs(
+                runtime_settings.upstream_stream_idle_timeout_seconds.max(1),
+            ),
             max_duration: Duration::from_secs(config.upstream_stream_max_duration_seconds.max(1)),
         }
     }
@@ -2292,6 +2294,7 @@ async fn claude_messages(
                 .into_anthropic_response();
         }
     };
+    let runtime_settings = state.runtime_settings();
     let claude_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let chat_payload = match claude_messages_to_chat_payload(&body) {
         Ok(payload) => payload,
@@ -2303,6 +2306,7 @@ async fn claude_messages(
         headers,
         chat_payload,
         EndpointKind::ChatCompletions,
+        runtime_settings,
         true,
         None,
         None,
@@ -3866,7 +3870,30 @@ async fn process_gateway_request(
     body: Value,
     endpoint: EndpointKind,
 ) -> Result<DispatchResult, GatewayError> {
-    process_gateway_request_inner(state, headers, body, endpoint, false, None, None, None).await
+    let runtime_settings = state.runtime_settings();
+    process_gateway_request_with_runtime_settings(state, headers, body, endpoint, runtime_settings)
+        .await
+}
+
+async fn process_gateway_request_with_runtime_settings(
+    state: AppState,
+    headers: HeaderMap,
+    body: Value,
+    endpoint: EndpointKind,
+    runtime_settings: Arc<RuntimeSettings>,
+) -> Result<DispatchResult, GatewayError> {
+    process_gateway_request_inner(
+        state,
+        headers,
+        body,
+        endpoint,
+        runtime_settings,
+        false,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 async fn process_gateway_request_with_pre_header_cancellation(
@@ -3874,6 +3901,7 @@ async fn process_gateway_request_with_pre_header_cancellation(
     headers: HeaderMap,
     body: Value,
     endpoint: EndpointKind,
+    runtime_settings: Arc<RuntimeSettings>,
     request_id: String,
     cancellation: PreHeaderStreamCancellation,
     first_semantic_deadline: stream_commit::FirstSemanticDeadline,
@@ -3883,6 +3911,7 @@ async fn process_gateway_request_with_pre_header_cancellation(
         headers,
         body,
         endpoint,
+        runtime_settings,
         false,
         Some(cancellation),
         Some(request_id),
@@ -3898,6 +3927,7 @@ async fn process_gateway_request_inner(
     headers: HeaderMap,
     mut body: Value,
     endpoint: EndpointKind,
+    runtime_settings: Arc<RuntimeSettings>,
     defer_success_usage_log: bool,
     pre_header_cancellation: Option<PreHeaderStreamCancellation>,
     request_id: Option<String>,
@@ -3909,7 +3939,6 @@ async fn process_gateway_request_inner(
         .await
         .ok_or_else(|| GatewayError::Unauthorized("invalid downstream key".into()))?;
     let routing_snapshot = state.routing_snapshot().await;
-
     let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let request_path = endpoint.path();
     let started = Instant::now();
@@ -4177,6 +4206,7 @@ async fn process_gateway_request_inner(
         request_id.clone(),
         downstream_concurrency_lease.clone(),
         account_recovery_deadline,
+        runtime_settings.upstream_concurrency_recovery_max_rounds,
     );
     let downstream_concurrency_guard =
         DownstreamConcurrencyGuard::new(state.clone(), downstream_concurrency_lease);
@@ -4791,7 +4821,8 @@ async fn process_gateway_request_inner(
             })
             .collect::<Vec<_>>()
     };
-    let route_retry_policy = RouteRetryPolicy::from(&state.config);
+    let route_retry_policy =
+        RouteRetryPolicy::from_sources(&state.config, runtime_settings.as_ref());
     let mut route_retry_budget = RouteRetryBudget::default();
     let mut request_route_attempts = RequestRouteAttempts::default();
     tracing::debug!(
@@ -4816,7 +4847,7 @@ async fn process_gateway_request_inner(
                 upstream.active && upstream.id == upstream_id && upstream.supports_model(model)
             })
             .then(|| upstream_id.to_string())
-    } else if state.config.routing_affinity_enabled {
+    } else if runtime_settings.routing_affinity_enabled {
         match state.get_affinity_upstream(&downstream.id, normalized_model) {
             Some(upstream_id)
                 if routing_snapshot.upstreams.iter().any(|upstream| {
@@ -4915,7 +4946,7 @@ async fn process_gateway_request_inner(
             // Ordinary affinity only helps when there is a single viable upstream; continuation
             // history pinning is stricter and applies even when multiple candidates are available.
             let use_routing_affinity = history_pinned_upstream.is_some()
-                || (state.config.routing_affinity_enabled && total_candidate_count == 1);
+                || (runtime_settings.routing_affinity_enabled && total_candidate_count == 1);
             let ranking_pressure = |upstream: &UpstreamConfig| {
                 let runtime = upstream_runtime_snapshots
                     .get(&upstream.id)
@@ -4980,8 +5011,9 @@ async fn process_gateway_request_inner(
                             let preferred = upstreams.remove(position);
                             upstreams.insert(0, preferred);
                         } else if position > 0 {
-                            let escape_ratio =
-                                state.config.routing_affinity_escape_pressure_ratio.max(1.0);
+                            let escape_ratio = runtime_settings
+                                .routing_affinity_escape_pressure_ratio
+                                .max(1.0);
                             let (
                                 preferred_cooled,
                                 preferred_cooldown,
@@ -5726,6 +5758,7 @@ async fn process_gateway_request_inner(
                         };
                         let send_future = send_to_upstream(
                             &state,
+                            runtime_settings.clone(),
                             &upstream,
                             api_key,
                             &[],
@@ -6009,6 +6042,7 @@ async fn process_gateway_request_inner(
                                         &downstream.id,
                                         normalized_model,
                                         &selected_upstream_id,
+                                        runtime_settings.routing_affinity_ttl_seconds,
                                     );
                                 }
                                 tracing::info!(
@@ -6068,7 +6102,7 @@ async fn process_gateway_request_inner(
                                 return Ok(result);
                             }
                             Err(error)
-                                if state.config.upstream_same_route_retry_enabled
+                                if runtime_settings.upstream_same_route_retry_enabled
                                     && !same_route_retry_attempted
                                     && !stream_only_recovery.final_attempt
                                     && should_retry_same_route_once(&error) =>
@@ -6151,7 +6185,7 @@ async fn process_gateway_request_inner(
                                     retry_after_seconds,
                                     "upstream concurrency/capacity response; moving to another route"
                                 );
-                                if state.config.routing_affinity_enabled {
+                                if runtime_settings.routing_affinity_enabled {
                                     state.clear_affinity_upstream(&downstream.id, normalized_model);
                                 }
                                 if let Some(retry_after) = retry_after {
@@ -6224,8 +6258,7 @@ async fn process_gateway_request_inner(
                             }) => {
                                 let retry_after = retry_after.unwrap_or_else(|| {
                                     Duration::from_secs(
-                                        state
-                                            .config
+                                        runtime_settings
                                             .upstream_rate_limit_default_retry_seconds
                                             .max(1),
                                     )
@@ -6244,7 +6277,7 @@ async fn process_gateway_request_inner(
                                     retry_after_seconds,
                                     "upstream rate limited; moving to another route"
                                 );
-                                if state.config.routing_affinity_enabled {
+                                if runtime_settings.routing_affinity_enabled {
                                     state.clear_affinity_upstream(&downstream.id, normalized_model);
                                 }
                                 if state

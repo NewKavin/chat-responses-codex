@@ -404,7 +404,7 @@ async fn reconciliation_waits_until_an_operational_retry_is_due() {
 }
 
 #[tokio::test]
-async fn default_runtime_rejects_automatic_but_allows_manual_probe_jobs() {
+async fn runtime_settings_enable_automatic_probe_jobs_without_restart() {
     let dir = tempdir().unwrap();
     let state = AppState::new(
         PersistedState::default(),
@@ -418,12 +418,23 @@ async fn default_runtime_rejects_automatic_but_allows_manual_probe_jobs() {
     automatic.reason = ProbeReason::ConfigurationChanged;
     assert!(!state.queue_capability_probe(automatic));
 
-    let manual = single_probe_job(blocker_probe_batch());
-    assert!(state.queue_capability_probe(manual));
+    let mut runtime_settings = state.runtime_settings().as_ref().clone();
+    runtime_settings.automatic_capability_probes_enabled = true;
+    state
+        .update_runtime_settings(0, runtime_settings)
+        .await
+        .unwrap();
+
+    let mut automatic = single_probe_job(blocker_probe_batch());
+    automatic.reason = ProbeReason::ConfigurationChanged;
+    assert!(state.queue_capability_probe(automatic));
     let queued = receiver
         .try_recv()
-        .expect("manual probe should remain available");
-    assert_eq!(single_probe_job(queued).reason, ProbeReason::Manual);
+        .expect("runtime-enabled automatic probe should be queued");
+    assert_eq!(
+        single_probe_job(queued).reason,
+        ProbeReason::ConfigurationChanged
+    );
 }
 
 #[tokio::test]

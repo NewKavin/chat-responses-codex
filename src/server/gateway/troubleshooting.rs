@@ -282,6 +282,12 @@ async fn run_troubleshooting_for_downstream(
     mut source_headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
+    let check_timeout = Duration::from_secs(
+        state
+            .runtime_settings()
+            .troubleshooting_check_timeout_seconds
+            .max(1),
+    );
     authorize_internal_route_capture(&state, &mut source_headers);
     let snapshot = state.routing_snapshot().await;
     let Some(downstream) = snapshot
@@ -341,6 +347,7 @@ async fn run_troubleshooting_for_downstream(
                         &body.model,
                         check,
                         &source_headers,
+                        check_timeout,
                     )
                     .await,
                 );
@@ -374,6 +381,12 @@ async fn run_compatibility_matrix(
     mut source_headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
+    let check_timeout = Duration::from_secs(
+        state
+            .runtime_settings()
+            .troubleshooting_check_timeout_seconds
+            .max(1),
+    );
     authorize_internal_route_capture(&state, &mut source_headers);
     let snapshot = state.routing_snapshot().await;
     let Some(downstream) = snapshot
@@ -448,6 +461,7 @@ async fn run_compatibility_matrix(
                     *client_profile,
                     model,
                     &source_headers,
+                    check_timeout,
                 )
                 .await,
             );
@@ -524,6 +538,7 @@ async fn run_matrix_cell(
     client_profile: TroubleshootingClientProfile,
     model: &str,
     source_headers: &HeaderMap,
+    check_timeout: Duration,
 ) -> CompatibilityMatrixCell {
     let expectation = matrix_expectation_context(&state, model, client_profile).await;
     let check_request = TroubleshootingRunRequest {
@@ -642,6 +657,7 @@ async fn run_matrix_cell(
                     model,
                     check,
                     source_headers,
+                    check_timeout,
                 )
                 .await
             }
@@ -1232,10 +1248,9 @@ async fn run_internal_gateway_check(
     model: &str,
     check: TroubleshootingCheck,
     source_headers: &HeaderMap,
+    check_timeout: Duration,
 ) -> TroubleshootingResult {
     let started = Instant::now();
-    let check_timeout =
-        Duration::from_secs(state.config.troubleshooting_check_timeout_seconds.max(1));
     let Some(secret) = plaintext_key else {
         return TroubleshootingResult {
             id: check_id(check),

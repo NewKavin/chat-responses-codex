@@ -244,6 +244,16 @@ pub fn build_downstream_usage_summary(
 
 impl AppState {
     pub async fn query_usage_logs_page(&self, query: UsageLogQuery) -> io::Result<UsageLogPage> {
+        let page_size_max = self.runtime_settings().admin_logs_page_size_max;
+        self.query_usage_logs_page_with_max_page_size(query, page_size_max)
+            .await
+    }
+
+    pub async fn query_usage_logs_page_with_max_page_size(
+        &self,
+        query: UsageLogQuery,
+        page_size_max: usize,
+    ) -> io::Result<UsageLogPage> {
         let error_categories = normalize_error_categories(&query.error_categories);
         let error_category_filter = if error_categories.is_empty() {
             None
@@ -252,9 +262,7 @@ impl AppState {
         };
         let query = UsageLogQuery {
             page: query.page.max(1),
-            page_size: query
-                .page_size
-                .clamp(1, self.config.admin_logs_page_size_max.max(1)),
+            page_size: query.page_size.clamp(1, page_size_max.max(1)),
             status_codes: query.status_codes,
             error_categories: query.error_categories,
             model_substring: query.model_substring,

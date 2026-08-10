@@ -51,6 +51,7 @@ pub(super) struct AccountRecoverySession {
     waiting_marked: bool,
     waited: Duration,
     rounds: u32,
+    max_rounds: u32,
     finished: bool,
 }
 
@@ -142,6 +143,7 @@ impl AccountRecoverySession {
         request_id: String,
         downstream_lease: DownstreamConcurrencyLease,
         deadline: Instant,
+        max_rounds: u32,
     ) -> Self {
         Self {
             state,
@@ -155,6 +157,7 @@ impl AccountRecoverySession {
             waiting_marked: false,
             waited: Duration::ZERO,
             rounds: 0,
+            max_rounds: max_rounds.max(1),
             finished: false,
         }
     }
@@ -215,9 +218,7 @@ impl AccountRecoverySession {
     ) -> Result<AccountAdmission, GatewayError> {
         let mut next_renewal = Instant::now() + RENEWAL_INTERVAL;
         loop {
-            if Instant::now() >= self.deadline
-                || self.rounds >= self.state.config.upstream_concurrency_recovery_max_rounds
-            {
+            if Instant::now() >= self.deadline || self.rounds >= self.max_rounds {
                 return Err(self.account_budget_exhausted());
             }
             match self

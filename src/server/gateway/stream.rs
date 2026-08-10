@@ -294,8 +294,17 @@ pub(super) async fn dispatch_streaming_request(
     body: Value,
     endpoint: EndpointKind,
 ) -> Response {
+    let runtime_settings = state.runtime_settings();
     if troubleshooting_route_capture_requested(&state, &headers) {
-        return match process_gateway_request(state, headers, body, endpoint).await {
+        return match process_gateway_request_with_runtime_settings(
+            state,
+            headers,
+            body,
+            endpoint,
+            runtime_settings,
+        )
+        .await
+        {
             Ok(result) => dispatch_success(result),
             Err(error) => error.into_response(),
         };
@@ -313,8 +322,7 @@ pub(super) async fn dispatch_streaming_request(
     // are bounded by this single deadline so that a stalled upstream cannot
     // hold the downstream stream open indefinitely.
     let first_semantic_budget = Duration::from_secs(
-        state
-            .config
+        runtime_settings
             .upstream_first_semantic_output_timeout_seconds
             .max(1),
     );
@@ -335,6 +343,7 @@ pub(super) async fn dispatch_streaming_request(
             headers,
             body,
             endpoint,
+            runtime_settings,
             background_request_id,
             request_cancellation,
             first_semantic_deadline,
