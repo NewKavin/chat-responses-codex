@@ -1433,7 +1433,10 @@ async fn chat_probe_prompt_is_meaningful_arithmetic_question() {
         EvidenceState::Supported
     );
     let requests = mock.requests();
-    assert!(!requests.is_empty(), "probe should send at least one request");
+    assert!(
+        !requests.is_empty(),
+        "probe should send at least one request"
+    );
     let content = requests[0]["messages"][0]["content"]
         .as_str()
         .expect("probe messages content must be a string");
@@ -1499,7 +1502,10 @@ async fn responses_probe_input_is_meaningful_arithmetic_question() {
         EvidenceState::Supported
     );
     let requests = capture.lock().unwrap();
-    assert!(!requests.is_empty(), "probe should send at least one request");
+    assert!(
+        !requests.is_empty(),
+        "probe should send at least one request"
+    );
     let input = requests[0]["input"]
         .as_str()
         .expect("responses probe input must be a string");

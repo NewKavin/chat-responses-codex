@@ -140,7 +140,8 @@ async fn transient_route_cooldown_uses_configured_base_and_cap() {
 
 #[tokio::test(start_paused = true)]
 async fn transient_route_cooldown_config_does_not_change_other_classes() {
-    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
     let concurrency_route = route("concurrency-config-isolation", "glm-5.2");
 
     registry.observe_route_failure(
@@ -280,9 +281,9 @@ async fn concurrency_saturation_uses_configured_probe_sequence() {
         registry.finish(
             lease,
             RouteOutcome::RouteFailure {
-            class: RouteFailureClass::ConcurrencySaturated,
-            upstream_status: None,
-        },
+                class: RouteFailureClass::ConcurrencySaturated,
+                upstream_status: None,
+            },
         );
         let expected_delay = Duration::from_millis(expected_delay);
         assert_eq!(
@@ -723,14 +724,8 @@ async fn app_state_permit_drop_releases_half_open_without_punishment() {
 
 #[tokio::test(start_paused = true)]
 async fn expired_route_half_open_lease_releases_for_next_caller() {
-    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
-        16,
-        16,
-        vec![100, 200],
-        3,
-        4,
-        300,
-    );
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
     let route = route("fingerprint-expired-lease", "glm-5.2");
     let key = key("fingerprint-expired-lease");
 
@@ -764,14 +759,8 @@ async fn expired_route_half_open_lease_releases_for_next_caller() {
 
 #[tokio::test(start_paused = true)]
 async fn expired_key_half_open_lease_releases_for_next_caller() {
-    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
-        16,
-        16,
-        vec![100, 200],
-        3,
-        4,
-        300,
-    );
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
     let key = key("fingerprint-expired-key-lease");
     let route = route("fingerprint-expired-key-lease", "glm-5.2");
 
@@ -802,14 +791,8 @@ async fn expired_key_half_open_lease_releases_for_next_caller() {
 
 #[tokio::test(start_paused = true)]
 async fn half_open_busy_reports_remaining_lease_time() {
-    let mut registry = RouteHealthRegistry::new_with_runtime_tuning(
-        16,
-        16,
-        vec![100, 200],
-        3,
-        4,
-        300,
-    );
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 4, 300);
     let route = route("fingerprint-busy-recovery", "glm-5.2");
     let key = key("fingerprint-busy-recovery");
 
@@ -831,7 +814,11 @@ async fn half_open_busy_reports_remaining_lease_time() {
     let recovery = registry
         .earliest_temporary_recovery(std::slice::from_ref(&route))
         .expect("active half-open route is temporarily busy");
-    assert_eq!(recovery.retry_after, Duration::from_secs(1), "gateway must poll optimistically");
+    assert_eq!(
+        recovery.retry_after,
+        Duration::from_secs(1),
+        "gateway must poll optimistically"
+    );
     // 诚实剩余租约：TTL 300s，已过 100s，剩余约 200s
     assert!(
         recovery
