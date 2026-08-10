@@ -157,7 +157,26 @@ async fn committed_concurrency_exhaustion_is_a_typed_responses_failure() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_body_text(response).await;
     assert!(body.contains("event: response.failed"));
-    assert!(body.contains("\"code\":\"upstream_routes_exhausted\""));
+    let failed: Value = serde_json::from_str(
+        body.split("event: response.failed\ndata: ")
+            .nth(1)
+            .and_then(|frame| frame.split("\n\n").next())
+            .expect("response.failed data"),
+    )
+    .unwrap();
+    let error: Value = serde_json::from_str(
+        body.split("event: error\ndata: ")
+            .nth(1)
+            .and_then(|frame| frame.split("\n\n").next())
+            .expect("error event data"),
+    )
+    .unwrap();
+    for error in [&failed["response"]["error"], &error] {
+        assert_eq!(error["code"], "upstream_routes_exhausted");
+        let message = error["message"].as_str().expect("Responses error message");
+        assert!(message.starts_with("[upstream_routes_exhausted] "));
+        assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 1);
+    }
     assert!(body.contains("\"retry_after_seconds\":"));
     assert_eq!(harness.logical_status_for_last_request().await, 429);
 }

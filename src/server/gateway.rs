@@ -262,9 +262,10 @@ fn promote_preferred_route_key(
     candidate_keys: &mut Vec<String>,
     preferred_fingerprint: &str,
 ) {
-    let Some(position) = candidate_keys.iter().position(|api_key| {
-        route_key_fingerprint(upstream, api_key) == preferred_fingerprint
-    }) else {
+    let Some(position) = candidate_keys
+        .iter()
+        .position(|api_key| route_key_fingerprint(upstream, api_key) == preferred_fingerprint)
+    else {
         return;
     };
     if position > 0 {
@@ -6663,6 +6664,7 @@ async fn process_gateway_request_inner(
                     .waited()
                     .saturating_add(account_recovery.waited()),
                 live_recovery,
+                request_route_attempts.physical_attempt_count(),
             )
         } else {
             last_route_error

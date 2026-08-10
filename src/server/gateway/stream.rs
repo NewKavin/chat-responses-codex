@@ -179,7 +179,7 @@ fn sse_error_frame(
 
 fn sse_gateway_error_frame(error: &GatewayError) -> Bytes {
     sse_error_frame(
-        error.message(),
+        &client_error_message(error.error_code(), error.message()),
         error.error_type(),
         error.error_code(),
         error.error_category(),
@@ -206,9 +206,10 @@ fn sse_error_frame_for_endpoint(
     details: Value,
     responses_sequence_number: u64,
 ) -> Bytes {
+    let message = client_error_message(code, message);
     match endpoint {
         EndpointKind::ChatCompletions => {
-            sse_error_frame(message, error_type, code, category, details)
+            sse_error_frame(&message, error_type, code, category, details)
         }
         EndpointKind::Responses => {
             let failed = json!({
@@ -2304,6 +2305,25 @@ mod diagnostic_tests {
     use crate::protocol::UpstreamStreamErrorKind;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn raw_chat_sse_error_message_adds_the_matching_prefix_once() {
+        let frame = sse_error_frame_for_endpoint(
+            EndpointKind::ChatCompletions,
+            "request processing channel closed",
+            "upstream_error",
+            "stream_processing_error",
+            "stream_processing_error",
+            json!({"scope": "gateway"}),
+            0,
+        );
+        let frame = std::str::from_utf8(&frame).expect("Chat SSE frame");
+
+        assert!(frame.contains(
+            "\"message\":\"[stream_processing_error] request processing channel closed\""
+        ));
+        assert_eq!(frame.matches("[stream_processing_error]").count(), 1);
+    }
 
     #[derive(Clone, Default)]
     struct Capture {

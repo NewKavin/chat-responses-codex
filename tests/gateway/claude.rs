@@ -1195,9 +1195,13 @@ async fn claude_gateway_error_uses_anthropic_error_envelope() {
     let payload: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["type"], "error");
     assert_eq!(payload["error"]["type"], "permission_error");
-    assert_eq!(payload["error"]["message"], "model not allowed");
     assert_eq!(payload["error"]["code"], "gateway_model_not_allowed");
     assert_eq!(payload["error"]["details"]["scope"], "gateway");
+    let message = payload["error"]["message"]
+        .as_str()
+        .expect("Anthropic error message");
+    assert!(message.starts_with("[gateway_model_not_allowed] model not allowed"));
+    assert_eq!(message.matches("[gateway_model_not_allowed]").count(), 1);
 }
 
 #[tokio::test]

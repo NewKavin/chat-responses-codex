@@ -203,7 +203,19 @@ fn terminal_error_for(classes: &[FailureClass]) -> GatewayError {
                 .then(|| Duration::from_secs(11 + index as u64)),
         });
     }
-    terminal_route_failure_error(&ledger, 1, Duration::ZERO, None)
+    terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, classes.len())
+}
+
+#[test]
+fn client_error_message_adds_the_matching_prefix_once() {
+    assert_eq!(
+        client_error_message("gateway_code", "plain message"),
+        "[gateway_code] plain message"
+    );
+    assert_eq!(
+        client_error_message("gateway_code", "[gateway_code] plain message"),
+        "[gateway_code] plain message"
+    );
 }
 
 #[test]
@@ -273,7 +285,7 @@ fn terminal_retry_after_seconds_are_rounded_up() {
         retry_after: Some(Duration::from_millis(1_001)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None);
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 1);
     assert_eq!(error.retry_after_seconds(), Some(2));
     assert_eq!(error.safe_details()["retry_after_seconds"], 2);
 }
@@ -294,7 +306,7 @@ fn rate_limit_only_exhaustion_returns_429_with_cause_in_message() {
         retry_after: Some(Duration::from_secs(2)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(9_800), None);
+    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(9_800), None, 1);
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(error.error_type(), "rate_limit_error");
@@ -334,7 +346,7 @@ fn cooled_routes_carry_real_upstream_status_in_summary() {
         });
     }
 
-    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(6_900), None);
+    let error = terminal_route_failure_error(&ledger, 3, Duration::from_millis(6_900), None, 0);
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     let message = error.message();
@@ -366,7 +378,7 @@ fn mixed_temporary_exhaustion_keeps_503_but_names_causes() {
         retry_after: Some(Duration::from_secs(10)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None);
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2);
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -401,7 +413,7 @@ fn mixed_capacity_429_and_503_exhaustion_keeps_503() {
         retry_after: Some(Duration::from_secs(10)),
     });
 
-    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None);
+    let error = terminal_route_failure_error(&ledger, 1, Duration::ZERO, None, 2);
 
     assert_eq!(error.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error_type(), "upstream_error");
@@ -428,6 +440,7 @@ fn live_recovery_overrides_understated_upstream_retry_after() {
             class: FailureClass::RateLimited,
             retry_after: Duration::from_secs(27),
         }),
+        1,
     );
 
     assert_eq!(error.status_code(), StatusCode::TOO_MANY_REQUESTS);
@@ -1258,6 +1271,7 @@ async fn reservation_capacity_rejection_is_request_local_and_does_not_cool_route
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["error"]["code"], "upstream_routes_exhausted");
     assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(body["error"]["details"]["physical_attempt_count"], 0);
     let message = body["error"]["message"].as_str().unwrap_or_default();
     assert!(
         message.contains("upstream concurrency limit saturated"),

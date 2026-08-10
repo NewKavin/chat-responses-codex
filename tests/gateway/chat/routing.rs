@@ -318,10 +318,7 @@ async fn downstream_chat_request_falls_back_to_next_mapped_key_after_unauthorize
                         );
                     }
 
-                    assert!(matches!(
-                        auth.as_str(),
-                        "Bearer sk-bad" | "Bearer sk-good"
-                    ));
+                    assert!(matches!(auth.as_str(), "Bearer sk-bad" | "Bearer sk-good"));
                     (
                         StatusCode::OK,
                         axum::Json(json!({
@@ -1020,6 +1017,18 @@ async fn all_physically_attempted_key_routes_create_one_route_set_observation() 
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let payload: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["error"]["code"], "upstream_routes_exhausted");
+        let message = payload["error"]["message"]
+            .as_str()
+            .expect("OpenAI terminal error message");
+        assert!(message.starts_with("[upstream_routes_exhausted] "));
+        assert_eq!(message.matches("[upstream_routes_exhausted]").count(), 1);
+        assert_eq!(payload["error"]["details"]["attempt_count"], 2);
+        assert_eq!(payload["error"]["details"]["physical_attempt_count"], 2);
         let aggregate = chat_responses_codex::state::RouteSetAggregateKey {
             upstream_id: upstream_id.into(),
             runtime_model_slug: model.into(),

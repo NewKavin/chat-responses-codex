@@ -3658,28 +3658,36 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
 
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
-        post(|_body: String| async move {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                headers,
-                axum::Json(json!({
-                    "error": {
-                        "message": "expecting, delimiter: line 1 column 78 (char 77)",
-                        "type": "badrequesterror",
-                        "param": null,
-                        "code": 400
-                    },
-                    "type": "upstream_error"
-                })),
-            )
+        post({
+            let hits = hits.clone();
+            move |_body: String| {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        headers,
+                        axum::Json(json!({
+                            "error": {
+                                "message": "expecting, delimiter: line 1 column 78 (char 77)",
+                                "type": "badrequesterror",
+                                "param": null,
+                                "code": 400
+                            },
+                            "type": "upstream_error"
+                        })),
+                    )
+                }
+            }
         }),
     );
 
@@ -3742,7 +3750,11 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
             runtime_settings: None,
         },
         state_path,
-        AppConfig::default(),
+        AppConfig {
+            upstream_hedge_enabled: false,
+            upstream_route_exhaustion_retry_enabled: false,
+            ..AppConfig::default()
+        },
     );
 
     let app = build_router(state.clone());
@@ -3777,6 +3789,12 @@ async fn upstream_5xx_with_nested_bad_request_code_remains_transient() {
     assert_eq!(
         payload["error"]["details"]["class_counts"]["transient_server"],
         1
+    );
+    assert_eq!(payload["error"]["details"]["attempt_count"], 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        payload["error"]["details"]["physical_attempt_count"],
+        hits.load(Ordering::SeqCst)
     );
 }
 
@@ -5709,6 +5727,14 @@ async fn claude_stream_preserves_structured_gateway_stream_error() {
     assert!(body.contains("event: error"));
     assert!(body.contains("\"type\":\"error\""));
     assert!(body.contains("\"category\":\"stream_upstream_body_decode_error\""));
+    assert!(body.contains("\"code\":\"stream_upstream_body_decode_error\""));
+    assert!(body.contains(
+        "\"message\":\"[stream_upstream_body_decode_error] failed to decode upstream SSE event"
+    ));
+    assert_eq!(
+        body.matches("[stream_upstream_body_decode_error]").count(),
+        1
+    );
     assert!(!body.contains("event: message_start"));
 
     wait_for_upstream_in_flight(&state, "up-1", 0).await;

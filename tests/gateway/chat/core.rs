@@ -82,11 +82,15 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload["error"]["message"], "model not allowed");
     assert_eq!(payload["error"]["type"], "gateway_access_denied");
     assert_eq!(payload["error"]["code"], "gateway_model_not_allowed");
     assert_eq!(payload["error"]["param"], Value::Null);
     assert_eq!(payload["error"]["details"]["scope"], "gateway");
+    let message = payload["error"]["message"]
+        .as_str()
+        .expect("gateway error message");
+    assert!(message.starts_with("[gateway_model_not_allowed] model not allowed"));
+    assert_eq!(message.matches("[gateway_model_not_allowed]").count(), 1);
 
     let snapshot = state.snapshot().await;
     assert_eq!(
@@ -101,14 +105,7 @@ async fn downstream_rejected_request_is_logged_with_error_status() {
         log.error_category.as_deref(),
         Some("gateway_model_not_allowed")
     );
-    assert!(
-        log.error_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("model not allowed"),
-        "unexpected log error message: {:?}",
-        log.error_message
-    );
+    assert_eq!(log.error_message.as_deref(), Some("model not allowed"));
 }
 
 #[tokio::test]
@@ -139,6 +136,11 @@ async fn malformed_chat_json_returns_openai_error_envelope() {
     assert_eq!(payload["error"]["type"], "invalid_request_error");
     assert_eq!(payload["error"]["code"], "gateway_invalid_request");
     assert_eq!(payload["error"]["param"], Value::Null);
+    let message = payload["error"]["message"]
+        .as_str()
+        .expect("OpenAI error message");
+    assert!(message.starts_with("[gateway_invalid_request] "));
+    assert_eq!(message.matches("[gateway_invalid_request]").count(), 1);
 }
 
 #[tokio::test]

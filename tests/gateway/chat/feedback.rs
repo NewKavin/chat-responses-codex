@@ -600,7 +600,9 @@ async fn chat_stream_request_rejects_empty_json_success_before_synthesizing_sse(
             "stream response should remain SSE once headers are sent, got {status}: {body_text}"
         );
         assert!(
-            body_text.contains("\"message\":\"upstream returned an empty response body"),
+            body_text.contains(
+                "\"message\":\"[upstream_empty_response] upstream returned an empty response body"
+            ),
             "stream should emit an actionable SSE error frame, got: {body_text}"
         );
         assert!(
@@ -610,6 +612,11 @@ async fn chat_stream_request_rejects_empty_json_success_before_synthesizing_sse(
         assert!(
             body_text.contains("\"category\":\"upstream_empty_response\""),
             "stream SSE error frame should include a log/search category, got: {body_text}"
+        );
+        assert_eq!(
+            body_text.matches("[upstream_empty_response]").count(),
+            1,
+            "stream SSE error message must contain exactly one matching prefix: {body_text}"
         );
         assert!(
             !body_text.contains("\"content\":\"\""),

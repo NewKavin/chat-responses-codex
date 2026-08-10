@@ -66,11 +66,21 @@ fn message_with_summary(base: &str, summary: &str) -> String {
     }
 }
 
+pub(super) fn client_error_message(code: &str, message: &str) -> String {
+    let prefix = format!("[{code}] ");
+    if message.starts_with(&prefix) {
+        message.to_owned()
+    } else {
+        format!("{prefix}{message}")
+    }
+}
+
 pub(super) fn terminal_route_failure_error(
     ledger: &AttemptLedger,
     routing_rounds: u32,
     waited: Duration,
     live_recovery: Option<RouteRecovery>,
+    physical_attempt_count: usize,
 ) -> GatewayError {
     let terminal = ledger.terminal_failure();
     let summaries = ledger.class_summaries();
@@ -81,6 +91,10 @@ pub(super) fn terminal_route_failure_error(
     }
     let mut details = Map::from_iter([
         ("attempt_count".to_string(), json!(ledger.attempt_count())),
+        (
+            "physical_attempt_count".to_string(),
+            json!(physical_attempt_count),
+        ),
         (
             "route_count".to_string(),
             json!(ledger.distinct_route_count()),
@@ -699,6 +713,7 @@ impl GatewayError {
             GatewayError::Classified { message, .. } => message,
         }
     }
+
     pub(super) fn retry_after_seconds(&self) -> Option<u64> {
         self.retry_after().map(duration_seconds_ceil)
     }
@@ -869,9 +884,9 @@ impl GatewayError {
         }
     }
     pub(super) fn into_response(self) -> Response {
-        let message = self.message().to_string();
         let error_type = self.error_type();
         let error_code = self.error_code();
+        let message = client_error_message(error_code, self.message());
         let details = self.safe_details();
         let category = self.error_category();
 
@@ -887,9 +902,9 @@ impl GatewayError {
         }))
     }
     pub(super) fn into_anthropic_response(self) -> Response {
-        let message = self.message().to_string();
         let error_type = self.anthropic_error_type();
         let error_code = self.error_code();
+        let message = client_error_message(error_code, self.message());
         let details = self.safe_details();
         let category = self.error_category();
 

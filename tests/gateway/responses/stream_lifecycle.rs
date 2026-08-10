@@ -629,7 +629,7 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
     assert!(body.contains("\"output\":[]"));
     assert!(body.contains("\"usage\":null"));
     assert!(
-        body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"upstream SSE stream reported failure\"}"),
+        body.contains("\"error\":{\"code\":\"upstream_stream_error_event\",\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure\"}"),
         "unexpected SSE body: {body}"
     );
     assert!(body.contains("\"sequence_number\":4"));
@@ -642,7 +642,14 @@ async fn post_output_upstream_stream_error_returns_typed_responses_error_not_499
         body.contains("\"code\":\"upstream_stream_error_event\""),
         "unexpected SSE body: {body}"
     );
-    assert!(body.contains("\"message\":\"upstream SSE stream reported failure\""));
+    assert!(body.contains(
+        "\"message\":\"[upstream_stream_error_event] upstream SSE stream reported failure\""
+    ));
+    assert_eq!(
+        body.matches("[upstream_stream_error_event]").count(),
+        2,
+        "each Responses error carrier should contain one stable prefix: {body}"
+    );
     assert!(body.contains("\"param\":null"));
     assert!(body.contains("\"delta\":\"one\""));
     assert!(body.contains("\"sequence_number\":5"));
