@@ -7,9 +7,10 @@ use crate::state::{
     DownstreamUsageSummary, EnrichedUsageLog, FreekeySyncError, FreekeySyncItem,
     GlobalContextProfile, KeyModelDiscoveryResult, ModelQualificationApplySummary,
     ModelQualificationEvidence, ModelQualificationLevel, ResolvedLogWindow, RouteHealthSnapshotDto,
-    RuntimeCoordinationError, SummaryRange, UpstreamConfig, UpstreamMutationError,
-    UpstreamQualificationDecision, UsageLog, UsageLogQuery,
+    RuntimeCoordinationError, RuntimeSettings, RuntimeSettingsUpdateError, SummaryRange,
+    UpstreamConfig, UpstreamMutationError, UpstreamQualificationDecision, UsageLog, UsageLogQuery,
 };
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -821,6 +822,93 @@ pub(super) async fn admin_set_global_context_profiles(
         "global_context_profiles": snapshot.global_context_profiles,
     }))
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RuntimeSettingsUpdatePayload {
+    expected_revision: u64,
+    settings: RuntimeSettings,
+}
+
+pub(super) async fn admin_get_runtime_settings(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.runtime_settings_response().await)
+}
+
+pub(super) async fn admin_update_runtime_settings(
+    State(state): State<AppState>,
+    payload: Result<Json<RuntimeSettingsUpdatePayload>, JsonRejection>,
+) -> Response {
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(status = %error.status(), "rejected malformed runtime settings request");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "runtime_settings_request_invalid",
+                        "message": "Invalid runtime settings request"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match state
+        .update_runtime_settings(payload.expected_revision, payload.settings)
+        .await
+    {
+        Ok(update) => Json(update).into_response(),
+        Err(RuntimeSettingsUpdateError::Validation(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "runtime_settings_invalid",
+                    "message": error.message(),
+                    "field": error.field()
+                }
+            })),
+        )
+            .into_response(),
+        Err(RuntimeSettingsUpdateError::RevisionConflict {
+            current_revision, ..
+        }) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "code": "runtime_settings_revision_conflict",
+                    "message": "Runtime settings were modified by another administrator",
+                    "current_revision": current_revision
+                }
+            })),
+        )
+            .into_response(),
+        Err(RuntimeSettingsUpdateError::RevisionExhausted) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "code": "runtime_settings_revision_exhausted",
+                    "message": "Runtime settings revision is exhausted"
+                }
+            })),
+        )
+            .into_response(),
+        Err(RuntimeSettingsUpdateError::Persist(error)) => {
+            tracing::error!(kind = ?error.kind(), "failed to persist runtime settings");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": {
+                        "code": "runtime_settings_persist_failed",
+                        "message": "Failed to save runtime settings"
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,5 +1,6 @@
 use super::types::AppConfig;
 use serde::{Deserialize, Serialize};
+use std::io;
 use thiserror::Error;
 
 pub const RUNTIME_SETTINGS_SCHEMA_VERSION: u32 = 1;
@@ -103,6 +104,30 @@ pub struct RuntimeSettingsDocument {
     pub settings: RuntimeSettings,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSettingsSource {
+    Startup,
+    Persisted,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeSettingsResponse {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub source: RuntimeSettingsSource,
+    pub settings: RuntimeSettings,
+    pub restart_required: bool,
+    pub restart_required_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeSettingsUpdate {
+    #[serde(flatten)]
+    pub response: RuntimeSettingsResponse,
+    pub applied_immediately: Vec<String>,
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 #[error("invalid runtime setting {field}: {message}")]
 pub struct RuntimeSettingsValidationError {
@@ -118,6 +143,23 @@ impl RuntimeSettingsValidationError {
     pub fn message(&self) -> &'static str {
         self.message
     }
+}
+
+#[derive(Debug, Error)]
+pub enum RuntimeSettingsUpdateError {
+    #[error(transparent)]
+    Validation(#[from] RuntimeSettingsValidationError),
+    #[error(
+        "runtime settings revision conflict: expected {expected_revision}, current {current_revision}"
+    )]
+    RevisionConflict {
+        expected_revision: u64,
+        current_revision: u64,
+    },
+    #[error("runtime settings revision is exhausted")]
+    RevisionExhausted,
+    #[error("failed to persist runtime settings")]
+    Persist(#[source] io::Error),
 }
 
 impl RuntimeSettingsDocument {
@@ -437,6 +479,20 @@ impl RuntimeSettings {
 
         Ok(self)
     }
+}
+
+pub(super) fn differing_runtime_setting_fields(
+    left: &RuntimeSettings,
+    right: &RuntimeSettings,
+    fields: &[&str],
+) -> Vec<String> {
+    let left = serde_json::to_value(left).expect("runtime settings must serialize");
+    let right = serde_json::to_value(right).expect("runtime settings must serialize");
+    fields
+        .iter()
+        .filter(|field| left.get(**field) != right.get(**field))
+        .map(|field| (*field).to_string())
+        .collect()
 }
 
 fn invalid(field: &'static str, message: &'static str) -> RuntimeSettingsValidationError {

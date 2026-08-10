@@ -118,8 +118,10 @@ pub use route_health::{
     RouteRecovery, RouteSetAggregateKey, DEFAULT_ROUTE_HEALTH_HALF_OPEN_TTL_SECONDS,
     ROUTE_HEALTH_GLOBAL_CAPACITY, ROUTE_HEALTH_PER_UPSTREAM_CAPACITY,
 };
+use runtime_settings::differing_runtime_setting_fields;
 pub use runtime_settings::{
-    RuntimeSettings, RuntimeSettingsDocument, RuntimeSettingsValidationError,
+    RuntimeSettings, RuntimeSettingsDocument, RuntimeSettingsResponse, RuntimeSettingsSource,
+    RuntimeSettingsUpdate, RuntimeSettingsUpdateError, RuntimeSettingsValidationError,
     IMMEDIATE_RUNTIME_SETTING_FIELDS, RESTART_RUNTIME_SETTING_FIELDS,
     RUNTIME_SETTINGS_SCHEMA_VERSION,
 };
@@ -2161,6 +2163,125 @@ impl AppState {
 
     pub fn startup_runtime_settings(&self) -> &RuntimeSettings {
         &self.startup_runtime_settings
+    }
+
+    fn runtime_settings_document(
+        &self,
+        state: &PersistedState,
+    ) -> (RuntimeSettingsSource, RuntimeSettingsDocument) {
+        if let Some(document) = state
+            .runtime_settings
+            .as_ref()
+            .filter(|document| document.schema_version == RUNTIME_SETTINGS_SCHEMA_VERSION)
+            .and_then(|document| {
+                document
+                    .settings
+                    .clone()
+                    .validate_and_normalize()
+                    .ok()
+                    .map(|settings| RuntimeSettingsDocument {
+                        settings,
+                        ..document.clone()
+                    })
+            })
+        {
+            return (RuntimeSettingsSource::Persisted, document);
+        }
+
+        (
+            RuntimeSettingsSource::Startup,
+            RuntimeSettingsDocument {
+                schema_version: RUNTIME_SETTINGS_SCHEMA_VERSION,
+                revision: 0,
+                updated_at: 0,
+                settings: self.runtime_settings.load_full().as_ref().clone(),
+            },
+        )
+    }
+
+    fn runtime_settings_response_for(
+        &self,
+        source: RuntimeSettingsSource,
+        document: RuntimeSettingsDocument,
+    ) -> RuntimeSettingsResponse {
+        let restart_required_fields = differing_runtime_setting_fields(
+            self.startup_runtime_settings.as_ref(),
+            &document.settings,
+            RESTART_RUNTIME_SETTING_FIELDS,
+        );
+        RuntimeSettingsResponse {
+            schema_version: document.schema_version,
+            revision: document.revision,
+            source,
+            settings: document.settings,
+            restart_required: !restart_required_fields.is_empty(),
+            restart_required_fields,
+        }
+    }
+
+    pub async fn runtime_settings_response(&self) -> RuntimeSettingsResponse {
+        let state = self.inner.lock().await;
+        let (source, document) = self.runtime_settings_document(&state);
+        self.runtime_settings_response_for(source, document)
+    }
+
+    pub async fn update_runtime_settings(
+        &self,
+        expected_revision: u64,
+        settings: RuntimeSettings,
+    ) -> Result<RuntimeSettingsUpdate, RuntimeSettingsUpdateError> {
+        let settings = settings.validate_and_normalize()?;
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let mut state = self.inner.lock().await;
+        let (_, current_document) = self.runtime_settings_document(&state);
+
+        if current_document.revision != expected_revision {
+            return Err(RuntimeSettingsUpdateError::RevisionConflict {
+                expected_revision,
+                current_revision: current_document.revision,
+            });
+        }
+
+        let revision = current_document
+            .revision
+            .checked_add(1)
+            .ok_or(RuntimeSettingsUpdateError::RevisionExhausted)?;
+        let applied_immediately = differing_runtime_setting_fields(
+            &current_document.settings,
+            &settings,
+            IMMEDIATE_RUNTIME_SETTING_FIELDS,
+        );
+        let document = RuntimeSettingsDocument {
+            schema_version: RUNTIME_SETTINGS_SCHEMA_VERSION,
+            revision,
+            updated_at: unix_seconds(),
+            settings: settings.clone(),
+        };
+        let mut candidate_state = state.clone();
+        candidate_state.runtime_settings = Some(document.clone());
+
+        self.config_store
+            .persist_config(&candidate_state)
+            .await
+            .map_err(RuntimeSettingsUpdateError::Persist)?;
+
+        state.runtime_settings = Some(document.clone());
+        self.runtime_settings.store(Arc::new(settings));
+        let response = self.runtime_settings_response_for(
+            RuntimeSettingsSource::Persisted,
+            document,
+        );
+        tracing::info!(
+            revision,
+            applied_immediately = ?applied_immediately,
+            restart_required_fields = ?response.restart_required_fields,
+            "updated runtime settings"
+        );
+
+        Ok(RuntimeSettingsUpdate {
+            response,
+            applied_immediately,
+        })
     }
 
     pub fn capability_snapshot(&self) -> Arc<CapabilityRuntimeSnapshot> {

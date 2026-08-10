@@ -1765,6 +1765,15 @@ pub fn build_router(state: AppState) -> Router {
                 )),
         )
         .route(
+            "/api/admin/runtime-settings",
+            get(admin_get_runtime_settings)
+                .put(admin_update_runtime_settings)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    admin_auth_middleware,
+                )),
+        )
+        .route(
             "/api/admin/integrations/freekey/sync",
             post(admin_sync_freekey_upstreams).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
