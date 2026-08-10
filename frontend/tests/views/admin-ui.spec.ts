@@ -136,6 +136,19 @@ describe('admin ui structure', () => {
     expect(page).not.toContain('updateInlineConcurrencyStatus')
   })
 
+  it('configures one per-key concurrency value across upstream form paths', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('label="每 Key 最大并发"')
+    expect(page).toContain('v-model="form.max_concurrency"')
+    expect(page).toContain('adminApi.getRuntimeSettings()')
+    expect(page).toContain('default_upstream_max_concurrency')
+    expect(page).toContain('max_concurrency: row.max_concurrency')
+    expect(page).toContain('submitData.max_concurrency = Number(form.value.max_concurrency)')
+    expect(page).toContain('max_concurrency: Number(form.value.max_concurrency)')
+    expect(page).not.toContain('delete submitData.max_concurrency')
+  })
+
   it('labels indexed model discovery results without key prefixes', () => {
     const page = source('views/admin/Upstreams.vue')
 

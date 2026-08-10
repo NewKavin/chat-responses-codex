@@ -198,6 +198,15 @@
           />
           <span class="form-hint">多行输入多个 Key，每行一个；单 Key 时不影响原有行为</span>
         </el-form-item>
+        <el-form-item label="每 Key 最大并发" prop="max_concurrency">
+          <el-input-number
+            v-model="form.max_concurrency"
+            :min="1"
+            :max="4294967295"
+            :step="1"
+            controls-position="right"
+          />
+        </el-form-item>
         <el-form-item label="协议" prop="protocols">
           <el-select v-model="form.protocols" multiple>
             <el-option label="ChatCompletions" value="ChatCompletions" />
@@ -472,6 +481,7 @@ const rules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
   base_url: [{ required: true, message: '请输入Base URL', trigger: 'blur' }],
   api_key: [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  max_concurrency: [{ required: true, message: '请输入每 Key 最大并发', trigger: 'change' }],
   protocols: [{ required: true, message: '请选择协议', trigger: 'change' }]
 }
 
@@ -581,7 +591,18 @@ const displayKeyCount = (value: UpstreamConfig) => {
   return new Set(keys).size
 }
 
-const handleCreate = () => {
+const handleCreate = async () => {
+  let defaultMaxConcurrency: number
+  try {
+    const { data } = await adminApi.getRuntimeSettings()
+    defaultMaxConcurrency = Number(data.settings.default_upstream_max_concurrency)
+    if (!Number.isSafeInteger(defaultMaxConcurrency) || defaultMaxConcurrency < 1) {
+      throw new Error('invalid default_upstream_max_concurrency')
+    }
+  } catch {
+    ElMessage.error('加载新建上游默认并发失败')
+    return
+  }
   dialogMode.value = 'create'
   contextConfigTab.value = 'overrides'
   clearDefaultContext.value = false
@@ -597,6 +618,7 @@ const handleCreate = () => {
     protocols: ['ChatCompletions'],
     api_key_models: [],
     supported_models: [],
+    max_concurrency: defaultMaxConcurrency,
     default_model_context: {
       context_limit: 200000,
       output_reserve: 4096,
@@ -637,6 +659,7 @@ const handleCopy = (row: UpstreamConfig) => {
     active: row.active,
     model_contexts: row.model_contexts ? [...row.model_contexts] : [],
     priority: row.priority,
+    max_concurrency: row.max_concurrency,
     premium_models: [...(row.premium_models || [])],
     protect_premium_quota: row.protect_premium_quota,
     strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
@@ -668,6 +691,7 @@ const handleEdit = (row: UpstreamConfig) => {
     })),
     protocol: protocols[0] as UpstreamConfig['protocol'],
     protocols,
+    max_concurrency: row.max_concurrency,
     strip_nonstandard_chat_fields: Boolean(row.strip_nonstandard_chat_fields),
     default_model_context: row.default_model_context
       ? {
@@ -698,7 +722,7 @@ const handleSubmit = async () => {
     delete submitData.requests_per_minute
     delete submitData.request_quota_window_hours
     delete submitData.request_quota_requests
-    delete submitData.max_concurrency
+    submitData.max_concurrency = Number(form.value.max_concurrency)
     submitData.model_contexts = (submitData.model_contexts || [])
       .map((item: any) => ({
         slug: String(item.slug || '').trim(),
@@ -784,6 +808,7 @@ const handleSubmit = async () => {
           api_key_models: submitData.api_key_models || [],
           protocol: protocols[0] ? String(protocols[0]) : 'ChatCompletions',
           protocols: protocols.map(p => String(p)),
+          max_concurrency: Number(form.value.max_concurrency),
           active: submitData.active,
           strip_nonstandard_chat_fields: Boolean(submitData.strip_nonstandard_chat_fields)
         }

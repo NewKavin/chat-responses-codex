@@ -651,10 +651,18 @@ impl AppState {
                     {
                         upstream.requests_per_minute = requests_per_minute as u32;
                     }
-                    if let Some(max_concurrency) =
-                        updates.get("max_concurrency").and_then(|v| v.as_u64())
-                    {
-                        upstream.max_concurrency = max_concurrency as u32;
+                    if let Some(max_concurrency) = updates.get("max_concurrency") {
+                        let max_concurrency = max_concurrency
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                UpstreamMutationError::InvalidInput(
+                                    "max_concurrency must be an integer between 1 and 4294967295"
+                                        .to_string(),
+                                )
+                            })?;
+                        upstream.max_concurrency = max_concurrency;
                     }
                     if let Some(priority_value) = updates.get("priority") {
                         let priority = priority_value

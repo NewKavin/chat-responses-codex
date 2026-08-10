@@ -267,6 +267,9 @@ impl UpstreamConfig {
     }
 
     pub fn validate_configuration(&self) -> Result<(), String> {
+        if self.max_concurrency == 0 {
+            return Err("max_concurrency must be greater than zero".to_string());
+        }
         if self
             .continuation_provider_group
             .as_ref()

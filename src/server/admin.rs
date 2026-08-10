@@ -1042,8 +1042,8 @@ pub(super) struct BatchCreateUpstreamPayload {
     request_quota_window_hours: u32,
     #[serde(default = "default_batch_request_quota_requests")]
     request_quota_requests: u32,
-    #[serde(default = "default_batch_max_concurrency")]
-    max_concurrency: u32,
+    #[serde(default)]
+    max_concurrency: Option<u32>,
     #[serde(default = "default_batch_active")]
     active: bool,
     #[serde(default)]
@@ -1058,9 +1058,6 @@ fn default_batch_request_quota_window_hours() -> u32 {
 }
 fn default_batch_request_quota_requests() -> u32 {
     500
-}
-fn default_batch_max_concurrency() -> u32 {
-    10
 }
 fn default_batch_active() -> bool {
     true
@@ -1381,6 +1378,16 @@ pub(super) async fn admin_create_upstreams_batch(
 ) -> impl IntoResponse {
     let runtime_settings = state.runtime_settings();
     let admin_timeout = runtime_settings.admin_upstream_timeout_seconds.max(1);
+    let max_concurrency = payload
+        .max_concurrency
+        .unwrap_or(runtime_settings.default_upstream_max_concurrency);
+    if max_concurrency == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "max_concurrency must be greater than zero"}})),
+        )
+            .into_response();
+    }
     if payload.keys.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1503,7 +1510,7 @@ pub(super) async fn admin_create_upstreams_batch(
         requests_per_minute: payload.requests_per_minute,
         request_quota_window_hours: payload.request_quota_window_hours,
         request_quota_requests: payload.request_quota_requests,
-        max_concurrency: payload.max_concurrency,
+        max_concurrency,
         active: payload.active,
         auto_managed: automatic_discovery,
         managed_source: automatic_discovery.then(|| "batch".to_string()),

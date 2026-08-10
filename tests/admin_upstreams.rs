@@ -1011,6 +1011,7 @@ async fn test_upstreams_create_adds_new_upstream() {
         "api_key": "sk-new-key",
         "protocol": "ChatCompletions",
         "supported_models": ["gpt-4"],
+        "max_concurrency": 3,
         "active": true
     });
 
@@ -1033,7 +1034,108 @@ async fn test_upstreams_create_adds_new_upstream() {
     // Verify the upstream was added
     let snapshot = state.snapshot().await;
     assert_eq!(snapshot.upstreams.len(), 3);
-    assert!(snapshot.upstreams.iter().any(|u| u.id == "upstream-3"));
+    let created = snapshot
+        .upstreams
+        .iter()
+        .find(|upstream| upstream.id == "upstream-3")
+        .unwrap();
+    assert_eq!(created.max_concurrency, 3);
+}
+
+#[tokio::test]
+async fn upstream_create_batch_and_update_reject_zero_max_concurrency() {
+    let state = create_test_state();
+    let app = build_router(state);
+    let token = get_admin_token(&app, "admin", "admin").await;
+
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "id": "zero-single",
+                        "name": "Zero Single",
+                        "base_url": "https://example.com",
+                        "api_key": "single-key",
+                        "protocol": "ChatCompletions",
+                        "supported_models": ["model-a"],
+                        "max_concurrency": 0
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::BAD_REQUEST);
+
+    let batch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/upstreams/batch")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "Zero Batch",
+                        "base_url": "https://example.com",
+                        "keys": ["batch-key-a", "batch-key-b"],
+                        "supported_models": ["model-a"],
+                        "max_concurrency": 0
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), StatusCode::BAD_REQUEST);
+
+    let update = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/admin/upstreams/upstream-1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"max_concurrency": 0}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn changing_default_upstream_concurrency_does_not_mutate_existing_upstreams() {
+    let state = create_test_state();
+    let before = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .map(|upstream| (upstream.id.clone(), upstream.max_concurrency))
+        .collect::<Vec<_>>();
+    let mut settings = (*state.runtime_settings()).clone();
+    settings.default_upstream_max_concurrency = 17;
+
+    state.update_runtime_settings(0, settings).await.unwrap();
+
+    let after = state
+        .snapshot()
+        .await
+        .upstreams
+        .iter()
+        .map(|upstream| (upstream.id.clone(), upstream.max_concurrency))
+        .collect::<Vec<_>>();
+    assert_eq!(after, before);
 }
 
 #[tokio::test]
@@ -4203,6 +4305,9 @@ async fn batch_create_uses_explicit_models_without_automatic_discovery_by_defaul
     });
 
     let state = create_test_state_with_upstreams(vec![]);
+    let mut settings = (*state.runtime_settings()).clone();
+    settings.default_upstream_max_concurrency = 7;
+    state.update_runtime_settings(0, settings).await.unwrap();
     let app = build_router(state.clone());
     let token = get_admin_token(&app, "admin", "admin").await;
     let payload = json!({
@@ -4256,6 +4361,7 @@ async fn batch_create_uses_explicit_models_without_automatic_discovery_by_defaul
         ]
     );
     assert_eq!(upstream.remark, "shared team account");
+    assert_eq!(upstream.max_concurrency, 7);
     assert!(!upstream.auto_managed);
     assert_eq!(upstream.last_synced_at, 0);
     assert!(upstream.keys_for_model("unselected-model").is_empty());
@@ -4304,7 +4410,8 @@ async fn batch_explicit_model_mapping_skips_discovery_when_auto_discovery_is_ena
         "api_key_models": [
             {"api_key": "key-a", "supported_models": ["manual-model"]},
             {"api_key": "key-b", "supported_models": ["manual-model"]}
-        ]
+        ],
+        "max_concurrency": 5
     });
 
     let response = app
@@ -4336,6 +4443,7 @@ async fn batch_explicit_model_mapping_skips_discovery_when_auto_discovery_is_ena
         .unwrap();
     assert_eq!(upstream.supported_models, vec!["manual-model"]);
     assert_eq!(upstream.api_key_models.len(), 2);
+    assert_eq!(upstream.max_concurrency, 5);
 }
 
 // ============================================================================

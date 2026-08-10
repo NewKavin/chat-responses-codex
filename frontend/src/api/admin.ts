@@ -43,6 +43,7 @@ export interface BatchCreateUpstreamPayload {
   api_key_models: ApiKeyModelConfig[]
   protocol?: string
   protocols?: string[]
+  max_concurrency?: number
   active?: boolean
   strip_nonstandard_chat_fields?: boolean
 }
