@@ -37,7 +37,7 @@
 - Test: `tests/unit/runtime_settings.rs`
 - Modify: `src/state/runtime_settings.rs` to include `tests/unit/runtime_settings.rs` under `#[cfg(test)]`
 
-- [ ] **Step 1: Write failing domain tests**
+- [x] **Step 1: Write failing domain tests**
 
 Add tests that construct `RuntimeSettings::from_app_config`, normalize strings
 and probe delays, reject invalid cooldown and stream relationships, and apply
@@ -63,13 +63,13 @@ fn persisted_runtime_settings_override_managed_config_without_touching_secrets()
 }
 ```
 
-- [ ] **Step 2: Run the domain test and verify RED**
+- [x] **Step 2: Run the domain test and verify RED**
 
 Run: `rtk cargo test --lib runtime_settings`
 
 Expected: FAIL because the module and types do not exist.
 
-- [ ] **Step 3: Implement the settings model**
+- [x] **Step 3: Implement the settings model**
 
 Define the complete non-secret settings object, document, sources, constants,
 validation error, immediate/restart field arrays, normalization, change
@@ -135,14 +135,14 @@ pub struct RuntimeSettingsDocument {
 Use explicit field assignment for `from_app_config` and `apply_to_app_config`;
 do not serialize `AppConfig` as an implementation shortcut.
 
-- [ ] **Step 4: Run the domain tests and verify GREEN**
+- [x] **Step 4: Run the domain tests and verify GREEN**
 
 Run: `rtk cargo test --lib runtime_settings`
 
 Expected: PASS with all normalization, validation, overlay, metadata, and
 secret-preservation tests passing.
 
-- [ ] **Step 5: Commit the domain model**
+- [x] **Step 5: Commit the domain model**
 
 ```bash
 rtk git add src/state.rs src/state/runtime_settings.rs tests/unit/runtime_settings.rs
@@ -159,7 +159,7 @@ rtk git commit -m "feat(settings): define validated runtime settings"
 - Test: `tests/state_store.rs`
 - Test: `tests/postgres_roundtrip.rs`
 
-- [ ] **Step 1: Write failing persistence tests**
+- [x] **Step 1: Write failing persistence tests**
 
 Add a file-state round trip and a startup overlay test. Extend the existing
 PostgreSQL round-trip fixture with the same document assertion.
@@ -182,13 +182,13 @@ async fn saved_runtime_settings_override_legacy_startup_config() {
 }
 ```
 
-- [ ] **Step 2: Run persistence tests and verify RED**
+- [x] **Step 2: Run persistence tests and verify RED**
 
 Run: `rtk cargo test --test state_store runtime_settings`
 
 Expected: FAIL because `PersistedState` and stores do not retain the document.
 
-- [ ] **Step 3: Implement persistence and startup ordering**
+- [x] **Step 3: Implement persistence and startup ordering**
 
 Add this backward-compatible state field:
 
@@ -213,7 +213,7 @@ Load the singleton into `PersistedState` and upsert/delete it inside
 before `RuntimeCoordinationBackend`, clients, registries, queues, and background
 services are constructed.
 
-- [ ] **Step 4: Run file and PostgreSQL persistence tests**
+- [x] **Step 4: Run file and PostgreSQL persistence tests**
 
 Run: `rtk cargo test --test state_store runtime_settings`
 
@@ -223,7 +223,7 @@ Expected: PASS. PostgreSQL tests may report their established skip result when
 the test database is unavailable; do not treat an unexpected connection error
 as a pass.
 
-- [ ] **Step 5: Commit persistence**
+- [x] **Step 5: Commit persistence**
 
 ```bash
 rtk git add src/state.rs src/state/types.rs src/state/file_store.rs src/state/postgres.rs tests/state_store.rs tests/postgres_roundtrip.rs
@@ -238,7 +238,7 @@ rtk git commit -m "feat(settings): persist runtime settings"
 - Modify: `src/server/admin.rs`
 - Modify: `src/server/gateway.rs`
 
-- [ ] **Step 1: Write failing admin API tests**
+- [x] **Step 1: Write failing admin API tests**
 
 Cover unauthenticated GET/PUT, revision-zero startup response, secret absence,
 successful PUT, invalid settings, stale revision, restart metadata, and a
@@ -265,13 +265,13 @@ async fn runtime_settings_put_is_revisioned_and_never_exposes_secrets() {
 }
 ```
 
-- [ ] **Step 2: Run API tests and verify RED**
+- [x] **Step 2: Run API tests and verify RED**
 
 Run: `rtk cargo test --test admin_runtime_settings`
 
 Expected: FAIL with 404 for the new endpoint.
 
-- [ ] **Step 3: Implement state update and handlers**
+- [x] **Step 3: Implement state update and handlers**
 
 Add `Arc<ArcSwap<RuntimeSettings>>` and immutable startup settings to
 `AppState`. Implement:
@@ -292,13 +292,13 @@ swap the immediate snapshot. Add GET/PUT handlers and route both through the
 existing admin JWT middleware. Map validation to 400, stale revision to 409,
 and persistence failures to 500.
 
-- [ ] **Step 4: Run API tests and verify GREEN**
+- [x] **Step 4: Run API tests and verify GREEN**
 
 Run: `rtk cargo test --test admin_runtime_settings`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit API behavior**
+- [x] **Step 5: Commit API behavior**
 
 ```bash
 rtk git add src/state.rs src/server/admin.rs src/server/gateway.rs tests/admin_runtime_settings.rs
@@ -317,14 +317,14 @@ rtk git commit -m "feat(settings): add admin runtime settings API"
 - Test: `tests/admin_runtime_settings.rs`
 - Test: `tests/gateway.rs` modules covering route retries, hedging, probes, and streams
 
-- [ ] **Step 1: Write one failing behavior test per consumer family**
+- [x] **Step 1: Write one failing behavior test per consumer family**
 
 Prove an update affects a later route-retry budget, capability probe timeout,
 affinity decision, hedging configuration, and stream timeout without creating
 a new `AppState`. Prove a restart-only HTTP timeout does not mutate
 `state.config` in the same process and appears in `restart_required_fields`.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `rtk cargo test --test admin_runtime_settings immediate_`
 
@@ -332,7 +332,7 @@ Run: `rtk cargo test --test gateway runtime_settings_`
 
 Expected: FAIL because consumers still read immutable `state.config`.
 
-- [ ] **Step 3: Switch only approved immediate consumers**
+- [x] **Step 3: Switch only approved immediate consumers**
 
 At the start of each request/job, load one snapshot and use it for that
 operation:
@@ -349,7 +349,7 @@ let retry_policy = RouteRetryPolicy::new(
 Do not switch restart-only consumers. Avoid loading the snapshot repeatedly
 inside tight loops; one operation must use one coherent settings revision.
 
-- [ ] **Step 4: Verify immediate and restart behavior**
+- [x] **Step 4: Verify immediate and restart behavior**
 
 Run: `rtk cargo test --test admin_runtime_settings immediate_`
 
@@ -359,7 +359,7 @@ Run: `rtk cargo test --lib runtime_settings`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit dynamic consumers**
+- [x] **Step 5: Commit dynamic consumers**
 
 ```bash
 rtk git add src/state.rs src/server/admin.rs src/server/gateway.rs src/server/gateway tests/admin_runtime_settings.rs tests/gateway
@@ -378,7 +378,7 @@ rtk git commit -m "feat(settings): apply safe settings at runtime"
 - Modify: `frontend/src/router/index.ts`
 - Modify or create focused frontend route/API specs
 
-- [ ] **Step 1: Write failing frontend catalog tests**
+- [x] **Step 1: Write failing frontend catalog tests**
 
 Define tests for all 39 managed fields, unique keys, six groups, immediate vs
 restart mode, probe-delay parsing, local validation, dirty-state comparison,
@@ -394,13 +394,13 @@ it('catalogs every managed setting exactly once', () => {
 })
 ```
 
-- [ ] **Step 2: Run frontend test and verify RED**
+- [x] **Step 2: Run frontend test and verify RED**
 
 Run: `rtk npm test -- runtimeSettings.spec.ts`
 
 Expected: FAIL because the catalog does not exist.
 
-- [ ] **Step 3: Implement types, API, catalog, page, route, and navigation**
+- [x] **Step 3: Implement types, API, catalog, page, route, and navigation**
 
 Add exact TypeScript interfaces matching Rust. Add:
 
@@ -417,7 +417,7 @@ comma-separated probe-delay input. Use Lucide `Save`, `RotateCcw`, and
 `Settings` icons. Keep stable form widths, responsive two-column rows, and an
 unframed tabbed layout. Handle 409 by showing a reload action.
 
-- [ ] **Step 4: Run frontend tests, type checking, and build**
+- [x] **Step 4: Run frontend tests, type checking, and build**
 
 Run: `rtk npm test -- runtimeSettings.spec.ts`
 
@@ -427,7 +427,7 @@ Run: `rtk npm run build`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit frontend**
+- [x] **Step 5: Commit frontend**
 
 ```bash
 rtk git add frontend/src/types/index.ts frontend/src/api/admin.ts frontend/src/utils/runtimeSettings.ts frontend/src/utils/runtimeSettings.spec.ts frontend/src/views/admin/Settings.vue frontend/src/App.vue frontend/src/router/index.ts
@@ -444,13 +444,13 @@ rtk git commit -m "feat(settings): add admin settings page"
 - Modify: `tests/docker.rs`
 - Modify: `tests/templates.rs`
 
-- [ ] **Step 1: Write failing configuration contract tests**
+- [x] **Step 1: Write failing configuration contract tests**
 
 Assert managed keys are absent from `.env.example`, bootstrap/secret keys
 remain, Compose marks behavior mappings as legacy first-run fallbacks, and docs
 state persisted-settings precedence.
 
-- [ ] **Step 2: Run configuration tests and verify RED**
+- [x] **Step 2: Run configuration tests and verify RED**
 
 Run: `rtk cargo test --test docker runtime_settings`
 
@@ -458,7 +458,7 @@ Run: `rtk cargo test --test templates runtime_settings`
 
 Expected: FAIL because templates still advertise every behavior variable.
 
-- [ ] **Step 3: Clean templates and document migration**
+- [x] **Step 3: Clean templates and document migration**
 
 Reduce `.env.example` to bootstrap and secret values. Retain one-release
 Compose pass-through with a clear legacy comment. Update docs with:
@@ -472,7 +472,7 @@ Bootstrap connections and credentials remain environment-only.
 Do not change `scripts/deploy.sh` and do not overwrite an existing operator
 `.env`.
 
-- [ ] **Step 4: Run configuration tests and verify GREEN**
+- [x] **Step 4: Run configuration tests and verify GREEN**
 
 Run: `rtk cargo test --test docker runtime_settings`
 
@@ -480,7 +480,7 @@ Run: `rtk cargo test --test templates runtime_settings`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit migration docs**
+- [x] **Step 5: Commit migration docs**
 
 ```bash
 rtk git add .env.example docker-compose.yml README.md DEPLOYMENT.md tests/docker.rs tests/templates.rs
@@ -494,7 +494,7 @@ rtk git commit -m "docs(settings): move behavior tuning to admin"
   focused failing test beside the owning suite before changing its exact
   production file.
 
-- [ ] **Step 1: Format and run focused backend suites**
+- [x] **Step 1: Format and run focused backend suites**
 
 Run: `rtk cargo fmt --check`
 
@@ -508,14 +508,14 @@ Run: `rtk cargo test --test docker runtime_settings`
 
 Expected: PASS with zero failures.
 
-- [ ] **Step 2: Run full backend verification**
+- [x] **Step 2: Run full backend verification**
 
 Run: `rtk cargo test`
 
 Expected: all non-environment-gated tests pass; report any established ignored
 or skipped tests separately.
 
-- [ ] **Step 3: Run full frontend verification**
+- [x] **Step 3: Run full frontend verification**
 
 Run: `rtk npm test`
 
@@ -525,7 +525,7 @@ Run: `rtk npm run build`
 
 Expected: PASS.
 
-- [ ] **Step 4: Start the development server and inspect desktop/mobile**
+- [x] **Step 4: Start the development server and inspect desktop/mobile**
 
 Run an available frontend development port, authenticate against a local test
 gateway, and capture the settings page at desktop and mobile widths. Verify no
@@ -533,7 +533,7 @@ overlap, clipped labels, unstable control widths, nested cards, or missing
 restart status. Exercise load, edit, reset, save, validation, and stale-revision
 states.
 
-- [ ] **Step 5: Final repository check**
+- [x] **Step 5: Final repository check**
 
 Run: `rtk git status --short`
 
