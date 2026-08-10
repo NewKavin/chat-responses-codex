@@ -42,6 +42,9 @@ Saved values from Admin > Settings override legacy behavior environment
 variables. Existing variables are used only until the first settings save.
 Bootstrap connections and credentials remain environment-only.
 
+Capability bootstrap only replaces a stored policy at revision 0. Set
+`CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=false` to keep revision zero and opt out.
+
 The first save persists the complete settings document. Later starts use that
 document instead of legacy behavior variables, and the gateway never rewrites
 the operator's `.env`. The checked-in Compose file no longer passes through behavior environment
@@ -191,6 +194,7 @@ docker run -d \
   -e LOG_PATH=/logs/chat-responses-codex.log \
   -e RUST_LOG=info \
   -e TZ=Asia/Shanghai \
+  -e CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=true \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD='<admin_password>' \
   -e JWT_SECRET='<jwt_secret_at_least_32_characters>' \

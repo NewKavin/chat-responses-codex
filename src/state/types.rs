@@ -220,7 +220,7 @@ impl Default for AppConfig {
             capability_probe_queue_capacity: 256,
             capability_probe_request_timeout_seconds: 20,
             automatic_capability_probes_enabled: false,
-            capability_policy_bootstrap_on_zero: false,
+            capability_policy_bootstrap_on_zero: true,
             admin_logs_page_size_max: 200,
             upstream_http_pool_max_idle_per_host: 32,
             upstream_user_agent: "codex/0.144.6".into(),

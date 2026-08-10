@@ -3,8 +3,8 @@ use axum::http::{header, Method, Request, StatusCode};
 use chat_responses_codex::auth::generate_admin_token;
 use chat_responses_codex::capabilities::{
     Capability, CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, DialectProfileKey,
-    DialectProfileState, EvidenceState, ProbeProfileOutcome, RouteCapabilityOverride,
-    SemanticPolicy, UpstreamDialectProfile, WireProtocol,
+    DialectProfileState, EvidenceState, ProbeConfiguration, ProbeProfileOutcome,
+    RouteCapabilityOverride, SemanticPolicy, UpstreamDialectProfile, WireProtocol,
 };
 use chat_responses_codex::keys::{anonymous_route_id, upstream_key_fingerprint};
 use chat_responses_codex::server::{build_router, CapabilityProbeService};
@@ -207,6 +207,28 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+async fn assert_probe_error(
+    response: axum::response::Response,
+    expected_status: StatusCode,
+    expected_code: &str,
+    expected_message: &str,
+) {
+    assert_eq!(response.status(), expected_status);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], expected_code);
+    assert_eq!(body["error"]["message"], expected_message);
+    assert!(!body.to_string().contains("upstream-secret"));
+}
+
+fn manual_probe_request(model: &str) -> Value {
+    json!({
+        "upstream_id": "up-1",
+        "exposed_model_slug": model,
+        "runtime_model_slug": model,
+        "protocol": "chat_completions"
+    })
+}
+
 #[tokio::test]
 async fn admin_can_export_import_and_inspect_capability_sources() {
     let fixture = AdminCapabilityFixture::new().await;
@@ -250,6 +272,7 @@ async fn invalid_import_is_400_and_keeps_previous_revision() {
 #[tokio::test]
 async fn manual_probe_only_enqueues_and_returns_accepted() {
     let fixture = AdminCapabilityFixture::new().await;
+    fixture.import_revision(1).await;
     let response = fixture
         .post_json(
             "/api/admin/capabilities/probe",
@@ -277,6 +300,123 @@ async fn capability_probe_all_rejects_revision_zero_policy() {
         response_json(response).await["error"]["code"],
         "capability_policy_missing"
     );
+}
+
+#[tokio::test]
+async fn manual_probe_endpoints_distinguish_policy_route_and_queue_failures() {
+    let missing =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    let mut missing_route = manual_probe_request("opaque");
+    missing_route["upstream_id"] = json!("missing");
+    assert_probe_error(
+        missing
+            .post_json("/api/admin/capabilities/probe", missing_route)
+            .await,
+        StatusCode::CONFLICT,
+        "capability_policy_missing",
+        "capability policy is required before probing",
+    )
+    .await;
+    assert_probe_error(
+        missing
+            .post_json("/api/admin/capabilities/probe-all", json!({}))
+            .await,
+        StatusCode::CONFLICT,
+        "capability_policy_missing",
+        "capability policy is required before probing",
+    )
+    .await;
+
+    let disabled =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    disabled
+        .state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            probe: ProbeConfiguration {
+                enabled: false,
+                ..ProbeConfiguration::default()
+            },
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    for response in [
+        disabled
+            .post_json(
+                "/api/admin/capabilities/probe",
+                manual_probe_request("opaque"),
+            )
+            .await,
+        disabled
+            .post_json("/api/admin/capabilities/probe-all", json!({}))
+            .await,
+    ] {
+        assert_probe_error(
+            response,
+            StatusCode::CONFLICT,
+            "capability_probe_disabled",
+            "capability probing is disabled by policy",
+        )
+        .await;
+    }
+
+    let no_routes =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    no_routes.import_revision(1).await;
+    for response in [
+        no_routes
+            .post_json(
+                "/api/admin/capabilities/probe",
+                manual_probe_request("not-configured"),
+            )
+            .await,
+        no_routes
+            .post_json(
+                "/api/admin/capabilities/probe-all",
+                json!({"models": ["not-configured"]}),
+            )
+            .await,
+    ] {
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "capability_probe_no_eligible_routes");
+        let message = body["error"]["message"]
+            .as_str()
+            .expect("no eligible routes message");
+        for expected in [
+            "active upstream",
+            "per-Key model mappings",
+            "requested model filters",
+            "supported protocols",
+        ] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+        assert!(!body.to_string().contains("upstream-secret"));
+    }
+
+    let unavailable =
+        AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    unavailable.import_revision(1).await;
+    for response in [
+        unavailable
+            .post_json(
+                "/api/admin/capabilities/probe",
+                manual_probe_request("opaque"),
+            )
+            .await,
+        unavailable
+            .post_json("/api/admin/capabilities/probe-all", json!({}))
+            .await,
+    ] {
+        assert_probe_error(
+            response,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway_capability_probe_unavailable",
+            "capability probe queue is unavailable",
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -509,6 +649,7 @@ async fn capability_discovery_unions_successful_routes_and_keeps_failures() {
 async fn admin_capability_routes_require_and_preserve_the_selected_key_identity() {
     let fixture =
         AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    fixture.import_revision(1).await;
     let mut upstream = fixture.state.upstreams().await.into_iter().next().unwrap();
     upstream.api_key = "key-a".into();
     upstream.api_keys = vec!["key-b".into()];
@@ -619,6 +760,7 @@ async fn admin_capability_views_redaction_hides_key_and_configuration_fingerprin
 async fn manual_probe_requires_exact_active_route_and_real_queue_capacity() {
     let fixture =
         AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
+    fixture.import_revision(1).await;
     let payload =
         |upstream_id: &str, exposed_model_slug: &str, runtime_model_slug: &str, protocol: &str| {
             json!({
@@ -635,7 +777,7 @@ async fn manual_probe_requires_exact_active_route_and_real_queue_capacity() {
             payload("missing", "opaque", "opaque", "chat_completions"),
         )
         .await;
-    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let unconfigured = fixture
         .post_json(
@@ -648,7 +790,7 @@ async fn manual_probe_requires_exact_active_route_and_real_queue_capacity() {
             ),
         )
         .await;
-    assert_eq!(unconfigured.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(unconfigured.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let disabled_protocol = fixture
         .post_json(
@@ -656,7 +798,7 @@ async fn manual_probe_requires_exact_active_route_and_real_queue_capacity() {
             payload("up-1", "opaque", "opaque", "responses"),
         )
         .await;
-    assert_eq!(disabled_protocol.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(disabled_protocol.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let no_worker = fixture
         .post_json(
@@ -666,7 +808,31 @@ async fn manual_probe_requires_exact_active_route_and_real_queue_capacity() {
         .await;
     assert_eq!(no_worker.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    let (sender, _receiver) = mpsc::channel(1);
+    let (sender, receiver) = mpsc::channel(1);
+    drop(receiver);
+    fixture.state.set_capability_probe_sender(sender);
+    let closed_worker = fixture
+        .post_json(
+            "/api/admin/capabilities/probe",
+            payload("up-1", "opaque", "opaque", "chat_completions"),
+        )
+        .await;
+    assert_probe_error(
+        closed_worker,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "gateway_capability_probe_unavailable",
+        "capability probe queue is unavailable",
+    )
+    .await;
+
+    let mut upstream = fixture.state.upstreams().await.into_iter().next().unwrap();
+    upstream.supported_models.push("opaque-two".into());
+    fixture
+        .state
+        .update_upstream("up-1", upstream)
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(1);
     fixture.state.set_capability_probe_sender(sender);
     let accepted = fixture
         .post_json(
@@ -680,17 +846,28 @@ async fn manual_probe_requires_exact_active_route_and_real_queue_capacity() {
     let full_queue = fixture
         .post_json(
             "/api/admin/capabilities/probe",
-            payload("up-1", "opaque", "opaque", "chat_completions"),
+            payload("up-1", "opaque-two", "opaque-two", "chat_completions"),
         )
         .await;
     assert_eq!(full_queue.status(), StatusCode::SERVICE_UNAVAILABLE);
+    receiver
+        .try_recv()
+        .expect("first distinct probe should occupy the queue");
+    let retried = fixture
+        .post_json(
+            "/api/admin/capabilities/probe",
+            payload("up-1", "opaque-two", "opaque-two", "chat_completions"),
+        )
+        .await;
+    assert_eq!(retried.status(), StatusCode::ACCEPTED);
 }
 
 #[tokio::test]
-async fn admin_manual_probe_deduplicates_identical_pending_jobs() {
+async fn admin_manual_probe_accepts_identical_pending_jobs_idempotently() {
     let fixture =
         AdminCapabilityFixture::new_with_upstream_base_url("https://example.invalid").await;
-    let (sender, _receiver) = mpsc::channel(2);
+    fixture.import_revision(1).await;
+    let (sender, mut receiver) = mpsc::channel(2);
     fixture.state.set_capability_probe_sender(sender);
     let body = json!({
         "upstream_id": "up-1",
@@ -703,10 +880,19 @@ async fn admin_manual_probe_deduplicates_identical_pending_jobs() {
         .post_json("/api/admin/capabilities/probe", body.clone())
         .await;
     assert_eq!(first.status(), StatusCode::ACCEPTED);
+    assert_eq!(response_json(first).await["queued"], true);
     let duplicate = fixture
         .post_json("/api/admin/capabilities/probe", body)
         .await;
-    assert_eq!(duplicate.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(duplicate.status(), StatusCode::ACCEPTED);
+    assert_eq!(response_json(duplicate).await["queued"], true);
+    receiver
+        .try_recv()
+        .expect("the first request should enqueue one probe batch");
+    assert!(
+        receiver.try_recv().is_err(),
+        "duplicate must not enqueue twice"
+    );
 }
 
 #[tokio::test]

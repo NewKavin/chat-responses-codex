@@ -188,6 +188,7 @@ connections and credentials remain environment-only.
 - `REDIS_ENABLED`、`REDIS_URL`、`REDIS_KEY_PREFIX`：可选多副本协调。
 - `UPSTREAM_CA_CERT_PATH`：内部 CA 信任路径。
 - `CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO`：仅用于 revision 0 的能力策略引导。
+  默认开启，仅替换 revision 0；如需保留空策略，可显式设置为 `false`。
 
 应用名称、模型发现、能力探测、路由、并发、HTTP 和日志保留统一在
 `/admin/settings` 中编辑。页面会区分“即时生效”和“重启后生效”：即时字段只影响保存之后开始的新请求，重启字段会显示待重启状态。凭据、连接串和 CA 路径不会进入该页面。
@@ -478,6 +479,8 @@ Environment configuration is limited to process bootstrap and infrastructure:
 - `REDIS_ENABLED`, `REDIS_URL`, and `REDIS_KEY_PREFIX` enable optional replica coordination.
 - `UPSTREAM_CA_CERT_PATH` adds internal CA trust.
 - `CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO` controls only the revision-zero policy bootstrap.
+  It defaults to `true`, never replaces a nonzero policy, and can be disabled with
+  `CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=false`.
 
 Use `/admin/settings` for application identity, discovery, probes, routing,
 concurrency, HTTP, and log retention. The page distinguishes settings applied

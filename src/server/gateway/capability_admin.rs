@@ -1,8 +1,8 @@
 use super::*;
 use crate::capabilities::{
     Capability, CapabilityConfiguration, CapabilityResolver, DialectProfileKey,
-    ProbeProfileOutcome, ProbeReason, RequestedFeatures, ResolutionInput, RouteIdentity,
-    UpstreamDialectProfile, WireProtocol,
+    ProbeProfileOutcome, RequestedFeatures, ResolutionInput, RouteIdentity, UpstreamDialectProfile,
+    WireProtocol,
 };
 use crate::keys::{anonymous_route_id, upstream_key_fingerprint};
 use axum::extract::{Path, Query};
@@ -311,6 +311,7 @@ pub(super) async fn admin_capability_probe(
         return capability_probe_error(
             StatusCode::BAD_REQUEST,
             "gateway_capability_probe_invalid_route",
+            "capability probe is unavailable for this route",
         );
     };
     let exposed_model_slug = body
@@ -324,9 +325,13 @@ pub(super) async fn admin_capability_probe(
             return capability_probe_error(
                 StatusCode::BAD_REQUEST,
                 "gateway_capability_probe_invalid_route",
+                "capability probe is unavailable for this route",
             )
         }
     };
+    if let Err(error) = state.validate_manual_capability_probe_policy() {
+        return manual_capability_probe_error(error);
+    }
     let routing = state.routing_snapshot().await;
     let key_fingerprints = routing
         .upstreams
@@ -349,35 +354,25 @@ pub(super) async fn admin_capability_probe(
         body.key_fingerprint.as_deref(),
     );
     let Some(key_fingerprint) = key_fingerprint else {
-        return capability_probe_error(
-            StatusCode::BAD_REQUEST,
-            "gateway_capability_probe_invalid_route",
+        return manual_capability_probe_error(
+            crate::state::ManualProbeBatchError::NoEligibleRoutes,
         );
     };
     let job = match state
-        .build_capability_probe_job(
+        .build_manual_capability_probe_job(
             &body.upstream_id,
             &key_fingerprint,
             &exposed_model_slug,
             &body.runtime_model_slug,
             upstream_protocol,
-            ProbeReason::Manual,
         )
         .await
     {
-        Ok(Some(job)) => job,
-        Ok(None) | Err(_) => {
-            return capability_probe_error(
-                StatusCode::BAD_REQUEST,
-                "gateway_capability_probe_invalid_route",
-            )
-        }
+        Ok(job) => job,
+        Err(error) => return manual_capability_probe_error(error),
     };
-    if !state.queue_capability_probe(job) {
-        return capability_probe_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "gateway_capability_probe_unavailable",
-        );
+    if let Err(error) = state.queue_manual_capability_probe(job).await {
+        return manual_capability_probe_error(error);
     }
     (StatusCode::ACCEPTED, Json(json!({"queued": true}))).into_response()
 }
@@ -399,18 +394,7 @@ pub(super) async fn admin_capability_probe_all(
             "candidates": receipt.candidates,
         }))
         .into_response(),
-        Err(crate::state::ManualProbeBatchError::CapabilityPolicyMissing) => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": {
-                "code": "capability_policy_missing",
-                "message": "capability policy is required before probing"
-            }})),
-        )
-            .into_response(),
-        Err(crate::state::ManualProbeBatchError::QueueUnavailable) => capability_probe_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "gateway_capability_probe_unavailable",
-        ),
+        Err(error) => manual_capability_probe_error(error),
     }
 }
 
@@ -452,12 +436,37 @@ fn capability_persist_error() -> Response {
         .into_response()
 }
 
-fn capability_probe_error(status: StatusCode, code: &str) -> Response {
+fn manual_capability_probe_error(error: crate::state::ManualProbeBatchError) -> Response {
+    match error {
+        crate::state::ManualProbeBatchError::CapabilityPolicyMissing => capability_probe_error(
+            StatusCode::CONFLICT,
+            "capability_policy_missing",
+            "capability policy is required before probing",
+        ),
+        crate::state::ManualProbeBatchError::CapabilityProbeDisabled => capability_probe_error(
+            StatusCode::CONFLICT,
+            "capability_probe_disabled",
+            "capability probing is disabled by policy",
+        ),
+        crate::state::ManualProbeBatchError::NoEligibleRoutes => capability_probe_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "capability_probe_no_eligible_routes",
+            "no eligible capability probe routes; check active upstream state, per-Key model mappings, requested model filters, and supported protocols",
+        ),
+        crate::state::ManualProbeBatchError::QueueUnavailable => capability_probe_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gateway_capability_probe_unavailable",
+            "capability probe queue is unavailable",
+        ),
+    }
+}
+
+fn capability_probe_error(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,
         Json(json!({"error": {
             "code": code,
-            "message": "capability probe is unavailable for this route"
+            "message": message
         }})),
     )
         .into_response()

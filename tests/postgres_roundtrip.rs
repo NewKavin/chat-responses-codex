@@ -761,6 +761,50 @@ async fn postgres_roundtrip_preserves_global_context_profiles() {
 }
 
 #[tokio::test]
+async fn postgres_revision_zero_capability_bootstrap_persists_for_opt_out_reloads() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres capability bootstrap test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+    reset_test_database(&database_url);
+
+    let bootstrapped = AppState::load_from_database_url(&database_url, AppConfig::default())
+        .await
+        .expect("revision-zero PostgreSQL state should bootstrap");
+    let expected = bootstrapped
+        .capability_snapshot()
+        .configuration
+        .source()
+        .clone();
+    assert!(expected.revision > 0);
+    assert!(!expected.policies.is_empty());
+
+    let reloaded = AppState::load_from_database_url(
+        &database_url,
+        AppConfig {
+            capability_policy_bootstrap_on_zero: false,
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .expect("bootstrapped PostgreSQL policy should persist independently of startup opt-out");
+    assert_eq!(
+        reloaded.capability_snapshot().configuration.source(),
+        &expected
+    );
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
+}
+
+#[tokio::test]
 async fn postgres_roundtrip_preserves_capability_state() {
     let _guard = env_lock().lock().await;
     let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {

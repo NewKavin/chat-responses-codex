@@ -6,15 +6,15 @@ use common::*;
 use futures_util::stream;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use chat_responses_codex::capabilities::{
     apply_probe_outcome, apply_probe_outcome_partial, AgentClientProfile, Capability,
     CapabilityConfiguration, CapabilityPolicy, CapabilitySelector, CompatibilityExpectation,
     DeclarativeProbeCase, DialectProfileKey, EvidenceState, HttpsImageFixture, PredicateOperator,
-    ProbeCandidates, ProbeJob, ProbeOutcome, ProbeProfileOutcome, ProbeQueueState, ProbeReason,
-    ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile,
-    WireProtocol,
+    ProbeCandidates, ProbeJob, ProbeJobBatch, ProbeOutcome, ProbeProfileOutcome, ProbeQueueState,
+    ProbeReason, ReasoningCarrier, ResponsePredicate, RouteIdentity, TokenLimitField,
+    UpstreamDialectProfile, WireProtocol,
 };
 use chat_responses_codex::protocol::stream_aggregate::MAX_STREAM_AGGREGATE_TOTAL_BYTES;
 use chat_responses_codex::server::{
@@ -577,6 +577,167 @@ impl ProbeMock {
     fn requests(&self) -> Vec<Value> {
         self.capture.lock().unwrap().clone()
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_binding_replacement_does_not_leave_a_submission_marker() {
+    with_proxy_env_cleared(|| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        (StatusCode::OK, axum::Json(text_response("ok")))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base_url = format!("http://{address}");
+        let upstream = |id: &str, model: &str| UpstreamConfig {
+            id: id.into(),
+            name: id.into(),
+            base_url: base_url.clone(),
+            api_key: format!("{id}-secret"),
+            protocol: UpstreamProtocol::ChatCompletions,
+            protocols: vec![UpstreamProtocol::ChatCompletions],
+            supported_models: vec![model.into()],
+            active: true,
+            ..UpstreamConfig::default()
+        };
+        let blocker_upstream = upstream("marker-blocker", "marker-blocker-model");
+        let target_upstream = upstream("marker-target", "marker-target-model");
+        let state = AppState::new(
+            PersistedState {
+                upstreams: Arc::new(vec![blocker_upstream.clone(), target_upstream.clone()]),
+                ..PersistedState::default()
+            },
+            tempdir().unwrap().path().join("state.json"),
+            AppConfig {
+                capability_probe_queue_capacity: 2,
+                capability_probe_request_timeout_seconds: 30,
+                ..AppConfig::default()
+            },
+        );
+        let enabled_configuration = CapabilityConfiguration {
+            revision: 7,
+            probe: chat_responses_codex::capabilities::ProbeConfiguration {
+                enabled: true,
+                max_global_concurrency: 1,
+                max_per_upstream_concurrency: 1,
+                ..Default::default()
+            },
+            ..CapabilityConfiguration::default()
+        };
+        state
+            .replace_capability_configuration(enabled_configuration.clone())
+            .await
+            .unwrap();
+        let service = CapabilityProbeService::spawn(state.clone());
+
+        let blocker = state
+            .build_manual_capability_probe_job(
+                &blocker_upstream.id,
+                &chat_responses_codex::keys::upstream_key_fingerprint(
+                    &blocker_upstream.id,
+                    &blocker_upstream.api_key,
+                ),
+                "marker-blocker-model",
+                "marker-blocker-model",
+                UpstreamProtocol::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        state.queue_manual_capability_probe(blocker).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("blocker probe should become active");
+
+        let target = state
+            .build_manual_capability_probe_job(
+                &target_upstream.id,
+                &chat_responses_codex::keys::upstream_key_fingerprint(
+                    &target_upstream.id,
+                    &target_upstream.api_key,
+                ),
+                "marker-target-model",
+                "marker-target-model",
+                UpstreamProtocol::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        state
+            .queue_manual_capability_probe(target.clone())
+            .await
+            .unwrap();
+        let pending_barrier =
+            tokio::time::timeout(Duration::from_secs(2), service.sender().reserve_many(2))
+                .await
+                .expect("target batch should leave ingress")
+                .expect("probe ingress should remain open");
+        drop(pending_barrier);
+
+        let mut replacement = target.clone();
+        replacement.configuration.configuration_fingerprint = "replacement-fingerprint".into();
+        replacement.configuration.configuration_revision = 8;
+        service
+            .sender()
+            .send(ProbeJobBatch::single(replacement))
+            .await
+            .unwrap();
+        let replacement_barrier =
+            tokio::time::timeout(Duration::from_secs(2), service.sender().reserve_many(2))
+                .await
+                .expect("replacement batch should leave ingress")
+                .expect("probe ingress should remain open");
+        drop(replacement_barrier);
+
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                probe: chat_responses_codex::capabilities::ProbeConfiguration {
+                    enabled: false,
+                    ..enabled_configuration.probe.clone()
+                },
+                ..enabled_configuration.clone()
+            })
+            .await
+            .unwrap();
+        service
+            .sender()
+            .send(ProbeJobBatch::new(Vec::new()))
+            .await
+            .unwrap();
+        let disabled_barrier =
+            tokio::time::timeout(Duration::from_secs(2), service.sender().reserve_many(2))
+                .await
+                .expect("disabled wake-up batch should leave ingress")
+                .expect("probe ingress should remain open");
+        drop(disabled_barrier);
+
+        state
+            .replace_capability_configuration(enabled_configuration)
+            .await
+            .unwrap();
+        assert!(
+            state.queue_capability_probe(target),
+            "the replaced exact binding marker must be discarded"
+        );
+        release.notify_waiters();
+    })
+    .await;
 }
 
 #[tokio::test]

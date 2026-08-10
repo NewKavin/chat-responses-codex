@@ -37,6 +37,7 @@ ENV BIND_ADDR=0.0.0.0:3001
 ENV STATE_PATH=/data/state.json
 ENV LOG_PATH=/logs/chat-responses-codex.log
 ENV APP_NAME=chat-responses-codex
+ENV CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=true
 
 VOLUME ["/data", "/logs"]
 EXPOSE 3001

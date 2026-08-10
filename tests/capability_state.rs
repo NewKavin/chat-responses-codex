@@ -1,7 +1,9 @@
 use chat_responses_codex::capabilities::*;
 use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::server::{probe_plan_for_job, CoreProbeCase};
-use chat_responses_codex::state::{AppConfig, AppState, FreekeySyncItem, PersistedState};
+use chat_responses_codex::state::{
+    AppConfig, AppState, FreekeySyncItem, ManualProbeBatchError, PersistedState,
+};
 use chat_responses_codex::state::{DownstreamConfig, UpstreamConfig};
 use serde_json::json;
 use std::sync::Arc;
@@ -108,9 +110,15 @@ async fn enabled_deployment_bootstrap_replaces_only_revision_zero() {
     let disabled_dir = tempdir().unwrap();
     let disabled_path = disabled_dir.path().join("state.json");
     write_capability_state(&disabled_path, CapabilityConfiguration::default()).await;
-    let disabled = AppState::load_from_path(&disabled_path, AppConfig::default())
-        .await
-        .unwrap();
+    let disabled = AppState::load_from_path(
+        &disabled_path,
+        AppConfig {
+            capability_policy_bootstrap_on_zero: false,
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
         disabled
             .capability_snapshot()
@@ -119,6 +127,11 @@ async fn enabled_deployment_bootstrap_replaces_only_revision_zero() {
             .revision,
         0
     );
+}
+
+#[test]
+fn app_config_defaults_revision_zero_capability_bootstrap_on() {
+    assert!(AppConfig::default().capability_policy_bootstrap_on_zero);
 }
 
 #[tokio::test]
@@ -191,9 +204,15 @@ async fn file_startup_migrates_legacy_sensitive_capability_urls_before_compile()
         .await
         .unwrap();
 
-    let loaded = AppState::load_from_path(&path, AppConfig::default())
-        .await
-        .expect("trusted legacy capability document should migrate before compile");
+    let loaded = AppState::load_from_path(
+        &path,
+        AppConfig {
+            capability_policy_bootstrap_on_zero: false,
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .expect("trusted legacy capability document should migrate before compile");
     let runtime =
         serde_json::to_string(loaded.capability_snapshot().configuration.source()).unwrap();
     assert!(!runtime.contains(legacy_secret));
@@ -238,7 +257,15 @@ async fn file_startup_legacy_url_migration_fails_closed_without_leaking_secrets(
         .await
         .unwrap();
 
-    let error = match AppState::load_from_path(&path, AppConfig::default()).await {
+    let error = match AppState::load_from_path(
+        &path,
+        AppConfig {
+            capability_policy_bootstrap_on_zero: false,
+            ..AppConfig::default()
+        },
+    )
+    .await
+    {
         Ok(_) => panic!("invalid migrated configuration must fail closed"),
         Err(error) => error,
     };
@@ -318,6 +345,225 @@ async fn disabled_capability_probe_configuration_rejects_jobs_and_reconciliation
         .is_empty());
     assert!(!state.queue_capability_probe(single_probe_job(blocker_probe_batch())));
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn manual_probe_state_preserves_distinct_failure_modes() {
+    let dir = tempdir().unwrap();
+    let upstream = learning_upstream("up-manual-probe-errors", "Lab/Manual");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: std::sync::Arc::new(vec![upstream.clone()]),
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let no_filters = std::collections::BTreeSet::new();
+    let key_fingerprint = upstream_key_fingerprint(&upstream.id, &upstream.api_key);
+
+    assert!(matches!(
+        state
+            .queue_manual_capability_probe_batch(&no_filters, &no_filters)
+            .await,
+        Err(ManualProbeBatchError::CapabilityPolicyMissing)
+    ));
+    assert!(matches!(
+        state
+            .build_manual_capability_probe_job(
+                &upstream.id,
+                &key_fingerprint,
+                "Lab/Manual",
+                "Lab/Manual",
+                chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+            )
+            .await,
+        Err(ManualProbeBatchError::CapabilityPolicyMissing)
+    ));
+
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            probe: ProbeConfiguration {
+                enabled: false,
+                ..ProbeConfiguration::default()
+            },
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        state
+            .queue_manual_capability_probe_batch(&no_filters, &no_filters)
+            .await,
+        Err(ManualProbeBatchError::CapabilityProbeDisabled)
+    ));
+
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    let unmatched_models = std::collections::BTreeSet::from(["not-configured".to_string()]);
+    assert!(matches!(
+        state
+            .queue_manual_capability_probe_batch(&no_filters, &unmatched_models)
+            .await,
+        Err(ManualProbeBatchError::NoEligibleRoutes)
+    ));
+
+    let job = state
+        .build_manual_capability_probe_job(
+            &upstream.id,
+            &key_fingerprint,
+            "Lab/Manual",
+            "Lab/Manual",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state.queue_manual_capability_probe(job).await,
+        Err(ManualProbeBatchError::QueueUnavailable)
+    );
+
+    let stale_job = state
+        .build_manual_capability_probe_job(
+            &upstream.id,
+            &key_fingerprint,
+            "Lab/Manual",
+            "Lab/Manual",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        )
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(1);
+    state.set_capability_probe_sender(sender);
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 2,
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        state.queue_manual_capability_probe(stale_job).await,
+        Err(ManualProbeBatchError::NoEligibleRoutes)
+    );
+    assert!(receiver.try_recv().is_err(), "stale job must not be queued");
+
+    let fresh_job = state
+        .build_manual_capability_probe_job(
+            &upstream.id,
+            &key_fingerprint,
+            "Lab/Manual",
+            "Lab/Manual",
+            chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.queue_manual_capability_probe(fresh_job).await, Ok(()));
+    let queued_job = single_probe_job(receiver.try_recv().expect("fresh job should be queued"));
+    assert_eq!(queued_job.configuration.configuration_revision, 2);
+    assert!(
+        !state.queue_capability_probe(queued_job.clone()),
+        "automatic/legacy callers must still report an identical pending job as not newly queued"
+    );
+    state.discard_capability_probe_submission(&queued_job);
+    assert!(
+        state.queue_capability_probe(queued_job),
+        "discarding a pending job must clear its submission marker"
+    );
+    receiver
+        .try_recv()
+        .expect("discarded job should be accepted again");
+}
+
+#[tokio::test]
+async fn manual_probe_submission_rejects_every_stale_route_binding() {
+    let original = learning_upstream("up-stale-manual-route", "Lab/Stale");
+    let stale_variants = [
+        (
+            "inactive upstream",
+            UpstreamConfig {
+                active: false,
+                ..original.clone()
+            },
+        ),
+        (
+            "changed key",
+            UpstreamConfig {
+                api_key: "replacement-secret".into(),
+                ..original.clone()
+            },
+        ),
+        (
+            "changed model mapping",
+            UpstreamConfig {
+                supported_models: vec!["Lab/Replacement".into()],
+                ..original.clone()
+            },
+        ),
+        (
+            "changed protocol",
+            UpstreamConfig {
+                protocol: chat_responses_codex::routing::UpstreamProtocol::Responses,
+                protocols: vec![chat_responses_codex::routing::UpstreamProtocol::Responses],
+                ..original.clone()
+            },
+        ),
+        (
+            "changed base URL",
+            UpstreamConfig {
+                base_url: "https://replacement.example/v1".into(),
+                ..original.clone()
+            },
+        ),
+    ];
+
+    for (case, changed) in stale_variants {
+        let dir = tempdir().unwrap();
+        let state = AppState::new(
+            PersistedState {
+                upstreams: Arc::new(vec![original.clone()]),
+                ..PersistedState::default()
+            },
+            dir.path().join("state.json"),
+            AppConfig::default(),
+        );
+        state
+            .replace_capability_configuration(CapabilityConfiguration {
+                revision: 1,
+                ..CapabilityConfiguration::default()
+            })
+            .await
+            .unwrap();
+        let job = state
+            .build_manual_capability_probe_job(
+                &original.id,
+                &upstream_key_fingerprint(&original.id, &original.api_key),
+                "Lab/Stale",
+                "Lab/Stale",
+                chat_responses_codex::routing::UpstreamProtocol::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        state.set_capability_probe_sender(sender);
+        assert!(state.update_upstream(&original.id, changed).await.unwrap());
+
+        assert_eq!(
+            state.queue_manual_capability_probe(job).await,
+            Err(ManualProbeBatchError::NoEligibleRoutes),
+            "{case} must invalidate the captured route binding"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "{case} must be rejected before enqueue"
+        );
+    }
 }
 
 #[tokio::test]
@@ -427,7 +673,11 @@ async fn runtime_settings_enable_automatic_probe_jobs_without_restart() {
 
     let mut automatic = single_probe_job(blocker_probe_batch());
     automatic.reason = ProbeReason::ConfigurationChanged;
-    assert!(state.queue_capability_probe(automatic));
+    assert!(state.queue_capability_probe(automatic.clone()));
+    assert!(
+        !state.queue_capability_probe(automatic),
+        "an identical automatic job must be reported as a duplicate"
+    );
     let queued = receiver
         .try_recv()
         .expect("runtime-enabled automatic probe should be queued");

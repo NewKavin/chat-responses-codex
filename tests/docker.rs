@@ -422,6 +422,28 @@ fn dotenv_example_documents_required_secrets() {
 }
 
 #[test]
+fn revision_zero_capability_bootstrap_defaults_match_every_deployment_surface() {
+    let dockerfile = fs::read_to_string("Dockerfile").expect("Dockerfile should be readable");
+    let compose =
+        fs::read_to_string("docker-compose.yml").expect("docker-compose.yml should be readable");
+    let dotenv = fs::read_to_string(".env.example").expect(".env.example should be readable");
+    let readme = fs::read_to_string("README.md").expect("README.md should be readable");
+    let deployment = fs::read_to_string("DEPLOYMENT.md").expect("DEPLOYMENT.md should be readable");
+
+    assert!(dockerfile.contains("ENV CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=true"));
+    assert!(compose.contains(
+        "CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO: ${CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO:-true}"
+    ));
+    assert!(dotenv
+        .lines()
+        .any(|line| line == "CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=true"));
+    assert!(readme.contains("It defaults to `true`, never replaces a nonzero policy"));
+    assert!(readme.contains("`CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=false`"));
+    assert!(deployment.contains("Capability bootstrap only replaces a stored policy at revision 0"));
+    assert!(deployment.contains("`CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO=false`"));
+}
+
+#[test]
 fn runtime_settings_leave_dotenv_bootstrap_only_and_compose_legacy_fallbacks() {
     let dotenv = fs::read_to_string(".env.example").expect(".env.example should be readable");
     let compose =

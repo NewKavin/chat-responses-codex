@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .max(1),
         automatic_capability_probes_enabled: env_bool("AUTOMATIC_CAPABILITY_PROBES_ENABLED", false),
-        capability_policy_bootstrap_on_zero: env_bool("CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO", false),
+        capability_policy_bootstrap_on_zero: env_bool("CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO", true),
         admin_logs_page_size_max: env_usize("ADMIN_LOGS_PAGE_SIZE_MAX", 200).max(200),
         upstream_http_pool_max_idle_per_host: env_usize("UPSTREAM_HTTP_POOL_MAX_IDLE_PER_HOST", 32)
             .max(8),
@@ -709,8 +709,8 @@ impl Write for TeeWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        env_positive_u64, env_u64, normalize_concurrency_probe_delays_ms, normalize_hedge_delay_ms,
-        normalize_route_retry_rounds, validate_long_stream_profile,
+        env_bool, env_positive_u64, env_u64, normalize_concurrency_probe_delays_ms,
+        normalize_hedge_delay_ms, normalize_route_retry_rounds, validate_long_stream_profile,
         validate_transient_route_cooldown_seconds, LongStreamProfile,
     };
     use std::env;
@@ -756,6 +756,29 @@ mod tests {
         env::set_var("TEST_MODEL_KEY_SYNC_INTERVAL", "0");
         assert_eq!(env_u64("TEST_MODEL_KEY_SYNC_INTERVAL", 900), 0);
         env::remove_var("TEST_MODEL_KEY_SYNC_INTERVAL");
+    }
+
+    #[test]
+    fn capability_policy_bootstrap_env_defaults_on_and_accepts_explicit_opt_outs() {
+        let _guard = env_lock();
+        const NAME: &str = "CAPABILITY_POLICY_BOOTSTRAP_ON_ZERO";
+        let previous = env::var_os(NAME);
+
+        env::remove_var(NAME);
+        assert!(env_bool(NAME, true));
+        for value in ["false", "0", "no", "off"] {
+            env::set_var(NAME, value);
+            assert!(!env_bool(NAME, true), "{value} must disable bootstrap");
+        }
+        for value in ["true", "1", "yes", "on"] {
+            env::set_var(NAME, value);
+            assert!(env_bool(NAME, false), "{value} must enable bootstrap");
+        }
+
+        match previous {
+            Some(value) => env::set_var(NAME, value),
+            None => env::remove_var(NAME),
+        }
     }
 
     #[test]

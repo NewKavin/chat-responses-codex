@@ -129,6 +129,30 @@ fn duplicate_pending_job_replaces_its_captured_plan_configuration() {
 }
 
 #[test]
+fn pending_replacement_returns_the_discarded_exact_binding() {
+    let mut queue = ProbeQueueState::new(1, 1, usize::MAX);
+    let mut first = job("u1", "runtime-model");
+    first.configuration.configuration_fingerprint = "fingerprint-a".into();
+    assert!(queue.enqueue(first.clone()));
+
+    let mut replacement = first.clone();
+    replacement.configuration.configuration_fingerprint = "fingerprint-b".into();
+    replacement.configuration.configuration_revision = 2;
+
+    let outcome = queue
+        .enqueue_with_outcome(replacement.clone())
+        .expect("pending replacement is accepted");
+    let ProbeQueueEnqueueOutcome::Replaced(discarded) = outcome else {
+        panic!("different pending binding must return the replaced job");
+    };
+    assert_eq!(discarded.configuration, first.configuration);
+    assert_eq!(
+        queue.start_next().unwrap().configuration,
+        replacement.configuration
+    );
+}
+
+#[test]
 fn alias_arriving_while_profile_is_active_schedules_follow_up() {
     let mut queue = ProbeQueueState::new(2, 2, usize::MAX);
     assert!(queue.enqueue(job("u1", "plain-alias")));
@@ -199,6 +223,27 @@ fn queue_limits_pending_jobs_per_reconcile_batch() {
     assert_eq!(second.key.runtime_model_slug, "m2");
     queue.finish(&second.key);
     assert!(queue.start_next().is_none());
+}
+
+#[test]
+fn clearing_pending_returns_discarded_jobs_and_preserves_active_identity() {
+    let mut queue = ProbeQueueState::new(1, 1, usize::MAX);
+    assert!(queue.enqueue(job("u1", "active")));
+    let active = queue.start_next().unwrap();
+    assert!(queue.enqueue(job("u1", "pending")));
+
+    let discarded = queue.clear_pending();
+
+    assert_eq!(discarded.len(), 1);
+    assert_eq!(discarded[0].key.runtime_model_slug, "pending");
+    assert_eq!(queue.pending_len(), 0);
+    assert!(queue.enqueue(job("u1", "pending")));
+    assert!(!queue.enqueue(active.clone()));
+    queue.finish(&active.key);
+    assert_eq!(
+        queue.start_next().unwrap().key.runtime_model_slug,
+        "pending"
+    );
 }
 
 #[test]

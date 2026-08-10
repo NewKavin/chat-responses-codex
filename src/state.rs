@@ -460,7 +460,15 @@ pub struct ManualProbeBatchReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualProbeBatchError {
     CapabilityPolicyMissing,
+    CapabilityProbeDisabled,
+    NoEligibleRoutes,
     QueueUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityProbeSubmission {
+    Queued,
+    AlreadyPending,
 }
 
 #[derive(Clone)]
@@ -1679,45 +1687,28 @@ impl AppState {
         {
             return false;
         }
+        matches!(
+            self.try_queue_capability_probe(job),
+            Ok(CapabilityProbeSubmission::Queued)
+        )
+    }
+
+    fn try_queue_capability_probe(
+        &self,
+        job: ProbeJob,
+    ) -> Result<CapabilityProbeSubmission, ManualProbeBatchError> {
         let sender = self
             .capability_probe_sender
             .lock()
             .expect("probe sender lock poisoned")
             .as_ref()
-            .cloned();
-        let Some(sender) = sender else {
-            return false;
-        };
+            .cloned()
+            .ok_or(ManualProbeBatchError::QueueUnavailable)?;
+        if sender.is_closed() {
+            return Err(ManualProbeBatchError::QueueUnavailable);
+        }
         let key = job.key.clone();
         let binding = job.configuration.clone();
-        {
-            let mut submissions = self
-                .capability_probe_submissions
-                .lock()
-                .expect("probe submission lock poisoned");
-            if submissions
-                .get(&key)
-                .is_some_and(|queued| queued == &binding)
-            {
-                return false;
-            }
-            submissions.insert(key.clone(), binding.clone());
-        }
-        if sender.try_send(ProbeJobBatch::single(job)).is_ok() {
-            tracing::info!(
-                upstream_id = %key.upstream_id,
-                route_id = %anonymous_route_id(
-                    &key.upstream_id,
-                    &key.key_fingerprint,
-                    &key.runtime_model_slug,
-                    key.protocol,
-                ),
-                runtime_model = %key.runtime_model_slug,
-                protocol = ?key.protocol,
-                "capability probe queued"
-            );
-            return true;
-        }
         let mut submissions = self
             .capability_probe_submissions
             .lock()
@@ -1726,9 +1717,76 @@ impl AppState {
             .get(&key)
             .is_some_and(|queued| queued == &binding)
         {
-            submissions.remove(&key);
+            return Ok(CapabilityProbeSubmission::AlreadyPending);
         }
-        false
+        let previous_binding = submissions.insert(key.clone(), binding.clone());
+        match sender.try_send(ProbeJobBatch::single(job)) {
+            Ok(()) => {
+                drop(submissions);
+                tracing::info!(
+                    upstream_id = %key.upstream_id,
+                    route_id = %anonymous_route_id(
+                        &key.upstream_id,
+                        &key.key_fingerprint,
+                        &key.runtime_model_slug,
+                        key.protocol,
+                    ),
+                    runtime_model = %key.runtime_model_slug,
+                    protocol = ?key.protocol,
+                    "capability probe queued"
+                );
+                Ok(CapabilityProbeSubmission::Queued)
+            }
+            Err(_) => {
+                match previous_binding {
+                    Some(previous_binding) => {
+                        submissions.insert(key, previous_binding);
+                    }
+                    None => {
+                        submissions.remove(&key);
+                    }
+                }
+                Err(ManualProbeBatchError::QueueUnavailable)
+            }
+        }
+    }
+
+    pub async fn queue_manual_capability_probe(
+        &self,
+        job: ProbeJob,
+    ) -> Result<(), ManualProbeBatchError> {
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let _capability_guard = self.capability_update_lock.lock().await;
+        let routing = self.routing_snapshot().await;
+        let capability_snapshot = self.capability_snapshot();
+        Self::validate_manual_capability_probe_configuration(
+            capability_snapshot.configuration.source(),
+        )?;
+        if !Self::manual_capability_probe_job_is_current(&routing, &capability_snapshot, &job) {
+            return Err(ManualProbeBatchError::NoEligibleRoutes);
+        }
+        match self.try_queue_capability_probe(job)? {
+            CapabilityProbeSubmission::Queued | CapabilityProbeSubmission::AlreadyPending => Ok(()),
+        }
+    }
+
+    pub fn validate_manual_capability_probe_policy(&self) -> Result<(), ManualProbeBatchError> {
+        let capability_snapshot = self.capability_snapshot();
+        Self::validate_manual_capability_probe_configuration(
+            capability_snapshot.configuration.source(),
+        )
+    }
+
+    fn validate_manual_capability_probe_configuration(
+        configuration: &CapabilityConfiguration,
+    ) -> Result<(), ManualProbeBatchError> {
+        if configuration.revision == 0 {
+            return Err(ManualProbeBatchError::CapabilityPolicyMissing);
+        }
+        if !configuration.probe.enabled {
+            return Err(ManualProbeBatchError::CapabilityProbeDisabled);
+        }
+        Ok(())
     }
 
     pub async fn queue_manual_capability_probe_batch(
@@ -1736,12 +1794,12 @@ impl AppState {
         upstream_ids: &BTreeSet<String>,
         models: &BTreeSet<String>,
     ) -> Result<ManualProbeBatchReceipt, ManualProbeBatchError> {
+        let _persist_guard = self.config_persist_lock.lock().await;
+        let _capability_guard = self.capability_update_lock.lock().await;
         let routing = self.routing_snapshot().await;
         let capability_snapshot = self.capability_snapshot();
         let configuration = capability_snapshot.configuration.source();
-        if configuration.revision == 0 || !configuration.probe.enabled {
-            return Err(ManualProbeBatchError::CapabilityPolicyMissing);
-        }
+        Self::validate_manual_capability_probe_configuration(configuration)?;
 
         let mut prepared_jobs = Vec::new();
         for upstream in routing.upstreams.iter().filter(|upstream| {
@@ -1781,7 +1839,7 @@ impl AppState {
         }
         prepared_jobs.sort_by(|left, right| left.key.cmp(&right.key));
         if prepared_jobs.is_empty() {
-            return Err(ManualProbeBatchError::CapabilityPolicyMissing);
+            return Err(ManualProbeBatchError::NoEligibleRoutes);
         }
 
         let candidates = prepared_jobs
@@ -1826,12 +1884,7 @@ impl AppState {
         key: &DialectProfileKey,
         binding: &ProbeConfigurationBinding,
     ) {
-        let mut submissions = self
-            .capability_probe_submissions
-            .lock()
-            .expect("probe submission lock poisoned");
-        if submissions.get(key).is_some_and(|queued| queued == binding) {
-            submissions.remove(key);
+        if self.remove_capability_probe_submission(key, binding) {
             tracing::info!(
                 upstream_id = %key.upstream_id,
                 route_id = %anonymous_route_id(
@@ -1844,6 +1897,27 @@ impl AppState {
                 protocol = ?key.protocol,
                 "capability probe completed"
             );
+        }
+    }
+
+    pub fn discard_capability_probe_submission(&self, job: &ProbeJob) {
+        self.remove_capability_probe_submission(&job.key, &job.configuration);
+    }
+
+    fn remove_capability_probe_submission(
+        &self,
+        key: &DialectProfileKey,
+        binding: &ProbeConfigurationBinding,
+    ) -> bool {
+        let mut submissions = self
+            .capability_probe_submissions
+            .lock()
+            .expect("probe submission lock poisoned");
+        if submissions.get(key).is_some_and(|queued| queued == binding) {
+            submissions.remove(key);
+            true
+        } else {
+            false
         }
     }
 
@@ -1874,6 +1948,38 @@ impl AppState {
             protocol,
             reason,
         )
+    }
+
+    pub async fn build_manual_capability_probe_job(
+        &self,
+        upstream_id: &str,
+        key_fingerprint: &str,
+        exposed_model_slug: &str,
+        runtime_model_slug: &str,
+        protocol: UpstreamProtocol,
+    ) -> Result<ProbeJob, ManualProbeBatchError> {
+        let capability_snapshot = self.capability_snapshot();
+        Self::validate_manual_capability_probe_configuration(
+            capability_snapshot.configuration.source(),
+        )?;
+        let routing = self.routing_snapshot().await;
+        let upstream = routing
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == upstream_id)
+            .ok_or(ManualProbeBatchError::NoEligibleRoutes)?;
+        Self::build_capability_probe_job_for_key_with_snapshot(
+            &capability_snapshot,
+            upstream,
+            key_fingerprint,
+            exposed_model_slug,
+            runtime_model_slug,
+            protocol,
+            ProbeReason::Manual,
+        )
+        .ok()
+        .flatten()
+        .ok_or(ManualProbeBatchError::NoEligibleRoutes)
     }
 
     fn build_capability_probe_job_for_key_with_snapshot(
@@ -1943,8 +2049,10 @@ impl AppState {
         };
         if !upstream.active
             || !upstream.supports_protocol(protocol)
-            || upstream.resolved_model_name(exposed_model_slug).as_deref()
-                != Some(job.key.runtime_model_slug.as_str())
+            || job.exposed_model_slugs.iter().any(|model| {
+                upstream.resolved_model_name(model).as_deref()
+                    != Some(job.key.runtime_model_slug.as_str())
+            })
             || !upstream
                 .keys_for_model(&job.key.runtime_model_slug)
                 .iter()
@@ -1954,21 +2062,44 @@ impl AppState {
         {
             return false;
         }
-        job.configuration.configuration_schema_version
+        Self::capability_probe_configuration_binding_is_current(
+            capability_snapshot,
+            &job.configuration,
+        ) && Self::route_configuration_fingerprint_with_snapshot(
+            capability_snapshot,
+            upstream,
+            &job.key.key_fingerprint,
+            exposed_model_slug,
+            &job.key.runtime_model_slug,
+            protocol,
+        )
+        .is_ok_and(|fingerprint| fingerprint == job.configuration.configuration_fingerprint)
+    }
+
+    fn manual_capability_probe_job_is_current(
+        routing: &PersistedState,
+        capability_snapshot: &CapabilityRuntimeSnapshot,
+        job: &ProbeJob,
+    ) -> bool {
+        job.plan_configuration.digest() == job.configuration.configuration_digest
+            && routing
+                .upstreams
+                .iter()
+                .find(|upstream| upstream.id == job.key.upstream_id)
+                .is_some_and(|upstream| {
+                    Self::capability_probe_job_is_current(capability_snapshot, upstream, job)
+                })
+    }
+
+    fn capability_probe_configuration_binding_is_current(
+        capability_snapshot: &CapabilityRuntimeSnapshot,
+        binding: &ProbeConfigurationBinding,
+    ) -> bool {
+        binding.configuration_schema_version
             == capability_snapshot.configuration.source().schema_version
-            && job.configuration.configuration_revision
-                == capability_snapshot.configuration.source().revision
-            && job.configuration.configuration_digest == capability_snapshot.configuration.digest()
-            && job.configuration.probe_schema_version == DIALECT_PROBE_SCHEMA_VERSION
-            && Self::route_configuration_fingerprint_with_snapshot(
-                capability_snapshot,
-                upstream,
-                &job.key.key_fingerprint,
-                exposed_model_slug,
-                &job.key.runtime_model_slug,
-                protocol,
-            )
-            .is_ok_and(|fingerprint| fingerprint == job.configuration.configuration_fingerprint)
+            && binding.configuration_revision == capability_snapshot.configuration.source().revision
+            && binding.configuration_digest == capability_snapshot.configuration.digest()
+            && binding.probe_schema_version == DIALECT_PROBE_SCHEMA_VERSION
     }
 
     pub fn start_active_gateway_request(&self, start: ActiveGatewayRequestStart) {
@@ -2450,10 +2581,7 @@ impl AppState {
     ) -> io::Result<bool> {
         let _guard = self.capability_update_lock.lock().await;
         let current = self.capability_snapshot();
-        if current.configuration.source().schema_version != binding.configuration_schema_version
-            || current.configuration.source().revision != binding.configuration_revision
-            || current.configuration.digest() != binding.configuration_digest
-            || binding.probe_schema_version != DIALECT_PROBE_SCHEMA_VERSION
+        if !Self::capability_probe_configuration_binding_is_current(&current, binding)
             || profile.configuration_fingerprint != binding.configuration_fingerprint
             || profile.probe_schema_version != binding.probe_schema_version
         {
@@ -4555,6 +4683,12 @@ impl AppState {
                 configuration: compiled,
                 profiles: reconciled,
             }));
+        tracing::info!(
+            capability_policy_bootstrapped = bootstrapped,
+            capability_policy_revision = capability_state.configuration.revision,
+            capability_policy_count = capability_state.configuration.policies.len(),
+            "initialized capability policy"
+        );
         Ok(())
     }
 
@@ -5623,14 +5757,21 @@ impl AppState {
         let mut upstream = upstream;
         upstream.normalize_for_storage();
         upstream.validate_configuration()?;
-
-        {
-            let mut inner = self.inner.lock().await;
-            if inner.upstreams.iter().any(|u| u.id == upstream.id) {
-                return Err(format!("Upstream with ID '{}' already exists", upstream.id));
-            }
-            Arc::make_mut(&mut inner.upstreams).push(upstream);
-        }
+        self.mutate_persisted_state(
+            |state| {
+                if state
+                    .upstreams
+                    .iter()
+                    .any(|existing| existing.id == upstream.id)
+                {
+                    return Err(format!("Upstream with ID '{}' already exists", upstream.id));
+                }
+                Arc::make_mut(&mut state.upstreams).push(upstream);
+                Ok(())
+            },
+            |error| format!("Failed to persist state: {error}"),
+        )
+        .await?;
         let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams)
             .await
@@ -5640,14 +5781,18 @@ impl AppState {
 
     /// Delete an upstream
     pub async fn delete_upstream_by_id(&self, id: &str) -> Result<(), String> {
-        {
-            let mut inner = self.inner.lock().await;
-            let initial_len = inner.upstreams.len();
-            Arc::make_mut(&mut inner.upstreams).retain(|u| u.id != id);
-            if inner.upstreams.len() == initial_len {
-                return Err(format!("Upstream '{}' not found", id));
-            }
-        }
+        self.mutate_persisted_state(
+            |state| {
+                let initial_len = state.upstreams.len();
+                Arc::make_mut(&mut state.upstreams).retain(|upstream| upstream.id != id);
+                if state.upstreams.len() == initial_len {
+                    return Err(format!("Upstream '{}' not found", id));
+                }
+                Ok(())
+            },
+            |error| format!("Failed to persist state: {error}"),
+        )
+        .await?;
         let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams)
             .await
@@ -5657,15 +5802,19 @@ impl AppState {
 
     /// Toggle upstream active status
     pub async fn toggle_upstream_by_id(&self, id: &str) -> Result<bool, String> {
-        let active = {
-            let mut inner = self.inner.lock().await;
-            let upstream = Arc::make_mut(&mut inner.upstreams)
-                .iter_mut()
-                .find(|u| u.id == id)
-                .ok_or_else(|| format!("Upstream '{}' not found", id))?;
-            upstream.active = !upstream.active;
-            upstream.active
-        };
+        let active = self
+            .mutate_persisted_state(
+                |state| {
+                    let upstream = Arc::make_mut(&mut state.upstreams)
+                        .iter_mut()
+                        .find(|upstream| upstream.id == id)
+                        .ok_or_else(|| format!("Upstream '{}' not found", id))?;
+                    upstream.active = !upstream.active;
+                    Ok(upstream.active)
+                },
+                |error| format!("Failed to persist state: {error}"),
+            )
+            .await?;
         let current_upstreams = self.routing_snapshot().await.upstreams;
         self.reconcile_route_health(&current_upstreams)
             .await

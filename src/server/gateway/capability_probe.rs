@@ -14,8 +14,8 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::capabilities::{
     apply_probe_outcome, apply_probe_outcome_partial, Capability, CompiledCapabilityConfiguration,
     DeclarativeProbeCase, DialectProfileKey, EvidenceState, PredicateOperator, ProbeJob,
-    ProbeJobBatch, ProbeOutcome, ProbeQueueState, ReasoningCarrier, ResponsePredicate,
-    RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
+    ProbeJobBatch, ProbeOutcome, ProbeQueueEnqueueOutcome, ProbeQueueState, ReasoningCarrier,
+    ResponsePredicate, RouteIdentity, TokenLimitField, UpstreamDialectProfile, WireProtocol,
 };
 use crate::keys::upstream_key_fingerprint;
 use crate::protocol::stream_aggregate::{SseEvent, MAX_STREAM_AGGREGATE_TOTAL_BYTES};
@@ -33,6 +33,31 @@ use crate::state::{
 /// question yields a deterministic text answer and engages real
 /// inference/reasoning paths, unlike a greeting or placeholder.
 pub const PROBE_INPUT_PROMPT: &str = "请计算 17 乘以 23，并给出最终答案。";
+
+fn enqueue_probe_job(queue: &mut ProbeQueueState, state: &AppState, job: ProbeJob) -> bool {
+    match queue.enqueue_with_outcome(job) {
+        Ok(ProbeQueueEnqueueOutcome::Enqueued) => true,
+        Ok(ProbeQueueEnqueueOutcome::Unchanged) => false,
+        Ok(ProbeQueueEnqueueOutcome::Replaced(discarded)) => {
+            state.discard_capability_probe_submission(&discarded);
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn enqueue_probe_batch(
+    queue: &mut ProbeQueueState,
+    state: &AppState,
+    batch: ProbeJobBatch,
+) -> ProbeJobBatch {
+    let outcome = queue.enqueue_batch_with_outcome(batch);
+    let (remaining, replaced) = outcome.into_parts();
+    for discarded in replaced {
+        state.discard_capability_probe_submission(&discarded);
+    }
+    remaining
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReasoningTrigger {
@@ -433,7 +458,7 @@ impl CapabilityProbeService {
             reconcile_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
             if let Ok(initial_jobs) = state.reconcile_dialect_profiles(unix_seconds()).await {
                 for job in initial_jobs {
-                    let _ = queue.enqueue(job);
+                    let _ = enqueue_probe_job(&mut queue, &state, job);
                 }
             }
             loop {
@@ -445,7 +470,7 @@ impl CapabilityProbeService {
                 );
                 if probe.enabled {
                     if let Some(batch) = deferred_batch.take() {
-                        let remaining = queue.enqueue_batch(batch);
+                        let remaining = enqueue_probe_batch(&mut queue, &state, batch);
                         if !remaining.is_empty() {
                             deferred_batch = Some(remaining);
                         }
@@ -460,7 +485,14 @@ impl CapabilityProbeService {
                         });
                     }
                 } else {
-                    queue.clear_pending();
+                    for job in queue.clear_pending() {
+                        state.discard_capability_probe_submission(&job);
+                    }
+                    if let Some(batch) = deferred_batch.take() {
+                        for job in batch.into_jobs() {
+                            state.discard_capability_probe_submission(&job);
+                        }
+                    }
                 }
 
                 if active.is_empty() && !receiver_open && deferred_batch.is_none() {
@@ -471,7 +503,7 @@ impl CapabilityProbeService {
                     _ = reconcile_tick.tick() => {
                         if let Ok(jobs) = state.reconcile_dialect_profiles(unix_seconds()).await {
                             for job in jobs {
-                                if !queue.enqueue(job) && queue.is_full() {
+                                if !enqueue_probe_job(&mut queue, &state, job) && queue.is_full() {
                                     tracing::warn!("capability probe queue reached its job capacity");
                                 }
                             }
@@ -488,7 +520,7 @@ impl CapabilityProbeService {
                         match received {
                             Some(batch) => {
                                 if state.capability_snapshot().configuration.source().probe.enabled {
-                                    let remaining = queue.enqueue_batch(batch);
+                                    let remaining = enqueue_probe_batch(&mut queue, &state, batch);
                                     if !remaining.is_empty() {
                                         tracing::info!(
                                             jobs = remaining.jobs().len(),
@@ -497,7 +529,9 @@ impl CapabilityProbeService {
                                         deferred_batch = Some(remaining);
                                     }
                                 } else {
-                                    deferred_batch = Some(batch);
+                                    for job in batch.into_jobs() {
+                                        state.discard_capability_probe_submission(&job);
+                                    }
                                 }
                             }
                             None => receiver_open = false,

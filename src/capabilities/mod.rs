@@ -12,7 +12,8 @@ pub use policy::{
     CompiledCapabilityConfiguration, CompiledExpectation,
 };
 pub use probe_queue::{
-    ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeQueueState, ProbeReason,
+    ProbeConfigurationBinding, ProbeJob, ProbeJobBatch, ProbeQueueBatchEnqueueOutcome,
+    ProbeQueueEnqueueOutcome, ProbeQueueState, ProbeReason,
 };
 pub use profile::{
     apply_probe_outcome, apply_probe_outcome_partial, normalize_route_base_url, profile_is_current,

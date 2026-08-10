@@ -36,6 +36,25 @@ pub struct ProbeJob {
     pub plan_configuration: Arc<CompiledCapabilityConfiguration>,
 }
 
+#[derive(Clone, Debug)]
+pub enum ProbeQueueEnqueueOutcome {
+    Enqueued,
+    Unchanged,
+    Replaced(ProbeJob),
+}
+
+#[derive(Debug)]
+pub struct ProbeQueueBatchEnqueueOutcome {
+    remaining: ProbeJobBatch,
+    replaced: Vec<ProbeJob>,
+}
+
+impl ProbeQueueBatchEnqueueOutcome {
+    pub fn into_parts(self) -> (ProbeJobBatch, Vec<ProbeJob>) {
+        (self.remaining, self.replaced)
+    }
+}
+
 /// One bounded ingress slot. The worker retains every accepted job while
 /// expanding the batch into `ProbeQueueState` as capacity becomes available.
 #[derive(Clone, Debug)]
@@ -91,20 +110,45 @@ impl ProbeQueueState {
     }
 
     pub fn enqueue(&mut self, job: ProbeJob) -> bool {
-        self.enqueue_preserving_full(job).unwrap_or(false)
+        matches!(
+            self.enqueue_with_outcome(job),
+            Ok(ProbeQueueEnqueueOutcome::Enqueued)
+        )
     }
 
     pub fn enqueue_batch(&mut self, batch: ProbeJobBatch) -> ProbeJobBatch {
-        let mut jobs = batch.into_jobs().into_iter();
-        while let Some(job) = jobs.next() {
-            if let Err(job) = self.enqueue_preserving_full(job) {
-                return ProbeJobBatch::new(std::iter::once(job).chain(jobs).collect());
-            }
-        }
-        ProbeJobBatch::new(Vec::new())
+        self.enqueue_batch_with_outcome(batch).into_parts().0
     }
 
-    fn enqueue_preserving_full(&mut self, job: ProbeJob) -> Result<bool, ProbeJob> {
+    pub fn enqueue_batch_with_outcome(
+        &mut self,
+        batch: ProbeJobBatch,
+    ) -> ProbeQueueBatchEnqueueOutcome {
+        let mut jobs = batch.into_jobs().into_iter();
+        let mut replaced = Vec::new();
+        while let Some(job) = jobs.next() {
+            match self.enqueue_with_outcome(job) {
+                Ok(ProbeQueueEnqueueOutcome::Replaced(discarded)) => replaced.push(discarded),
+                Ok(ProbeQueueEnqueueOutcome::Enqueued)
+                | Ok(ProbeQueueEnqueueOutcome::Unchanged) => {}
+                Err(job) => {
+                    return ProbeQueueBatchEnqueueOutcome {
+                        remaining: ProbeJobBatch::new(std::iter::once(job).chain(jobs).collect()),
+                        replaced,
+                    };
+                }
+            }
+        }
+        ProbeQueueBatchEnqueueOutcome {
+            remaining: ProbeJobBatch::new(Vec::new()),
+            replaced,
+        }
+    }
+
+    pub fn enqueue_with_outcome(
+        &mut self,
+        job: ProbeJob,
+    ) -> Result<ProbeQueueEnqueueOutcome, ProbeJob> {
         if self.known.contains(&job.key) {
             if let Some(pending) = self
                 .pending
@@ -113,10 +157,11 @@ impl ProbeQueueState {
             {
                 if same_job_configuration(pending, &job) {
                     pending.exposed_model_slugs.extend(job.exposed_model_slugs);
+                    return Ok(ProbeQueueEnqueueOutcome::Unchanged);
                 } else {
-                    *pending = job;
+                    let replaced = std::mem::replace(pending, job);
+                    return Ok(ProbeQueueEnqueueOutcome::Replaced(replaced));
                 }
-                return Ok(false);
             }
             if self.active.contains(&job.key) {
                 if self.active_jobs.get(&job.key).is_some_and(|active| {
@@ -125,22 +170,22 @@ impl ProbeQueueState {
                             .exposed_model_slugs
                             .is_subset(&active.exposed_model_slugs)
                 }) {
-                    return Ok(false);
+                    return Ok(ProbeQueueEnqueueOutcome::Unchanged);
                 }
                 if self.active.len() + self.pending.len() >= self.max_jobs {
                     return Err(job);
                 }
                 self.pending.push_back(job);
-                return Ok(true);
+                return Ok(ProbeQueueEnqueueOutcome::Enqueued);
             }
-            return Ok(false);
+            return Ok(ProbeQueueEnqueueOutcome::Unchanged);
         }
         if self.active.len() + self.pending.len() >= self.max_jobs {
             return Err(job);
         }
         self.known.insert(job.key.clone());
         self.pending.push_back(job);
-        Ok(true)
+        Ok(ProbeQueueEnqueueOutcome::Enqueued)
     }
 
     pub fn set_limits(&mut self, max_global: usize, max_per_upstream: usize) {
@@ -148,9 +193,10 @@ impl ProbeQueueState {
         self.max_per_upstream = max_per_upstream.max(1);
     }
 
-    pub fn clear_pending(&mut self) {
-        self.pending.clear();
+    pub fn clear_pending(&mut self) -> Vec<ProbeJob> {
+        let discarded = self.pending.drain(..).collect();
         self.known = self.active.clone();
+        discarded
     }
 
     pub fn pending_len(&self) -> usize {
