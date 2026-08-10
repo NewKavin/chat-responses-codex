@@ -262,11 +262,16 @@ async fn downstream_responses_namespace_and_custom_tools_round_trip_are_preserve
         .await
         .unwrap();
 
-    assert_eq!(continuation.status(), StatusCode::OK);
+    let continuation_status = continuation.status();
     let body = to_bytes(continuation.into_body(), usize::MAX)
         .await
         .unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        continuation_status,
+        StatusCode::OK,
+        "unexpected continuation response: {payload}"
+    );
     assert_eq!(payload["output"][0]["call_id"], "call_2");
     assert_eq!(payload["output"][0]["name"], "search");
     assert_eq!(payload["output"][0]["namespace"], "mcp__docs");

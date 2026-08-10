@@ -292,9 +292,18 @@ pub(super) fn continuation_contract_for_route(
     profile: &UpstreamDialectProfile,
     tool_registry_version: Option<u32>,
 ) -> Option<ContinuationCompatibilityContract> {
+    let mut route_required_capabilities = required_capabilities.clone();
+    if upstream_protocol == WireProtocol::ChatCompletions {
+        let uses_function_adapter = route_required_capabilities.remove(&Capability::NamespaceTools)
+            | route_required_capabilities.remove(&Capability::CustomTools);
+        if uses_function_adapter {
+            tool_registry_version?;
+            route_required_capabilities.insert(Capability::FunctionTools);
+        }
+    }
     if profile.state == DialectProfileState::Unknown
         || profile.probe_schema_version != DIALECT_PROBE_SCHEMA_VERSION
-        || !required_capabilities
+        || !route_required_capabilities
             .iter()
             .all(|capability| resolved.supports(*capability))
     {
