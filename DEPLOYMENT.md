@@ -44,9 +44,9 @@ Bootstrap connections and credentials remain environment-only.
 
 The first save persists the complete settings document. Later starts use that
 document instead of legacy behavior variables, and the gateway never rewrites
-the operator's `.env`. The checked-in Compose file retains the old behavior
-pass-through mappings for one compatibility release so existing installations
-can migrate without changing every variable before the upgrade.
+the operator's `.env`. The checked-in Compose file no longer passes through behavior environment
+variables: it wires bootstrap and credentials only, and all behavior settings
+are maintained in `Admin > Settings`.
 
 Use `/admin/settings` for application identity, discovery, capability probes,
 routing, concurrency, HTTP, and log retention. Each field is marked either
@@ -205,8 +205,8 @@ For PostgreSQL-backed deployments, use Compose or another orchestrator and provi
 ## Docker Compose
 
 Use this if you want a repeatable local or VM deployment. The checked-in
-`docker-compose.yml` is the source of truth for bootstrap wiring and retains a
-one-release legacy behavior fallback until the first settings save.
+`docker-compose.yml` is the source of truth for bootstrap wiring and credentials
+only; application behavior is maintained in `Admin > Settings`.
 
 The default, single-instance mode does not start Redis:
 

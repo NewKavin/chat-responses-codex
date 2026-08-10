@@ -192,7 +192,7 @@ connections and credentials remain environment-only.
 应用名称、模型发现、能力探测、路由、并发、HTTP 和日志保留统一在
 `/admin/settings` 中编辑。页面会区分“即时生效”和“重启后生效”：即时字段只影响保存之后开始的新请求，重启字段会显示待重启状态。凭据、连接串和 CA 路径不会进入该页面。
 
-旧部署建议先升级并登录 `Admin > Settings` 核对由现有环境变量生成的值，保存一次后再从自有 `.env` 中删除旧行为变量。Compose 暂时保留一版旧变量透传作为首次保存前的兼容回退。
+旧部署建议先升级并登录 `Admin > Settings` 核对由现有环境变量生成的值，保存一次后再从自有 `.env` 中删除旧行为变量。Compose 不再透传行为环境变量，应用行为统一在 `/admin/settings` 中维护。
 
 ### 多 Key 精确路由与故障语义
 
@@ -487,8 +487,9 @@ restart. Connections, credentials, and CA paths are intentionally absent.
 On upgrade, review the effective values in `Admin > Settings` before saving.
 The first save persists the complete settings document; later starts use that
 document instead of legacy behavior variables, and the gateway never rewrites
-an operator's `.env`. Compose retains those legacy pass-through mappings for
-one compatibility release so existing installations can migrate in place.
+an operator's `.env`. Compose no longer passes through behavior environment variables;
+`docker-compose.yml` wires bootstrap and credentials only, and all behavior
+settings are maintained in `Admin > Settings`.
 
 Configuration model:
 

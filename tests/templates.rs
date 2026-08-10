@@ -168,7 +168,7 @@ fn app_config_defaults_upstream_route_retry_policy() {
 }
 
 #[test]
-fn compose_retains_legacy_stream_and_probe_fallbacks() {
+fn compose_omits_legacy_stream_and_probe_fallbacks() {
     let env_example = fs::read_to_string(".env.example").unwrap();
     let compose = fs::read_to_string("docker-compose.yml").unwrap();
     let deployment = fs::read_to_string("DEPLOYMENT.md").unwrap();
@@ -187,8 +187,8 @@ fn compose_retains_legacy_stream_and_probe_fallbacks() {
     ] {
         assert!(!env_example.contains(marker), ".env should omit {marker}");
         assert!(
-            compose.contains(marker),
-            "docker-compose.yml should retain legacy fallback {marker}"
+            !compose.contains(marker),
+            "docker-compose.yml should not advertise {marker}"
         );
         assert!(
             !deployment.contains(marker),
@@ -270,7 +270,10 @@ fn route_exhaustion_retry_moves_to_admin_settings_with_compose_fallback() {
         "UPSTREAM_ROUTE_EXHAUSTION_RETRY_MAX_ROUNDS",
     ] {
         assert!(!env_example.contains(marker), ".env should omit {marker}");
-        assert!(compose.contains(marker), "Compose should retain {marker}");
+        assert!(
+            !compose.contains(marker),
+            "Compose should not advertise {marker}"
+        );
         assert!(!readme.contains(marker), "README should omit {marker}");
         assert!(
             !deployment.contains(marker),
@@ -296,7 +299,10 @@ fn transient_route_retry_moves_to_admin_settings_with_compose_fallback() {
         "UPSTREAM_TRANSIENT_ROUTE_COOLDOWN_MAX_SECONDS",
     ] {
         assert!(!env_example.contains(marker), ".env should omit {marker}");
-        assert!(compose.contains(marker), "Compose should retain {marker}");
+        assert!(
+            !compose.contains(marker),
+            "Compose should not advertise {marker}"
+        );
         assert!(!readme.contains(marker), "README should omit {marker}");
         assert!(
             !deployment.contains(marker),
