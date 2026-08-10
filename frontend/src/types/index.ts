@@ -811,6 +811,7 @@ export interface RuntimeSettings {
   upstream_route_exhaustion_retry_enabled: boolean
   upstream_route_exhaustion_retry_max_wait_ms: number
   upstream_route_exhaustion_retry_max_rounds: number
+  default_upstream_max_concurrency: number
   downstream_lease_ttl_seconds: number
   upstream_concurrency_recovery_max_wait_ms: number
   upstream_concurrency_recovery_max_rounds: number

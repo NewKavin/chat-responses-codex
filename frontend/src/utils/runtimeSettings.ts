@@ -269,6 +269,16 @@ export const runtimeSettingFields: RuntimeSettingField[] = [
     max: MAX_U32
   },
   {
+    key: 'default_upstream_max_concurrency',
+    group: 'concurrency',
+    label: '新建上游每 Key 默认最大并发',
+    apply: 'immediate',
+    control: 'number',
+    unit: '路',
+    min: 1,
+    max: MAX_U32
+  },
+  {
     key: 'downstream_lease_ttl_seconds',
     group: 'concurrency',
     label: '下游租约有效期',

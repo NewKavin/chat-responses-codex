@@ -39,6 +39,7 @@ const validSettings = (): RuntimeSettings => ({
   upstream_route_exhaustion_retry_enabled: true,
   upstream_route_exhaustion_retry_max_wait_ms: 15_000,
   upstream_route_exhaustion_retry_max_rounds: 3,
+  default_upstream_max_concurrency: 4,
   downstream_lease_ttl_seconds: 120,
   upstream_concurrency_recovery_max_wait_ms: 30_000,
   upstream_concurrency_recovery_max_rounds: 5,
@@ -81,6 +82,7 @@ const expectedKeys: Array<keyof RuntimeSettings> = [
   'upstream_route_exhaustion_retry_enabled',
   'upstream_route_exhaustion_retry_max_wait_ms',
   'upstream_route_exhaustion_retry_max_rounds',
+  'default_upstream_max_concurrency',
   'downstream_lease_ttl_seconds',
   'upstream_concurrency_recovery_max_wait_ms',
   'upstream_concurrency_recovery_max_rounds',
@@ -105,10 +107,10 @@ describe('runtime settings catalog', () => {
       'http',
       'logs'
     ])
-    expect(runtimeSettingFields).toHaveLength(39)
-    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(39)
+    expect(runtimeSettingFields).toHaveLength(40)
+    expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(40)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(22)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(23)
     expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(17)
   })
 })
@@ -128,6 +130,7 @@ describe('runtime settings helpers', () => {
 
     const invalid = validSettings()
     invalid.app_name = '  '
+    invalid.default_upstream_max_concurrency = 0
     invalid.upstream_transient_route_cooldown_base_seconds = 61
     invalid.upstream_stream_keepalive_interval_seconds = 120
     invalid.upstream_stream_idle_timeout_seconds = 120
@@ -139,6 +142,7 @@ describe('runtime settings helpers', () => {
 
     const errors = validateRuntimeSettings(invalid)
     expect(errors.app_name).toBeTruthy()
+    expect(errors.default_upstream_max_concurrency).toBeTruthy()
     expect(errors.upstream_transient_route_cooldown_base_seconds).toBeTruthy()
     expect(errors.upstream_stream_keepalive_interval_seconds).toBeTruthy()
     expect(errors.upstream_stream_idle_timeout_seconds).toBeTruthy()

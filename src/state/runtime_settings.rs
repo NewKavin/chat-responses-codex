@@ -1,4 +1,4 @@
-use super::types::AppConfig;
+use super::types::{default_upstream_max_concurrency, AppConfig};
 use serde::{Deserialize, Serialize};
 use std::io;
 use thiserror::Error;
@@ -26,6 +26,7 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
+    "default_upstream_max_concurrency",
     "upstream_concurrency_recovery_max_rounds",
     "upstream_stream_idle_timeout_seconds",
     "upstream_first_semantic_output_timeout_seconds",
@@ -81,6 +82,8 @@ pub struct RuntimeSettings {
     pub upstream_route_exhaustion_retry_enabled: bool,
     pub upstream_route_exhaustion_retry_max_wait_ms: u64,
     pub upstream_route_exhaustion_retry_max_rounds: u32,
+    #[serde(default = "default_upstream_max_concurrency")]
+    pub default_upstream_max_concurrency: u32,
     pub downstream_lease_ttl_seconds: u64,
     pub upstream_concurrency_recovery_max_wait_ms: u64,
     pub upstream_concurrency_recovery_max_rounds: u32,
@@ -214,6 +217,7 @@ impl RuntimeSettings {
                 .upstream_route_exhaustion_retry_max_wait_ms,
             upstream_route_exhaustion_retry_max_rounds: config
                 .upstream_route_exhaustion_retry_max_rounds,
+            default_upstream_max_concurrency: default_upstream_max_concurrency(),
             downstream_lease_ttl_seconds: config.downstream_lease_ttl_seconds,
             upstream_concurrency_recovery_max_wait_ms: config
                 .upstream_concurrency_recovery_max_wait_ms,
@@ -378,6 +382,10 @@ impl RuntimeSettings {
         require_positive_u32(
             self.upstream_route_exhaustion_retry_max_rounds,
             "upstream_route_exhaustion_retry_max_rounds",
+        )?;
+        require_positive_u32(
+            self.default_upstream_max_concurrency,
+            "default_upstream_max_concurrency",
         )?;
         if self.downstream_lease_ttl_seconds < 60 {
             return Err(invalid(

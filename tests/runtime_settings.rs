@@ -74,15 +74,43 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    assert_eq!(all.len(), 39);
+    assert_eq!(all.len(), 40);
     assert_eq!(
         all.len(),
         IMMEDIATE_RUNTIME_SETTING_FIELDS.len() + RESTART_RUNTIME_SETTING_FIELDS.len()
     );
     assert!(all.contains("app_name"));
+    assert!(all.contains("default_upstream_max_concurrency"));
     assert!(all.contains("upstream_concurrency_probe_delays_ms"));
     assert!(!all.contains("jwt_secret"));
     assert!(!all.contains("redis_url"));
+}
+
+#[test]
+fn runtime_settings_without_default_upstream_concurrency_use_canonical_default() {
+    let mut serialized =
+        serde_json::to_value(RuntimeSettings::from_app_config(&AppConfig::default())).unwrap();
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("default_upstream_max_concurrency");
+
+    let loaded: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    let reserialized = serde_json::to_value(loaded).unwrap();
+
+    assert_eq!(reserialized["default_upstream_max_concurrency"], 4);
+}
+
+#[test]
+fn runtime_settings_reject_zero_default_upstream_concurrency() {
+    let mut serialized =
+        serde_json::to_value(RuntimeSettings::from_app_config(&AppConfig::default())).unwrap();
+    serialized["default_upstream_max_concurrency"] = serde_json::json!(0);
+
+    let settings: RuntimeSettings = serde_json::from_value(serialized).unwrap();
+    let error = settings.validate_and_normalize().unwrap_err();
+
+    assert_eq!(error.field(), "default_upstream_max_concurrency");
 }
 
 #[test]

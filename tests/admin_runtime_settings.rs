@@ -188,7 +188,8 @@ async fn runtime_settings_initial_response_uses_startup_source_without_secrets()
     assert_eq!(body["revision"], 0);
     assert_eq!(body["source"], "startup");
     assert_eq!(body["settings"]["app_name"], "Startup Gateway");
-    assert_eq!(body["settings"].as_object().unwrap().len(), 39);
+    assert_eq!(body["settings"]["default_upstream_max_concurrency"], 4);
+    assert_eq!(body["settings"].as_object().unwrap().len(), 40);
     assert_eq!(body["restart_required"], false);
     assert_eq!(body["restart_required_fields"], json!([]));
 }
@@ -199,6 +200,7 @@ async fn runtime_settings_put_normalizes_and_publishes_after_persistence() {
     let initial = harness.get().await;
     let mut settings = initial["settings"].clone();
     settings["app_name"] = json!("  Internal Gateway  ");
+    settings["default_upstream_max_concurrency"] = json!(7);
     settings["upstream_http_pool_max_idle_per_host"] = json!(64);
 
     let response = harness.put(0, settings).await;
@@ -208,6 +210,7 @@ async fn runtime_settings_put_normalizes_and_publishes_after_persistence() {
     assert_eq!(saved["revision"], 1);
     assert_eq!(saved["source"], "persisted");
     assert_eq!(saved["settings"]["app_name"], "Internal Gateway");
+    assert_eq!(saved["settings"]["default_upstream_max_concurrency"], 7);
     assert_eq!(saved["restart_required"], true);
     assert!(saved["applied_immediately"]
         .as_array()
@@ -221,6 +224,11 @@ async fn runtime_settings_put_normalizes_and_publishes_after_persistence() {
     assert_eq!(
         harness.state.runtime_settings().app_name,
         "Internal Gateway"
+    );
+    assert_eq!(
+        serde_json::to_value(harness.state.runtime_settings()).unwrap()
+            ["default_upstream_max_concurrency"],
+        7
     );
     assert_eq!(
         harness.state.config.upstream_http_pool_max_idle_per_host,
