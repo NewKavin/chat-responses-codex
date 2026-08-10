@@ -7,7 +7,8 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::state::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, AppConfig, AppState,
     CompatibilityUsageMetadata, DefaultModelContextConfig, DownstreamConfig, GlobalContextProfile,
-    ModelContextConfig, PersistedState, UpstreamConfig, UsageLog, UsageLogQuery,
+    ModelContextConfig, PersistedState, RuntimeSettingsDocument, UpstreamConfig, UsageLog,
+    UsageLogQuery,
 };
 use serde_json::json;
 use serde_json::Map;
@@ -131,6 +132,71 @@ async fn upstream_remark_round_trips_through_postgres() {
         .cloned()
         .unwrap();
     assert_eq!(persisted.remark, "shared team account");
+}
+
+#[tokio::test]
+async fn runtime_settings_round_trip_through_postgres() {
+    let _guard = env_lock().lock().await;
+    let Ok(database_url) = env::var("PG_TEST_DATABASE_URL") else {
+        eprintln!("skipping postgres runtime settings test: PG_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let injected_password = env::var("PG_TEST_PASSWORD").ok();
+    if let Some(password) = &injected_password {
+        env::set_var("PGPASSWORD", password);
+    }
+
+    let mut legacy = AppConfig::default();
+    legacy.app_name = "Legacy PostgreSQL env".into();
+    AppState::load_from_database_url(&database_url, legacy.clone())
+        .await
+        .expect("should initialize the PostgreSQL schema");
+    reset_test_database_async(&database_url).await;
+
+    let mut document = RuntimeSettingsDocument::startup(&legacy);
+    document.revision = 4;
+    document.updated_at = 123;
+    document.settings.app_name = "Saved PostgreSQL settings".into();
+    document.settings.upstream_http_pool_max_idle_per_host = 64;
+    let encoded = serde_json::to_string(&document).unwrap();
+    let client = postgres_client(&database_url).await;
+    client
+        .execute(
+            "INSERT INTO runtime_settings (singleton_id, document, updated_at) \
+             VALUES ('default', $1, $2)",
+            &[&encoded, &(document.updated_at as i64)],
+        )
+        .await
+        .unwrap();
+
+    let loaded = AppState::load_from_database_url(&database_url, legacy.clone())
+        .await
+        .expect("should load persisted runtime settings");
+    assert_eq!(loaded.config.app_name, "Saved PostgreSQL settings");
+    assert_eq!(loaded.config.upstream_http_pool_max_idle_per_host, 64);
+    assert_eq!(
+        loaded.snapshot().await.runtime_settings,
+        Some(document.clone())
+    );
+
+    client
+        .execute(
+            "DELETE FROM runtime_settings WHERE singleton_id = 'default'",
+            &[],
+        )
+        .await
+        .unwrap();
+    loaded.persist().await.unwrap();
+
+    let reloaded = AppState::load_from_database_url(&database_url, legacy)
+        .await
+        .expect("should reload the transactionally persisted settings");
+    assert_eq!(reloaded.snapshot().await.runtime_settings, Some(document));
+    reset_test_database_async(&database_url).await;
+
+    if injected_password.is_some() {
+        env::remove_var("PGPASSWORD");
+    }
 }
 
 #[tokio::test]
@@ -1537,7 +1603,7 @@ async fn execute_pg_sql(database_url: &str, sql: &str) {
 async fn reset_test_database_async(database_url: &str) {
     execute_pg_sql(
         database_url,
-        "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
+        "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings RESTART IDENTITY",
     )
     .await;
 }
@@ -1585,7 +1651,7 @@ fn reset_test_database(database_url: &str) {
             "-v",
             "ON_ERROR_STOP=1",
             "-c",
-            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements RESTART IDENTITY",
+            "TRUNCATE TABLE usage_logs, dialect_profiles, downstream_ip_allowlist, downstream_model_allowlist, downstreams, upstream_premium_models, upstream_supported_models, upstreams, global_context_profiles, app_announcements, runtime_settings RESTART IDENTITY",
         ])
         .output()
         .expect("psql should run");

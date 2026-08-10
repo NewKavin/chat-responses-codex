@@ -50,6 +50,7 @@ fn create_test_state_without_announcement() -> (AppState, String) {
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -102,6 +103,7 @@ fn create_test_state_with_draft_announcement() -> (AppState, String) {
             updated_at: 1_710_000_000,
         }),
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

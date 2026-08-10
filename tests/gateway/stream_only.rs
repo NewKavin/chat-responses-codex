@@ -159,6 +159,7 @@ impl StreamOnlyHarness {
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(HashMap::new()),
+                runtime_settings: None,
             },
             tempdir().unwrap().path().join("state.json"),
             AppConfig::default(),

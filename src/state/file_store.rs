@@ -184,6 +184,7 @@ impl StateStore for FileStateStore {
                 usage_logs: Vec::new(),
                 announcement: state.announcement.clone(),
                 global_context_profiles: state.global_context_profiles.clone(),
+                runtime_settings: state.runtime_settings.clone(),
             })
             .map_err(io::Error::other)?;
 

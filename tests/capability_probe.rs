@@ -2866,6 +2866,7 @@ async fn normal_gateway_request_never_launches_a_probe() {
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+                runtime_settings: None,
             },
             state_path,
             AppConfig::default(),
@@ -2958,6 +2959,7 @@ async fn recognized_field_level_400_queues_future_probe_without_blocking_request
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+                runtime_settings: None,
             },
             state_path,
             AppConfig {

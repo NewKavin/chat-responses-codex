@@ -2271,6 +2271,7 @@ async fn manual_probe_queue_for_downstream_model_emits_exact_jobs() {
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         &path,
         AppConfig::default(),

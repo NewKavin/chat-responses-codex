@@ -259,6 +259,7 @@ fn create_test_state() -> AppState {
         ],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     AppState::new(state, unique_state_path(), config)
@@ -832,6 +833,7 @@ async fn admin_dashboard_returns_model_and_client_breakdowns() {
         ],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let app_state = AppState::new(state, unique_state_path(), config);

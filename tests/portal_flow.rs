@@ -53,6 +53,7 @@ fn create_test_state_with_downstream() -> (AppState, String, String) {
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     (

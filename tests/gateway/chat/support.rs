@@ -98,6 +98,7 @@ pub(super) async fn capture_single_chat_request(
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         state_path,
         AppConfig::default(),

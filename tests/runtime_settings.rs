@@ -1,6 +1,7 @@
 use chat_responses_codex::state::{
-    AppConfig, RuntimeSettings, RuntimeSettingsDocument, IMMEDIATE_RUNTIME_SETTING_FIELDS,
-    RESTART_RUNTIME_SETTING_FIELDS, RUNTIME_SETTINGS_SCHEMA_VERSION,
+    AppConfig, AppState, PersistedState, RuntimeSettings, RuntimeSettingsDocument,
+    IMMEDIATE_RUNTIME_SETTING_FIELDS, RESTART_RUNTIME_SETTING_FIELDS,
+    RUNTIME_SETTINGS_SCHEMA_VERSION,
 };
 
 #[test]
@@ -82,4 +83,60 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     assert!(all.contains("upstream_concurrency_probe_delays_ms"));
     assert!(!all.contains("jwt_secret"));
     assert!(!all.contains("redis_url"));
+}
+
+#[test]
+fn persisted_state_without_runtime_settings_still_deserializes() {
+    let raw = serde_json::json!({
+        "upstreams": [],
+        "downstreams": [],
+        "usage_logs": []
+    });
+
+    let state: PersistedState = serde_json::from_value(raw).unwrap();
+
+    assert!(state.runtime_settings.is_none());
+}
+
+#[tokio::test]
+async fn persisted_runtime_settings_override_startup_config_and_round_trip_file_state() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let state_path = tempdir.path().join("state.json");
+    let mut legacy = AppConfig::default();
+    legacy.app_name = "Legacy env".into();
+    legacy.upstream_route_exhaustion_retry_max_rounds = 3;
+
+    let mut document = RuntimeSettingsDocument::startup(&legacy);
+    document.revision = 4;
+    document.updated_at = 123;
+    document.settings.app_name = "Saved settings".into();
+    document.settings.upstream_route_exhaustion_retry_max_rounds = 9;
+
+    let state = AppState::new(
+        PersistedState {
+            runtime_settings: Some(document.clone()),
+            ..PersistedState::default()
+        },
+        state_path.clone(),
+        legacy.clone(),
+    );
+
+    assert_eq!(state.config.app_name, "Saved settings");
+    assert_eq!(state.config.upstream_route_exhaustion_retry_max_rounds, 9);
+    assert_eq!(state.runtime_settings().app_name, "Saved settings");
+    state.persist().await.unwrap();
+
+    legacy.app_name = "Changed legacy env".into();
+    legacy.upstream_route_exhaustion_retry_max_rounds = 2;
+    let reloaded = AppState::load_from_path(&state_path, legacy).await.unwrap();
+    let snapshot = reloaded.snapshot().await;
+
+    assert_eq!(snapshot.runtime_settings, Some(document));
+    assert_eq!(reloaded.config.app_name, "Saved settings");
+    assert_eq!(
+        reloaded
+            .runtime_settings()
+            .upstream_route_exhaustion_retry_max_rounds,
+        9
+    );
 }

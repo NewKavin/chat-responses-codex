@@ -1,6 +1,7 @@
 use crate::routing::UpstreamProtocol;
 use crate::state::redis_runtime::RuntimeCoordinationError;
 use crate::upstream_tls::UpstreamCaConfig;
+use super::runtime_settings::RuntimeSettingsDocument;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -694,6 +695,8 @@ pub struct PersistedState {
     pub announcement: Option<AnnouncementConfig>,
     #[serde(default)]
     pub global_context_profiles: Arc<HashMap<String, GlobalContextProfile>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_settings: Option<RuntimeSettingsDocument>,
 }
 
 fn default_true() -> bool {

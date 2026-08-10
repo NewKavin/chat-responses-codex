@@ -189,6 +189,7 @@ fn canonical_upstream_state() -> (AppState, String) {
         ],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -287,6 +288,7 @@ fn create_test_state() -> (AppState, String) {
         ],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -385,6 +387,7 @@ fn create_test_state_without_token_limits() -> (AppState, String) {
         ],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -454,6 +457,7 @@ fn create_test_state_with_many_logs(count: usize) -> (AppState, String) {
         usage_logs,
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1312,6 +1316,7 @@ fn create_test_state_with_key_prefix() -> (AppState, String) {
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1649,6 +1654,7 @@ fn create_state_with_context_limits() -> (AppState, String) {
         usage_logs: vec![],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1772,6 +1778,7 @@ fn create_test_state_with_timezone(timezone: &str) -> (AppState, String) {
         }],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();
@@ -1988,6 +1995,7 @@ async fn portal_overview_cost_billing_exposes_cost_daily_and_cost_summary() {
         }],
         announcement: None,
         global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+        runtime_settings: None,
     };
 
     let portal_key = state.downstreams[0].plaintext_key.clone().unwrap();

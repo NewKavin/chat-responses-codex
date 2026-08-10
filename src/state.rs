@@ -465,6 +465,8 @@ pub enum ManualProbeBatchError {
 pub struct AppState {
     inner: Arc<Mutex<PersistedState>>,
     config_persist_lock: Arc<Mutex<()>>,
+    runtime_settings: Arc<ArcSwap<RuntimeSettings>>,
+    startup_runtime_settings: Arc<RuntimeSettings>,
     capability_snapshot: Arc<ArcSwap<CapabilityRuntimeSnapshot>>,
     capability_update_lock: Arc<Mutex<()>>,
     archived_usage_logs: Arc<Mutex<Vec<UsageLog>>>,
@@ -515,6 +517,27 @@ fn account_concurrency_registry_from_config(config: &AppConfig) -> Arc<AccountCo
     Arc::new(AccountConcurrencyRegistry::new(
         AccountConcurrencyTuning::from_config(config),
     ))
+}
+
+fn config_with_persisted_runtime_settings(
+    state: &PersistedState,
+    mut config: AppConfig,
+) -> (AppConfig, RuntimeSettings) {
+    let startup_settings = RuntimeSettings::from_app_config(&config);
+    let settings = state
+        .runtime_settings
+        .as_ref()
+        .filter(|document| document.schema_version == RUNTIME_SETTINGS_SCHEMA_VERSION)
+        .and_then(|document| match document.settings.clone().validate_and_normalize() {
+            Ok(settings) => Some(settings),
+            Err(error) => {
+                tracing::error!(error = %error, "ignoring invalid persisted runtime settings");
+                None
+            }
+        })
+        .unwrap_or(startup_settings);
+    settings.apply_to_app_config(&mut config);
+    (config, settings)
 }
 
 fn new_internal_route_capture_token() -> Arc<str> {
@@ -806,6 +829,7 @@ impl AppState {
         runtime_coordination: RuntimeCoordinationBackend,
         deployment_calendar: DeploymentCalendar,
     ) -> Self {
+        let (config, runtime_settings) = config_with_persisted_runtime_settings(&state, config);
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
         }
@@ -825,6 +849,8 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
+            runtime_settings: Arc::new(ArcSwap::from_pointee(runtime_settings.clone())),
+            startup_runtime_settings: Arc::new(runtime_settings),
             capability_snapshot: Arc::new(ArcSwap::from_pointee(
                 CapabilityRuntimeSnapshot::default(),
             )),
@@ -878,6 +904,7 @@ impl AppState {
         postgres: Option<Arc<PostgresStateStore>>,
         deployment_calendar: DeploymentCalendar,
     ) -> Self {
+        let (config, runtime_settings) = config_with_persisted_runtime_settings(&state, config);
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
         }
@@ -895,6 +922,8 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
+            runtime_settings: Arc::new(ArcSwap::from_pointee(runtime_settings.clone())),
+            startup_runtime_settings: Arc::new(runtime_settings),
             capability_snapshot: Arc::new(ArcSwap::from_pointee(
                 CapabilityRuntimeSnapshot::default(),
             )),
@@ -946,6 +975,7 @@ impl AppState {
         runtime_coordination: RuntimeCoordinationBackend,
         deployment_calendar: DeploymentCalendar,
     ) -> Self {
+        let (config, runtime_settings) = config_with_persisted_runtime_settings(&state, config);
         for upstream in Arc::make_mut(&mut state.upstreams) {
             upstream.normalize_for_storage();
         }
@@ -960,6 +990,8 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(state)),
             config_persist_lock: Arc::new(Mutex::new(())),
+            runtime_settings: Arc::new(ArcSwap::from_pointee(runtime_settings.clone())),
+            startup_runtime_settings: Arc::new(runtime_settings),
             capability_snapshot: Arc::new(ArcSwap::from_pointee(
                 CapabilityRuntimeSnapshot::default(),
             )),
@@ -2119,7 +2151,16 @@ impl AppState {
             usage_logs: Vec::new(),
             announcement: None,
             global_context_profiles: state.global_context_profiles.clone(),
+            runtime_settings: state.runtime_settings.clone(),
         }
+    }
+
+    pub fn runtime_settings(&self) -> Arc<RuntimeSettings> {
+        self.runtime_settings.load_full()
+    }
+
+    pub fn startup_runtime_settings(&self) -> &RuntimeSettings {
+        &self.startup_runtime_settings
     }
 
     pub fn capability_snapshot(&self) -> Arc<CapabilityRuntimeSnapshot> {
@@ -2137,14 +2178,12 @@ impl AppState {
         config: AppConfig,
         deployment_calendar: DeploymentCalendar,
     ) -> io::Result<Self> {
-        let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
         if let Ok(database_url) = env::var("DATABASE_URL") {
             if !database_url.trim().is_empty() {
                 tracing::info!(backend = "postgres", "loading gateway state from postgres");
-                return Self::load_from_database_url_with_runtime(
+                return Self::load_from_database_url_with_calendar(
                     database_url,
                     config,
-                    runtime_coordination,
                     deployment_calendar,
                 )
                 .await;
@@ -2163,6 +2202,8 @@ impl AppState {
         } else {
             PersistedState::default()
         };
+        let (config, _) = config_with_persisted_runtime_settings(&state, config);
+        let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
 
         let archived_usage_logs = load_archived_usage_logs(&store_path).await?;
         let upstream_count = state.upstreams.len();
@@ -2201,20 +2242,12 @@ impl AppState {
     ) -> io::Result<Self> {
         let deployment_calendar = DeploymentCalendar::parse(&config.deployment_timezone)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
-        Self::load_from_database_url_with_runtime(
-            database_url,
-            config,
-            runtime_coordination,
-            deployment_calendar,
-        )
-        .await
+        Self::load_from_database_url_with_calendar(database_url, config, deployment_calendar).await
     }
 
-    async fn load_from_database_url_with_runtime(
+    async fn load_from_database_url_with_calendar(
         database_url: impl AsRef<str>,
         config: AppConfig,
-        runtime_coordination: RuntimeCoordinationBackend,
         deployment_calendar: DeploymentCalendar,
     ) -> io::Result<Self> {
         let postgres =
@@ -2225,6 +2258,8 @@ impl AppState {
                 })?;
         let state = postgres.load_state().await?;
         let capability_state = postgres.load_capability_state().await?;
+        let (config, _) = config_with_persisted_runtime_settings(&state, config);
+        let runtime_coordination = RuntimeCoordinationBackend::from_config(&config).await?;
         tracing::info!(
             backend = "postgres",
             upstreams = state.upstreams.len(),
@@ -5128,6 +5163,7 @@ impl AppState {
         state.downstreams = candidate_state.downstreams;
         state.announcement = candidate_state.announcement;
         state.global_context_profiles = candidate_state.global_context_profiles;
+        state.runtime_settings = candidate_state.runtime_settings;
 
         Ok(result)
     }

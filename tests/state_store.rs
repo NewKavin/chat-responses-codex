@@ -202,6 +202,7 @@ async fn file_store_persists_announcement_payload() {
             usage_logs: vec![],
             announcement: Some(announcement.clone()),
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         state_path.clone(),
         AppConfig::default(),
@@ -269,6 +270,7 @@ async fn query_usage_logs_page_filters_sorts_and_pages() {
             ],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         unique_state_path(),
         AppConfig::default(),
@@ -378,6 +380,7 @@ async fn query_usage_logs_page_preserves_same_timestamp_ordering() {
             ],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         unique_state_path(),
         AppConfig::default(),
@@ -463,6 +466,7 @@ async fn downstream_usage_summary_matches_existing_portal_totals() {
             ],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         unique_state_path(),
         AppConfig::default(),
@@ -697,6 +701,7 @@ async fn routing_snapshot_does_not_publish_before_slow_config_persist_commits() 
                 ..UpstreamConfig::default()
             }]),
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
             ..PersistedState::default()
         },
         unique_state_path(),
@@ -916,6 +921,7 @@ async fn downstream_usage_summary_includes_pending_logs_and_matches_allowlist_ca
             }]),
             usage_logs: vec![],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
             ..PersistedState::default()
         },
         unique_state_path(),
@@ -985,6 +991,7 @@ async fn query_usage_logs_page_includes_pending_logs_before_flush() {
             }]),
             usage_logs: vec![],
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
             ..PersistedState::default()
         },
         unique_state_path(),

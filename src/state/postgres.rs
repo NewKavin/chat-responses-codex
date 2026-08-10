@@ -5,7 +5,7 @@ use super::{
     unix_seconds, AnnouncementConfig, AnnouncementLevel, ApiKeyModelConfig, CalendarRange,
     DailyStats, DefaultModelContextConfig, DownstreamConfig, DownstreamUsageSummary,
     GlobalContextProfile, ModelContextConfig, PersistedState, ResponseHistoryEntry, UpstreamConfig,
-    UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
+    RuntimeSettingsDocument, UpstreamProtocol, UsageLog, UsageLogPage, UsageLogQuery,
 };
 use crate::capabilities::{
     CapabilityConfiguration, CapabilityStateDocument, DialectProfileKey, UpstreamDialectProfile,
@@ -283,6 +283,16 @@ impl PostgresStateStore {
         }
 
         let announcement = load_announcement(&conn).await?;
+        let runtime_settings = conn
+            .query_opt(
+                "SELECT document FROM runtime_settings WHERE singleton_id = 'default'",
+                &[],
+            )
+            .await
+            .map_err(io_other)?
+            .map(|row| serde_json::from_str::<RuntimeSettingsDocument>(&row.get::<_, String>(0)))
+            .transpose()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
         Ok(PersistedState {
             upstreams: Arc::new(upstreams),
@@ -290,6 +300,7 @@ impl PostgresStateStore {
             global_context_profiles: Arc::new(global_context_profiles),
             usage_logs,
             announcement,
+            runtime_settings,
         })
     }
 
@@ -899,7 +910,36 @@ async fn sync_config_tables(tx: &Transaction<'_>, state: &PersistedState) -> io:
     sync_upstreams(tx, &state.upstreams).await?;
     sync_downstreams(tx, &state.downstreams).await?;
     sync_global_context_profiles(tx, &state.global_context_profiles).await?;
-    sync_announcements(tx, &state.announcement).await
+    sync_announcements(tx, &state.announcement).await?;
+    sync_runtime_settings(tx, &state.runtime_settings).await
+}
+
+async fn sync_runtime_settings(
+    tx: &Transaction<'_>,
+    document: &Option<RuntimeSettingsDocument>,
+) -> io::Result<()> {
+    let Some(document) = document else {
+        tx.execute(
+            "DELETE FROM runtime_settings WHERE singleton_id = 'default'",
+            &[],
+        )
+        .await
+        .map_err(io_other)?;
+        return Ok(());
+    };
+    let encoded = serde_json::to_string(document).map_err(io_other)?;
+    let updated_at = u64_to_i64(document.updated_at);
+    tx.execute(
+        "INSERT INTO runtime_settings (singleton_id, document, updated_at)
+         VALUES ('default', $1, $2)
+         ON CONFLICT (singleton_id) DO UPDATE SET
+             document = EXCLUDED.document,
+             updated_at = EXCLUDED.updated_at",
+        &[&encoded, &updated_at],
+    )
+    .await
+    .map_err(io_other)?;
+    Ok(())
 }
 
 async fn sync_global_context_profiles(
@@ -1695,6 +1735,12 @@ CREATE TABLE IF NOT EXISTS app_announcements (
     content TEXT NOT NULL,
     level TEXT NOT NULL,
     active BOOLEAN NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    singleton_id TEXT PRIMARY KEY CHECK (singleton_id = 'default'),
+    document TEXT NOT NULL,
     updated_at BIGINT NOT NULL
 );
 

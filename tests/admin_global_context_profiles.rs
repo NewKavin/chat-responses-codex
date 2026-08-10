@@ -52,6 +52,7 @@ fn create_test_state() -> AppState {
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(global_context_profiles),
+            runtime_settings: None,
         },
         unique_state_path(),
         config,

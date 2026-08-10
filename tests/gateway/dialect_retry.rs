@@ -203,6 +203,7 @@ impl DialectRetryFixture {
                 usage_logs: vec![],
                 announcement: None,
                 global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+                runtime_settings: None,
             },
             state_path,
             AppConfig::default(),

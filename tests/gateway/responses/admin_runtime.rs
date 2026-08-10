@@ -95,6 +95,7 @@ async fn logs_distinguish_local_reference_from_upstream_feedback() {
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         state_path,
         AppConfig::default(),
@@ -221,6 +222,7 @@ async fn admin_upstream_runtime_exposes_feedback_cooldown() {
             usage_logs: vec![],
             announcement: None,
             global_context_profiles: std::sync::Arc::new(std::collections::HashMap::new()),
+            runtime_settings: None,
         },
         state_path,
         AppConfig {
