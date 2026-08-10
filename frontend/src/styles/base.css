@@ -534,6 +534,11 @@ a {
 }
 
 @media (max-width: 767px) {
+  .el-message.settings-feedback-message {
+    top: auto !important;
+    bottom: max(16px, env(safe-area-inset-bottom)) !important;
+  }
+
   .upstream-account-drawer,
   .downstream-account-drawer {
     --account-drawer-width: 100vw;

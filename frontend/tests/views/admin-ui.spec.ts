@@ -228,6 +228,21 @@ describe('admin ui structure', () => {
     expect(page).toContain('announcement-form-surface')
     expect(page).not.toContain('<el-card')
   })
+
+  it('replaces stale settings feedback instead of stacking messages', () => {
+    const page = source('views/admin/Settings.vue')
+    const baseStyles = source('styles/base.css')
+    const feedbackHelper = page.slice(
+      page.indexOf('const showSettingsMessage'),
+      page.indexOf('const loadSettings')
+    )
+
+    expect(feedbackHelper).toContain('ElMessage.closeAll()')
+    expect(feedbackHelper).toContain("customClass: 'settings-feedback-message'")
+    expect(baseStyles).toContain('.el-message.settings-feedback-message')
+    expect(baseStyles).toContain('bottom: max(16px, env(safe-area-inset-bottom)) !important')
+    expect(page).not.toMatch(/ElMessage\.(success|warning|error)\(/)
+  })
 })
 
 describe('admin downstream runtime display', () => {

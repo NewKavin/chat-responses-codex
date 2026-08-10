@@ -336,6 +336,18 @@ const apiErrorMessage = (error: unknown, fallback: string) => {
     (error instanceof Error ? error.message : fallback)
 }
 
+const showSettingsMessage = (
+  type: 'success' | 'warning' | 'error',
+  message: string
+) => {
+  ElMessage.closeAll()
+  ElMessage({
+    type,
+    message,
+    customClass: 'settings-feedback-message'
+  })
+}
+
 const loadSettings = async () => {
   try {
     loading.value = true
@@ -343,7 +355,7 @@ const loadSettings = async () => {
     applyResponse(data)
   } catch (error) {
     loadFailed.value = true
-    ElMessage.error(apiErrorMessage(error, '加载设置失败'))
+    showSettingsMessage('error', apiErrorMessage(error, '加载设置失败'))
   } finally {
     loading.value = false
   }
@@ -376,13 +388,13 @@ const saveSettings = async () => {
     const message = data.restart_required
       ? `设置已保存，${data.restart_required_fields.length} 项重启后生效`
       : `设置已保存，${data.applied_immediately.length} 项已应用`
-    ElMessage.success(message)
+    showSettingsMessage('success', message)
   } catch (error) {
     const apiError = error as RuntimeSettingsApiError
     const responseError = apiError.response?.data?.error
     if (apiError.response?.status === 409) {
       conflictRevision.value = responseError?.current_revision ?? revision.value
-      ElMessage.warning('设置已被其他管理员更新')
+      showSettingsMessage('warning', '设置已被其他管理员更新')
     } else {
       if (responseError?.field && responseError.message) {
         backendFieldError.value = {
@@ -390,7 +402,7 @@ const saveSettings = async () => {
           message: responseError.message
         }
       }
-      ElMessage.error(apiErrorMessage(error, '保存设置失败'))
+      showSettingsMessage('error', apiErrorMessage(error, '保存设置失败'))
     }
   } finally {
     saving.value = false
