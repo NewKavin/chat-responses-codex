@@ -228,7 +228,7 @@
 - 合成顺序：探测 resolved（最优）> 方言预设 > Auto 保守剥离。实现于 route 能力解析入口（`src/capabilities/resolver.rs`，与 `evaluate_route_capabilities_with_runtime_hints` 汇合处）。
 - 模板 JSON 的 policy 亦可引用预设，减少重复。
 
-### A3. 失败驱动的形状学习闭环
+### A3. 失败驱动的形状学习闭环 ✅ 已完成 (commit 33c962c)
 **改动**：
 - `maybe_queue_dialect_error_probe`（`capability_probe.rs:561`）触发条件扩展：除 400 外，纳入 B1 识别出的"5xx+请求语义证据"与 B2 共模熔断样本（把首个上游错误文本传入）。
 - 新增受控的**同请求降级重试**：当首条路由失败且错误文本命中方言字段列表（`capability_probe.rs:591-604` 的清单），在**同一条路由**上进行一次剥离该字段后的重试（`same_route_retry_attempted` 机制已有锚点，`gateway.rs:5405`），成功则记录 runtime hint（`RuntimeCapabilityHintSnapshot`，`gateway.rs:153` 已有钩子）供后续请求直接生效。
