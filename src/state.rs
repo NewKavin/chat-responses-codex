@@ -1472,6 +1472,36 @@ impl AppState {
         Ok(self.route_health.lock().await.route_health_snapshot(route))
     }
 
+    pub async fn reset_upstream_route_health(
+        &self,
+        upstream_id: &str,
+    ) -> Result<Option<usize>, RuntimeCoordinationError> {
+        let upstream = self
+            .snapshot()
+            .await
+            .upstreams
+            .iter()
+            .find(|upstream| upstream.id == upstream_id)
+            .cloned();
+        let Some(upstream) = upstream else {
+            return Ok(None);
+        };
+        let routes = match &self.runtime_coordination {
+            RuntimeCoordinationBackend::Redis(coordinator) => {
+                coordinator.configured_route_health_routes(&upstream).await?
+            }
+            RuntimeCoordinationBackend::Local => self
+                .route_health
+                .lock()
+                .await
+                .configured_route_health_routes(&upstream),
+        };
+        for route in &routes {
+            self.clear_route_health(route).await?;
+        }
+        Ok(Some(routes.len()))
+    }
+
     pub async fn key_health_snapshot(
         &self,
         key: &KeyHealthKey,
@@ -2398,6 +2428,20 @@ impl AppState {
             .map_err(RuntimeSettingsUpdateError::Persist)?;
 
         state.runtime_settings = Some(document.clone());
+        {
+            let mut route_health = self.route_health.lock().await;
+            route_health.update_runtime_tuning(
+                settings.upstream_concurrency_probe_delays_ms.clone(),
+                settings.upstream_transient_route_cooldown_base_seconds,
+                settings.upstream_transient_route_cooldown_max_seconds,
+                settings.upstream_route_health_half_open_ttl_seconds,
+            );
+        }
+        self.account_concurrency.update_runtime_tuning(
+            settings.upstream_concurrency_probe_delays_ms.clone(),
+            settings.upstream_concurrency_recovery_max_wait_ms,
+        );
+        self.runtime_coordination.update_runtime_tuning(&settings);
         self.runtime_settings.store(Arc::new(settings));
         let response = self.runtime_settings_response_for(
             RuntimeSettingsSource::Persisted,

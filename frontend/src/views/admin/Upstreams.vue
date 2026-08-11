@@ -141,12 +141,19 @@
           <template #default="{ row }">{{ row.remark || '-' }}</template>
         </el-table-column>
         
-        <el-table-column label="操作" width="340" fixed="right">
+        <el-table-column label="操作" width="450" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click="handleEdit(row)">编辑</el-button>
             <el-button size="small" @click="handleCopy(row)">复制</el-button>
             <el-button size="small" @click="handleToggle(row)">
               {{ row.active ? '禁用' : '启用' }}
+            </el-button>
+            <el-button
+              size="small"
+              :icon="RefreshCw"
+              @click="handleResetRouteHealth(row)"
+            >
+              解除冷却
             </el-button>
             <el-button size="small" type="danger" @click="handleDelete(row)">删除</el-button>
           </template>
@@ -869,6 +876,23 @@ const handleToggle = async (row: UpstreamConfig) => {
     loadData()
   } catch (error) {
     ElMessage.error('操作失败')
+  }
+}
+
+const handleResetRouteHealth = async (row: UpstreamConfig) => {
+  try {
+    await ElMessageBox.confirm(
+      `确定解除上游 "${row.name}" 的临时路由冷却吗？Key 凭证和额度状态会保留。`,
+      '确认解除临时冷却',
+      { type: 'warning' }
+    )
+    const { data } = await adminApi.resetUpstreamRouteHealth(row.id)
+    ElMessage.success(`已解除 ${data.cleared_routes} 条路由的临时冷却`)
+    await loadData()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('解除临时冷却失败')
+    }
   }
 }
 

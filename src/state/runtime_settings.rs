@@ -23,10 +23,15 @@ pub const IMMEDIATE_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_hedge_interval_ms",
     "upstream_hedge_max_extra_attempts",
     "upstream_same_route_retry_enabled",
+    "upstream_transient_route_cooldown_base_seconds",
+    "upstream_transient_route_cooldown_max_seconds",
+    "upstream_route_health_half_open_ttl_seconds",
     "upstream_route_exhaustion_retry_enabled",
     "upstream_route_exhaustion_retry_max_wait_ms",
     "upstream_route_exhaustion_retry_max_rounds",
     "default_upstream_max_concurrency",
+    "upstream_concurrency_recovery_max_wait_ms",
+    "upstream_concurrency_probe_delays_ms",
     "upstream_concurrency_recovery_max_rounds",
     "upstream_stream_idle_timeout_seconds",
     "upstream_first_semantic_output_timeout_seconds",
@@ -44,12 +49,7 @@ pub const RESTART_RUNTIME_SETTING_FIELDS: &[&str] = &[
     "upstream_response_header_timeout_seconds",
     "upstream_stream_keepalive_interval_seconds",
     "upstream_stream_max_duration_seconds",
-    "upstream_transient_route_cooldown_base_seconds",
-    "upstream_transient_route_cooldown_max_seconds",
-    "upstream_route_health_half_open_ttl_seconds",
     "downstream_lease_ttl_seconds",
-    "upstream_concurrency_recovery_max_wait_ms",
-    "upstream_concurrency_probe_delays_ms",
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

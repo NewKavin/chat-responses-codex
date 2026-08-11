@@ -1847,6 +1847,12 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/upstreams/{id}/route-health/reset",
+            post(admin_reset_upstream_route_health).route_layer(
+                axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),
+            ),
+        )
+        .route(
             "/api/admin/upstreams/batch-toggle",
             post(admin_batch_toggle_upstreams).route_layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -4247,7 +4253,7 @@ async fn process_gateway_request_inner(
             }
         };
     let account_recovery_deadline = TokioInstant::now()
-        + Duration::from_millis(state.config.upstream_concurrency_recovery_max_wait_ms);
+        + Duration::from_millis(runtime_settings.upstream_concurrency_recovery_max_wait_ms);
     let mut account_recovery = AccountRecoverySession::new(
         state.clone(),
         request_id.clone(),

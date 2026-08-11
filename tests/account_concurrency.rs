@@ -300,6 +300,30 @@ fn rejection_jitter_is_deterministic_and_bounded() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn runtime_tuning_updates_waiter_budget_and_probe_delays() {
+    let coordinator = AccountConcurrencyRegistry::new(test_tuning());
+    let account = AccountConcurrencyKey::new("up-runtime", "key-runtime");
+    coordinator.update_runtime_tuning(vec![7, 11], 25);
+    coordinator.reject(&account, None, Instant::now());
+    assert!(coordinator.snapshot(&account, Instant::now()).retry_after >= Duration::from_millis(7));
+
+    let ticket = coordinator.register_waiter(
+        account,
+        "req-runtime",
+        "down-a",
+        "lease-runtime",
+        Instant::now(),
+    );
+    tokio::time::advance(Duration::from_millis(26)).await;
+    assert_eq!(
+        coordinator
+            .snapshot(&ticket.account, Instant::now())
+            .waiters,
+        0
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancellation_removes_only_the_matching_ticket() {
     let coordinator = AccountConcurrencyRegistry::new(test_tuning());
     let account = AccountConcurrencyKey::new("up-a", "fingerprint-a");

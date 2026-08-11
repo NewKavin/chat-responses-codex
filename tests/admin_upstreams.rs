@@ -21,10 +21,10 @@ use chat_responses_codex::routing::UpstreamProtocol;
 use chat_responses_codex::server::build_router;
 use chat_responses_codex::state::{
     build_key_qualification_decision, confirmed_level, qualify_model_on_upstream, unix_seconds,
-    ApiKeyModelConfig, AppConfig, AppState, DownstreamConfig, KeyQualificationDecision,
-    ModelQualificationCategory, ModelQualificationLevel, PersistedState, QualificationObservation,
-    RouteFailureClass, RouteHealthKey, StateStore, StoreFuture, UpstreamConfig,
-    UpstreamQualificationDecision,
+    ApiKeyModelConfig, AppConfig, AppState, DownstreamConfig, KeyHealthKey,
+    KeyQualificationDecision, ModelQualificationCategory, ModelQualificationLevel, PersistedState,
+    QualificationObservation, RouteFailureClass, RouteHealthKey, StateStore, StoreFuture,
+    UpstreamConfig, UpstreamQualificationDecision,
 };
 use chat_responses_codex::upstream_tls::UpstreamCaConfig;
 use serde_json::{json, Value};
@@ -890,6 +890,135 @@ async fn test_upstreams_list_route_health_is_aggregate_and_secret_free() {
     assert!(!serialized.contains(key_b));
     assert!(!serialized.contains(&cooling_fingerprint));
     assert!(!serialized.contains("key_prefix"));
+}
+
+#[tokio::test]
+async fn reset_upstream_route_health_clears_exact_routes_but_preserves_key_failures() {
+    let target_key = "target-reset-secret";
+    let target_id = "upstream-reset-target";
+    let target = UpstreamConfig {
+        id: target_id.to_string(),
+        name: "Reset Target".to_string(),
+        base_url: "https://shared.example.invalid".to_string(),
+        api_key: target_key.to_string(),
+        api_key_models: vec![ApiKeyModelConfig {
+            api_key: target_key.to_string(),
+            supported_models: vec!["glm-5.2".to_string()],
+        }],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["glm-5.2".to_string()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let control_key = "control-reset-secret";
+    let control = UpstreamConfig {
+        id: "upstream-reset-control".to_string(),
+        name: "Reset Control".to_string(),
+        base_url: "https://shared.example.invalid".to_string(),
+        api_key: control_key.to_string(),
+        api_key_models: vec![ApiKeyModelConfig {
+            api_key: control_key.to_string(),
+            supported_models: vec!["glm-5.2".to_string()],
+        }],
+        protocol: UpstreamProtocol::ChatCompletions,
+        supported_models: vec!["glm-5.2".to_string()],
+        active: true,
+        ..UpstreamConfig::default()
+    };
+    let state = create_test_state_with_upstreams(vec![target, control]);
+    let target_fingerprint = upstream_key_fingerprint(target_id, target_key);
+    let control_fingerprint = upstream_key_fingerprint("upstream-reset-control", control_key);
+    let target_route = RouteHealthKey {
+        upstream_id: target_id.to_string(),
+        key_fingerprint: target_fingerprint.clone(),
+        runtime_model_slug: "glm-5.2".to_string(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    let control_route = RouteHealthKey {
+        upstream_id: "upstream-reset-control".to_string(),
+        key_fingerprint: control_fingerprint,
+        runtime_model_slug: "glm-5.2".to_string(),
+        protocol: WireProtocol::ChatCompletions,
+    };
+    state
+        .observe_route_failure(
+            &target_route,
+            RouteFailureClass::CapacityUnavailable,
+            Some(Duration::from_secs(90)),
+        )
+        .await
+        .unwrap();
+    state
+        .observe_route_failure(
+            &control_route,
+            RouteFailureClass::CapacityUnavailable,
+            Some(Duration::from_secs(90)),
+        )
+        .await
+        .unwrap();
+    state
+        .observe_key_failure(
+            &KeyHealthKey {
+                upstream_id: target_id.to_string(),
+                key_fingerprint: target_fingerprint.clone(),
+            },
+            RouteFailureClass::Credentials,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let app = build_router(state.clone());
+    let token = get_admin_token(&app, "admin", "admin").await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/admin/upstreams/{target_id}/route-health/reset"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["upstream_id"], target_id);
+    assert_eq!(payload["cleared_routes"], 1);
+    let target_snapshot = state
+        .route_health_snapshot(&target_route)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(target_snapshot.last_failure_class, None);
+    assert_eq!(target_snapshot.cooldown_remaining, Duration::ZERO);
+    let control_snapshot = state
+        .route_health_snapshot(&control_route)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        control_snapshot.last_failure_class,
+        Some(RouteFailureClass::CapacityUnavailable)
+    );
+    let key_snapshot = state
+        .key_health_snapshot(&KeyHealthKey {
+            upstream_id: target_id.to_string(),
+            key_fingerprint: target_fingerprint,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        key_snapshot.last_failure_class,
+        Some(RouteFailureClass::Credentials)
+    );
 }
 
 #[tokio::test]

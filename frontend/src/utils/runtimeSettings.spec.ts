@@ -110,8 +110,8 @@ describe('runtime settings catalog', () => {
     expect(runtimeSettingFields).toHaveLength(40)
     expect(new Set(runtimeSettingFields.map(field => field.key)).size).toBe(40)
     expect(runtimeSettingFields.map(field => field.key).sort()).toEqual(expectedKeys.sort())
-    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(23)
-    expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(17)
+    expect(runtimeSettingFields.filter(field => field.apply === 'immediate')).toHaveLength(28)
+    expect(runtimeSettingFields.filter(field => field.apply === 'restart')).toHaveLength(12)
   })
 })
 

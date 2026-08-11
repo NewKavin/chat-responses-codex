@@ -106,6 +106,16 @@ describe('admin api auth behavior', () => {
     )
   })
 
+  it('resets temporary route health for one upstream', async () => {
+    const spy = vi.spyOn(adminHttp, 'post').mockResolvedValue({
+      data: { upstream_id: 'up-1', cleared_routes: 3 }
+    } as never)
+
+    await adminApi.resetUpstreamRouteHealth('up-1')
+
+    expect(spy).toHaveBeenCalledWith('/admin/upstreams/up-1/route-health/reset')
+  })
+
   it('queues and polls server-owned capability discovery routes', async () => {
     const post = vi.spyOn(adminHttp, 'post').mockResolvedValue({
       data: {

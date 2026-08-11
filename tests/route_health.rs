@@ -185,6 +185,30 @@ async fn transient_route_cooldown_config_does_not_change_other_classes() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn runtime_tuning_updates_future_delays_and_clamps_existing_transient_cooldown() {
+    let mut registry =
+        RouteHealthRegistry::new_with_runtime_tuning(16, 16, vec![100, 200], 3, 60, 300);
+    let route = route("key-runtime", "model-runtime");
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    assert!(
+        registry
+            .route_health_snapshot(&route)
+            .unwrap()
+            .cooldown_remaining
+            > Duration::from_secs(2)
+    );
+
+    registry.update_runtime_tuning(vec![7, 11], 1, 2, 5);
+    let clamped = registry.route_health_snapshot(&route).unwrap();
+    assert!(clamped.cooldown_remaining <= Duration::from_secs(2));
+
+    tokio::time::advance(Duration::from_secs(2)).await;
+    registry.observe_route_failure(&route, RouteFailureClass::TransientServer, None);
+    let updated = registry.route_health_snapshot(&route).unwrap();
+    assert!(updated.cooldown_remaining <= Duration::from_secs(2));
+}
+
+#[tokio::test(start_paused = true)]
 async fn successful_route_state_does_not_create_a_new_half_open_lease() {
     let mut registry = RouteHealthRegistry::new(16, 16);
     let route = route("fingerprint-a", "glm-5.2");

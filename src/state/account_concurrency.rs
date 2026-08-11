@@ -129,7 +129,7 @@ pub enum AccountLeaseError {
 }
 
 pub struct AccountConcurrencyRegistry {
-    tuning: AccountConcurrencyTuning,
+    tuning: std::sync::RwLock<AccountConcurrencyTuning>,
     origin: Instant,
     inner: Mutex<RegistryState>,
 }
@@ -182,9 +182,30 @@ impl AccountConcurrencyRegistry {
             tuning.probe_delays = vec![Duration::from_millis(100)];
         }
         Self {
-            tuning,
+            tuning: std::sync::RwLock::new(tuning),
             origin: Instant::now(),
             inner: Mutex::new(RegistryState::default()),
+        }
+    }
+
+    pub fn update_runtime_tuning(
+        &self,
+        concurrency_probe_delays_ms: Vec<u64>,
+        recovery_max_wait_ms: u64,
+    ) {
+        let now = Instant::now();
+        let mut tuning = self.tuning_snapshot();
+        tuning.probe_delays = normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
+        tuning.waiter_budget = Duration::from_millis(recovery_max_wait_ms.max(1));
+        tuning.waiter_ttl = tuning.waiter_budget.saturating_add(Duration::from_secs(60));
+        *self.tuning.write().expect("account tuning lock poisoned") = tuning.clone();
+
+        let mut registry = self.inner.lock().expect("account registry lock poisoned");
+        for state in registry.accounts.values_mut() {
+            for ticket in &mut state.tickets {
+                ticket.logical_deadline = ticket.logical_deadline.min(now + tuning.waiter_budget);
+                ticket.lease_deadline = ticket.lease_deadline.min(now + tuning.waiter_ttl);
+            }
         }
     }
 
@@ -228,8 +249,8 @@ impl AccountConcurrencyRegistry {
         };
         state.tickets.push_back(TicketRecord {
             ticket: ticket.clone(),
-            logical_deadline: now + self.tuning.waiter_budget,
-            lease_deadline: now + self.tuning.waiter_ttl,
+            logical_deadline: now + self.tuning_snapshot().waiter_budget,
+            lease_deadline: now + self.tuning_snapshot().waiter_ttl,
         });
         state.last_access = now;
         ticket
@@ -269,8 +290,8 @@ impl AccountConcurrencyRegistry {
         };
         state.tickets.push_back(TicketRecord {
             ticket: ticket.clone(),
-            logical_deadline: now + self.tuning.waiter_budget,
-            lease_deadline: now + self.tuning.waiter_ttl,
+            logical_deadline: now + self.tuning_snapshot().waiter_budget,
+            lease_deadline: now + self.tuning_snapshot().waiter_ttl,
         });
         state.last_access = now;
         Some(ticket)
@@ -309,7 +330,7 @@ impl AccountConcurrencyRegistry {
         if now >= record.logical_deadline || now >= record.lease_deadline {
             return Err(AccountLeaseError::Expired);
         }
-        record.lease_deadline = now + self.tuning.waiter_ttl;
+        record.lease_deadline = now + self.tuning_snapshot().waiter_ttl;
         state.last_access = now;
         Ok(())
     }
@@ -356,7 +377,7 @@ impl AccountConcurrencyRegistry {
             .tickets
             .pop_front()
             .expect("head waiter disappeared while granting probe");
-        let expires_at = now + self.tuning.probe_ttl;
+        let expires_at = now + self.tuning_snapshot().probe_ttl;
         let lease = AccountProbeLease {
             account: ticket.account.clone(),
             request_id: record.ticket.request_id,
@@ -385,7 +406,7 @@ impl AccountConcurrencyRegistry {
         self.prune_account(state, now);
         validate_probe(state, lease)?;
         let probe = state.probe.as_mut().ok_or(AccountLeaseError::Missing)?;
-        probe.expires_at = now + self.tuning.probe_ttl;
+        probe.expires_at = now + self.tuning_snapshot().probe_ttl;
         probe.lease.expires_at_ms = self.instant_ms(probe.expires_at);
         state.last_access = now;
         Ok(())
@@ -452,7 +473,7 @@ impl AccountConcurrencyRegistry {
             live_cooldown
                 || !state.tickets.is_empty()
                 || state.probe.is_some()
-                || now.saturating_duration_since(state.last_access) <= self.tuning.idle_retention
+                || now.saturating_duration_since(state.last_access) <= self.tuning_snapshot().idle_retention
         });
         before.saturating_sub(registry.accounts.len())
     }
@@ -479,8 +500,8 @@ impl AccountConcurrencyRegistry {
         state.saturated = true;
         let schedule_index = state
             .rejection_count
-            .min(self.tuning.probe_delays.len().saturating_sub(1));
-        let local_delay = self.tuning.probe_delays[schedule_index]
+            .min(self.tuning_snapshot().probe_delays.len().saturating_sub(1));
+        let local_delay = self.tuning_snapshot().probe_delays[schedule_index]
             .saturating_add(self.jitter(key, state.generation));
         state.rejection_count = state.rejection_count.saturating_add(1);
         let local_deadline = now + local_delay;
@@ -536,15 +557,15 @@ impl AccountConcurrencyRegistry {
     }
 
     fn default_retry_after(&self) -> Duration {
-        self.tuning
+        self.tuning_snapshot()
             .probe_delays
             .first()
             .copied()
-            .unwrap_or(self.tuning.renewal_interval)
+            .unwrap_or(self.tuning_snapshot().renewal_interval)
     }
 
     fn jitter(&self, key: &AccountConcurrencyKey, generation: u64) -> Duration {
-        let max_ms = u64::try_from(self.tuning.jitter_max.as_millis()).unwrap_or(u64::MAX);
+        let max_ms = u64::try_from(self.tuning_snapshot().jitter_max.as_millis()).unwrap_or(u64::MAX);
         if max_ms == 0 {
             return Duration::ZERO;
         }
@@ -557,6 +578,13 @@ impl AccountConcurrencyRegistry {
     fn instant_ms(&self, instant: Instant) -> u64 {
         u64::try_from(instant.saturating_duration_since(self.origin).as_millis())
             .unwrap_or(u64::MAX)
+    }
+
+    fn tuning_snapshot(&self) -> AccountConcurrencyTuning {
+        self.tuning
+            .read()
+            .expect("account tuning lock poisoned")
+            .clone()
     }
 }
 

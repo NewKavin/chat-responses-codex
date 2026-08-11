@@ -80,12 +80,12 @@ impl RouteRetryPolicy {
         }
     }
 
-    pub fn from_sources(config: &AppConfig, runtime_settings: &RuntimeSettings) -> Self {
+    pub fn from_sources(_config: &AppConfig, runtime_settings: &RuntimeSettings) -> Self {
         Self::new_with_concurrency(
             runtime_settings.upstream_route_exhaustion_retry_enabled,
             Duration::from_millis(runtime_settings.upstream_route_exhaustion_retry_max_wait_ms),
             runtime_settings.upstream_route_exhaustion_retry_max_rounds,
-            Duration::from_millis(config.upstream_concurrency_recovery_max_wait_ms),
+            Duration::from_millis(runtime_settings.upstream_concurrency_recovery_max_wait_ms),
             runtime_settings.upstream_concurrency_recovery_max_rounds,
         )
     }

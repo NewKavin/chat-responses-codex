@@ -1,8 +1,11 @@
+use chat_responses_codex::capabilities::WireProtocol;
 use chat_responses_codex::state::{
-    AppConfig, AppState, PersistedState, RuntimeSettings, RuntimeSettingsDocument,
-    IMMEDIATE_RUNTIME_SETTING_FIELDS, RESTART_RUNTIME_SETTING_FIELDS,
+    AppConfig, AppState, PersistedState, RouteFailureClass, RouteHealthKey, RuntimeSettings,
+    RuntimeSettingsDocument, IMMEDIATE_RUNTIME_SETTING_FIELDS, RESTART_RUNTIME_SETTING_FIELDS,
     RUNTIME_SETTINGS_SCHEMA_VERSION,
 };
+use std::time::Duration;
+use tempfile::tempdir;
 
 #[test]
 fn runtime_settings_round_trip_managed_config_without_touching_secrets() {
@@ -28,6 +31,40 @@ fn runtime_settings_round_trip_managed_config_without_touching_secrets() {
     assert_eq!(config.admin_password, "admin-secret");
     assert_eq!(config.jwt_secret, "jwt-secret");
     assert_eq!(config.redis_url, "redis://secret-host");
+}
+
+#[tokio::test]
+async fn runtime_settings_update_applies_recovery_tuning_without_restart() {
+    let directory = tempdir().unwrap();
+    let state = AppState::new(
+        PersistedState::default(),
+        directory.path().join("state.json"),
+        AppConfig::default(),
+    );
+    let route = RouteHealthKey {
+        upstream_id: "up-runtime".into(),
+        key_fingerprint: "key-runtime".into(),
+        runtime_model_slug: "model-runtime".into(),
+        protocol: WireProtocol::Responses,
+    };
+    state
+        .observe_route_failure(&route, RouteFailureClass::TransientServer, None)
+        .await
+        .unwrap();
+
+    let mut settings = state.runtime_settings().as_ref().clone();
+    settings.upstream_transient_route_cooldown_base_seconds = 1;
+    settings.upstream_transient_route_cooldown_max_seconds = 1;
+    settings.upstream_route_health_half_open_ttl_seconds = 2;
+    settings.upstream_concurrency_recovery_max_wait_ms = 25;
+    settings.upstream_concurrency_probe_delays_ms = vec![7, 11];
+    let update = state.update_runtime_settings(0, settings).await.unwrap();
+
+    assert!(update
+        .applied_immediately
+        .contains(&"upstream_transient_route_cooldown_max_seconds".to_string()));
+    let snapshot = state.route_health_snapshot(&route).await.unwrap().unwrap();
+    assert!(snapshot.cooldown_remaining <= Duration::from_secs(1));
 }
 
 #[test]
@@ -82,6 +119,22 @@ fn runtime_settings_field_metadata_is_complete_and_disjoint() {
     assert!(all.contains("app_name"));
     assert!(all.contains("default_upstream_max_concurrency"));
     assert!(all.contains("upstream_concurrency_probe_delays_ms"));
+    for field in [
+        "upstream_transient_route_cooldown_base_seconds",
+        "upstream_transient_route_cooldown_max_seconds",
+        "upstream_route_health_half_open_ttl_seconds",
+        "upstream_concurrency_recovery_max_wait_ms",
+        "upstream_concurrency_probe_delays_ms",
+    ] {
+        assert!(
+            IMMEDIATE_RUNTIME_SETTING_FIELDS.contains(&field),
+            "{field} should apply immediately"
+        );
+        assert!(
+            !RESTART_RUNTIME_SETTING_FIELDS.contains(&field),
+            "{field} should not require restart"
+        );
+    }
     assert!(!all.contains("jwt_secret"));
     assert!(!all.contains("redis_url"));
 }

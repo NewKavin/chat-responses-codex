@@ -424,6 +424,46 @@ impl RouteHealthRegistry {
         }
     }
 
+    pub fn update_runtime_tuning(
+        &mut self,
+        concurrency_probe_delays_ms: Vec<u64>,
+        transient_route_cooldown_base_seconds: u64,
+        transient_route_cooldown_max_seconds: u64,
+        half_open_ttl_seconds: u64,
+    ) {
+        let base = Duration::from_secs(transient_route_cooldown_base_seconds.max(1));
+        let max = Duration::from_secs(
+            transient_route_cooldown_max_seconds
+                .max(transient_route_cooldown_base_seconds)
+                .max(1),
+        );
+        let half_open_ttl = Duration::from_secs(half_open_ttl_seconds.max(1));
+        let now = Instant::now();
+        let max_cooldown_until = now + max;
+        let max_half_open_until = now + half_open_ttl;
+
+        self.concurrency_probe_delays = normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
+        self.transient_route_cooldown_base = base;
+        self.transient_route_cooldown_max = max;
+        self.half_open_ttl = half_open_ttl;
+
+        for state in self.routes.values_mut() {
+            if state.last_failure_class == Some(RouteFailureClass::TransientServer) {
+                if state.cooldown_until.is_some_and(|until| until > max_cooldown_until) {
+                    state.cooldown_until = Some(max_cooldown_until);
+                }
+            }
+            if state.half_open_expires_at.is_some_and(|until| until > max_half_open_until) {
+                state.half_open_expires_at = Some(max_half_open_until);
+            }
+        }
+        for state in self.keys.values_mut() {
+            if state.half_open_expires_at.is_some_and(|until| until > max_half_open_until) {
+                state.half_open_expires_at = Some(max_half_open_until);
+            }
+        }
+    }
+
     pub fn route_health_snapshot(&self, route: &RouteHealthKey) -> Option<HealthStateSnapshot> {
         self.routes
             .get(route)
@@ -529,6 +569,13 @@ impl RouteHealthRegistry {
     fn enumerable_routes(&self, upstream: &UpstreamConfig) -> HashSet<RouteHealthKey> {
         let existing_routes = self.routes.keys().cloned().collect();
         enumerable_route_health_routes(upstream, &existing_routes)
+    }
+
+    pub(super) fn configured_route_health_routes(
+        &self,
+        upstream: &UpstreamConfig,
+    ) -> HashSet<RouteHealthKey> {
+        self.enumerable_routes(upstream)
     }
 
     pub fn route_count(&self) -> usize {

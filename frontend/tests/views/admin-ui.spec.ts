@@ -125,6 +125,15 @@ describe('admin ui structure', () => {
     expect(page).toContain('selectedUpstreams.length')
   })
 
+  it('confirms and refreshes after resetting one upstream route cooldown', () => {
+    const page = source('views/admin/Upstreams.vue')
+
+    expect(page).toContain('@click="handleResetRouteHealth(row)"')
+    expect(page).toContain('确认解除临时冷却')
+    expect(page).toContain('adminApi.resetUpstreamRouteHealth(row.id)')
+    expect(page).toContain('await loadData()')
+  })
+
   it('supports inline upstream priority updates', () => {
     const page = source('views/admin/Upstreams.vue')
 

@@ -1903,6 +1903,30 @@ pub(super) async fn admin_toggle_upstream(
     }
 }
 
+pub(super) async fn admin_reset_upstream_route_health(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.reset_upstream_route_health(&id).await {
+        Ok(Some(cleared_routes)) => Json(json!({
+            "upstream_id": id,
+            "cleared_routes": cleared_routes,
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": format!("Upstream '{}' not found", id),
+                    "code": "upstream_not_found"
+                }
+            })),
+        )
+            .into_response(),
+        Err(_) => runtime_coordination_unavailable_admin_response(),
+    }
+}
+
 // ============================================================================
 // Admin API - Downstream Management
 // ============================================================================

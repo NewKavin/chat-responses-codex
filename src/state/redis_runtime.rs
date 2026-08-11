@@ -163,30 +163,32 @@ impl RuntimeCoordinationBackend {
                     .downstream_lease_ttl_seconds
                     .saturating_mul(1_000)
                     .max(60_000),
-                account_waiter_budget_ms: config.upstream_concurrency_recovery_max_wait_ms,
-                account_waiter_ttl_ms: config
-                    .upstream_concurrency_recovery_max_wait_ms
-                    .saturating_add(60_000),
-                account_probe_ttl_ms: config
-                    .upstream_response_header_timeout_seconds
-                    .saturating_add(60)
-                    .saturating_mul(1_000),
-                route_health_ttl_seconds: route_health_retention_ttl_seconds(Duration::from_secs(
-                    config.upstream_transient_route_cooldown_max_seconds,
-                )),
-                route_health_half_open_ttl_ms: config
-                    .upstream_route_health_half_open_ttl_seconds
-                    .max(1)
-                    .saturating_mul(1_000),
-                concurrency_probe_delays: normalize_concurrency_probe_delays(
-                    config.upstream_concurrency_probe_delays_ms.clone(),
-                ),
-                transient_route_cooldown_base: Duration::from_secs(
-                    config.upstream_transient_route_cooldown_base_seconds,
-                ),
-                transient_route_cooldown_max: Duration::from_secs(
-                    config.upstream_transient_route_cooldown_max_seconds,
-                ),
+                tuning: RwLock::new(RedisRuntimeTuning {
+                    account_waiter_budget_ms: config.upstream_concurrency_recovery_max_wait_ms,
+                    account_waiter_ttl_ms: config
+                        .upstream_concurrency_recovery_max_wait_ms
+                        .saturating_add(60_000),
+                    account_probe_ttl_ms: config
+                        .upstream_response_header_timeout_seconds
+                        .saturating_add(60)
+                        .saturating_mul(1_000),
+                    route_health_ttl_seconds: route_health_retention_ttl_seconds(Duration::from_secs(
+                        config.upstream_transient_route_cooldown_max_seconds,
+                    )),
+                    route_health_half_open_ttl_ms: config
+                        .upstream_route_health_half_open_ttl_seconds
+                        .max(1)
+                        .saturating_mul(1_000),
+                    concurrency_probe_delays: normalize_concurrency_probe_delays(
+                        config.upstream_concurrency_probe_delays_ms.clone(),
+                    ),
+                    transient_route_cooldown_base: Duration::from_secs(
+                        config.upstream_transient_route_cooldown_base_seconds,
+                    ),
+                    transient_route_cooldown_max: Duration::from_secs(
+                        config.upstream_transient_route_cooldown_max_seconds,
+                    ),
+                }),
             });
             coordinator.ping().await?;
             Ok::<_, redis::RedisError>(coordinator)
@@ -208,6 +210,18 @@ impl RuntimeCoordinationBackend {
             Self::Redis(coordinator) => coordinator.healthcheck().await,
         }
     }
+
+    pub fn update_runtime_tuning(&self, settings: &super::runtime_settings::RuntimeSettings) {
+        if let Self::Redis(coordinator) = self {
+            coordinator.update_runtime_tuning(
+                settings.upstream_concurrency_probe_delays_ms.clone(),
+                settings.upstream_concurrency_recovery_max_wait_ms,
+                settings.upstream_transient_route_cooldown_base_seconds,
+                settings.upstream_transient_route_cooldown_max_seconds,
+                settings.upstream_route_health_half_open_ttl_seconds,
+            );
+        }
+    }
 }
 
 pub struct RedisRuntimeCoordinator {
@@ -217,6 +231,11 @@ pub struct RedisRuntimeCoordinator {
     key_prefix: Arc<str>,
     lease_duration_ms: u64,
     downstream_lease_duration_ms: u64,
+    tuning: RwLock<RedisRuntimeTuning>,
+}
+
+#[derive(Clone, Debug)]
+struct RedisRuntimeTuning {
     account_waiter_budget_ms: u64,
     account_waiter_ttl_ms: u64,
     account_probe_ttl_ms: u64,
@@ -228,6 +247,35 @@ pub struct RedisRuntimeCoordinator {
 }
 
 impl RedisRuntimeCoordinator {
+    pub(super) fn update_runtime_tuning(
+        &self,
+        concurrency_probe_delays_ms: Vec<u64>,
+        recovery_max_wait_ms: u64,
+        transient_route_cooldown_base_seconds: u64,
+        transient_route_cooldown_max_seconds: u64,
+        half_open_ttl_seconds: u64,
+    ) {
+        let base_seconds = transient_route_cooldown_base_seconds.max(1);
+        let max_seconds = transient_route_cooldown_max_seconds
+            .max(base_seconds)
+            .max(1);
+        let mut tuning = self.tuning.write().expect("redis tuning lock poisoned");
+        tuning.account_waiter_budget_ms = recovery_max_wait_ms.max(1);
+        tuning.account_waiter_ttl_ms = tuning.account_waiter_budget_ms.saturating_add(60_000);
+        tuning.route_health_ttl_seconds = route_health_retention_ttl_seconds(Duration::from_secs(max_seconds));
+        tuning.route_health_half_open_ttl_ms = half_open_ttl_seconds.max(1).saturating_mul(1_000);
+        tuning.concurrency_probe_delays = normalize_concurrency_probe_delays(concurrency_probe_delays_ms);
+        tuning.transient_route_cooldown_base = Duration::from_secs(base_seconds);
+        tuning.transient_route_cooldown_max = Duration::from_secs(max_seconds);
+    }
+
+    fn tuning_snapshot(&self) -> RedisRuntimeTuning {
+        self.tuning
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     async fn healthcheck(&self) -> io::Result<()> {
         let result = tokio::time::timeout(REDIS_OPERATION_TIMEOUT, self.ping())
             .await
@@ -553,7 +601,7 @@ impl RedisRuntimeCoordinator {
         let identity = stable_identity(downstream_id);
         let lease_key = self.key(&identity, "leases");
         let waiting_key = self.key(&identity, "waiting");
-        let expires_at_ms = unix_millis().saturating_add(self.account_waiter_ttl_ms);
+        let expires_at_ms = unix_millis().saturating_add(self.tuning_snapshot().account_waiter_ttl_ms);
         let result = self
             .retry_coordination_once(|| {
                 let mut connection = self.connection();
@@ -648,9 +696,9 @@ impl RedisRuntimeCoordinator {
                             i64::try_from(retry_after_ms).unwrap_or(i64::MAX)
                         })
                         .arg(100_u64)
-                        .arg(self.concurrency_probe_delays.len())
+                        .arg(self.tuning_snapshot().concurrency_probe_delays.len())
                         .arg(mutation_token);
-                    for delay in &self.concurrency_probe_delays {
+                    for delay in &self.tuning_snapshot().concurrency_probe_delays {
                         invocation.arg(duration_millis(*delay));
                     }
                     timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
@@ -738,8 +786,8 @@ impl RedisRuntimeCoordinator {
                         .arg(request_id)
                         .arg(downstream_id)
                         .arg(downstream_lease_id)
-                        .arg(self.account_waiter_budget_ms)
-                        .arg(self.account_waiter_ttl_ms)
+                        .arg(self.tuning_snapshot().account_waiter_budget_ms)
+                        .arg(self.tuning_snapshot().account_waiter_ttl_ms)
                         .arg(registration_token);
                     timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
                         .await
@@ -889,7 +937,7 @@ impl RedisRuntimeCoordinator {
                         .arg(ticket.registered_at_ms)
                         .arg(&ticket.registration_token);
                     if operation == "renew" {
-                        invocation.arg(self.account_waiter_ttl_ms);
+                        invocation.arg(self.tuning_snapshot().account_waiter_ttl_ms);
                     }
                     timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection))
                         .await
@@ -964,7 +1012,7 @@ impl RedisRuntimeCoordinator {
                         .arg(ticket.registered_at_ms)
                         .arg(&ticket.registration_token)
                         .arg(owner_token)
-                        .arg(self.account_probe_ttl_ms);
+                        .arg(self.tuning_snapshot().account_probe_ttl_ms);
                     if let Some((_, _, lease_id)) = downstream_keys.as_ref() {
                         invocation.arg(lease_id);
                     }
@@ -1047,7 +1095,7 @@ impl RedisRuntimeCoordinator {
                                 .arg(&lease.request_id)
                                 .arg(lease.generation)
                                 .arg(&lease.owner_token)
-                                .arg(self.account_probe_ttl_ms);
+                                .arg(self.tuning_snapshot().account_probe_ttl_ms);
                         }
                         Some(outcome) => {
                             invocation
@@ -1067,8 +1115,8 @@ impl RedisRuntimeCoordinator {
                                             }),
                                         )
                                         .arg(100_u64)
-                                        .arg(self.concurrency_probe_delays.len());
-                                    for delay in &self.concurrency_probe_delays {
+                                        .arg(self.tuning_snapshot().concurrency_probe_delays.len());
+                                    for delay in &self.tuning_snapshot().concurrency_probe_delays {
                                         invocation.arg(duration_millis(*delay));
                                     }
                                 }
@@ -1298,8 +1346,8 @@ impl RedisRuntimeCoordinator {
             .key(self.health_global_index_key("keys"))
             .key(self.health_global_index_key("routes"))
             .arg(lease_id)
-            .arg(self.route_health_ttl_seconds)
-            .arg(self.route_health_half_open_ttl_ms)
+            .arg(self.tuning_snapshot().route_health_ttl_seconds)
+            .arg(self.tuning_snapshot().route_health_half_open_ttl_ms)
             .arg(self.legacy_local_admission_cooldown_threshold_ms());
         let result =
             timeout_coordination(invocation.invoke_async::<Vec<String>>(&mut connection)).await;
@@ -1310,7 +1358,7 @@ impl RedisRuntimeCoordinator {
     }
 
     fn legacy_local_admission_cooldown_threshold_ms(&self) -> u64 {
-        legacy_local_admission_cooldown_threshold(&self.concurrency_probe_delays)
+        legacy_local_admission_cooldown_threshold(&self.tuning_snapshot().concurrency_probe_delays)
             .as_millis()
             .min(u128::from(u64::MAX)) as u64
     }
@@ -1361,9 +1409,9 @@ impl RedisRuntimeCoordinator {
                 route_cooldown_schedule_ms(
                     &lease.route,
                     class,
-                    &self.concurrency_probe_delays,
-                    self.transient_route_cooldown_base,
-                    self.transient_route_cooldown_max,
+                    &self.tuning_snapshot().concurrency_probe_delays,
+                    self.tuning_snapshot().transient_route_cooldown_base,
+                    self.tuning_snapshot().transient_route_cooldown_max,
                 )
             })
             .unwrap_or_default();
@@ -1371,7 +1419,7 @@ impl RedisRuntimeCoordinator {
             .filter(|class| key_failure_has_cooldown(*class))
             .map(|class| key_cooldown_schedule_ms(&lease.key, class))
             .unwrap_or_default();
-        let probe_schedule = concurrency_probe_schedule_ms(&self.concurrency_probe_delays);
+        let probe_schedule = concurrency_probe_schedule_ms(&self.tuning_snapshot().concurrency_probe_delays);
         let ttl_seconds = self.retention_ttl_seconds_for(
             retry_after,
             &[&route_schedule, &key_schedule, &probe_schedule],
@@ -1436,9 +1484,9 @@ impl RedisRuntimeCoordinator {
         let schedule = route_cooldown_schedule_ms(
             route,
             class,
-            &self.concurrency_probe_delays,
-            self.transient_route_cooldown_base,
-            self.transient_route_cooldown_max,
+            &self.tuning_snapshot().concurrency_probe_delays,
+            self.tuning_snapshot().transient_route_cooldown_base,
+            self.tuning_snapshot().transient_route_cooldown_max,
         );
         self.observe_health_state(
             &self.route_health_state_key(route),
@@ -1615,7 +1663,7 @@ impl RedisRuntimeCoordinator {
             .arg("")
             .arg(-1_i64)
             .arg(ROUTE_HEALTH_FAILURE_STREAK_RESET_MS)
-            .arg(self.route_health_ttl_seconds)
+            .arg(self.tuning_snapshot().route_health_ttl_seconds)
             .arg(ROUTE_HEALTH_GLOBAL_CAPACITY as u64)
             .arg(ROUTE_HEALTH_PER_UPSTREAM_CAPACITY as u64)
             .arg("")
@@ -1758,6 +1806,23 @@ impl RedisRuntimeCoordinator {
                 (upstream.id.clone(), snapshot)
             })
             .collect())
+    }
+
+    pub(super) async fn configured_route_health_routes(
+        &self,
+        upstream: &UpstreamConfig,
+    ) -> Result<HashSet<RouteHealthKey>, RuntimeCoordinationError> {
+        let records = self.indexed_health_state_records("routes").await?;
+        let existing_routes = records
+            .into_iter()
+            .map(|record| Ok(RouteHealthKey {
+                upstream_id: record.upstream_id,
+                key_fingerprint: record.key_fingerprint,
+                runtime_model_slug: record.model_slug,
+                protocol: record.protocol.ok_or(RuntimeCoordinationError)?,
+            }))
+            .collect::<Result<HashSet<_>, _>>()?;
+        Ok(enumerable_route_health_routes(upstream, &existing_routes))
     }
 
     async fn legacy_local_admission_poisoned_routes_by_upstream(
@@ -2037,7 +2102,7 @@ impl RedisRuntimeCoordinator {
             .map(Duration::from_millis)
             .unwrap_or_default();
         let cooldown = retry_after.unwrap_or_default().max(scheduled_cooldown);
-        self.route_health_ttl_seconds
+        self.tuning_snapshot().route_health_ttl_seconds
             .max(route_health_retention_ttl_seconds(cooldown))
     }
 
