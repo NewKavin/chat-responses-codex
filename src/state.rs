@@ -442,6 +442,16 @@ impl Drop for LeaseReleaseGuard {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualProbeBatchCandidateState {
+    Queued,
+    Reused,
+    Running,
+    Completed,
+    Failed,
+}
+
 #[derive(Clone, Serialize)]
 pub struct ProbeCandidateSummary {
     pub upstream_id: String,
@@ -449,12 +459,40 @@ pub struct ProbeCandidateSummary {
     pub exposed_model_slug: String,
     pub runtime_model_slug: String,
     pub protocol: WireProtocol,
+    pub state: ManualProbeBatchCandidateState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct CapabilityProbeBatchStatus {
+    pub batch_id: String,
+    pub configuration_revision: u64,
+    pub started_at: u64,
+    pub queued_routes: usize,
+    pub reused_routes: usize,
+    pub candidates: Vec<ProbeCandidateSummary>,
+    pub terminal_at: Option<u64>,
 }
 
 pub struct ManualProbeBatchReceipt {
+    pub batch_id: String,
     pub configuration_revision: u64,
     pub started_at: u64,
+    pub queued_routes: usize,
+    pub reused_routes: usize,
     pub candidates: Vec<ProbeCandidateSummary>,
+}
+
+struct CapabilityProbeBatchCandidate {
+    summary: ProbeCandidateSummary,
+    key: DialectProfileKey,
+    binding: ProbeConfigurationBinding,
+}
+
+struct CapabilityProbeBatchRecord {
+    status: CapabilityProbeBatchStatus,
+    candidates: Vec<CapabilityProbeBatchCandidate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -499,6 +537,7 @@ pub struct AppState {
     capability_probe_sender: Arc<StdMutex<Option<mpsc::Sender<ProbeJobBatch>>>>,
     capability_probe_submissions:
         Arc<StdMutex<HashMap<DialectProfileKey, ProbeConfigurationBinding>>>,
+    capability_probe_batches: Arc<StdMutex<HashMap<String, CapabilityProbeBatchRecord>>>,
     model_key_sync_runtime: Arc<StdMutex<model_key_sync::ModelKeySyncRuntime>>,
     model_key_sync_lock: Arc<Mutex<()>>,
     troubleshooting_route_capture_token: Arc<str>,
@@ -538,13 +577,15 @@ fn config_with_persisted_runtime_settings(
         .runtime_settings
         .as_ref()
         .filter(|document| document.schema_version == RUNTIME_SETTINGS_SCHEMA_VERSION)
-        .and_then(|document| match document.settings.clone().validate_and_normalize() {
-            Ok(settings) => Some(settings),
-            Err(error) => {
-                tracing::error!(error = %error, "ignoring invalid persisted runtime settings");
-                None
-            }
-        })
+        .and_then(
+            |document| match document.settings.clone().validate_and_normalize() {
+                Ok(settings) => Some(settings),
+                Err(error) => {
+                    tracing::error!(error = %error, "ignoring invalid persisted runtime settings");
+                    None
+                }
+            },
+        )
         .unwrap_or(startup_settings);
     settings.apply_to_app_config(&mut config);
     (config, settings)
@@ -889,6 +930,7 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
             capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            capability_probe_batches: Arc::new(StdMutex::new(HashMap::new())),
             model_key_sync_runtime: Arc::new(StdMutex::new(
                 model_key_sync::ModelKeySyncRuntime::default(),
             )),
@@ -962,6 +1004,7 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
             capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            capability_probe_batches: Arc::new(StdMutex::new(HashMap::new())),
             model_key_sync_runtime: Arc::new(StdMutex::new(
                 model_key_sync::ModelKeySyncRuntime::default(),
             )),
@@ -1030,6 +1073,7 @@ impl AppState {
             admin_sessions: Arc::new(StdMutex::new(HashMap::new())),
             capability_probe_sender: Arc::new(StdMutex::new(None)),
             capability_probe_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            capability_probe_batches: Arc::new(StdMutex::new(HashMap::new())),
             model_key_sync_runtime: Arc::new(StdMutex::new(
                 model_key_sync::ModelKeySyncRuntime::default(),
             )),
@@ -1488,7 +1532,9 @@ impl AppState {
         };
         let routes = match &self.runtime_coordination {
             RuntimeCoordinationBackend::Redis(coordinator) => {
-                coordinator.configured_route_health_routes(&upstream).await?
+                coordinator
+                    .configured_route_health_routes(&upstream)
+                    .await?
             }
             RuntimeCoordinationBackend::Local => self
                 .route_health
@@ -1872,41 +1918,206 @@ impl AppState {
             return Err(ManualProbeBatchError::NoEligibleRoutes);
         }
 
-        let candidates = prepared_jobs
-            .iter()
-            .map(|job| ProbeCandidateSummary {
-                upstream_id: job.key.upstream_id.clone(),
-                route_id: anonymous_route_id(
-                    &job.key.upstream_id,
-                    &job.key.key_fingerprint,
-                    &job.key.runtime_model_slug,
-                    job.key.protocol,
-                ),
-                exposed_model_slug: job
-                    .exposed_model_slugs
-                    .iter()
-                    .next()
-                    .expect("prepared capability probe has an exposed model")
-                    .clone(),
-                runtime_model_slug: job.key.runtime_model_slug.clone(),
-                protocol: job.key.protocol,
-            })
-            .collect::<Vec<_>>();
         let sender = self
             .capability_probe_sender
             .lock()
             .expect("probe sender lock poisoned")
             .clone()
             .ok_or(ManualProbeBatchError::QueueUnavailable)?;
-        sender
-            .try_send(ProbeJobBatch::new(prepared_jobs))
-            .map_err(|_| ManualProbeBatchError::QueueUnavailable)?;
+
+        let batch_id = Uuid::new_v4().to_string();
+        let started_at = unix_seconds();
+        let mut queued_jobs = Vec::new();
+        let mut queued_routes = 0;
+        let mut reused_routes = 0;
+        let mut candidates = Vec::with_capacity(prepared_jobs.len());
+        {
+            let mut submissions = self
+                .capability_probe_submissions
+                .lock()
+                .expect("probe submission lock poisoned");
+            for job in prepared_jobs {
+                let state = if submissions
+                    .get(&job.key)
+                    .is_some_and(|binding| binding == &job.configuration)
+                {
+                    reused_routes += 1;
+                    ManualProbeBatchCandidateState::Reused
+                } else {
+                    submissions.insert(job.key.clone(), job.configuration.clone());
+                    queued_jobs.push(job.clone());
+                    queued_routes += 1;
+                    ManualProbeBatchCandidateState::Queued
+                };
+                let summary = ProbeCandidateSummary {
+                    upstream_id: job.key.upstream_id.clone(),
+                    route_id: anonymous_route_id(
+                        &job.key.upstream_id,
+                        &job.key.key_fingerprint,
+                        &job.key.runtime_model_slug,
+                        job.key.protocol,
+                    ),
+                    exposed_model_slug: job
+                        .exposed_model_slugs
+                        .iter()
+                        .next()
+                        .expect("prepared capability probe has an exposed model")
+                        .clone(),
+                    runtime_model_slug: job.key.runtime_model_slug.clone(),
+                    protocol: job.key.protocol,
+                    state,
+                    diagnostic_code: None,
+                };
+                candidates.push(CapabilityProbeBatchCandidate {
+                    summary,
+                    key: job.key,
+                    binding: job.configuration,
+                });
+            }
+        }
+        if !queued_jobs.is_empty() {
+            if sender
+                .try_send(ProbeJobBatch::new(queued_jobs.clone()))
+                .is_err()
+            {
+                let mut submissions = self
+                    .capability_probe_submissions
+                    .lock()
+                    .expect("probe submission lock poisoned");
+                for job in queued_jobs {
+                    if submissions
+                        .get(&job.key)
+                        .is_some_and(|binding| binding == &job.configuration)
+                    {
+                        submissions.remove(&job.key);
+                    }
+                }
+                return Err(ManualProbeBatchError::QueueUnavailable);
+            }
+        }
+
+        let status = CapabilityProbeBatchStatus {
+            batch_id: batch_id.clone(),
+            configuration_revision: configuration.revision,
+            started_at,
+            queued_routes,
+            reused_routes,
+            candidates: candidates
+                .iter()
+                .map(|candidate| candidate.summary.clone())
+                .collect(),
+            terminal_at: (queued_routes + reused_routes == 0).then_some(started_at),
+        };
+        let receipt_candidates = status.candidates.clone();
+        let mut batches = self
+            .capability_probe_batches
+            .lock()
+            .expect("probe batch lock poisoned");
+        prune_capability_probe_batches(&mut batches, started_at);
+        batches.insert(
+            batch_id.clone(),
+            CapabilityProbeBatchRecord { status, candidates },
+        );
 
         Ok(ManualProbeBatchReceipt {
+            batch_id,
             configuration_revision: configuration.revision,
-            started_at: unix_seconds(),
-            candidates,
+            started_at,
+            queued_routes,
+            reused_routes,
+            candidates: receipt_candidates,
         })
+    }
+
+    pub fn capability_probe_batch_status(
+        &self,
+        batch_id: &str,
+    ) -> Option<CapabilityProbeBatchStatus> {
+        let now = unix_seconds();
+        let mut batches = self
+            .capability_probe_batches
+            .lock()
+            .expect("probe batch lock poisoned");
+        prune_capability_probe_batches(&mut batches, now);
+        batches.get(batch_id).map(|record| record.status.clone())
+    }
+
+    pub fn mark_capability_probe_running(
+        &self,
+        key: &DialectProfileKey,
+        binding: &ProbeConfigurationBinding,
+    ) {
+        let mut batches = self
+            .capability_probe_batches
+            .lock()
+            .expect("probe batch lock poisoned");
+        for record in batches.values_mut() {
+            for candidate in &mut record.candidates {
+                if &candidate.key == key
+                    && &candidate.binding == binding
+                    && matches!(
+                        candidate.summary.state,
+                        ManualProbeBatchCandidateState::Queued
+                            | ManualProbeBatchCandidateState::Reused
+                    )
+                {
+                    candidate.summary.state = ManualProbeBatchCandidateState::Running;
+                }
+            }
+            record.status.candidates = record
+                .candidates
+                .iter()
+                .map(|candidate| candidate.summary.clone())
+                .collect();
+        }
+    }
+
+    pub fn finish_capability_probe_job(
+        &self,
+        key: &DialectProfileKey,
+        binding: &ProbeConfigurationBinding,
+        result: &io::Result<()>,
+    ) {
+        let (state, diagnostic_code) = if result.is_ok() {
+            (ManualProbeBatchCandidateState::Completed, None)
+        } else {
+            (
+                ManualProbeBatchCandidateState::Failed,
+                Some("probe_execution_failed".to_string()),
+            )
+        };
+        let now = unix_seconds();
+        let mut batches = self
+            .capability_probe_batches
+            .lock()
+            .expect("probe batch lock poisoned");
+        for record in batches.values_mut() {
+            let mut matched = false;
+            for candidate in &mut record.candidates {
+                if &candidate.key == key && &candidate.binding == binding {
+                    candidate.summary.state = state.clone();
+                    candidate.summary.diagnostic_code = diagnostic_code.clone();
+                    matched = true;
+                }
+            }
+            if matched {
+                record.status.candidates = record
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.summary.clone())
+                    .collect();
+                if record.candidates.iter().all(|candidate| {
+                    matches!(
+                        candidate.summary.state,
+                        ManualProbeBatchCandidateState::Completed
+                            | ManualProbeBatchCandidateState::Failed
+                    )
+                }) {
+                    record.status.terminal_at.get_or_insert(now);
+                }
+            }
+        }
+        self.finish_capability_probe_submission(key, binding);
     }
 
     pub fn finish_capability_probe_submission(
@@ -1931,6 +2142,11 @@ impl AppState {
     }
 
     pub fn discard_capability_probe_submission(&self, job: &ProbeJob) {
+        self.finish_capability_probe_job(
+            &job.key,
+            &job.configuration,
+            &Err(io::Error::new(io::ErrorKind::Other, "probe replaced")),
+        );
         self.remove_capability_probe_submission(&job.key, &job.configuration);
     }
 
@@ -2443,10 +2659,8 @@ impl AppState {
         );
         self.runtime_coordination.update_runtime_tuning(&settings);
         self.runtime_settings.store(Arc::new(settings));
-        let response = self.runtime_settings_response_for(
-            RuntimeSettingsSource::Persisted,
-            document,
-        );
+        let response =
+            self.runtime_settings_response_for(RuntimeSettingsSource::Persisted, document);
         tracing::info!(
             revision,
             applied_immediately = ?applied_immediately,
@@ -5993,6 +6207,37 @@ impl AppState {
         downstream.hash = new_hash;
         validate_downstream_plaintext_pair(downstream);
         Ok(())
+    }
+}
+
+const CAPABILITY_PROBE_BATCH_RETENTION_SECONDS: u64 = 2 * 60 * 60;
+const CAPABILITY_PROBE_BATCH_MAX_RECORDS: usize = 256;
+
+fn prune_capability_probe_batches(
+    batches: &mut HashMap<String, CapabilityProbeBatchRecord>,
+    now: u64,
+) {
+    let cutoff = now.saturating_sub(CAPABILITY_PROBE_BATCH_RETENTION_SECONDS);
+    batches.retain(|_, record| {
+        record
+            .status
+            .terminal_at
+            .is_none_or(|terminal_at| terminal_at >= cutoff)
+    });
+    if batches.len() <= CAPABILITY_PROBE_BATCH_MAX_RECORDS {
+        return;
+    }
+    let mut oldest = batches
+        .iter()
+        .map(|(id, record)| (id.clone(), record.status.started_at))
+        .collect::<Vec<_>>();
+    oldest.sort_by_key(|(_, started_at)| *started_at);
+    for (id, _) in oldest.into_iter().take(
+        batches
+            .len()
+            .saturating_sub(CAPABILITY_PROBE_BATCH_MAX_RECORDS),
+    ) {
+        batches.remove(&id);
     }
 }
 

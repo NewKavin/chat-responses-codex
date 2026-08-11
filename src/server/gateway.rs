@@ -1745,6 +1745,13 @@ pub fn build_router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/api/admin/capabilities/probe-batches/{batch_id}",
+            get(admin_capability_probe_batch).route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_middleware,
+            )),
+        )
+        .route(
             "/api/admin/capabilities/profiles/{upstream_id}",
             axum::routing::delete(admin_capability_profiles_delete).route_layer(
                 axum::middleware::from_fn_with_state(state.clone(), admin_auth_middleware),

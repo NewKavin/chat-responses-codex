@@ -388,13 +388,34 @@ pub(super) async fn admin_capability_probe_all(
         .await
     {
         Ok(receipt) => Json(json!({
+            "batch_id": receipt.batch_id,
             "configuration_revision": receipt.configuration_revision,
             "started_at": receipt.started_at,
-            "queued_routes": receipt.candidates.len(),
+            "queued_routes": receipt.queued_routes,
+            "reused_routes": receipt.reused_routes,
             "candidates": receipt.candidates,
         }))
         .into_response(),
         Err(error) => manual_capability_probe_error(error),
+    }
+}
+
+pub(super) async fn admin_capability_probe_batch(
+    State(state): State<AppState>,
+    Path(batch_id): Path<String>,
+) -> impl IntoResponse {
+    match state.capability_probe_batch_status(&batch_id) {
+        Some(batch) => Json(batch).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "code": "capability_probe_batch_not_found",
+                    "message": "capability probe batch was not found or has expired"
+                }
+            })),
+        )
+            .into_response(),
     }
 }
 

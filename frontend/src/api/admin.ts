@@ -16,6 +16,7 @@ import type {
   LoginResponse,
   LogsResponse,
   ModelProbeResponse,
+  CapabilityProbeBatchStatus,
   ProbeAllCapabilitiesRequest,
   ProbeAllCapabilitiesResponse,
   QualifyModelsRequest,
@@ -397,6 +398,12 @@ export const adminApi = {
     adminHttp.post<QueueDialectProbeResponse>('/admin/capabilities/probe', data),
   probeAllCapabilities: (data: ProbeAllCapabilitiesRequest = {}) =>
     adminHttp.post<ProbeAllCapabilitiesResponse>('/admin/capabilities/probe-all', data),
+  getCapabilityProbeBatch: (batchId: string, timeoutMs?: number) =>
+    timeoutMs === undefined
+      ? adminHttp.get<CapabilityProbeBatchStatus>(`/admin/capabilities/probe-batches/${batchId}`)
+      : adminHttp.get<CapabilityProbeBatchStatus>(`/admin/capabilities/probe-batches/${batchId}`, {
+        timeout: timeoutMs
+      }),
   getCapabilityDiscovery: (timeoutMs?: number) =>
     timeoutMs === undefined
       ? adminHttp.get<CapabilityDiscoveryResponse>('/admin/capabilities/discovery')

@@ -625,19 +625,34 @@ export interface ProbeAllCapabilitiesRequest {
   models?: string[]
 }
 
+export type CapabilityProbeCandidateState =
+  | 'queued'
+  | 'reused'
+  | 'running'
+  | 'completed'
+  | 'failed'
+
 export interface CapabilityProbeCandidateSummary {
   upstream_id: string
   route_id: string
   exposed_model_slug: string
   runtime_model_slug: string
   protocol: CapabilityWireProtocol
+  state: CapabilityProbeCandidateState
+  diagnostic_code?: string
 }
 
 export interface ProbeAllCapabilitiesResponse {
+  batch_id: string
   configuration_revision: number
   started_at: number
   queued_routes: number
+  reused_routes: number
   candidates: CapabilityProbeCandidateSummary[]
+}
+
+export interface CapabilityProbeBatchStatus extends ProbeAllCapabilitiesResponse {
+  terminal_at: number | null
 }
 
 export type CapabilityRouteProbeOutcome =

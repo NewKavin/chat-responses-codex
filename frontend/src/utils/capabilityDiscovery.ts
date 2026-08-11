@@ -1,6 +1,8 @@
 import type {
   CapabilityDiscoveryResponse,
   CapabilityModelDiscoverySummary,
+  CapabilityProbeBatchStatus,
+  CapabilityProbeCandidateState,
   CapabilityRouteDiscoverySummary,
   ProbeAllCapabilitiesResponse
 } from '@/types'
@@ -172,6 +174,123 @@ export const pollCapabilityDiscovery = async ({
       discovery = await fetchDiscovery(Math.min(10_000, remainingBeforeRequest))
       if (cancelled()) return result(false, true)
       progress = discoveryBatchProgress(receipt, discovery)
+      onProgress?.(progress)
+      if (progress.settled) return result(false, false)
+    } catch {
+      if (cancelled()) return result(false, true)
+    }
+
+    const remainingBeforeSleep = deadline - now()
+    if (remainingBeforeSleep <= 0) return result(true, false)
+    await sleep(Math.min(intervalMs, remainingBeforeSleep))
+    if (cancelled()) return result(false, true)
+  }
+
+  return result(false, true)
+}
+
+
+export const capabilityProbeBatchProgress = (
+  status: CapabilityProbeBatchStatus
+): DiscoveryBatchProgress => {
+  const completed = status.candidates.filter(
+    candidate => candidate.state === 'completed'
+  ).length
+  const total = status.candidates.length
+  return {
+    completed,
+    total,
+    settled: status.terminal_at !== null || completed === total
+  }
+}
+
+export const probeBatchStateLabel = (
+  state: CapabilityProbeCandidateState
+): string => {
+  switch (state) {
+    case 'queued':
+      return '排队中'
+    case 'reused':
+      return '复用探测中'
+    case 'running':
+      return '探测中'
+    case 'completed':
+      return '已完成'
+    case 'failed':
+      return '本轮失败'
+  }
+}
+
+export const probeBatchStateTagType = (
+  state: CapabilityProbeCandidateState
+): 'success' | 'warning' | 'danger' | 'info' => {
+  switch (state) {
+    case 'completed':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'running':
+      return 'warning'
+    case 'queued':
+    case 'reused':
+      return 'info'
+  }
+}
+
+export interface PollCapabilityProbeBatchOptions {
+  initial: CapabilityProbeBatchStatus
+  fetchBatch: (requestTimeoutMs: number) => Promise<CapabilityProbeBatchStatus>
+  now?: () => number
+  sleep?: (delayMs: number) => Promise<void>
+  cancelled?: () => boolean
+  onProgress?: (progress: DiscoveryBatchProgress) => void
+  intervalMs?: number
+  timeoutMs?: number
+}
+
+export interface PollCapabilityProbeBatchResult {
+  status: CapabilityProbeBatchStatus
+  progress: DiscoveryBatchProgress
+  timedOut: boolean
+  cancelled: boolean
+}
+
+// The batch endpoint reflects the current in-memory round state (queued,
+// reused, running, completed, failed) independently from the durable profile
+// results. Poll until the backend marks the round terminal, with the same 2h
+// safety cap as the durable discovery poll.
+export const pollCapabilityProbeBatch = async ({
+  initial,
+  fetchBatch,
+  now = Date.now,
+  sleep = sleepFor,
+  cancelled = () => false,
+  onProgress,
+  intervalMs = 2_500,
+  timeoutMs = CAPABILITY_PROBE_WAIT_TIMEOUT_MS
+}: PollCapabilityProbeBatchOptions): Promise<PollCapabilityProbeBatchResult> => {
+  const deadline = now() + timeoutMs
+  let status = initial
+  let progress = capabilityProbeBatchProgress(status)
+
+  const result = (
+    timedOut: boolean,
+    wasCancelled: boolean
+  ): PollCapabilityProbeBatchResult => ({
+    status,
+    progress,
+    timedOut,
+    cancelled: wasCancelled
+  })
+
+  while (!cancelled()) {
+    const remainingBeforeRequest = deadline - now()
+    if (remainingBeforeRequest <= 0) return result(true, false)
+
+    try {
+      status = await fetchBatch(Math.min(10_000, remainingBeforeRequest))
+      if (cancelled()) return result(false, true)
+      progress = capabilityProbeBatchProgress(status)
       onProgress?.(progress)
       if (progress.settled) return result(false, false)
     } catch {

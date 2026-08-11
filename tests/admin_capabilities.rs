@@ -468,6 +468,8 @@ async fn capability_probe_all_builds_every_exact_key_and_protocol() {
     let body = response_json(response).await;
     assert_eq!(body["configuration_revision"], 1);
     assert_eq!(body["queued_routes"], 3);
+    assert_eq!(body["reused_routes"], 0);
+    assert!(body["batch_id"].is_string());
     assert!(body["started_at"].is_number());
     let candidates = body["candidates"].as_array().unwrap();
     assert_eq!(candidates.len(), 3);
@@ -483,13 +485,36 @@ async fn capability_probe_all_builds_every_exact_key_and_protocol() {
         .any(|candidate| candidate["protocol"] == "responses"));
     assert!(!body.to_string().contains("key_fingerprint"));
 
-    let full_queue = fixture
+    let reused = fixture
         .post_json("/api/admin/capabilities/probe-all", json!({}))
         .await;
-    assert_eq!(full_queue.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(reused.status(), StatusCode::OK);
+    let reused = response_json(reused).await;
+    assert_eq!(reused["queued_routes"], 0);
+    assert_eq!(reused["reused_routes"], 3);
+    assert!(reused["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|candidate| candidate["state"] == "reused"));
+    let batch_status = fixture
+        .get(&format!(
+            "/api/admin/capabilities/probe-batches/{}",
+            body["batch_id"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(batch_status.status(), StatusCode::OK);
     assert_eq!(
-        response_json(full_queue).await["error"]["code"],
-        "gateway_capability_probe_unavailable"
+        response_json(batch_status).await["batch_id"],
+        body["batch_id"]
+    );
+    let missing = fixture
+        .get("/api/admin/capabilities/probe-batches/not-a-batch")
+        .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response_json(missing).await["error"]["code"],
+        "capability_probe_batch_not_found"
     );
 
     let batch = timeout(Duration::from_secs(1), receiver.recv())

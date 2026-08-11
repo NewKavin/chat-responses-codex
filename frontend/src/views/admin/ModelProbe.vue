@@ -117,6 +117,47 @@
             <span>能力探测进行中 {{ capabilityProbeCompleted }}/{{ capabilityProbeTotal }}</span>
           </div>
 
+          <div
+            v-if="probingCapabilities && capabilityProbeBatch"
+            class="capability-probe-batch"
+          >
+            <div class="capability-probe-batch__header">
+              <h4>本轮探测状态</h4>
+              <el-tag
+                v-if="capabilityProbeBatchReused > 0"
+                type="info"
+                effect="plain"
+                size="small"
+              >
+                复用 {{ capabilityProbeBatchReused }} 条等价路由
+              </el-tag>
+              <span>{{ capabilityProbeBatchRows.length }} 个候选</span>
+            </div>
+            <div class="crc-table-shell">
+              <el-table
+                :data="capabilityProbeBatchRows"
+                size="small"
+                empty-text="无本轮探测候选"
+              >
+                <el-table-column prop="upstream_id" label="上游" min-width="140" show-overflow-tooltip />
+                <el-table-column prop="exposed_model_slug" label="模型" min-width="170" show-overflow-tooltip />
+                <el-table-column label="协议" width="130">
+                  <template #default="{ row }">{{ capabilityProtocolLabel(row.protocol) }}</template>
+                </el-table-column>
+                <el-table-column label="本轮状态" width="120">
+                  <template #default="{ row }">
+                    <el-tag :type="probeBatchStateTagType(row.state)" effect="plain" size="small">
+                      {{ probeBatchStateLabel(row.state) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="诊断" min-width="150" show-overflow-tooltip>
+                  <template #default="{ row }">{{ row.diagnostic_code || '-' }}</template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
+
           <section
             v-if="capabilityModelResults.length > 0 || capabilityRouteResults.length > 0"
             class="capability-probe-results"
@@ -229,6 +270,7 @@ import { adminApi } from '@/api/admin'
 import ModelProbeBoard from '@/components/ModelProbeBoard.vue'
 import type {
   CapabilityDiscoveryResponse,
+  CapabilityProbeBatchStatus,
   CapabilityWireProtocol,
   ModelProbeResponse,
   ModelQualificationCategory,
@@ -239,6 +281,9 @@ import type {
 import {
   CAPABILITY_PROBE_WAIT_TIMEOUT_MS,
   pollCapabilityDiscovery,
+  pollCapabilityProbeBatch,
+  probeBatchStateLabel,
+  probeBatchStateTagType,
   routeStatusLabel,
   routeStatusTagType
 } from '@/utils/capabilityDiscovery'
@@ -273,6 +318,13 @@ const capabilityDiscovery = ref<CapabilityDiscoveryResponse>({ models: [] })
 const capabilityProbeProgress = ref(0)
 const capabilityProbeCompleted = ref(0)
 const capabilityProbeTotal = ref(0)
+const capabilityProbeBatch = ref<CapabilityProbeBatchStatus | null>(null)
+const capabilityProbeBatchRows = computed(() =>
+  capabilityProbeBatch.value?.candidates ?? []
+)
+const capabilityProbeBatchReused = computed(() =>
+  capabilityProbeBatch.value?.reused_routes ?? 0
+)
 const capabilityModelResults = computed(() =>
   capabilityDiscovery.value.models.map(model => ({
     exposed_model_slug: model.exposed_model_slug,
@@ -341,12 +393,29 @@ const runCapabilityProbe = async () => {
   capabilityProbeProgress.value = 0
   capabilityProbeCompleted.value = 0
   capabilityProbeTotal.value = 0
+  capabilityProbeBatch.value = null
   try {
     const { data: receipt } = await adminApi.probeAllCapabilities()
     if (isUnmounted) return
     capabilityProbeTotal.value = receipt.queued_routes
+    capabilityProbeBatch.value = { ...receipt, terminal_at: null }
     ElMessage.success(`已排队 ${receipt.queued_routes} 条精确路由，正在等待探测完成`)
+    let batchPollCancelled = false
+    void pollCapabilityProbeBatch({
+      initial: { ...receipt, terminal_at: null },
+      fetchBatch: async (timeoutMs) => {
+        const { data } = await adminApi.getCapabilityProbeBatch(
+          receipt.batch_id,
+          timeoutMs
+        )
+        if (!isUnmounted) capabilityProbeBatch.value = data
+        return data
+      },
+      cancelled: () => isUnmounted || batchPollCancelled,
+      timeoutMs: CAPABILITY_PROBE_WAIT_TIMEOUT_MS
+    })
     const polling = await waitForProbesToSettle(receipt)
+    batchPollCancelled = true
     if (polling.cancelled || isUnmounted) return
     const latest = polling.discovery
     const progress = polling.progress
@@ -667,6 +736,26 @@ onUnmounted(() => {
 
 .capability-probe-progress .el-progress {
   flex: 1;
+}
+
+.capability-probe-batch {
+  margin-top: 12px;
+}
+
+.capability-probe-batch__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--crc-text-muted);
+  font-size: 12px;
+}
+
+.capability-probe-batch__header h4 {
+  margin: 0;
+  color: var(--crc-text-strong);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .capability-probe-results {

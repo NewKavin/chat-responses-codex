@@ -1041,7 +1041,10 @@ async fn stream_only_learning_follower_429_has_one_final_exact_route_attempt() {
         .iter()
         .all(|(authorization, _)| authorization == &requests[0].0));
     assert_eq!(
-        requests.iter().map(|(_, stream)| *stream).collect::<Vec<_>>(),
+        requests
+            .iter()
+            .map(|(_, stream)| *stream)
+            .collect::<Vec<_>>(),
         [false, true, true]
     );
     let snapshot = state.capability_snapshot();
@@ -1595,7 +1598,10 @@ async fn stream_only_learning_context_fallback_consumed_recovery_uses_json_on_ne
     assert_eq!(requests[0].0, requests[1].0);
     assert_ne!(requests[1].0, requests[2].0);
     assert_eq!(
-        requests.iter().map(|(_, stream, _)| *stream).collect::<Vec<_>>(),
+        requests
+            .iter()
+            .map(|(_, stream, _)| *stream)
+            .collect::<Vec<_>>(),
         [false, true, false]
     );
     assert!(requests

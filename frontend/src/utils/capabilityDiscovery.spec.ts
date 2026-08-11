@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type {
+  CapabilityProbeBatchStatus,
   CapabilityDiscoveryResponse,
   ProbeAllCapabilitiesResponse
 } from '@/types'
 import {
   discoveryBatchProgress,
+  capabilityProbeBatchProgress,
   indexDiscovery,
+  pollCapabilityProbeBatch,
   pollCapabilityDiscovery,
+  probeBatchStateLabel,
   routeStatusLabel,
   routeStatusTagType
 } from './capabilityDiscovery'
@@ -47,23 +51,27 @@ const discovery = (): CapabilityDiscoveryResponse => ({
 })
 
 const receipt: ProbeAllCapabilitiesResponse = {
+  batch_id: 'batch-1',
   configuration_revision: 7,
   started_at: 1_000,
   queued_routes: 2,
+  reused_routes: 0,
   candidates: [
     {
       upstream_id: 'deepseek',
       route_id: 'route_chat',
       exposed_model_slug: 'deepseek-v4-flash',
       runtime_model_slug: 'deepseek-v4-flash',
-      protocol: 'chat_completions'
+      protocol: 'chat_completions',
+      state: 'queued'
     },
     {
       upstream_id: 'deepseek',
       route_id: 'route_responses',
       exposed_model_slug: 'deepseek-v4-flash',
       runtime_model_slug: 'deepseek-v4-flash',
-      protocol: 'responses'
+      protocol: 'responses',
+      state: 'queued'
     }
   ]
 }
@@ -99,6 +107,55 @@ describe('capability discovery', () => {
     current.models[0].routes[1].last_attempt_at = receipt.started_at
     expect(discoveryBatchProgress(receipt, current))
       .toEqual({ completed: 2, total: 2, settled: true })
+  })
+
+  it('tracks current batch state independently from durable discovery results', () => {
+    const status: CapabilityProbeBatchStatus = {
+      ...receipt,
+      terminal_at: null,
+      candidates: [
+        { ...receipt.candidates[0], state: 'completed' },
+        { ...receipt.candidates[1], state: 'running' }
+      ]
+    }
+
+    expect(capabilityProbeBatchProgress(status)).toEqual({
+      completed: 1,
+      total: 2,
+      settled: false
+    })
+    expect(probeBatchStateLabel('reused')).toBe('复用探测中')
+    expect(probeBatchStateLabel('failed')).toBe('本轮失败')
+  })
+
+  it('polls the batch endpoint until the backend marks the round terminal', async () => {
+    let now = 0
+    let attempts = 0
+    const initial: CapabilityProbeBatchStatus = { ...receipt, terminal_at: null }
+
+    const result = await pollCapabilityProbeBatch({
+      initial,
+      fetchBatch: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('temporary network failure')
+        return {
+          ...initial,
+          terminal_at: 1_100,
+          candidates: initial.candidates.map(candidate => ({
+            ...candidate,
+            state: 'completed' as const
+          }))
+        }
+      },
+      now: () => now,
+      sleep: async delay => { now += delay },
+      intervalMs: 25,
+      timeoutMs: 100
+    })
+
+    expect(attempts).toBe(2)
+    expect(result.progress.settled).toBe(true)
+    expect(result.timedOut).toBe(false)
   })
 
   it('retries transient discovery failures until the batch settles', async () => {

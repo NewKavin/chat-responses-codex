@@ -2,7 +2,8 @@ use chat_responses_codex::capabilities::*;
 use chat_responses_codex::keys::upstream_key_fingerprint;
 use chat_responses_codex::server::{probe_plan_for_job, CoreProbeCase};
 use chat_responses_codex::state::{
-    AppConfig, AppState, FreekeySyncItem, ManualProbeBatchError, PersistedState,
+    AppConfig, AppState, FreekeySyncItem, ManualProbeBatchCandidateState, ManualProbeBatchError,
+    PersistedState,
 };
 use chat_responses_codex::state::{DownstreamConfig, UpstreamConfig};
 use serde_json::json;
@@ -479,6 +480,76 @@ async fn manual_probe_state_preserves_distinct_failure_modes() {
     receiver
         .try_recv()
         .expect("discarded job should be accepted again");
+}
+
+#[tokio::test]
+async fn manual_probe_batches_have_identity_and_reuse_equivalent_routes() {
+    let dir = tempdir().unwrap();
+    let upstream = learning_upstream("up-batch-state", "Lab/Batch");
+    let state = AppState::new(
+        PersistedState {
+            upstreams: Arc::new(vec![upstream.clone()]),
+            ..PersistedState::default()
+        },
+        dir.path().join("state.json"),
+        AppConfig::default(),
+    );
+    state
+        .replace_capability_configuration(CapabilityConfiguration {
+            revision: 1,
+            ..CapabilityConfiguration::default()
+        })
+        .await
+        .unwrap();
+    let (sender, mut receiver) = mpsc::channel(4);
+    state.set_capability_probe_sender(sender);
+    let filters = std::collections::BTreeSet::new();
+
+    let first = state
+        .queue_manual_capability_probe_batch(&filters, &filters)
+        .await
+        .unwrap();
+    assert!(!first.batch_id.is_empty());
+    assert_eq!(first.queued_routes, 1);
+    assert_eq!(first.reused_routes, 0);
+    assert_eq!(
+        first.candidates[0].state,
+        ManualProbeBatchCandidateState::Queued
+    );
+    let first_job = receiver.recv().await.unwrap().into_jobs().pop().unwrap();
+
+    let second = state
+        .queue_manual_capability_probe_batch(&filters, &filters)
+        .await
+        .unwrap();
+    assert_ne!(first.batch_id, second.batch_id);
+    assert_eq!(second.queued_routes, 0);
+    assert_eq!(second.reused_routes, 1);
+    assert_eq!(
+        second.candidates[0].state,
+        ManualProbeBatchCandidateState::Reused
+    );
+    assert!(receiver.try_recv().is_err());
+
+    state.mark_capability_probe_running(&first_job.key, &first_job.configuration);
+    let first_status = state
+        .capability_probe_batch_status(&first.batch_id)
+        .unwrap();
+    assert_eq!(
+        first_status.candidates[0].state,
+        ManualProbeBatchCandidateState::Running
+    );
+    state.finish_capability_probe_job(&first_job.key, &first_job.configuration, &Ok(()));
+    assert!(state
+        .capability_probe_batch_status(&first.batch_id)
+        .unwrap()
+        .terminal_at
+        .is_some());
+    assert!(state
+        .capability_probe_batch_status(&second.batch_id)
+        .unwrap()
+        .terminal_at
+        .is_some());
 }
 
 #[tokio::test]

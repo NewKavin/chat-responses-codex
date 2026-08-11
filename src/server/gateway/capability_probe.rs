@@ -480,6 +480,7 @@ impl CapabilityProbeService {
                         active.push(async move {
                             let key = next.key.clone();
                             let binding = next.configuration.clone();
+                            state.mark_capability_probe_running(&key, &binding);
                             let result = run_probe_job(&state, &next).await;
                             (key, binding, result)
                         });
@@ -511,9 +512,8 @@ impl CapabilityProbeService {
                     }
                     completed = active.next(), if !active.is_empty() => {
                         if let Some((key, binding, result)) = completed {
-                            let _ = result;
                             queue.finish(&key);
-                            state.finish_capability_probe_submission(&key, &binding);
+                            state.finish_capability_probe_job(&key, &binding, &result);
                         }
                     }
                     received = receiver.recv(), if receiver_open && deferred_batch.is_none() => {
