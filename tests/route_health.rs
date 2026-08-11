@@ -905,3 +905,37 @@ async fn half_open_busy_reports_remaining_lease_time() {
         RouteAvailability::Ready(_)
     ));
 }
+
+#[tokio::test(start_paused = true)]
+async fn edge_proxy_error_cools_briefly_and_never_escalates_streak() {
+    let mut registry = RouteHealthRegistry::new(16, 16);
+    let route = route("edge-proxy-brief", "glm-5.2");
+    let key = key("edge-proxy-brief");
+
+    // Edge proxy errors are cooldown classes (short base), unlike pure
+    // request rejections which never cool.
+    registry.observe_route_failure(&route, RouteFailureClass::EdgeProxyError, None);
+    assert!(matches!(
+        registry.reserve(&route, &key),
+        RouteAvailability::Cooling { .. }
+    ));
+    let first = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(first.consecutive_failures, 1);
+    assert!(
+        first.cooldown_remaining <= Duration::from_secs(5),
+        "edge proxy cooldown must be short, got {:?}",
+        first.cooldown_remaining
+    );
+
+    // Repeated identical edge proxy failures must not escalate the streak or
+    // lengthen the cooldown beyond the short base.
+    tokio::time::advance(Duration::from_secs(10)).await;
+    registry.observe_route_failure(&route, RouteFailureClass::EdgeProxyError, None);
+    let second = registry.route_health_snapshot(&route).unwrap();
+    assert_eq!(second.consecutive_failures, 1);
+    assert!(
+        second.cooldown_remaining <= Duration::from_secs(5),
+        "edge proxy cooldown must not escalate, got {:?}",
+        second.cooldown_remaining
+    );
+}

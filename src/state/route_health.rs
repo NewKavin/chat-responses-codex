@@ -24,6 +24,11 @@ use tokio::time::Instant;
 pub const ROUTE_HEALTH_GLOBAL_CAPACITY: usize = 16_384;
 pub const ROUTE_HEALTH_PER_UPSTREAM_CAPACITY: usize = 4_096;
 const CAPACITY_ROUTE_BASE: Duration = Duration::from_secs(15);
+/// Edge proxy error pages carry no service-fault evidence, so they cool
+/// briefly (and never escalate the failure streak) instead of backing off
+/// like genuine transient server faults.
+const EDGE_PROXY_ROUTE_BASE: Duration = Duration::from_secs(3);
+const EDGE_PROXY_ROUTE_MAX: Duration = Duration::from_secs(15);
 const DEFAULT_RATE_LIMIT_BASE: Duration = Duration::from_secs(30);
 const ROUTE_COOLDOWN_MAX: Duration = Duration::from_secs(5 * 60);
 const CREDENTIAL_KEY_BASE: Duration = Duration::from_secs(15 * 60);
@@ -1356,6 +1361,7 @@ pub(super) fn route_failure_has_cooldown(class: RouteFailureClass) -> bool {
             | RouteFailureClass::RateLimited
             | RouteFailureClass::KeyQuota
             | RouteFailureClass::ModelUnsupported
+            | RouteFailureClass::EdgeProxyError
     )
 }
 
@@ -1367,6 +1373,11 @@ pub(super) fn key_failure_has_cooldown(class: RouteFailureClass) -> bool {
 }
 
 fn failure_step(state: &HealthState, class: RouteFailureClass, now: Instant) -> u32 {
+    if class == RouteFailureClass::EdgeProxyError {
+        // Edge proxy pages describe the gateway, not the route: they must
+        // never escalate the failure streak or lengthen the cooldown.
+        return 1;
+    }
     if state
         .last_failure_at
         .is_some_and(|last| now.duration_since(last) > FAILURE_STREAK_RESET)
@@ -1391,6 +1402,7 @@ fn route_cooldown(
             (DEFAULT_RATE_LIMIT_BASE, ROUTE_COOLDOWN_MAX)
         }
         RouteFailureClass::ModelUnsupported => (MODEL_QUARANTINE_BASE, MODEL_QUARANTINE_MAX),
+        RouteFailureClass::EdgeProxyError => (EDGE_PROXY_ROUTE_BASE, EDGE_PROXY_ROUTE_MAX),
         _ => (transient_route_cooldown_base, transient_route_cooldown_max),
     };
     jittered_backoff(base, step, max, route_jitter_material(route, class, step))

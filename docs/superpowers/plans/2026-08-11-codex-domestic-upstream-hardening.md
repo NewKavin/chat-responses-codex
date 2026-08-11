@@ -106,7 +106,7 @@
 
 ## 3. Workstream B：错误分类与冷却治理（止血，与 F 并行先行）
 
-### B1. 5xx 细分：无证据 5xx 不再直接全额冷却
+### B1. 5xx 细分：无证据 5xx 不再直接全额冷却 ✅ 已完成 (commit 8bb4310)
 **改动**（`src/upstream_feedback.rs`）：
 - 新增语义：`UpstreamResponseSemantic::EdgeProxyError`（HTML/空 body 的 502/503/504，典型 nginx 网关错误）。识别：body 非 JSON 且（以 `<` 开头或包含 `<html`/`bad gateway`/`gateway time-out` 等），或 Server/Content-Type 头指示代理。
 - `classify_nonsemantic_default`（锚点 `:406`）拆分 5xx：
