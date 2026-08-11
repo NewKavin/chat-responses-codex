@@ -31,6 +31,7 @@ fn failure_class_phrase(class: FailureClass) -> &'static str {
         FailureClass::FeatureUnsupported => "requested capability unsupported",
         FailureClass::ProtocolUnsupported => "protocol unsupported by upstream",
         FailureClass::RequestRejected => "request rejected by upstream",
+        FailureClass::EdgeProxyError => "edge proxy errors",
     }
 }
 
@@ -431,6 +432,15 @@ impl GatewayError {
                 "upstream_error",
                 "upstream_temporary_unavailable",
                 "upstream_temporary_unavailable",
+                retry_after,
+                Some(details()),
+            ),
+            FailureClass::EdgeProxyError => Self::classified_with_retry_after(
+                StatusCode::BAD_GATEWAY,
+                message,
+                "upstream_error",
+                "upstream_edge_proxy_error",
+                "upstream_edge_proxy_error",
                 retry_after,
                 Some(details()),
             ),

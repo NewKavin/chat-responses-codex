@@ -30,10 +30,14 @@ pub enum RouteFailureClass {
     FeatureUnsupported,
     ProtocolUnsupported,
     RequestRejected,
+    /// 502/503/504 with an HTML or empty body (typical edge proxy/nginx
+    /// error page): no service-fault evidence, so it cools briefly and
+    /// never escalates the failure streak.
+    EdgeProxyError,
 }
 
 impl RouteFailureClass {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::CapacityUnavailable,
         Self::ConcurrencySaturated,
         Self::TransientServer,
@@ -45,6 +49,7 @@ impl RouteFailureClass {
         Self::FeatureUnsupported,
         Self::ProtocolUnsupported,
         Self::RequestRejected,
+        Self::EdgeProxyError,
     ];
 
     pub fn is_temporary(self) -> bool {
@@ -56,6 +61,7 @@ impl RouteFailureClass {
                 | Self::Transport
                 | Self::RateLimited
                 | Self::KeyQuota
+                | Self::EdgeProxyError
         )
     }
 
@@ -72,6 +78,7 @@ impl RouteFailureClass {
             Self::FeatureUnsupported => "feature_unsupported",
             Self::ProtocolUnsupported => "protocol_unsupported",
             Self::RequestRejected => "request_rejected",
+            Self::EdgeProxyError => "edge_proxy_error",
         }
     }
 }

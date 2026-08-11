@@ -476,3 +476,62 @@ fn test_body_with_busy_text() {
     );
     assert_eq!(classification, UpstreamFeedbackClassification::ProviderBusy);
 }
+
+#[test]
+fn html_502_is_edge_proxy_error_with_short_cooldown_class() {
+    let classified = classify_upstream_response(UpstreamFeedbackInput {
+        status: 502,
+        headers: &reqwest::header::HeaderMap::new(),
+        body: Some(
+            "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n</body>\r\n</html>",
+        ),
+        target_model: Some("glm-5.2"),
+    });
+    assert_eq!(classified.class, FailureClass::EdgeProxyError);
+    assert_eq!(
+        classified.semantic,
+        UpstreamResponseSemantic::EdgeProxyError
+    );
+}
+
+#[test]
+fn empty_503_is_edge_proxy_error() {
+    let classified = classify_upstream_response(UpstreamFeedbackInput {
+        status: 503,
+        headers: &reqwest::header::HeaderMap::new(),
+        body: None,
+        target_model: Some("glm-5.2"),
+    });
+    assert_eq!(classified.class, FailureClass::EdgeProxyError);
+    assert_eq!(
+        classified.semantic,
+        UpstreamResponseSemantic::EdgeProxyError
+    );
+}
+
+#[test]
+fn json_502_with_request_semantics_is_request_rejected() {
+    assert_class(
+        502,
+        r#"{"error":{"message":"invalid parameter: stream_options"}}"#,
+        FailureClass::RequestRejected,
+    );
+}
+
+#[test]
+fn json_500_internal_server_error_stays_transient_server() {
+    assert_class(
+        500,
+        r#"{"error":{"message":"internal server error"}}"#,
+        FailureClass::TransientServer,
+    );
+}
+
+#[test]
+fn json_503_service_busy_stays_transient_server() {
+    assert_class(
+        503,
+        r#"{"error":{"message":"server busy"}}"#,
+        FailureClass::TransientServer,
+    );
+}

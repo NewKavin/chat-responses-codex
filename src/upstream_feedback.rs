@@ -11,6 +11,9 @@ pub enum UpstreamResponseSemantic {
     ExplicitConcurrency,
     ExplicitContextOverflow,
     TargetModelCapacity,
+    /// 502/503/504 with an HTML or empty body - an edge proxy produced the
+    /// failure, not the model service. Short cooldown, no streak escalation.
+    EdgeProxyError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,13 +406,69 @@ fn is_explicit_request_rejection(parsed: &StructuredError, message: &str) -> boo
     ]) || message_is_request_rejected(message)
 }
 
+fn is_edge_proxy_error(status: u16, body: Option<&str>) -> bool {
+    if !(502..=504).contains(&status) {
+        return false;
+    }
+    let Some(body) = body.map(str::trim).filter(|body| !body.is_empty()) else {
+        // Empty body on a gateway status is a proxy error page with the
+        // body stripped, not a service-fault signal.
+        return true;
+    };
+    if body.starts_with('<') {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("<html")
+        || lower.contains("bad gateway")
+        || lower.contains("gateway time-out")
+        || lower.contains("nginx")
+        || lower.contains("502 bad gateway")
+        || lower.contains("504 gateway timeout")
+}
+
 fn classify_nonsemantic_default(
     status: u16,
     parsed: &StructuredError,
     message: &str,
 ) -> FailureClass {
     if (500..600).contains(&status) {
-        FailureClass::TransientServer
+        // 500/502 with request-shape evidence is a rejected request shape,
+        // not a service fault: do not cool the route for it.
+        if (500..=502).contains(&status)
+            && (is_explicit_request_rejection(parsed, message)
+                || message_is_feature_unsupported(message)
+                || message_is_protocol_unsupported(message)
+                || message_is_model_unsupported(message))
+        {
+            if parsed.has_code(&[
+                "feature_unsupported",
+                "unsupported_feature",
+                "capability_not_supported",
+            ]) || message_is_feature_unsupported(message)
+            {
+                FailureClass::FeatureUnsupported
+            } else if parsed.has_code(&[
+                "endpoint_not_found",
+                "protocol_unsupported",
+                "unsupported_protocol",
+            ]) || message_is_protocol_unsupported(message)
+            {
+                FailureClass::ProtocolUnsupported
+            } else if parsed.has_code(&[
+                "model_not_found",
+                "model_unsupported",
+                "unsupported_model",
+                "invalid_model",
+            ]) || message_is_model_unsupported(message)
+            {
+                FailureClass::ModelUnsupported
+            } else {
+                FailureClass::RequestRejected
+            }
+        } else {
+            FailureClass::TransientServer
+        }
     } else if matches!(status, 401..=403) {
         FailureClass::Credentials
     } else if status == 429 {
@@ -512,7 +571,12 @@ pub fn classify_upstream_response(input: UpstreamFeedbackInput<'_>) -> Classifie
     let message = parsed.normalized_message(input.body);
     let retry_after = parse_retry_after(input.headers);
 
-    let (semantic, class) = if parsed.is_context_overflow(&message) {
+    let (semantic, class) = if is_edge_proxy_error(input.status, input.body) {
+        (
+            UpstreamResponseSemantic::EdgeProxyError,
+            FailureClass::EdgeProxyError,
+        )
+    } else if parsed.is_context_overflow(&message) {
         (
             UpstreamResponseSemantic::ExplicitContextOverflow,
             FailureClass::RequestRejected,
@@ -569,6 +633,9 @@ impl ClassifiedUpstreamFailure {
             }
             UpstreamResponseSemantic::ExplicitContextOverflow => {
                 UpstreamFeedbackClassification::Unknown
+            }
+            UpstreamResponseSemantic::EdgeProxyError => {
+                UpstreamFeedbackClassification::TemporaryUnavailable
             }
             UpstreamResponseSemantic::Generic => match self.class {
                 FailureClass::RateLimited | FailureClass::KeyQuota => {
