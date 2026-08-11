@@ -204,7 +204,7 @@
 - 配置指纹变化导致的静默丢弃（`capability_probe.rs:635-637`）：改为记 `superseded` 状态并计入批次终态，不再无声消失。
 - **探测范围收敛（用户明确需求）**：一键探测默认只覆盖"下游实际可见的模型"（有下游 key 映射/白名单内的 exposed model），不再对全部 130 路由全量探测；UI 提供模型多选框（默认勾选下游关注集合，可手动增删），后端 `POST /api/admin/capabilities/probe-batches` 接受 `models: Vec<String>` 过滤参数（空 = 旧行为全量，向后兼容）。批次状态返回中标注本次探测的模型清单。
 
-### E4. 探测与正式流量的一致性
+### E4. 探测与正式流量的一致性 ✅ 已完成 (commit d41bc29)
 **改动**：探测请求体构造走与正式请求相同的净化管道（`normalize_chat_payload_for_upstream_compatibility` + 方言预设，见 A2），确保"探测通过 ⇒ 正式请求同形状"；在 ProbeExecutor（`capability_probe.rs:653-667`）构造处复用。
 
 **验收（对应问题 2）**：在模拟内网环境（存量 revision≥1 + deepseek-v4-flash 上游桩，返回 reasoning_content）跑一键探测：档位在批次完成后显示为 verified 集合非空；GLM thinking 对象形态可被探出。
