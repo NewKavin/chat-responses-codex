@@ -177,7 +177,7 @@
 
 ## 6. Workstream E：一键探测思考档位修复（问题 2）
 
-### E1. 内置策略可升级（去除 revision==0 死锁）
+### E1. 内置策略可升级（去除 revision==0 死锁） ✅ 已完成 (commit 2e50dcd)
 **改动**：
 - `CapabilityConfiguration` 增加 `builtin_policy_version: u32`（内置模板中维护递增版本）。
 - 启动时（`src/state.rs:4777` 区域）：除 revision==0 全量引导外，新增**合并引导**——当嵌入模板的 `builtin_policy_version` > 已存配置记录的值：把模板中 `id` 以 `domestic-`/内置前缀开头且现存配置中不存在的 policy/expectation 条目**追加**（绝不覆盖或删除 operator 自建条目），随后 revision+1、记录新 builtin 版本。这保持了既有约束"operator-managed nonzero policy 不被覆盖"，同时让新内置国模条目可达存量部署。
